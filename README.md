@@ -19,7 +19,7 @@ A touch-friendly tmux web UI (session list + terminal + voice-to-command button)
 ## Run
 
 ```bash
-cd /home/mvhenten/development/mobux
+cd /home/alice/development/mobux
 # Option A: explicit user/password (HTTPS enabled by default)
 MOBUX_AUTH_USER="$USER" MOBUX_AUTH_PASS="change-me" PORT=5151 cargo run
 
