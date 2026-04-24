@@ -127,7 +127,7 @@ input {
   top: 0;
   left: 0;
   right: 0;
-  bottom: 40px; /* leave toolbar exposed */
+  bottom: 0;
   z-index: 10;
   touch-action: none;
   /* transparent to mouse so wheel/click go straight to xterm */
@@ -135,15 +135,7 @@ input {
 }
 
 .term-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-  height: 40px;
-  flex-shrink: 0;
-  touch-action: manipulation;
+  display: none;
 }
 
 .tb-btn {

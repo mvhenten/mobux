@@ -64,7 +64,7 @@ function sendResize() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const cw = term._core._renderService.dimensions?.css?.cell?.width || 9;
   const ch = term._core._renderService.dimensions?.css?.cell?.height || 18;
-  const tb = document.querySelector('.term-toolbar')?.offsetHeight || 40;
+  const tb = document.querySelector('.term-toolbar')?.offsetHeight || 0;
   const cols = Math.max(20, Math.floor(window.innerWidth / cw) - 1);
   const rows = Math.max(10, Math.floor((window.innerHeight - tb) / ch) - 1);
   term.resize(cols, rows);
@@ -100,15 +100,11 @@ function updatePaneUI() {
   }
 }
 
-async function selectPane(index) {
+async function selectPane(direction) {
   if (panes.length <= 1) return;
-  if (index < 0) index = panes.length - 1;
-  if (index >= panes.length) index = 0;
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const dir = (index > activeIndex || (activeIndex === panes.length - 1 && index === 0)) ? "n" : "p";
-    ws.send("\x02" + dir);
-    activeIndex = index;
-    updatePaneUI();
+    // direction: 1 = next, -1 = previous
+    ws.send("\x02" + (direction > 0 ? "n" : "p"));
     setTimeout(refreshPanes, 300);
   }
 }
@@ -285,7 +281,7 @@ setInterval(refreshPanes, 5000);
       const dt = performance.now() - startTime;
       const vel = Math.abs(dx) / dt;
       if (Math.abs(dx) > FLICK_H_PX || vel > FLICK_H_VEL) {
-        selectPane(dx < 0 ? activeIndex + 1 : activeIndex - 1);
+        selectPane(dx < 0 ? 1 : -1);
       }
     }
     gesture = null;
