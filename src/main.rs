@@ -1,0 +1,506 @@
+use std::{
+    env,
+    io::{Read, Write},
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+
+use anyhow::Result;
+use axum::{
+    extract::{ws::Message, Path, State, WebSocketUpgrade},
+    http::{
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        HeaderValue, Request, StatusCode,
+    },
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use futures_util::{SinkExt, StreamExt};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use rand::{distr::Alphanumeric, Rng};
+use regex::Regex;
+use serde::Deserialize;
+use serde_json::json;
+use tower_http::services::ServeDir;
+
+mod ssl;
+mod tmux;
+
+#[derive(Clone)]
+struct AppState {
+    session_name_re: Arc<Regex>,
+    auth: Option<AuthConfig>,
+}
+
+#[derive(Clone)]
+struct AuthConfig {
+    user: String,
+    pass: String,
+    session_cookie_name: String,
+    session_cookie_value: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let auth = load_auth_config();
+    let state = AppState {
+        session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
+        auth,
+    };
+
+    let state_for_mw = state.clone();
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/api/sessions", get(api_sessions).post(api_create_session))
+        .route("/api/sessions/{name}/kill", post(api_kill_session))
+        .route("/api/sessions/{name}/send", post(api_send_to_session))
+        .route("/s/{name}", get(terminal_page))
+        .route("/ws/{name}", get(terminal_ws))
+        .nest_service("/static", ServeDir::new("web/static"))
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state_for_mw, auth_middleware));
+
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    if state.auth.is_some() {
+        println!("auth: enabled (HTTP Basic)");
+    } else {
+        println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
+    }
+
+    let use_tls = env::var("MOBUX_TLS").map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true);
+
+    if use_tls {
+        let extra_hosts: Vec<String> = env::var("MOBUX_TLS_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let (cert_path, key_path) = ssl::ensure_dev_cert(&extra_hosts)?;
+        let tls_config = ssl::load_rustls_config(&cert_path, &key_path)?;
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(tls_config));
+
+        println!("mobux listening on https://{}", addr);
+        axum_server::bind_rustls(addr, rustls_config)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        println!("mobux listening on http://{}", addr);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+    }
+
+    Ok(())
+}
+
+fn load_auth_config() -> Option<AuthConfig> {
+    let user_env = env::var("MOBUX_AUTH_USER").ok().map(|v| v.trim().to_string());
+    let pass_env = env::var("MOBUX_AUTH_PASS").ok().map(|v| v.trim().to_string());
+    let pin_env = env::var("MOBUX_PIN").ok().map(|v| v.trim().to_string());
+
+    let session_cookie_name = "mobux_session".to_string();
+    let session_cookie_value: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    match (user_env, pass_env, pin_env) {
+        (Some(user), Some(pass), _) if !user.is_empty() && !pass.is_empty() => Some(AuthConfig {
+            user,
+            pass,
+            session_cookie_name,
+            session_cookie_value,
+        }),
+        (user_opt, None, Some(pin)) if !pin.is_empty() => Some(AuthConfig {
+            user: user_opt.filter(|u| !u.is_empty()).unwrap_or_else(|| "mobux".to_string()),
+            pass: pin,
+            session_cookie_name,
+            session_cookie_value,
+        }),
+        _ => None,
+    }
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return next.run(req).await;
+    };
+
+    let cookie_ok = req
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|cookie| {
+            cookie
+                .split(';')
+                .filter_map(|p| p.trim().split_once('='))
+                .any(|(k, v)| k == auth.session_cookie_name && v == auth.session_cookie_value)
+        })
+        .unwrap_or(false);
+
+    if cookie_ok {
+        return next.run(req).await;
+    }
+
+    let basic_ok = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Basic "))
+        .and_then(|b64| BASE64.decode(b64).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|pair| {
+            let mut parts = pair.splitn(2, ':');
+            let user = parts.next()?.to_string();
+            let pass = parts.next()?.to_string();
+            Some((user, pass))
+        })
+        .map(|(user, pass)| user == auth.user && pass == auth.pass)
+        .unwrap_or(false);
+
+    if basic_ok {
+        let mut resp = next.run(req).await;
+        let set_cookie = format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000",
+            auth.session_cookie_name, auth.session_cookie_value
+        );
+        if let Ok(v) = HeaderValue::from_str(&set_cookie) {
+            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+        return resp;
+    }
+
+    let mut resp = (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    resp.headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"mobux\""));
+    resp
+}
+
+async fn index() -> Result<Html<String>, AppError> {
+    let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
+    Ok(Html(render_index(&sessions, None)))
+}
+
+async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
+    let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
+    Ok(Json(sessions))
+}
+
+#[derive(Deserialize)]
+struct CreateReq {
+    name: String,
+}
+
+async fn api_create_session(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let name = payload.name.trim();
+    validate_session_name(&state, name)?;
+    tmux::new_session(name).await.map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true, "name": name})))
+}
+
+async fn api_kill_session(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &name)?;
+    tmux::kill_session(&name)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct SendReq {
+    text: String,
+}
+
+async fn api_send_to_session(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<SendReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &name)?;
+    let text = payload.text.trim();
+    if text.is_empty() {
+        return Err(AppError::bad_request(anyhow::anyhow!("text is required")));
+    }
+    if text.len() > 800 {
+        return Err(AppError::bad_request(anyhow::anyhow!("text too long")));
+    }
+    tmux::send_line(&name, text)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn terminal_page(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Html<String>, AppError> {
+    validate_session_name(&state, &name)?;
+    Ok(Html(render_terminal_page(&name)))
+}
+
+async fn terminal_ws(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, AppError> {
+    validate_session_name(&state, &name)?;
+    Ok(ws.on_upgrade(move |socket| async move {
+        if let Err(err) = handle_ws(socket, name).await {
+            eprintln!("ws error: {err:#}");
+        }
+    }))
+}
+
+#[derive(Deserialize)]
+struct ResizeMsg {
+    #[serde(rename = "type")]
+    kind: String,
+    cols: u16,
+    rows: u16,
+}
+
+async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -> Result<()> {
+    let pty_system = native_pty_system();
+    let pair = pty_system.openpty(PtySize {
+        rows: 35,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+
+    let mut cmd = CommandBuilder::new("tmux");
+    cmd.args(["attach-session", "-t", &session_name]);
+    let mut child = pair.slave.spawn_command(cmd)?;
+
+    let mut reader = pair.master.try_clone_reader()?;
+    let writer = pair.master.take_writer()?;
+    let master = pair.master;
+
+    let writer = Arc::new(Mutex::new(writer));
+    let master = Arc::new(Mutex::new(master));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    loop {
+        tokio::select! {
+            maybe_out = rx.recv() => {
+                match maybe_out {
+                    Some(chunk) => {
+                        let text = String::from_utf8_lossy(&chunk).to_string();
+                        if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            maybe_in = ws_receiver.next() => {
+                match maybe_in {
+                    Some(Ok(msg)) => {
+                        match msg {
+                            Message::Text(t) => {
+                                if let Ok(rz) = serde_json::from_str::<ResizeMsg>(&t) {
+                                    if rz.kind == "resize" && rz.cols > 0 && rz.rows > 0 {
+                                        if let Ok(m) = master.lock() {
+                                            let _ = m.resize(PtySize { rows: rz.rows, cols: rz.cols, pixel_width: 0, pixel_height: 0});
+                                        }
+                                        continue;
+                                    }
+                                }
+                                if let Ok(mut w) = writer.lock() {
+                                    let _ = w.write_all(t.as_bytes());
+                                    let _ = w.flush();
+                                }
+                            }
+                            Message::Binary(b) => {
+                                if let Ok(mut w) = writer.lock() {
+                                    let _ = w.write_all(&b);
+                                    let _ = w.flush();
+                                }
+                            }
+                            Message::Close(_) => break,
+                            Message::Ping(_) | Message::Pong(_) => {}
+                        }
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
+    if name.is_empty() || !state.session_name_re.is_match(name) {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "invalid session name"
+        )));
+    }
+    Ok(())
+}
+
+fn render_index(sessions: &[tmux::Session], error: Option<&str>) -> String {
+    let mut cards = String::new();
+    if sessions.is_empty() {
+        cards.push_str(r#"<p class="hint">No tmux sessions found.</p>"#);
+    } else {
+        for s in sessions {
+            let name = html_escape::encode_text(&s.name);
+            cards.push_str(&format!(
+                r#"<article class="session-card" data-name="{name}">
+  <div class="session-head">
+    <h3>{name}</h3>
+    <div class="meta">{}w · {} attached</div>
+  </div>
+  <div class="actions">
+    <a class="btn btn-primary" href="/s/{name}">Open</a>
+    <button class="btn danger" data-kill="{name}">Kill</button>
+  </div>
+</article>"#,
+                s.windows, s.attached
+            ));
+        }
+    }
+
+    let error_html = error
+        .map(|e| format!(r#"<section class="panel error">{}</section>"#, html_escape::encode_text(e)))
+        .unwrap_or_default();
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mobux</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>Mobux</h1>
+      <button id="refreshBtn" class="btn">Refresh</button>
+    </header>
+
+    <section class="panel">
+      <h2>New session</h2>
+      <form id="newSessionForm">
+        <input id="sessionName" placeholder="pi, api, deploy..." autocomplete="off" required />
+        <button class="btn btn-primary" type="submit">Create</button>
+      </form>
+      <p class="hint">Allowed: letters, numbers, dot, underscore, dash</p>
+    </section>
+
+    {error_html}
+
+    <section class="panel">
+      <h2>Sessions</h2>
+      <div id="sessionList" class="session-list">
+        {cards}
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/index.js"></script>
+</body>
+</html>
+"#
+    )
+}
+
+fn render_terminal_page(session: &str) -> String {
+    let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
+    let session_title = html_escape::encode_text(session);
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mobux · {session_title}</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
+</head>
+<body class="term-body">
+  <header class="term-header">
+    <a href="/" class="btn">← Sessions</a>
+    <strong>{session_title}</strong>
+    <button id="micBtn" class="btn">🎤 Talk</button>
+  </header>
+
+  <div id="terminal"></div>
+
+  <script>
+    window.MOBUX_SESSION = {session_json};
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+  <script src="/static/terminal.js"></script>
+</body>
+</html>
+"#
+    )
+}
+
+#[derive(Debug)]
+struct AppError {
+    status: StatusCode,
+    message: String,
+}
+
+impl AppError {
+    fn bad_request(err: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: err.to_string(),
+        }
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (self.status, self.message).into_response()
+    }
+}
