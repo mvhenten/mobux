@@ -171,6 +171,112 @@ input {
   text-align: center;
 }
 
+/* ── Tmux command pick list ─────────────────────────────── */
+
+#cmdPickList {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  padding: 8px 0 env(safe-area-inset-bottom, 8px);
+  max-height: 70dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
+  animation: slideUp 0.2s ease-out;
+}
+
+#cmdPickList.visible {
+  display: block;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+.cmd-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.cmd-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--muted);
+}
+
+.cmd-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 4px 8px;
+  touch-action: manipulation;
+}
+
+.cmd-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 17px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.cmd-item:active {
+  background: var(--border);
+}
+
+.cmd-item .cmd-icon {
+  font-size: 20px;
+  width: 28px;
+  text-align: center;
+}
+
+.cmd-item .cmd-label {
+  flex: 1;
+}
+
+.cmd-item .cmd-desc {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cmd-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 16px;
+}
+
+#cmdOverlayBg {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 99;
+  background: rgba(0,0,0,0.4);
+}
+
+#cmdOverlayBg.visible {
+  display: block;
+}
+
 @media (max-width: 620px) {
   .container { padding: 12px; }
   .actions { width: 100%; }

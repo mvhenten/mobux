@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/panes", get(api_list_panes))
         .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
         .route("/api/sessions/{name}/send", post(api_send_to_session))
+        .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
@@ -254,6 +255,23 @@ async fn api_select_pane(
 #[derive(Deserialize)]
 struct SendReq {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct CommandReq {
+    command: String,
+}
+
+async fn api_tmux_command(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<CommandReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &name)?;
+    let result = tmux::run_command(&name, &payload.command)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true, "output": result})))
 }
 
 async fn api_send_to_session(
@@ -512,10 +530,61 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <nav class="term-toolbar">
     <span id="paneIndicator" class="tb-label"></span>
+    <button id="cmdBtn" class="tb-btn" title="Tmux commands">☰</button>
     <button id="micBtn" class="tb-btn" title="Voice input">🎤</button>
     <button class="tb-btn" title="Reload" onclick="location.reload(true)">🔄</button>
     <a href="/" class="tb-btn tb-exit" title="Back to sessions">✕</a>
   </nav>
+
+  <div id="cmdOverlayBg"></div>
+  <div id="cmdPickList">
+    <div class="cmd-header">
+      <h3>Tmux Commands</h3>
+      <button class="cmd-close" id="cmdCloseBtn">✕</button>
+    </div>
+    <button class="cmd-item" data-cmd="new-window">
+      <span class="cmd-icon">➕</span>
+      <span class="cmd-label">New Window</span>
+    </button>
+    <button class="cmd-item" data-cmd="kill-window">
+      <span class="cmd-icon">❌</span>
+      <span class="cmd-label">Close Window</span>
+    </button>
+    <div class="cmd-separator"></div>
+    <button class="cmd-item" data-cmd="split-h">
+      <span class="cmd-icon">│</span>
+      <span class="cmd-label">Split Horizontal</span>
+    </button>
+    <button class="cmd-item" data-cmd="split-v">
+      <span class="cmd-icon">─</span>
+      <span class="cmd-label">Split Vertical</span>
+    </button>
+    <button class="cmd-item" data-cmd="kill-pane">
+      <span class="cmd-icon">🗑</span>
+      <span class="cmd-label">Close Pane</span>
+    </button>
+    <div class="cmd-separator"></div>
+    <button class="cmd-item" data-cmd="next-window">
+      <span class="cmd-icon">▶</span>
+      <span class="cmd-label">Next Window</span>
+    </button>
+    <button class="cmd-item" data-cmd="prev-window">
+      <span class="cmd-icon">◀</span>
+      <span class="cmd-label">Previous Window</span>
+    </button>
+    <button class="cmd-item" data-cmd="next-pane">
+      <span class="cmd-icon">↻</span>
+      <span class="cmd-label">Next Pane</span>
+    </button>
+    <button class="cmd-item" data-cmd="prev-pane">
+      <span class="cmd-icon">↺</span>
+      <span class="cmd-label">Previous Pane</span>
+    </button>
+    <button class="cmd-item" data-cmd="zoom-pane">
+      <span class="cmd-icon">🔍</span>
+      <span class="cmd-label">Zoom Pane</span>
+    </button>
+  </div>
 
   <script>
     window.MOBUX_SESSION = {session_json};

@@ -37,7 +37,12 @@ let ws;
     if (res.ok) {
       const history = await res.text();
       if (history.trim()) {
-        term.write(history.replace(/\n/g, '\r\n'));
+        // Hide terminal during history load to prevent visible scroll storm
+        termEl.style.visibility = 'hidden';
+        term.write(history.replace(/\n/g, '\r\n'), () => {
+          term.scrollToBottom();
+          termEl.style.visibility = '';
+        });
       }
     }
   } catch (e) {}
@@ -134,9 +139,12 @@ setInterval(refreshPanes, 5000);
 
   let startX, startY, startTime;
   let lastY, lastTime;
-  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'pinch'
+  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
+  let pinchStartDist = 0;
+  let pinchStartFontSize = 0;
   let posSamples;   // [{y, t}]
   let momId = null;
+  let wasTwoFinger = false;
   let lastTapTime = 0;
 
   function wheel(dy) {
@@ -186,11 +194,17 @@ setInterval(refreshPanes, 5000);
   overlay.addEventListener('touchstart', (e) => {
     stopMom();
     if (e.touches.length === 2) {
-      gesture = 'pinch';
+      const fdx = e.touches[0].pageX - e.touches[1].pageX;
+      const fdy = e.touches[0].pageY - e.touches[1].pageY;
+      pinchStartDist = Math.hypot(fdx, fdy);
+      pinchStartFontSize = term.options.fontSize;
       startY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
+      gesture = 'two';
+      wasTwoFinger = true;
       return;
     }
     if (e.touches.length !== 1) { gesture = null; return; }
+    wasTwoFinger = false;
     const t = e.touches[0];
     startX = t.pageX; startY = t.pageY;
     lastY = t.pageY;
@@ -201,19 +215,53 @@ setInterval(refreshPanes, 5000);
 
   overlay.addEventListener('touchmove', (e) => {
     e.preventDefault();
-    if (e.touches.length === 2 && gesture === 'pinch') {
-      // Track two-finger pull distance
+    if (e.touches.length === 2 && (gesture === 'two' || gesture === 'pinch' || gesture === 'twopull')) {
+      const fdx = e.touches[0].pageX - e.touches[1].pageX;
+      const fdy = e.touches[0].pageY - e.touches[1].pageY;
+      const dist = Math.hypot(fdx, fdy);
       const midY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
-      const dy = midY - startY;
-      // Visual feedback: show pull indicator when pulling down > 60px
-      if (dy > 60) {
-        paneIndicator.textContent = '↻ Release to reload';
-      } else if (dy > 20) {
-        paneIndicator.textContent = '↓ Pull to reload...';
+      const pull = midY - startY;
+      const distChange = Math.abs(dist - pinchStartDist);
+      const pinchThreshold = pinchStartDist * 0.25; // 25% scale change (iOS uses ~15-20%)
+
+      // Still undecided — classify based on what dominates
+      // Use scale ratio like iOS (must deviate 25% from 1.0)
+      const scale = dist / pinchStartDist;
+      if (gesture === 'two') {
+        if (Math.abs(scale - 1.0) > 0.25) {
+          gesture = 'pinch'; // clear pinch intent
+        } else if (Math.abs(pull) > 30) {
+          gesture = 'twopull'; // fingers moving together
+        }
+        // else: not enough movement yet, stay undecided, do nothing
+        if (gesture === 'two') return;
+      }
+
+      // Locked in as pinch zoom
+      if (gesture === 'pinch') {
+        const scale = dist / pinchStartDist;
+        const newSize = Math.round(Math.max(8, Math.min(32, pinchStartFontSize * scale)));
+        if (newSize !== term.options.fontSize) {
+          term.options.fontSize = newSize;
+          sendResize();
+        }
+      }
+
+      // Locked in as pull to reload
+      if (gesture === 'two') {
+      gesture = null;
+      return;
+    }
+    if (gesture === 'twopull') {
+        if (pull > 60) {
+          paneIndicator.textContent = '\u21bb Release to reload';
+        } else if (pull > 20) {
+          paneIndicator.textContent = '\u2193 Pull to reload...';
+        }
       }
       return;
     }
-    if (e.touches.length !== 1 || !gesture) return;
+    if (e.touches.length !== 1 || !gesture || wasTwoFinger) return;
     const y = e.touches[0].pageY;
     const now = performance.now();
 
@@ -243,15 +291,23 @@ setInterval(refreshPanes, 5000);
   }, { passive: false });
 
   overlay.addEventListener('touchend', (e) => {
-    if (gesture === 'pinch') {
-      // Check if two-finger pull down was far enough
+    if (gesture === 'two') {
+      gesture = null;
+      return;
+    }
+    if (gesture === 'twopull') {
       const endY = e.changedTouches[0]?.pageY ?? startY;
       const dy = endY - startY;
       if (dy > 60) {
         location.reload(true);
       } else {
-        updatePaneUI(); // restore indicator text
+        updatePaneUI();
       }
+      gesture = null;
+      return;
+    }
+    if (gesture === 'pinch') {
+      // Pinch zoom done - just clean up
       gesture = null;
       return;
     }
@@ -291,6 +347,92 @@ setInterval(refreshPanes, 5000);
 }
 
 // ── Voice input ─────────────────────────────────────────────────────
+
+// ── Tmux command pick list ──────────────────────────────────────────
+{
+  const pickList = document.getElementById('cmdPickList');
+  const overlayBg = document.getElementById('cmdOverlayBg');
+  const cmdBtn = document.getElementById('cmdBtn');
+  const cmdCloseBtn = document.getElementById('cmdCloseBtn');
+
+  function showCmdList() {
+    pickList.classList.add('visible');
+    overlayBg.classList.add('visible');
+  }
+
+  function hideCmdList() {
+    pickList.classList.remove('visible');
+    overlayBg.classList.remove('visible');
+  }
+
+  async function runTmuxCmd(command) {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      // Refresh panes after structural commands
+      setTimeout(refreshPanes, 300);
+    } catch (e) {
+      term.writeln(`\r\n\x1b[31m[tmux error: ${e.message}]\x1b[0m`);
+    }
+  }
+
+  // Toolbar button
+  cmdBtn?.addEventListener('click', showCmdList);
+  cmdCloseBtn?.addEventListener('click', hideCmdList);
+  overlayBg?.addEventListener('click', hideCmdList);
+
+  // Pick list item clicks
+  pickList?.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-cmd]');
+    if (!item) return;
+    const cmd = item.dataset.cmd;
+    hideCmdList();
+    runTmuxCmd(cmd);
+  });
+
+  // Long-press gesture on the touch overlay (hold ~600ms)
+  let longPressTimer = null;
+  const LONGPRESS_MS = 600;
+  const LONGPRESS_MOVE_PX = 12;
+  let lpStartX = 0, lpStartY = 0;
+
+  overlay.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { clearTimeout(longPressTimer); longPressTimer = null; return; }
+    lpStartX = e.touches[0].pageX;
+    lpStartY = e.touches[0].pageY;
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      // Trigger haptic feedback if available
+      if (navigator.vibrate) navigator.vibrate(30);
+      showCmdList();
+      // Cancel the ongoing gesture so tap/scroll don't fire
+      gesture = null;
+    }, LONGPRESS_MS);
+  }, { passive: true });
+
+  overlay.addEventListener('touchmove', (e) => {
+    if (longPressTimer !== null && e.touches.length === 1) {
+      const dx = Math.abs(e.touches[0].pageX - lpStartX);
+      const dy = Math.abs(e.touches[0].pageY - lpStartY);
+      if (dx > LONGPRESS_MOVE_PX || dy > LONGPRESS_MOVE_PX) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+    }
+  }, { passive: true });
+
+  overlay.addEventListener('touchend', () => {
+    if (longPressTimer !== null) { clearTimeout(longPressTimer); longPressTimer = null; }
+  }, { passive: true });
+
+  overlay.addEventListener('touchcancel', () => {
+    if (longPressTimer !== null) { clearTimeout(longPressTimer); longPressTimer = null; }
+  }, { passive: true });
+}
 
 async function sendVoiceText(text) {
   const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/send`, {
