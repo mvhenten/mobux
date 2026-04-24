@@ -2,29 +2,6 @@ const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
 const overlay = document.getElementById("touchOverlay");
 const isMobile = window.innerWidth < 620;
-
-// ── Loading quote ─────────────────────────────────────────────────
-const QUOTES = [
-  ["Simplicity is prerequisite for reliability.", "Edsger W. Dijkstra"],
-  ["If debugging is the process of removing bugs, then programming must be the process of putting them in.", "Edsger W. Dijkstra"],
-  ["The Analytical Engine weaves algebraical patterns just as the Jacquard loom weaves flowers and leaves.", "Ada Lovelace"],
-  ["We can only see a short distance ahead, but we can see plenty there that needs to be done.", "Alan Turing"],
-  ["Those who can imagine anything, can create the impossible.", "Alan Turing"],
-  ["The most dangerous phrase in the language is: we've always done it this way.", "Grace Hopper"],
-  ["The best way to predict the future is to invent it.", "Alan Kay"],
-  ["Premature optimization is the root of all evil.", "Donald Knuth"],
-  ["Talk is cheap. Show me the code.", "Linus Torvalds"],
-  ["Controlling complexity is the essence of computer programming.", "Brian Kernighan"],
-  ["Any sufficiently advanced technology is indistinguishable from magic.", "Arthur C. Clarke"],
-  ["Information is the resolution of uncertainty.", "Claude Shannon"],
-];
-{
-  const [text, author] = QUOTES[Math.floor(Math.random() * QUOTES.length)];
-  const qEl = document.getElementById('quote');
-  const aEl = document.getElementById('qauthor');
-  if (qEl) qEl.textContent = text;
-  if (aEl) aEl.textContent = `\u2014 ${author}`;
-}
 const term = new Terminal({
   cursorBlink: true,
   fontSize: isMobile ? 14 : 15,
@@ -75,27 +52,9 @@ let reconnect = () => {};
       if (typeof ev.data === "string") term.write(ev.data);
       else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
       else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
-      scheduleReveal();
     };
     ws.onclose = () => {};
     ws.onerror = () => {};
-  }
-
-  // Debounced reveal: once data stops for 800ms, tmux dump is done
-  let revealed = false;
-  let revealTimer = null;
-  function reveal() {
-    if (revealed) return;
-    revealed = true;
-    term.scrollToBottom();
-    const lq = document.getElementById('loadquote');
-    if (lq) lq.style.opacity = '0';
-    setTimeout(() => lq?.remove(), 300);
-  }
-  function scheduleReveal() {
-    if (revealed) return;
-    clearTimeout(revealTimer);
-    revealTimer = setTimeout(reveal, 800);
   }
 
   reconnect = () => {
@@ -107,6 +66,7 @@ let reconnect = () => {};
   term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
   connect();
+  setTimeout(() => term.scrollToBottom(), 500);
 })();
 
 function sendResize() {
@@ -254,47 +214,19 @@ setInterval(refreshPanes, 5000);
 
   overlay.addEventListener('touchmove', (e) => {
     e.preventDefault();
-
-    // Two-finger gestures
-    if (e.touches.length === 2 && (gesture === 'two' || gesture === 'pinch' || gesture === 'twopull')) {
-      const fdx = e.touches[0].pageX - e.touches[1].pageX;
-      const fdy = e.touches[0].pageY - e.touches[1].pageY;
-      const dist = Math.hypot(fdx, fdy);
+    if (e.touches.length === 2 && gesture === 'pinch') {
+      // Track two-finger pull distance
       const midY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
-      const pull = midY - startY;
-      const scale = dist / pinchStartDist;
-
-      // Classify: 25% scale change = pinch zoom (iOS threshold)
-      if (gesture === 'two') {
-        if (Math.abs(scale - 1.0) > 0.25) {
-          gesture = 'pinch';
-        } else if (Math.abs(pull) > 30) {
-          gesture = 'twopull';
-        } else {
-          return; // undecided
-        }
-      }
-
-      if (gesture === 'pinch') {
-        const newSize = Math.round(Math.max(8, Math.min(32, pinchStartFontSize * scale)));
-        if (newSize !== term.options.fontSize) {
-          term.options.fontSize = newSize;
-          sendResize();
-        }
-      }
-
-      if (gesture === 'twopull') {
-        if (pull > 60) {
-          paneIndicator.textContent = '↻ Release to reload';
-        } else if (pull > 20) {
-          paneIndicator.textContent = '↓ Pull to reload...';
-        }
+      const dy = midY - startY;
+      // Visual feedback: show pull indicator when pulling down > 60px
+      if (dy > 60) {
+        paneIndicator.textContent = '↻ Release to reload';
+      } else if (dy > 20) {
+        paneIndicator.textContent = '↓ Pull to reload...';
       }
       return;
     }
-
-    // Single-finger — skip if was two-finger (lifting one finger)
-    if (e.touches.length !== 1 || !gesture || wasTwoFinger) return;
+    if (e.touches.length !== 1 || !gesture) return;
     const y = e.touches[0].pageY;
     const now = performance.now();
 
@@ -324,18 +256,18 @@ setInterval(refreshPanes, 5000);
   }, { passive: false });
 
   overlay.addEventListener('touchend', (e) => {
-    if (gesture === 'two') { gesture = null; return; }
-    if (gesture === 'twopull') {
+    if (gesture === 'pinch') {
+      // Check if two-finger pull down was far enough
       const endY = e.changedTouches[0]?.pageY ?? startY;
-      if (endY - startY > 60) {
+      const dy = endY - startY;
+      if (dy > 60) {
         location.reload(true);
       } else {
-        updatePaneUI();
+        updatePaneUI(); // restore indicator text
       }
       gesture = null;
       return;
     }
-    if (gesture === 'pinch') { gesture = null; return; }
     if (gesture === 'tap' && (performance.now() - startTime) < TAP_MS) {
       const now = performance.now();
       if (now - lastTapTime < DTAP_MS) {
