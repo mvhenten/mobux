@@ -1,6 +1,41 @@
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
 const overlay = document.getElementById("touchOverlay");
+
+// ── Loading screen quote ──────────────────────────────────────────
+const QUOTES = [
+  ["The question of whether a computer can think is no more interesting than whether a submarine can swim.", "Edsger W. Dijkstra"],
+  ["Simplicity is prerequisite for reliability.", "Edsger W. Dijkstra"],
+  ["If debugging is the process of removing bugs, then programming must be the process of putting them in.", "Edsger W. Dijkstra"],
+  ["The computer was born to solve problems that did not exist before.", "Bill Gates"],
+  ["The Analytical Engine weaves algebraical patterns just as the Jacquard loom weaves flowers and leaves.", "Ada Lovelace"],
+  ["We can only see a short distance ahead, but we can see plenty there that needs to be done.", "Alan Turing"],
+  ["Those who can imagine anything, can create the impossible.", "Alan Turing"],
+  ["The most dangerous phrase in the language is: we've always done it this way.", "Grace Hopper"],
+  ["One accurate measurement is worth a thousand expert opinions.", "Grace Hopper"],
+  ["The best way to predict the future is to invent it.", "Alan Kay"],
+  ["People who are really serious about software should make their own hardware.", "Alan Kay"],
+  ["Premature optimization is the root of all evil.", "Donald Knuth"],
+  ["Programs must be written for people to read, and only incidentally for machines to execute.", "Harold Abelson"],
+  ["Talk is cheap. Show me the code.", "Linus Torvalds"],
+  ["UNIX is basically a simple operating system, but you have to be a genius to understand the simplicity.", "Dennis Ritchie"],
+  ["There are two ways of constructing software: one is to make it so simple that there are obviously no deficiencies, the other is to make it so complicated that there are no obvious deficiencies.", "C.A.R. Hoare"],
+  ["A distributed system is one in which the failure of a computer you didn't even know existed can render your own computer unusable.", "Leslie Lamport"],
+  ["Controlling complexity is the essence of computer programming.", "Brian Kernighan"],
+  ["Simplicity is the ultimate sophistication.", "Leonardo da Vinci"],
+  ["Any sufficiently advanced technology is indistinguishable from magic.", "Arthur C. Clarke"],
+  ["The function of good software is to make the complex appear to be simple.", "Grady Booch"],
+  ["First, solve the problem. Then, write the code.", "John Johnson"],
+  ["It's hardware that makes a machine fast. It's software that makes a fast machine slow.", "Craig Bruce"],
+  ["Information is the resolution of uncertainty.", "Claude Shannon"],
+];
+{
+  const [text, author] = QUOTES[Math.floor(Math.random() * QUOTES.length)];
+  const qEl = document.getElementById('quote');
+  const aEl = document.getElementById('qauthor');
+  if (qEl) qEl.textContent = text;
+  if (aEl) aEl.textContent = `— ${author}`;
+}
 const isMobile = window.innerWidth < 620;
 const term = new Terminal({
   cursorBlink: true,
@@ -31,11 +66,10 @@ if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
 const wsProto = location.protocol === "https:" ? "wss" : "ws";
 let ws;
 
+let reconnect = () => {};
+
 (async () => {
   const loadingEl = document.getElementById('loading');
-
-  ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
-  ws.binaryType = "arraybuffer";
 
   let revealed = false;
   let revealTimer = null;
@@ -45,29 +79,42 @@ let ws;
     term.scrollToBottom();
     requestAnimationFrame(() => { loadingEl?.remove(); });
   }
-
-  // Debounced reveal: wait until data stops flowing (tmux dump is done)
   function scheduleReveal() {
     if (revealed) return;
     clearTimeout(revealTimer);
-    revealTimer = setTimeout(reveal, 800); // 800ms of silence = dump is done
+    revealTimer = setTimeout(reveal, 800);
   }
 
-  ws.onopen = () => {
-    sendResize();
-    refreshPanes();
+  function connect() {
+    ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      sendResize();
+      refreshPanes();
+    };
+
+    ws.onmessage = async (ev) => {
+      if (typeof ev.data === "string") term.write(ev.data);
+      else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+      else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
+      scheduleReveal();
+    };
+
+    ws.onclose = () => {};
+    ws.onerror = () => {};
+  }
+
+  reconnect = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    // Kill stale socket
+    if (ws) { try { ws.close(); } catch(e) {} }
+    connect();
   };
 
-  ws.onmessage = async (ev) => {
-    if (typeof ev.data === "string") term.write(ev.data);
-    else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
-    else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
-    scheduleReveal();
-  };
+  term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
-  ws.onclose = () => term.writeln("\r\n\x1b[31m[disconnected]\x1b[0m");
-  ws.onerror = () => term.writeln("\r\n\x1b[31m[connection error]\x1b[0m");
-  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+  connect();
 })();
 
 function sendResize() {
@@ -197,6 +244,7 @@ setInterval(refreshPanes, 5000);
   }
 
   overlay.addEventListener('touchstart', (e) => {
+    reconnect();
     stopMom();
     if (e.touches.length === 2) {
       const fdx = e.touches[0].pageX - e.touches[1].pageX;
