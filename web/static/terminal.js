@@ -31,6 +31,8 @@ if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
 const wsProto = location.protocol === "https:" ? "wss" : "ws";
 let ws;
 
+let reconnect = () => {};
+
 (async () => {
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/history`);
@@ -42,21 +44,28 @@ let ws;
     }
   } catch (e) {}
 
-  ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
-  ws.binaryType = "arraybuffer";
+  function connect() {
+    ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { sendResize(); refreshPanes(); };
+    ws.onmessage = async (ev) => {
+      if (typeof ev.data === "string") term.write(ev.data);
+      else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+      else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
+    };
+    ws.onclose = () => {};
+    ws.onerror = () => {};
+  }
 
-  ws.onopen = () => { sendResize(); refreshPanes(); };
-
-  ws.onmessage = async (ev) => {
-    if (typeof ev.data === "string") term.write(ev.data);
-    else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
-    else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
+  reconnect = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    if (ws) { try { ws.close(); } catch(e) {} }
+    connect();
   };
 
-  ws.onclose = () => term.writeln("\r\n\x1b[31m[disconnected]\x1b[0m");
-  ws.onerror = () => term.writeln("\r\n\x1b[31m[connection error]\x1b[0m");
-  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+  term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
+  connect();
   setTimeout(() => term.scrollToBottom(), 500);
 })();
 
@@ -64,9 +73,8 @@ function sendResize() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const cw = term._core._renderService.dimensions?.css?.cell?.width || 9;
   const ch = term._core._renderService.dimensions?.css?.cell?.height || 18;
-  const tb = document.querySelector('.term-toolbar')?.offsetHeight || 40;
   const cols = Math.max(20, Math.floor(window.innerWidth / cw) - 1);
-  const rows = Math.max(10, Math.floor((window.innerHeight - tb) / ch) - 1);
+  const rows = Math.max(10, Math.floor(window.innerHeight / ch) - 1);
   term.resize(cols, rows);
   ws.send(JSON.stringify({ type: "resize", cols, rows }));
 }
@@ -188,6 +196,7 @@ setInterval(refreshPanes, 5000);
   }
 
   overlay.addEventListener('touchstart', (e) => {
+    reconnect();
     stopMom();
     if (e.touches.length === 2) {
       gesture = 'pinch';
