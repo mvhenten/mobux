@@ -510,13 +510,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <div id="terminal"></div>
   <div id="touchOverlay"></div>
 
-  <nav class="term-toolbar">
-    <span id="paneIndicator" class="tb-label"></span>
-    <button id="micBtn" class="tb-btn" title="Voice input">🎤</button>
-    <button class="tb-btn" title="Reload" onclick="location.reload(true)">🔄</button>
-    <a href="/" class="tb-btn tb-exit" title="Back to sessions">✕</a>
-  </nav>
-
   <script>
     window.MOBUX_SESSION = {session_json};
   </script>
