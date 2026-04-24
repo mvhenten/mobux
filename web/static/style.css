@@ -120,11 +120,6 @@ input {
   padding: 6px;
   min-height: 0;
   overflow: hidden;
-  visibility: hidden;
-}
-
-#terminal.ready {
-  visibility: visible;
 }
 
 #loadquote {

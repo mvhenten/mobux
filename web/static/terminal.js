@@ -88,7 +88,6 @@ let reconnect = () => {};
     if (revealed) return;
     revealed = true;
     term.scrollToBottom();
-    termEl.classList.add('ready');
     const lq = document.getElementById('loadquote');
     if (lq) lq.style.opacity = '0';
     setTimeout(() => lq?.remove(), 300);
