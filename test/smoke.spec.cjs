@@ -3,10 +3,10 @@ const { test, expect } = require('@playwright/test');
 const BASE = process.env.MOBUX_URL || 'https://localhost:5151';
 const USER = process.env.MOBUX_USER || 'mvhenten';
 const PASS = process.env.MOBUX_PASS || '30879';
-const AUTH = 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64');
+const AUTH = (USER && PASS) ? 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64') : null;
 
 test.use({
-  extraHTTPHeaders: { Authorization: AUTH },
+  ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
 });
 
 test('index loads', async ({ page }) => {
