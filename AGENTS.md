@@ -77,8 +77,11 @@ Environment: `MOBUX_AUTH_USER`, `MOBUX_PIN`, `MOBUX_PORT` (default 5151), `MOBUX
 ## Cargo build caching gotcha
 When editing HTML in `main.rs` format strings, `cargo build` may not detect the change. Use `cargo clean -p mobux && cargo build` to force recompile.
 
-## Known issue: loading screen breaks touch scrolling
-Adding a `#loading` div with `z-index: 20` over the terminal causes touch scrolling to break, even after the div is removed. This has happened twice. The root cause is likely that the loading div intercepts touch events during the initial data dump, and something in the gesture state or xterm.js gets corrupted. **Do not add a loading screen overlay without thorough touch testing.** The scroll storm from tmux attach is visible but harmless — users see it for <1 second.
+## Loading screen (quotes)
+- Quote div at `z-index: 5` — **below** touch overlay (`z-index: 10`). Never above.
+- Terminal starts with `visibility: hidden`, gets `.ready` class on reveal.
+- Debounced reveal: 800ms of data silence → `scrollToBottom()` → show terminal → fade out quote.
+- Previous attempts with `z-index: 20` (above overlay) broke touch scrolling twice. Don't do that.
 
 ## Branch structure
 - `main` — protected, requires CI pass
