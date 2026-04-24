@@ -2,6 +2,14 @@
 
 **tmux on your phone. Yes, really.**
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mvhenten/mobux/assets/sessions.png" width="270" alt="Session list">
+  &nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/mvhenten/mobux/assets/terminal.png" width="270" alt="Terminal">
+  &nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/mvhenten/mobux/assets/commands.png" width="270" alt="Command menu">
+</p>
+
 For the clinically unhinged among us who think "I should SSH into my server" while
 picking up dog poop in the park. For people who can't stop thinking about that
 one running process even though the sun is shining and the birds are singing.

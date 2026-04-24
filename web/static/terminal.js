@@ -50,7 +50,7 @@ let ws;
   function scheduleReveal() {
     if (revealed) return;
     clearTimeout(revealTimer);
-    revealTimer = setTimeout(reveal, 150); // 150ms of silence = dump is done
+    revealTimer = setTimeout(reveal, 800); // 800ms of silence = dump is done
   }
 
   ws.onopen = () => {
