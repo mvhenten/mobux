@@ -17,9 +17,33 @@ jobs:
       - run: cargo test --no-run
       - run: cargo clippy -- -D warnings
 
-  # Creates a release PR with version bump + CHANGELOG based on conventional commits
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Build mobux
+        run: cargo build
+      - name: Start tmux + mobux
+        run: |
+          sudo apt-get install -y tmux
+          tmux new-session -d -s test "echo 'test session running'; sleep 300"
+          MOBUX_TLS=0 PORT=5151 ./target/debug/mobux &
+          sleep 2
+          curl -sf http://localhost:5151/api/sessions || (echo "Server failed to start"; exit 1)
+      - name: Run Playwright tests
+        run: MOBUX_URL=http://localhost:5151 npx playwright test
+        env:
+          CI: true
+
   release-plz-pr:
-    needs: check
+    needs: [check, e2e]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     concurrency:
@@ -36,9 +60,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Publishes to crates.io + creates GitHub release when release PR is merged
   release-plz-release:
-    needs: check
+    needs: [check, e2e]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     concurrency:

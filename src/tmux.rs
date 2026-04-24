@@ -165,42 +165,6 @@ pub async fn send_line(session: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Execute a named tmux command on the active window/pane of a session.
-pub async fn run_command(session: &str, command: &str) -> Result<String> {
-    let next_pane = format!("{}:.+", session);
-    let prev_pane = format!("{}:.-", session);
-    let args: Vec<&str> = match command {
-        "new-window" => vec!["new-window", "-t", session],
-        "kill-window" => vec!["kill-window", "-t", session],
-        "split-h" => vec!["split-window", "-h", "-t", session],
-        "split-v" => vec!["split-window", "-v", "-t", session],
-        "next-window" => vec!["next-window", "-t", session],
-        "prev-window" => vec!["previous-window", "-t", session],
-        "next-pane" => vec!["select-pane", "-t", &next_pane],
-        "prev-pane" => vec!["select-pane", "-t", &prev_pane],
-        "kill-pane" => vec!["kill-pane", "-t", session],
-        "zoom-pane" => vec!["resize-pane", "-Z", "-t", session],
-        _ => return Err(anyhow!("unknown command: {}", command)),
-    };
-
-    let output = Command::new("tmux")
-        .args(&args)
-        .output()
-        .await
-        .context("failed to execute tmux")?;
-
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        // Don't error if kill-pane/kill-window closes the last one
-        if msg.contains("no remaining") || msg.contains("session not found") {
-            return Ok(msg);
-        }
-        return Err(anyhow!("tmux {} failed: {}", command, msg));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 /// Capture the scrollback history of the active pane in a session.
 /// Returns the content with ANSI escape sequences preserved.
 pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
