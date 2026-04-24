@@ -1,20 +1,18 @@
 # mobux
 
-A touch-friendly tmux web UI (session list + terminal + voice-to-command button).
+A touch-friendly tmux web UI (session list + terminal).
 
 ## What it does
 
 - Lists tmux sessions in a mobile-friendly UI
 - Tap a session to open a live terminal
 - Create/kill sessions from the phone
-- Optional mic button on terminal page (browser speech recognition) to send text as a line into that tmux session
 
 ## Requirements
 
 - Rust toolchain (stable)
 - `tmux` installed and available in `PATH`
 - A browser with WebSocket support
-- For voice button: browser `SpeechRecognition` support (works best on Chromium browsers)
 
 ## Run
 
@@ -54,16 +52,11 @@ cache directory with `MOBUX_CERT_DIR`.
 ## Notes
 
 - This MVP has optional auth. Put it behind Tailscale ACLs and/or a reverse proxy auth layer.
-- HTTPS is on by default (needed for mic/speech on non-localhost). Set `MOBUX_TLS=0` to disable.
+- HTTPS is on by default. Set `MOBUX_TLS=0` to disable.
 - Session names are restricted to: `a-z A-Z 0-9 . _ -`
-- Voice button sends text via tmux buffer + Enter:
-  - `tmux set-buffer -- "$TEXT"`
-  - `tmux paste-buffer -t <session>`
-  - `tmux send-keys -t <session> Enter`
 
 ## Suggested next steps
 
 - Add read-only mode endpoint (`tmux attach -r`)
 - Add basic auth or OAuth proxy
-- Add CSRF/rate-limiting for `/send`
 - Add reconnect/session-preserve behavior

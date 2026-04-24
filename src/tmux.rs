@@ -75,36 +75,117 @@ pub async fn kill_session(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_line(session: &str, text: &str) -> Result<()> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pane {
+    pub index: String,
+    pub title: String,
+    pub active: bool,
+}
+
+pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
+    // List windows (the main navigable units in tmux)
     let output = Command::new("tmux")
+        .args([
+            "list-windows",
+            "-t", session,
+            "-F",
+            "#{window_index}\t#{window_name}\t#{window_active}",
+        ])
+        .output()
+        .await
+        .context("failed to execute tmux")?;
+
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux list-windows failed: {}", msg));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = vec![];
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        out.push(Pane {
+            index: parts[0].to_string(),
+            title: parts[1].to_string(),
+            active: parts[2] == "1",
+        });
+    }
+    Ok(out)
+}
+
+pub async fn select_pane(session: &str, window_index: &str) -> Result<()> {
+    let target = format!("{}:{}", session, window_index);
+    let output = Command::new("tmux")
+        .args(["select-window", "-t", &target])
+        .output()
+        .await
+        .context("failed to execute tmux")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux select-window failed: {}", msg));
+    }
+    Ok(())
+}
+
+pub async fn send_line(session: &str, text: &str) -> Result<()> {
+    let set = Command::new("tmux")
         .args(["set-buffer", "--", text])
         .output()
         .await
-        .context("failed to execute tmux")?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        .context("failed to execute tmux set-buffer")?;
+    if !set.status.success() {
+        let msg = String::from_utf8_lossy(&set.stderr).trim().to_string();
         return Err(anyhow!("tmux set-buffer failed: {}", msg));
     }
 
-    let output = Command::new("tmux")
+    let paste = Command::new("tmux")
         .args(["paste-buffer", "-t", session])
         .output()
         .await
-        .context("failed to execute tmux")?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        .context("failed to execute tmux paste-buffer")?;
+    if !paste.status.success() {
+        let msg = String::from_utf8_lossy(&paste.stderr).trim().to_string();
         return Err(anyhow!("tmux paste-buffer failed: {}", msg));
     }
 
-    let output = Command::new("tmux")
+    let enter = Command::new("tmux")
         .args(["send-keys", "-t", session, "Enter"])
         .output()
         .await
-        .context("failed to execute tmux")?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        .context("failed to execute tmux send-keys")?;
+    if !enter.status.success() {
+        let msg = String::from_utf8_lossy(&enter.stderr).trim().to_string();
         return Err(anyhow!("tmux send-keys failed: {}", msg));
     }
 
     Ok(())
 }
+
+/// Capture the scrollback history of the active pane in a session.
+/// Returns the content with ANSI escape sequences preserved.
+pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
+    let start = format!("-{}", lines);
+    let output = Command::new("tmux")
+        .args([
+            "capture-pane",
+            "-p",     // print to stdout
+            "-e",     // include escape sequences (colors)
+            "-S", &start,  // start N lines back
+            "-t", session,
+        ])
+        .output()
+        .await
+        .context("failed to execute tmux capture-pane")?;
+
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux capture-pane failed: {}", msg));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+

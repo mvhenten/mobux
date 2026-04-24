@@ -33,6 +33,7 @@ mod tmux;
 struct AppState {
     session_name_re: Arc<Regex>,
     auth: Option<AuthConfig>,
+    cache_bust: String,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
+        cache_bust: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
     };
 
     let state_for_mw = state.clone();
@@ -56,7 +58,10 @@ async fn main() -> Result<()> {
         .route("/", get(index))
         .route("/api/sessions", get(api_sessions).post(api_create_session))
         .route("/api/sessions/{name}/kill", post(api_kill_session))
+        .route("/api/sessions/{name}/panes", get(api_list_panes))
+        .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
         .route("/api/sessions/{name}/send", post(api_send_to_session))
+        .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .nest_service("/static", ServeDir::new("web/static"))
@@ -175,7 +180,7 @@ async fn auth_middleware(
     if basic_ok {
         let mut resp = next.run(req).await;
         let set_cookie = format!(
-            "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000",
+            "{}={}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000",
             auth.session_cookie_name, auth.session_cookie_value
         );
         if let Ok(v) = HeaderValue::from_str(&set_cookie) {
@@ -190,9 +195,9 @@ async fn auth_middleware(
     resp
 }
 
-async fn index() -> Result<Html<String>, AppError> {
+async fn index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
-    Ok(Html(render_index(&sessions, None)))
+    Ok(Html(render_index(&sessions, None, &state.cache_bust)))
 }
 
 async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
@@ -226,6 +231,26 @@ async fn api_kill_session(
     Ok(Json(json!({"ok": true})))
 }
 
+async fn api_list_panes(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<tmux::Pane>>, AppError> {
+    validate_session_name(&state, &name)?;
+    let panes = tmux::list_panes(&name).await.map_err(AppError::bad_request)?;
+    Ok(Json(panes))
+}
+
+async fn api_select_pane(
+    State(state): State<AppState>,
+    Path((name, pane)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &name)?;
+    tmux::select_pane(&name, &pane)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true})))
+}
+
 #[derive(Deserialize)]
 struct SendReq {
     text: String,
@@ -250,12 +275,23 @@ async fn api_send_to_session(
     Ok(Json(json!({"ok": true})))
 }
 
+async fn api_session_history(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<String, AppError> {
+    validate_session_name(&state, &name)?;
+    let history = tmux::capture_history(&name, 10000)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(history)
+}
+
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Html<String>, AppError> {
     validate_session_name(&state, &name)?;
-    Ok(Html(render_terminal_page(&name)))
+    Ok(Html(render_terminal_page(&name, &state.cache_bust)))
 }
 
 async fn terminal_ws(
@@ -288,8 +324,14 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -
         pixel_height: 0,
     })?;
 
-    let mut cmd = CommandBuilder::new("tmux");
-    cmd.args(["attach-session", "-t", &session_name]);
+    let mut cmd = CommandBuilder::new("bash");
+    cmd.args([
+        "-c",
+        &format!(
+            "tmux set-option -g mouse on 2>/dev/null; tmux set-window-option -g aggressive-resize on 2>/dev/null; tmux attach-session -t {}",
+            &session_name
+        ),
+    ]);
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -379,7 +421,7 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn render_index(sessions: &[tmux::Session], error: Option<&str>) -> String {
+fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> String {
     let mut cards = String::new();
     if sessions.is_empty() {
         cards.push_str(r#"<p class="hint">No tmux sessions found.</p>"#);
@@ -411,10 +453,10 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>) -> String {
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Mobux</title>
   <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v={v}" />
 </head>
 <body>
   <main class="container">
@@ -442,14 +484,14 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>) -> String {
     </section>
   </main>
 
-  <script src="/static/index.js"></script>
+  <script src="/static/index.js?v={v}"></script>
 </body>
 </html>
 "#
     )
 }
 
-fn render_terminal_page(session: &str) -> String {
+fn render_terminal_page(session: &str, v: &str) -> String {
     let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
     let session_title = html_escape::encode_text(session);
 
@@ -458,26 +500,28 @@ fn render_terminal_page(session: &str) -> String {
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Mobux · {session_title}</title>
   <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v={v}" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
 </head>
 <body class="term-body">
-  <header class="term-header">
-    <a href="/" class="btn">← Sessions</a>
-    <strong>{session_title}</strong>
-    <button id="micBtn" class="btn">🎤 Talk</button>
-  </header>
-
   <div id="terminal"></div>
+  <div id="touchOverlay"></div>
+
+  <nav class="term-toolbar">
+    <span id="paneIndicator" class="tb-label"></span>
+    <button id="micBtn" class="tb-btn" title="Voice input">🎤</button>
+    <button class="tb-btn" title="Reload" onclick="location.reload(true)">🔄</button>
+    <a href="/" class="tb-btn tb-exit" title="Back to sessions">✕</a>
+  </nav>
 
   <script>
     window.MOBUX_SESSION = {session_json};
   </script>
   <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-  <script src="/static/terminal.js"></script>
+  <script src="/static/terminal.js?v={v}"></script>
 </body>
 </html>
 "#
