@@ -122,6 +122,34 @@ input {
   overflow: hidden;
 }
 
+#loading {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 16px;
+  padding: 24px;
+  text-align: center;
+  gap: 8px;
+}
+
+#loading q {
+  font-style: italic;
+  color: var(--text);
+  max-width: 500px;
+  line-height: 1.5;
+}
+
+#loading cite {
+  color: var(--primary);
+  font-size: 14px;
+}
+
 #touchOverlay {
   position: absolute;
   top: 0;

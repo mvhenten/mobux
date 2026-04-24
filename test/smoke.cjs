@@ -49,15 +49,9 @@ const PASS = process.env.MOBUX_PASS || '30879';
     await page.waitForSelector('.xterm-screen', { timeout: 5000 });
     console.log('  [3] ✓ xterm rendered');
 
-    // 4. Check no blocking overlay (loading screen gone)
-    const loadingVisible = await page.evaluate(() => {
-      const el = document.getElementById('loading');
-      if (!el) return false;
-      const style = window.getComputedStyle(el);
-      return style.display !== 'none' && style.visibility !== 'hidden';
-    });
-    if (loadingVisible) throw new Error('Loading screen is still visible!');
-    console.log('  [4] ✓ No blocking loading screen');
+    // 4. Wait for loading screen to be removed (debounced reveal)
+    await page.waitForFunction(() => !document.getElementById('loading'), { timeout: 5000 });
+    console.log('  [4] ✓ Loading screen removed');
 
     // 5. Check touch overlay exists
     const hasOverlay = await page.$('#touchOverlay');
