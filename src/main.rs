@@ -525,7 +525,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
 </head>
 <body class="term-body">
-  <div id="loading">connecting…</div>
   <div id="terminal"></div>
   <div id="touchOverlay"></div>
 

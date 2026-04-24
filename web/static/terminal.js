@@ -32,49 +32,39 @@ const wsProto = location.protocol === "https:" ? "wss" : "ws";
 let ws;
 
 (async () => {
-  const loadingEl = document.getElementById('loading');
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/history`);
+    if (res.ok) {
+      const history = await res.text();
+      if (history.trim()) {
+        term.write(history.replace(/\n/g, '\r\n'));
+      }
+    }
+  } catch (e) {}
 
   ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
   ws.binaryType = "arraybuffer";
 
-  let revealed = false;
-  let revealTimer = null;
-  function reveal() {
-    if (revealed) return;
-    revealed = true;
-    term.scrollToBottom();
-    requestAnimationFrame(() => { loadingEl?.remove(); });
-  }
-
-  // Debounced reveal: wait until data stops flowing (tmux dump is done)
-  function scheduleReveal() {
-    if (revealed) return;
-    clearTimeout(revealTimer);
-    revealTimer = setTimeout(reveal, 800); // 800ms of silence = dump is done
-  }
-
-  ws.onopen = () => {
-    sendResize();
-    refreshPanes();
-  };
+  ws.onopen = () => { sendResize(); refreshPanes(); };
 
   ws.onmessage = async (ev) => {
     if (typeof ev.data === "string") term.write(ev.data);
     else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
     else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
-    scheduleReveal();
   };
 
   ws.onclose = () => term.writeln("\r\n\x1b[31m[disconnected]\x1b[0m");
   ws.onerror = () => term.writeln("\r\n\x1b[31m[connection error]\x1b[0m");
   term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+
+  setTimeout(() => term.scrollToBottom(), 500);
 })();
 
 function sendResize() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const cw = term._core._renderService.dimensions?.css?.cell?.width || 9;
   const ch = term._core._renderService.dimensions?.css?.cell?.height || 18;
-  const tb = document.querySelector('.term-toolbar')?.offsetHeight || 0;
+  const tb = document.querySelector('.term-toolbar')?.offsetHeight || 40;
   const cols = Math.max(20, Math.floor(window.innerWidth / cw) - 1);
   const rows = Math.max(10, Math.floor((window.innerHeight - tb) / ch) - 1);
   term.resize(cols, rows);
@@ -110,11 +100,15 @@ function updatePaneUI() {
   }
 }
 
-async function selectPane(direction) {
+async function selectPane(index) {
   if (panes.length <= 1) return;
+  if (index < 0) index = panes.length - 1;
+  if (index >= panes.length) index = 0;
   if (ws && ws.readyState === WebSocket.OPEN) {
-    // direction: 1 = next, -1 = previous
-    ws.send("\x02" + (direction > 0 ? "n" : "p"));
+    const dir = (index > activeIndex || (activeIndex === panes.length - 1 && index === 0)) ? "n" : "p";
+    ws.send("\x02" + dir);
+    activeIndex = index;
+    updatePaneUI();
     setTimeout(refreshPanes, 300);
   }
 }
@@ -144,12 +138,9 @@ setInterval(refreshPanes, 5000);
 
   let startX, startY, startTime;
   let lastY, lastTime;
-  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
-  let pinchStartDist = 0;
-  let pinchStartFontSize = 0;
+  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'pinch'
   let posSamples;   // [{y, t}]
   let momId = null;
-  let wasTwoFinger = false;
   let lastTapTime = 0;
 
   function wheel(dy) {
@@ -199,17 +190,11 @@ setInterval(refreshPanes, 5000);
   overlay.addEventListener('touchstart', (e) => {
     stopMom();
     if (e.touches.length === 2) {
-      const fdx = e.touches[0].pageX - e.touches[1].pageX;
-      const fdy = e.touches[0].pageY - e.touches[1].pageY;
-      pinchStartDist = Math.hypot(fdx, fdy);
-      pinchStartFontSize = term.options.fontSize;
+      gesture = 'pinch';
       startY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
-      gesture = 'two';
-      wasTwoFinger = true;
       return;
     }
     if (e.touches.length !== 1) { gesture = null; return; }
-    wasTwoFinger = false;
     const t = e.touches[0];
     startX = t.pageX; startY = t.pageY;
     lastY = t.pageY;
@@ -220,53 +205,19 @@ setInterval(refreshPanes, 5000);
 
   overlay.addEventListener('touchmove', (e) => {
     e.preventDefault();
-    if (e.touches.length === 2 && (gesture === 'two' || gesture === 'pinch' || gesture === 'twopull')) {
-      const fdx = e.touches[0].pageX - e.touches[1].pageX;
-      const fdy = e.touches[0].pageY - e.touches[1].pageY;
-      const dist = Math.hypot(fdx, fdy);
+    if (e.touches.length === 2 && gesture === 'pinch') {
+      // Track two-finger pull distance
       const midY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
-      const pull = midY - startY;
-      const distChange = Math.abs(dist - pinchStartDist);
-      const pinchThreshold = pinchStartDist * 0.25; // 25% scale change (iOS uses ~15-20%)
-
-      // Still undecided — classify based on what dominates
-      // Use scale ratio like iOS (must deviate 25% from 1.0)
-      const scale = dist / pinchStartDist;
-      if (gesture === 'two') {
-        if (Math.abs(scale - 1.0) > 0.25) {
-          gesture = 'pinch'; // clear pinch intent
-        } else if (Math.abs(pull) > 30) {
-          gesture = 'twopull'; // fingers moving together
-        }
-        // else: not enough movement yet, stay undecided, do nothing
-        if (gesture === 'two') return;
-      }
-
-      // Locked in as pinch zoom
-      if (gesture === 'pinch') {
-        const scale = dist / pinchStartDist;
-        const newSize = Math.round(Math.max(8, Math.min(32, pinchStartFontSize * scale)));
-        if (newSize !== term.options.fontSize) {
-          term.options.fontSize = newSize;
-          sendResize();
-        }
-      }
-
-      // Locked in as pull to reload
-      if (gesture === 'two') {
-      gesture = null;
-      return;
-    }
-    if (gesture === 'twopull') {
-        if (pull > 60) {
-          paneIndicator.textContent = '\u21bb Release to reload';
-        } else if (pull > 20) {
-          paneIndicator.textContent = '\u2193 Pull to reload...';
-        }
+      const dy = midY - startY;
+      // Visual feedback: show pull indicator when pulling down > 60px
+      if (dy > 60) {
+        paneIndicator.textContent = '↻ Release to reload';
+      } else if (dy > 20) {
+        paneIndicator.textContent = '↓ Pull to reload...';
       }
       return;
     }
-    if (e.touches.length !== 1 || !gesture || wasTwoFinger) return;
+    if (e.touches.length !== 1 || !gesture) return;
     const y = e.touches[0].pageY;
     const now = performance.now();
 
@@ -296,23 +247,15 @@ setInterval(refreshPanes, 5000);
   }, { passive: false });
 
   overlay.addEventListener('touchend', (e) => {
-    if (gesture === 'two') {
-      gesture = null;
-      return;
-    }
-    if (gesture === 'twopull') {
+    if (gesture === 'pinch') {
+      // Check if two-finger pull down was far enough
       const endY = e.changedTouches[0]?.pageY ?? startY;
       const dy = endY - startY;
       if (dy > 60) {
         location.reload(true);
       } else {
-        updatePaneUI();
+        updatePaneUI(); // restore indicator text
       }
-      gesture = null;
-      return;
-    }
-    if (gesture === 'pinch') {
-      // Pinch zoom done - just clean up
       gesture = null;
       return;
     }
@@ -342,7 +285,7 @@ setInterval(refreshPanes, 5000);
       const dt = performance.now() - startTime;
       const vel = Math.abs(dx) / dt;
       if (Math.abs(dx) > FLICK_H_PX || vel > FLICK_H_VEL) {
-        selectPane(dx < 0 ? 1 : -1);
+        selectPane(dx < 0 ? activeIndex + 1 : activeIndex - 1);
       }
     }
     gesture = null;
@@ -352,92 +295,6 @@ setInterval(refreshPanes, 5000);
 }
 
 // ── Voice input ─────────────────────────────────────────────────────
-
-// ── Tmux command pick list ──────────────────────────────────────────
-{
-  const pickList = document.getElementById('cmdPickList');
-  const overlayBg = document.getElementById('cmdOverlayBg');
-  const cmdBtn = document.getElementById('cmdBtn');
-  const cmdCloseBtn = document.getElementById('cmdCloseBtn');
-
-  function showCmdList() {
-    pickList.classList.add('visible');
-    overlayBg.classList.add('visible');
-  }
-
-  function hideCmdList() {
-    pickList.classList.remove('visible');
-    overlayBg.classList.remove('visible');
-  }
-
-  async function runTmuxCmd(command) {
-    try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      // Refresh panes after structural commands
-      setTimeout(refreshPanes, 300);
-    } catch (e) {
-      term.writeln(`\r\n\x1b[31m[tmux error: ${e.message}]\x1b[0m`);
-    }
-  }
-
-  // Toolbar button
-  cmdBtn?.addEventListener('click', showCmdList);
-  cmdCloseBtn?.addEventListener('click', hideCmdList);
-  overlayBg?.addEventListener('click', hideCmdList);
-
-  // Pick list item clicks
-  pickList?.addEventListener('click', (e) => {
-    const item = e.target.closest('[data-cmd]');
-    if (!item) return;
-    const cmd = item.dataset.cmd;
-    hideCmdList();
-    runTmuxCmd(cmd);
-  });
-
-  // Long-press gesture on the touch overlay (hold ~600ms)
-  let longPressTimer = null;
-  const LONGPRESS_MS = 600;
-  const LONGPRESS_MOVE_PX = 12;
-  let lpStartX = 0, lpStartY = 0;
-
-  overlay.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { clearTimeout(longPressTimer); longPressTimer = null; return; }
-    lpStartX = e.touches[0].pageX;
-    lpStartY = e.touches[0].pageY;
-    longPressTimer = setTimeout(() => {
-      longPressTimer = null;
-      // Trigger haptic feedback if available
-      if (navigator.vibrate) navigator.vibrate(30);
-      showCmdList();
-      // Cancel the ongoing gesture so tap/scroll don't fire
-      gesture = null;
-    }, LONGPRESS_MS);
-  }, { passive: true });
-
-  overlay.addEventListener('touchmove', (e) => {
-    if (longPressTimer !== null && e.touches.length === 1) {
-      const dx = Math.abs(e.touches[0].pageX - lpStartX);
-      const dy = Math.abs(e.touches[0].pageY - lpStartY);
-      if (dx > LONGPRESS_MOVE_PX || dy > LONGPRESS_MOVE_PX) {
-        clearTimeout(longPressTimer);
-        longPressTimer = null;
-      }
-    }
-  }, { passive: true });
-
-  overlay.addEventListener('touchend', () => {
-    if (longPressTimer !== null) { clearTimeout(longPressTimer); longPressTimer = null; }
-  }, { passive: true });
-
-  overlay.addEventListener('touchcancel', () => {
-    if (longPressTimer !== null) { clearTimeout(longPressTimer); longPressTimer = null; }
-  }, { passive: true });
-}
 
 async function sendVoiceText(text) {
   const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/send`, {
