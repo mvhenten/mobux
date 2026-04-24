@@ -1,7 +1,29 @@
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
 const overlay = document.getElementById("touchOverlay");
+const loadquote = document.getElementById("loadquote");
 const isMobile = window.innerWidth < 620;
+
+// ── Loading screen quotes ───────────────────────────────────────────
+const quotes = [
+  ["Simplicity is prerequisite for reliability.", "Edsger W. Dijkstra"],
+  ["If debugging is the process of removing bugs, then programming must be the process of putting them in.", "Edsger W. Dijkstra"],
+  ["The Analytical Engine weaves algebraical patterns just as the Jacquard loom weaves flowers and leaves.", "Ada Lovelace"],
+  ["We can only see a short distance ahead, but we can see plenty there that needs to be done.", "Alan Turing"],
+  ["Those who can imagine anything, can create the impossible.", "Alan Turing"],
+  ["The most dangerous phrase in the language is: we\u2019ve always done it this way.", "Grace Hopper"],
+  ["The best way to predict the future is to invent it.", "Alan Kay"],
+  ["Premature optimization is the root of all evil.", "Donald Knuth"],
+  ["Talk is cheap. Show me the code.", "Linus Torvalds"],
+  ["Controlling complexity is the essence of computer programming.", "Brian Kernighan"],
+  ["Any sufficiently advanced technology is indistinguishable from magic.", "Arthur C. Clarke"],
+  ["Information is the resolution of uncertainty.", "Claude Shannon"],
+];
+{
+  const [text, author] = quotes[Math.floor(Math.random() * quotes.length)];
+  document.getElementById("quote").textContent = text;
+  document.getElementById("qauthor").textContent = "\u2014 " + author;
+}
 const term = new Terminal({
   cursorBlink: true,
   fontSize: isMobile ? 14 : 15,
@@ -44,6 +66,18 @@ let reconnect = () => {};
     }
   } catch (e) {}
 
+  // ── Debounced reveal: wait for data to settle, then show terminal ──────
+  let revealTimer = null;
+  function scheduleReveal() {
+    if (!loadquote || !loadquote.parentNode) return;
+    clearTimeout(revealTimer);
+    revealTimer = setTimeout(() => {
+      term.scrollToBottom();
+      loadquote.style.opacity = '0';
+      setTimeout(() => { if (loadquote.parentNode) loadquote.remove(); }, 300);
+    }, 800);
+  }
+
   function connect() {
     ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
     ws.binaryType = "arraybuffer";
@@ -52,6 +86,7 @@ let reconnect = () => {};
       if (typeof ev.data === "string") term.write(ev.data);
       else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
       else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
+      scheduleReveal();
     };
     ws.onclose = () => {};
     ws.onerror = () => {};
@@ -66,7 +101,7 @@ let reconnect = () => {};
   term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
   connect();
-  setTimeout(() => term.scrollToBottom(), 500);
+  // scrollToBottom is now handled by scheduleReveal()
 })();
 
 function sendResize() {
