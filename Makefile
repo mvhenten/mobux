@@ -29,5 +29,5 @@ status:
 logs:
 	@tail -f /tmp/mobux.log
 
-test: start
-	NODE_PATH=$$(npm root -g) node test/smoke.cjs
+test:
+	npx playwright test
