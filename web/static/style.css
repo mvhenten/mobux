@@ -120,6 +120,40 @@ input {
   padding: 6px;
   min-height: 0;
   overflow: hidden;
+  visibility: hidden;
+}
+
+#terminal.ready {
+  visibility: visible;
+}
+
+#loadquote {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 16px;
+  padding: 24px;
+  text-align: center;
+  gap: 8px;
+  transition: opacity 0.3s;
+}
+
+#loadquote q {
+  font-style: italic;
+  color: var(--text);
+  max-width: 500px;
+  line-height: 1.5;
+}
+
+#loadquote cite {
+  color: var(--primary);
+  font-size: 14px;
 }
 
 #touchOverlay {
@@ -127,10 +161,9 @@ input {
   top: 0;
   left: 0;
   right: 0;
-  bottom: 40px; /* leave toolbar exposed */
+  bottom: 0;
   z-index: 10;
   touch-action: none;
-  /* transparent to mouse so wheel/click go straight to xterm */
   pointer-events: none;
 }
 
