@@ -255,19 +255,47 @@ setInterval(refreshPanes, 5000);
 
   overlay.addEventListener('touchmove', (e) => {
     e.preventDefault();
-    if (e.touches.length === 2 && gesture === 'pinch') {
-      // Track two-finger pull distance
+
+    // Two-finger gestures
+    if (e.touches.length === 2 && (gesture === 'two' || gesture === 'pinch' || gesture === 'twopull')) {
+      const fdx = e.touches[0].pageX - e.touches[1].pageX;
+      const fdy = e.touches[0].pageY - e.touches[1].pageY;
+      const dist = Math.hypot(fdx, fdy);
       const midY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
-      const dy = midY - startY;
-      // Visual feedback: show pull indicator when pulling down > 60px
-      if (dy > 60) {
-        paneIndicator.textContent = '↻ Release to reload';
-      } else if (dy > 20) {
-        paneIndicator.textContent = '↓ Pull to reload...';
+      const pull = midY - startY;
+      const scale = dist / pinchStartDist;
+
+      // Classify: 25% scale change = pinch zoom (iOS threshold)
+      if (gesture === 'two') {
+        if (Math.abs(scale - 1.0) > 0.25) {
+          gesture = 'pinch';
+        } else if (Math.abs(pull) > 30) {
+          gesture = 'twopull';
+        } else {
+          return; // undecided
+        }
+      }
+
+      if (gesture === 'pinch') {
+        const newSize = Math.round(Math.max(8, Math.min(32, pinchStartFontSize * scale)));
+        if (newSize !== term.options.fontSize) {
+          term.options.fontSize = newSize;
+          sendResize();
+        }
+      }
+
+      if (gesture === 'twopull') {
+        if (pull > 60) {
+          paneIndicator.textContent = '↻ Release to reload';
+        } else if (pull > 20) {
+          paneIndicator.textContent = '↓ Pull to reload...';
+        }
       }
       return;
     }
-    if (e.touches.length !== 1 || !gesture) return;
+
+    // Single-finger — skip if was two-finger (lifting one finger)
+    if (e.touches.length !== 1 || !gesture || wasTwoFinger) return;
     const y = e.touches[0].pageY;
     const now = performance.now();
 
@@ -297,18 +325,18 @@ setInterval(refreshPanes, 5000);
   }, { passive: false });
 
   overlay.addEventListener('touchend', (e) => {
-    if (gesture === 'pinch') {
-      // Check if two-finger pull down was far enough
+    if (gesture === 'two') { gesture = null; return; }
+    if (gesture === 'twopull') {
       const endY = e.changedTouches[0]?.pageY ?? startY;
-      const dy = endY - startY;
-      if (dy > 60) {
+      if (endY - startY > 60) {
         location.reload(true);
       } else {
-        updatePaneUI(); // restore indicator text
+        updatePaneUI();
       }
       gesture = null;
       return;
     }
+    if (gesture === 'pinch') { gesture = null; return; }
     if (gesture === 'tap' && (performance.now() - startTime) < TAP_MS) {
       const now = performance.now();
       if (now - lastTapTime < DTAP_MS) {
