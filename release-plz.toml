@@ -1,0 +1,10 @@
+[workspace]
+# Generate changelog from conventional commits
+changelog_config = "cliff.toml"
+
+# Create a git tag on release
+git_tag_enable = true
+
+# Create a GitHub release
+git_release_enable = true
+git_release_draft = false

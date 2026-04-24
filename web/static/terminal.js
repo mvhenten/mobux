@@ -38,6 +38,7 @@ let ws;
   ws.binaryType = "arraybuffer";
 
   let revealed = false;
+  let revealTimer = null;
   function reveal() {
     if (revealed) return;
     revealed = true;
@@ -45,17 +46,23 @@ let ws;
     requestAnimationFrame(() => { loadingEl?.remove(); });
   }
 
+  // Debounced reveal: wait until data stops flowing (tmux dump is done)
+  function scheduleReveal() {
+    if (revealed) return;
+    clearTimeout(revealTimer);
+    revealTimer = setTimeout(reveal, 150); // 150ms of silence = dump is done
+  }
+
   ws.onopen = () => {
     sendResize();
     refreshPanes();
-    setTimeout(reveal, 300);
   };
 
   ws.onmessage = async (ev) => {
     if (typeof ev.data === "string") term.write(ev.data);
     else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
     else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
-    reveal();
+    scheduleReveal();
   };
 
   ws.onclose = () => term.writeln("\r\n\x1b[31m[disconnected]\x1b[0m");
