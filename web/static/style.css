@@ -122,6 +122,18 @@ input {
   overflow: hidden;
 }
 
+#loading {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 18px;
+}
+
 #touchOverlay {
   position: absolute;
   top: 0;

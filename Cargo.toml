@@ -2,6 +2,14 @@
 name = "mobux"
 version = "0.1.0"
 edition = "2021"
+description = "A touch-friendly tmux web UI for unhinged people who run terminal sessions from their phone while walking the dog"
+license = "MIT"
+repository = "https://github.com/mvhenten/mobux"
+homepage = "https://github.com/mvhenten/mobux"
+readme = "README.md"
+keywords = ["tmux", "terminal", "mobile", "web", "tui"]
+categories = ["command-line-utilities", "web-programming"]
+exclude = ["target/"]
 
 [dependencies]
 anyhow = "1"

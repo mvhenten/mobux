@@ -32,37 +32,35 @@ const wsProto = location.protocol === "https:" ? "wss" : "ws";
 let ws;
 
 (async () => {
-  try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/history`);
-    if (res.ok) {
-      const history = await res.text();
-      if (history.trim()) {
-        // Hide terminal during history load to prevent visible scroll storm
-        termEl.style.visibility = 'hidden';
-        term.write(history.replace(/\n/g, '\r\n'), () => {
-          term.scrollToBottom();
-          termEl.style.visibility = '';
-        });
-      }
-    }
-  } catch (e) {}
+  const loadingEl = document.getElementById('loading');
 
   ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
   ws.binaryType = "arraybuffer";
 
-  ws.onopen = () => { sendResize(); refreshPanes(); };
+  let revealed = false;
+  function reveal() {
+    if (revealed) return;
+    revealed = true;
+    term.scrollToBottom();
+    requestAnimationFrame(() => { loadingEl?.remove(); });
+  }
+
+  ws.onopen = () => {
+    sendResize();
+    refreshPanes();
+    setTimeout(reveal, 300);
+  };
 
   ws.onmessage = async (ev) => {
     if (typeof ev.data === "string") term.write(ev.data);
     else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
     else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
+    reveal();
   };
 
   ws.onclose = () => term.writeln("\r\n\x1b[31m[disconnected]\x1b[0m");
   ws.onerror = () => term.writeln("\r\n\x1b[31m[connection error]\x1b[0m");
   term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
-
-  setTimeout(() => term.scrollToBottom(), 500);
 })();
 
 function sendResize() {

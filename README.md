@@ -1,62 +1,118 @@
-# mobux
+# 🤖 mobux
 
-A touch-friendly tmux web UI (session list + terminal).
+**tmux on your phone. Yes, really.**
 
-## What it does
+For the clinically unhinged among us who think "I should SSH into my server" while
+picking up dog poop in the park. For people who can't stop thinking about that
+one running process even though the sun is shining and the birds are singing.
+For those who believe the best time to talk to your favorite LLM is while your
+golden retriever is sniffing a fire hydrant for the eleventh time.
 
-- Lists tmux sessions in a mobile-friendly UI
-- Tap a session to open a live terminal
-- Create/kill sessions from the phone
+If you're a sane person who puts their phone away and touches grass — this is not
+for you. Close this tab. Go outside. You're doing great.
+
+Still here? Of course you are. Welcome home.
+
+## What this cursed thing does
+
+- Lists your tmux sessions in a fat-finger-friendly mobile UI
+- Tap a session to get a full live terminal on your phone
+- Create, kill, split panes, switch windows — all from touch gestures
+- Long-press for a tmux command menu (new pane, close pane, split, zoom, etc.)
+- Swipe left/right to switch windows
+- Pinch to zoom the font size because your eyes aren't what they used to be
+- Two-finger pull to reload because why not
+- Double-tap to focus and bring up the keyboard
+- Voice input so you can dictate shell commands to your phone while your dog
+  judges you silently
+- Self-signed HTTPS out of the box — no nginx, no certbot, no suffering
+- Optional auth via HTTP Basic or a simple PIN
+
+## Install
+
+### From crates.io (recommended for fellow degenerates)
+
+```bash
+cargo install mobux
+```
+
+That's it. You now have `mobux` in your PATH. You need `tmux` installed too,
+obviously. If you don't have tmux, what are you even doing here?
+
+### From source (for the extra unhinged)
+
+```bash
+git clone https://github.com/mvhenten/mobux.git
+cd mobux
+cargo build --release
+# Binary is at target/release/mobux
+```
 
 ## Requirements
 
-- Rust toolchain (stable)
-- `tmux` installed and available in `PATH`
-- A browser with WebSocket support
+- `tmux` in your PATH (the whole point)
+- Rust toolchain if building from source
+- A phone, a dog (optional but recommended), and questionable life choices
 
 ## Run
 
 ```bash
-cd /home/alice/development/mobux
-# Option A: explicit user/password (HTTPS enabled by default)
-MOBUX_AUTH_USER="$USER" MOBUX_AUTH_PASS="change-me" PORT=5151 cargo run
+# With auth (you probably want this unless you enjoy strangers in your shell)
+MOBUX_AUTH_USER="$USER" MOBUX_AUTH_PASS="change-me" mobux
 
-# Option B: PIN mode (username defaults to 'mobux' unless MOBUX_AUTH_USER is set)
-MOBUX_PIN="123456" PORT=5151 cargo run
+# PIN mode (username defaults to 'mobux')
+MOBUX_PIN="123456" mobux
 
-# Disable TLS (plain HTTP)
-MOBUX_TLS=0 PORT=5151 cargo run
+# Custom port
+PORT=5151 mobux
 
-# Add extra SANs (e.g. Tailscale hostname)
-MOBUX_TLS_HOSTS="myhost.tailnet.ts.net,100.64.0.1" PORT=5151 cargo run
+# Disable TLS if you like living dangerously
+MOBUX_TLS=0 mobux
+
+# Extra SANs for Tailscale or whatever
+MOBUX_TLS_HOSTS="myhost.tailnet.ts.net,100.64.0.1" mobux
 ```
 
-Open:
+Then open on your phone:
 
 - Local: `https://localhost:8080`
-- From phone on Tailscale: `https://<your-tailscale-ip>:8080`
+- Over Tailscale: `https://<your-tailscale-ip>:8080`
 
-> Your browser will show a self-signed certificate warning — this is expected.
-> In Chrome, type `thisisunsafe` on the warning page to bypass it.
+> Your browser will scream about the self-signed cert. In Chrome, type
+> `thisisunsafe` on the warning page. Yes that's a real thing. No I didn't
+> make it up.
 
-### TLS details
+## Touch gestures
 
-SSL is enabled by default with a self-signed certificate generated at startup
-using `rcgen` (pure Rust, no openssl/mkcert/nginx needed). The cert is cached in
-`~/.local/share/mobux/ssl/` and auto-regenerates when it expires (30-day validity).
+| Gesture | Action |
+|---------|--------|
+| Swipe up/down | Scroll with momentum |
+| Swipe left/right | Switch tmux windows |
+| Double-tap | Focus terminal + keyboard |
+| Long-press (~600ms) | Open tmux command menu |
+| Pinch | Zoom font size |
+| Two-finger pull down | Reload page |
 
-SANs always include `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, and the machine
-hostname. Add more via `MOBUX_TLS_HOSTS` (comma-separated). Override the cert
-cache directory with `MOBUX_CERT_DIR`.
+## TLS details
 
-## Notes
+HTTPS is on by default with a self-signed cert generated at startup via `rcgen`
+(pure Rust, no openssl needed). Cached in `~/.local/share/mobux/ssl/`, auto-regenerates
+after 30 days.
 
-- This MVP has optional auth. Put it behind Tailscale ACLs and/or a reverse proxy auth layer.
-- HTTPS is on by default. Set `MOBUX_TLS=0` to disable.
-- Session names are restricted to: `a-z A-Z 0-9 . _ -`
+SANs include `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, and your hostname.
+Add more with `MOBUX_TLS_HOSTS`. Override the cert dir with `MOBUX_CERT_DIR`.
 
-## Suggested next steps
+## The dog walking workflow
 
-- Add read-only mode endpoint (`tmux attach -r`)
-- Add basic auth or OAuth proxy
-- Add reconnect/session-preserve behavior
+1. Start mobux on your server
+2. Leash up your dog
+3. Open mobux on your phone
+4. Ask your LLM to refactor that module while Barkley does his business
+5. Review the diff while waiting at the crosswalk
+6. Deploy from the dog park
+7. Question your life choices
+8. Repeat tomorrow
+
+## License
+
+MIT — because even bad ideas deserve to be free.
