@@ -146,10 +146,13 @@ setInterval(refreshPanes, 5000);
 
   let startX, startY, startTime;
   let lastY, lastTime;
-  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'pinch'
+  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
   let posSamples;   // [{y, t}]
   let momId = null;
   let lastTapTime = 0;
+  let pinchStartDist = 0;       // Math.hypot of initial finger distance
+  let pinchStartFontSize = 0;   // term.options.fontSize at gesture start
+  let wasTwoFinger = false;     // guards single-finger events after two-finger
 
   function wheel(dy) {
     xtermEl.dispatchEvent(new WheelEvent('wheel', {
@@ -199,11 +202,17 @@ setInterval(refreshPanes, 5000);
     reconnect();
     stopMom();
     if (e.touches.length === 2) {
-      gesture = 'pinch';
+      const fdx = e.touches[0].pageX - e.touches[1].pageX;
+      const fdy = e.touches[0].pageY - e.touches[1].pageY;
+      pinchStartDist = Math.hypot(fdx, fdy);
+      pinchStartFontSize = term.options.fontSize;
       startY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
+      gesture = 'two';
+      wasTwoFinger = true;
       return;
     }
     if (e.touches.length !== 1) { gesture = null; return; }
+    wasTwoFinger = false;
     const t = e.touches[0];
     startX = t.pageX; startY = t.pageY;
     lastY = t.pageY;
@@ -214,19 +223,53 @@ setInterval(refreshPanes, 5000);
 
   overlay.addEventListener('touchmove', (e) => {
     e.preventDefault();
-    if (e.touches.length === 2 && gesture === 'pinch') {
-      // Track two-finger pull distance
+    if (e.touches.length === 2 && (gesture === 'two' || gesture === 'pinch' || gesture === 'twopull')) {
+      const fdx = e.touches[0].pageX - e.touches[1].pageX;
+      const fdy = e.touches[0].pageY - e.touches[1].pageY;
+      const dist = Math.hypot(fdx, fdy);
       const midY = (e.touches[0].pageY + e.touches[1].pageY) / 2;
-      const dy = midY - startY;
-      // Visual feedback: show pull indicator when pulling down > 60px
-      if (dy > 60) {
-        paneIndicator.textContent = '↻ Release to reload';
-      } else if (dy > 20) {
-        paneIndicator.textContent = '↓ Pull to reload...';
+      const pull = midY - startY;
+      const scale = pinchStartDist > 0 ? dist / pinchStartDist : 1;
+
+      if (gesture === 'two') {
+        // Competing classifier: compare normalized pinch vs pull signals.
+        // scaleAmount: how much fingers moved apart/together (0 = none)
+        // pullAmount: how far midpoint drifted, normalized to finger spread
+        //   so it's comparable to scaleAmount
+        const scaleAmount = Math.abs(scale - 1.0);
+        const pullAmount = pinchStartDist > 0 ? Math.abs(pull) / pinchStartDist : 0;
+
+        // Need a minimum signal before locking — prevents jitter from locking too early
+        // Use 3% of viewport height as deadzone (scales with device size)
+        const deadzone = window.innerHeight * 0.03;
+        if (scaleAmount < 0.08 && Math.abs(pull) < deadzone) return; // still undecided
+
+        // Whichever signal is stronger wins
+        if (scaleAmount >= pullAmount) gesture = 'pinch';
+        else gesture = 'twopull';
+      }
+
+      if (gesture === 'pinch') {
+        const newSize = Math.round(Math.max(8, Math.min(32, pinchStartFontSize * scale)));
+        if (newSize !== term.options.fontSize) {
+          term.options.fontSize = newSize;
+          sendResize();
+        }
+      }
+
+      if (gesture === 'twopull') {
+        // Visual feedback — thresholds relative to viewport height
+        const vh = window.innerHeight;
+        if (pull > vh * 0.08) {
+          paneIndicator.textContent = '↻ Release to reload';
+        } else if (pull > vh * 0.03) {
+          paneIndicator.textContent = '↓ Pull to reload...';
+        }
       }
       return;
     }
-    if (e.touches.length !== 1 || !gesture) return;
+    // Single-finger — skip if was two-finger (ghost events after lifting one finger)
+    if (e.touches.length !== 1 || !gesture || wasTwoFinger) return;
     const y = e.touches[0].pageY;
     const now = performance.now();
 
@@ -256,11 +299,13 @@ setInterval(refreshPanes, 5000);
   }, { passive: false });
 
   overlay.addEventListener('touchend', (e) => {
-    if (gesture === 'pinch') {
+    if (gesture === 'two') { gesture = null; return; }
+    if (gesture === 'pinch') { gesture = null; return; }
+    if (gesture === 'twopull') {
       // Check if two-finger pull down was far enough
       const endY = e.changedTouches[0]?.pageY ?? startY;
       const dy = endY - startY;
-      if (dy > 60) {
+      if (dy > window.innerHeight * 0.08) {
         location.reload(true);
       } else {
         updatePaneUI(); // restore indicator text
