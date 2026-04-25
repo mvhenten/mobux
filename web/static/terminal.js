@@ -44,7 +44,10 @@ Object.defineProperty(term._core.coreMouseService, 'activeProtocol', {
 // Instead, clear scrollback when tmux activates alt screen (window switch).
 // This prevents content from other windows accumulating in the buffer.
 const buffers = term._core._bufferService.buffers;
-buffers.activateAltBuffer = () => { term.clear(); };
+buffers.activateAltBuffer = () => {
+  term.clear();
+  term.scrollToBottom();
+};
 buffers.activateNormalBuffer = () => {};
 
 // Enable overlay for touch devices, keep pointer-events:none for mouse
@@ -182,6 +185,13 @@ var gesture = null;
 
   const xtermEl = termEl.querySelector('.xterm') || termEl;
 
+  function getLineHeight() {
+    return term._core._renderService.dimensions?.css?.cell?.height || 18;
+  }
+
+  // Accumulate sub-line pixel deltas so small movements aren't lost
+  let scrollAccum = 0;
+
   let startX, startY, startTime;
   let lastY, lastTime;
   gesture = null;   // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
@@ -193,9 +203,13 @@ var gesture = null;
   let wasTwoFinger = false;     // guards single-finger events after two-finger
 
   function wheel(dy) {
-    xtermEl.dispatchEvent(new WheelEvent('wheel', {
-      deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true,
-    }));
+    scrollAccum += dy;
+    const lh = getLineHeight();
+    const lines = Math.trunc(scrollAccum / lh);
+    if (lines !== 0) {
+      scrollAccum -= lines * lh;
+      term.scrollLines(lines);
+    }
   }
 
   function stopMom() {
@@ -239,6 +253,7 @@ var gesture = null;
   overlay.addEventListener('touchstart', (e) => {
     reconnect();
     stopMom();
+    scrollAccum = 0;
     if (e.touches.length === 2) {
       const fdx = e.touches[0].pageX - e.touches[1].pageX;
       const fdy = e.touches[0].pageY - e.touches[1].pageY;
