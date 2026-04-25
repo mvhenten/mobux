@@ -41,13 +41,8 @@ Object.defineProperty(term._core.coreMouseService, 'activeProtocol', {
 });
 
 // Prevent xterm.js from switching to alternate screen buffer.
-// Instead, clear scrollback when tmux activates alt screen (window switch).
-// This prevents content from other windows accumulating in the buffer.
 const buffers = term._core._bufferService.buffers;
-buffers.activateAltBuffer = () => {
-  term.clear();
-  term.scrollToBottom();
-};
+buffers.activateAltBuffer = () => {};
 buffers.activateNormalBuffer = () => {};
 
 // Enable overlay for touch devices, keep pointer-events:none for mouse
@@ -184,10 +179,6 @@ var gesture = null;
   const FLICK_H_VEL  = 0.3;   // min horizontal velocity (px/ms)
 
   const xtermEl = termEl.querySelector('.xterm') || termEl;
-
-  function getLineHeight() {
-    return term._core._renderService.dimensions?.css?.cell?.height || 18;
-  }
 
   let startX, startY, startTime;
   let lastY, lastTime;
