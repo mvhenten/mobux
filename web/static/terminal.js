@@ -189,27 +189,20 @@ var gesture = null;
     return term._core._renderService.dimensions?.css?.cell?.height || 18;
   }
 
-  // Accumulate sub-line pixel deltas so small movements aren't lost
-  let scrollAccum = 0;
-
   let startX, startY, startTime;
   let lastY, lastTime;
-  gesture = null;   // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
-  let posSamples;   // [{y, t}]
+  gesture = null;
+  let posSamples;
   let momId = null;
   let lastTapTime = 0;
-  let pinchStartDist = 0;       // Math.hypot of initial finger distance
-  let pinchStartFontSize = 0;   // term.options.fontSize at gesture start
-  let wasTwoFinger = false;     // guards single-finger events after two-finger
+  let pinchStartDist = 0;
+  let pinchStartFontSize = 0;
+  let wasTwoFinger = false;
 
   function wheel(dy) {
-    scrollAccum += dy;
-    const lh = getLineHeight();
-    const lines = Math.trunc(scrollAccum / lh);
-    if (lines !== 0) {
-      scrollAccum -= lines * lh;
-      term.scrollLines(lines);
-    }
+    xtermEl.dispatchEvent(new WheelEvent('wheel', {
+      deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true,
+    }));
   }
 
   function stopMom() {
@@ -253,7 +246,6 @@ var gesture = null;
   overlay.addEventListener('touchstart', (e) => {
     reconnect();
     stopMom();
-    scrollAccum = 0;
     if (e.touches.length === 2) {
       const fdx = e.touches[0].pageX - e.touches[1].pageX;
       const fdy = e.touches[0].pageY - e.touches[1].pageY;
