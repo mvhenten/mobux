@@ -165,6 +165,44 @@ pub async fn send_line(session: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run a tmux command against a session.
+pub async fn run_command(session: &str, command: &str) -> Result<String> {
+    let target = session.to_string();
+    let args: Vec<String> = match command {
+        "new-window"   => vec!["new-window".into(), "-t".into(), target],
+        "kill-window"  => vec!["kill-window".into(), "-t".into(), target],
+        "split-h"      => vec!["split-window".into(), "-h".into(), "-t".into(), target],
+        "split-v"      => vec!["split-window".into(), "-v".into(), "-t".into(), target],
+        "next-window"  => vec!["next-window".into(), "-t".into(), target],
+        "prev-window"  => vec!["previous-window".into(), "-t".into(), target],
+        "next-pane"    => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
+        "prev-pane"    => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
+        "kill-pane"    => vec!["kill-pane".into(), "-t".into(), target],
+        "zoom-pane"    => vec!["resize-pane".into(), "-Z".into(), "-t".into(), target],
+        _ => return Err(anyhow!("unknown command: {}", command)),
+    };
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let output = Command::new("tmux")
+        .args(&args_ref)
+        .output()
+        .await
+        .context("failed to execute tmux")?;
+
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Graceful: don't error on last pane/window close or missing session
+        if msg.contains("no remaining") || msg.contains("session not found")
+            || msg.contains("can't find") || msg.contains("no current")
+        {
+            return Ok(msg);
+        }
+        return Err(anyhow!("tmux {} failed: {}", command, msg));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// Capture the scrollback history of the active pane in a session.
 /// Returns the content with ANSI escape sequences preserved.
 pub async fn capture_history(session: &str, lines: i32) -> Result<String> {

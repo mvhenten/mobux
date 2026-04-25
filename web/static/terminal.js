@@ -164,6 +164,7 @@ setInterval(refreshPanes, 5000);
 // dispatched on xterm's element so its handleWheel does the scrolling.
 //
 // Physics: iOS UIScrollView / BetterScroll constants.
+var gesture = null;
 {
   const AMP          = 2.5;
   const TAP_PX       = 8;
@@ -181,7 +182,7 @@ setInterval(refreshPanes, 5000);
 
   let startX, startY, startTime;
   let lastY, lastTime;
-  let gesture;      // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
+  gesture = null;   // null | 'tap' | 'scroll' | 'hswipe' | 'two' | 'pinch' | 'twopull'
   let posSamples;   // [{y, t}]
   let momId = null;
   let lastTapTime = 0;
@@ -381,6 +382,79 @@ setInterval(refreshPanes, 5000);
   });
 
   overlay.addEventListener('touchcancel', () => { stopMom(); gesture = null; });
+}
+
+// ── Command pick list (long-press) ──────────────────────────────────
+{
+  const cmdPickList = document.getElementById('cmdPickList');
+  const cmdOverlayBg = document.getElementById('cmdOverlayBg');
+  const cmdCloseBtn = document.getElementById('cmdCloseBtn');
+
+  function showCmdList() {
+    cmdPickList.classList.add('visible');
+    cmdOverlayBg.classList.add('visible');
+  }
+
+  function hideCmdList() {
+    cmdPickList.classList.remove('visible');
+    cmdOverlayBg.classList.remove('visible');
+  }
+
+  async function runTmuxCmd(command) {
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(session)}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+    } catch (e) {}
+    setTimeout(refreshPanes, 300);
+  }
+
+  // Event delegation for command items
+  cmdPickList.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-cmd]');
+    if (item) {
+      runTmuxCmd(item.dataset.cmd);
+      hideCmdList();
+    }
+  });
+
+  cmdCloseBtn.addEventListener('click', hideCmdList);
+  cmdOverlayBg.addEventListener('click', hideCmdList);
+
+  // Long-press on touch overlay (separate listeners, passive)
+  let lpTimer = null;
+  let lpStartX = 0, lpStartY = 0;
+
+  overlay.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { clearTimeout(lpTimer); lpTimer = null; return; }
+    lpStartX = e.touches[0].pageX;
+    lpStartY = e.touches[0].pageY;
+    lpTimer = setTimeout(() => {
+      lpTimer = null;
+      if (navigator.vibrate) navigator.vibrate(30);
+      showCmdList();
+      // Cancel the main gesture so touchend doesn't fire tap/scroll
+      gesture = null;
+    }, 600);
+  }, { passive: true });
+
+  overlay.addEventListener('touchmove', (e) => {
+    if (!lpTimer) return;
+    if (e.touches.length !== 1) { clearTimeout(lpTimer); lpTimer = null; return; }
+    const dx = Math.abs(e.touches[0].pageX - lpStartX);
+    const dy = Math.abs(e.touches[0].pageY - lpStartY);
+    if (dx > 12 || dy > 12) { clearTimeout(lpTimer); lpTimer = null; }
+  }, { passive: true });
+
+  overlay.addEventListener('touchend', () => {
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+  }, { passive: true });
+
+  overlay.addEventListener('touchcancel', () => {
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+  }, { passive: true });
 }
 
 // ── Voice input ─────────────────────────────────────────────────────
