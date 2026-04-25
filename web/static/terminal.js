@@ -149,18 +149,16 @@ cmdPickList.addEventListener('click', (e) => {
 cmdCloseBtn.addEventListener('click', hideCmdList);
 cmdOverlayBg.addEventListener('click', hideCmdList);
 
-// ── Scroll target ───────────────────────────────────────────────────
-const xtermEl = termEl.querySelector('.xterm') || termEl;
-
-function dispatchScroll(dy) {
-  xtermEl.dispatchEvent(new WheelEvent('wheel', {
-    deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true,
-  }));
+// ── Scroll ──────────────────────────────────────────────────────────
+function scrollByPixels(dy) {
+  const cellHeight = term._core._renderService.dimensions?.css?.cell?.height || 18;
+  const lines = Math.round(dy / cellHeight);
+  if (lines !== 0) term.scrollLines(lines);
 }
 
 // ── Touch gestures (single state machine) ───────────────────────────
 createGestureRecognizer(overlay, {
-  onScroll: dispatchScroll,
+  onScroll: scrollByPixels,
 
   onReconnect: reconnect,
 

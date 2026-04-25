@@ -133,7 +133,7 @@ test('window switching works via command API', async ({ page }) => {
   expect(afterPrevActive).toBe(initialActive);
 });
 
-test('gesture layer translates touch to wheel', async ({ page }) => {
+test('gesture layer translates touch to scroll', async ({ page }) => {
   const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
   await page.goto(`${BASE}/s/${sessions[0].name}`);
 
@@ -142,14 +142,23 @@ test('gesture layer translates touch to wheel', async ({ page }) => {
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
 
-  const gestureWorks = await page.evaluate(() => {
-    const overlay = document.getElementById('touchOverlay');
-    if (!overlay) return { error: 'no overlay' };
-    overlay.style.pointerEvents = 'auto';
+  // Scroll to bottom first so we can detect upward scroll
+  await page.evaluate(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    if (vp) vp.scrollTop = vp.scrollHeight;
+  });
+  await page.waitForTimeout(100);
 
-    let wheelFired = false;
-    const xt = document.querySelector('.xterm');
-    xt.addEventListener('wheel', () => { wheelFired = true; }, { once: true });
+  const scrollBefore = await page.evaluate(() =>
+    document.querySelector('.xterm-viewport')?.scrollTop ?? 0
+  );
+  if (scrollBefore === 0) { test.skip(true, 'No scrollback'); return; }
+
+  // Simulate upward swipe on touch overlay
+  await page.evaluate(() => {
+    const overlay = document.getElementById('touchOverlay');
+    if (!overlay) return;
+    overlay.style.pointerEvents = 'auto';
 
     function fire(type, x, y) {
       const t = new Touch({ identifier: 1, target: overlay, clientX: x, clientY: y, pageX: x, pageY: y });
@@ -160,12 +169,14 @@ test('gesture layer translates touch to wheel', async ({ page }) => {
       }));
     }
 
-    fire('touchstart', 200, 500);
-    for (let i = 1; i <= 10; i++) fire('touchmove', 200, 500 - i * 20);
-    fire('touchend', 200, 300);
-
-    return { wheelFired };
+    fire('touchstart', 200, 300);
+    for (let i = 1; i <= 10; i++) fire('touchmove', 200, 300 + i * 20);
+    fire('touchend', 200, 500);
   });
+  await page.waitForTimeout(200);
 
-  expect(gestureWorks.wheelFired).toBe(true);
+  const scrollAfter = await page.evaluate(() =>
+    document.querySelector('.xterm-viewport')?.scrollTop ?? 0
+  );
+  expect(scrollAfter).toBeLessThan(scrollBefore);
 });
