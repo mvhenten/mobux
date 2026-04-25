@@ -450,11 +450,11 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
                 r#"<article class="session-card" data-name="{name}">
   <div class="session-head">
     <h3>{name}</h3>
-    <div class="meta">{}w · {} attached</div>
+    <div class="meta">{} windows · {} attached</div>
   </div>
   <div class="actions">
-    <a class="btn btn-primary" href="/s/{name}">Open</a>
-    <button class="btn danger" data-kill="{name}">Kill</button>
+    <a class="btn btn-primary" href="/s/{name}">open</a>
+    <button class="btn danger" data-kill="{name}">kill</button>
   </div>
 </article>"#,
                 s.windows, s.attached
@@ -479,27 +479,28 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
 <body>
   <main class="container">
     <header class="header">
-      <h1>Mobux</h1>
-      <button id="refreshBtn" class="btn">Refresh</button>
+      <h1>🤖 mobux</h1>
+      <span class="tagline">tmux on your phone</span>
     </header>
 
     <section class="panel">
-      <h2>New session</h2>
+      <h2>// new session</h2>
       <form id="newSessionForm">
-        <input id="sessionName" placeholder="pi, api, deploy..." autocomplete="off" required />
-        <button class="btn btn-primary" type="submit">Create</button>
+        <input id="sessionName" placeholder="session-name" autocomplete="off" required />
+        <button class="btn btn-create" type="submit">create</button>
       </form>
-      <p class="hint">Allowed: letters, numbers, dot, underscore, dash</p>
     </section>
 
     {error_html}
 
     <section class="panel">
-      <h2>Sessions</h2>
+      <h2>// sessions</h2>
       <div id="sessionList" class="session-list">
         {cards}
       </div>
     </section>
+
+    <footer class="footer">mobux v{v} · ctrl-c to exit</footer>
   </main>
 
   <script src="/static/index.js?v={v}"></script>
