@@ -375,7 +375,12 @@ var gesture = null;
       const dt = performance.now() - startTime;
       const vel = Math.abs(dx) / dt;
       if (Math.abs(dx) > FLICK_H_PX || vel > FLICK_H_VEL) {
-        selectPane(dx < 0 ? activeIndex + 1 : activeIndex - 1);
+        // Swipe left = next window, swipe right = previous window
+        // Send tmux prefix + n/p directly instead of tracking index
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(dx < 0 ? "\x02n" : "\x02p");
+          setTimeout(refreshPanes, 300);
+        }
       }
     }
     gesture = null;
