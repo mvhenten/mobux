@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
+        .route("/sw.js", get(serve_sw))
         .nest_service("/static", ServeDir::new("web/static"))
         .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
@@ -313,6 +314,14 @@ async fn terminal_page(
     Ok(Html(render_terminal_page(&name, &state.cache_bust)))
 }
 
+async fn serve_sw() -> impl axum::response::IntoResponse {
+    use axum::http::header;
+    (
+        [(header::CONTENT_TYPE, "text/javascript")],
+        include_str!("../web/static/sw.js"),
+    )
+}
+
 async fn terminal_ws(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -510,7 +519,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
   </main>
 
   <script src="/static/index.js?v={v}"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js');</script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </body>
 </html>
 "##
@@ -564,7 +573,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <script>
     window.MOBUX_SESSION = {session_json};
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js');
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
