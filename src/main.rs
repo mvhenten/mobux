@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .nest_service("/static", ServeDir::new("web/static"))
+        .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state_for_mw, auth_middleware));
 
@@ -453,8 +454,8 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     <div class="meta">{} windows · {} attached</div>
   </div>
   <div class="actions">
-    <a class="btn btn-primary" href="/s/{name}">open</a>
-    <button class="btn danger" data-kill="{name}">kill</button>
+    <a class="btn btn-primary" href="/s/{name}">Open</a>
+    <button class="btn danger" data-kill="{name}">Kill</button>
   </div>
 </article>"#,
                 s.windows, s.attached
@@ -479,22 +480,22 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
 <body>
   <main class="container">
     <header class="header">
-      <h1>🤖 mobux</h1>
+      <h1>mobux</h1>
       <span class="tagline">tmux on your phone</span>
     </header>
 
     <section class="panel">
-      <h2>// new session</h2>
+      <h2>New session</h2>
       <form id="newSessionForm">
         <input id="sessionName" placeholder="session-name" autocomplete="off" required />
-        <button class="btn btn-create" type="submit">create</button>
+        <button class="btn btn-create" type="submit">Create</button>
       </form>
     </section>
 
     {error_html}
 
     <section class="panel">
-      <h2>// sessions</h2>
+      <h2>Sessions</h2>
       <div id="sessionList" class="session-list">
         {cards}
       </div>
