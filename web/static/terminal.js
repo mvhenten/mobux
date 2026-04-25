@@ -106,7 +106,7 @@ function switchWindow(direction) {
     ws.send(direction === 'next' ? "\x02n" : "\x02p");
     term.clear();
     term.scrollToBottom();
-    setTimeout(refreshPanes, 300);
+    setTimeout(() => { refreshPanes(); reloadHistory(); }, 300);
   }
 }
 
@@ -124,7 +124,7 @@ async function runTmuxCmd(command) {
     term.clear();
     term.scrollToBottom();
   }
-  setTimeout(refreshPanes, 300);
+  setTimeout(() => { refreshPanes(); reloadHistory(); }, 300);
 }
 
 // ── Command pick list ───────────────────────────────────────────────
@@ -200,6 +200,20 @@ createGestureRecognizer(overlay, {
   onLongPress: showCmdList,
 });
 
+// ── History loading ─────────────────────────────────────────────────
+async function reloadHistory() {
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/history`);
+    if (!res.ok) return;
+    const history = await res.text();
+    if (history.trim()) {
+      // Prepend history above current viewport
+      term.write(history.replace(/\n/g, '\r\n'));
+      term.scrollToBottom();
+    }
+  } catch (e) {}
+}
+
 // ── Connect & reveal ────────────────────────────────────────────────
 let revealTimer = null;
 function scheduleReveal() {
@@ -229,13 +243,7 @@ function connect() {
 term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
 (async () => {
-  try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/history`);
-    if (res.ok) {
-      const history = await res.text();
-      if (history.trim()) term.write(history.replace(/\n/g, '\r\n'));
-    }
-  } catch (e) {}
+  await reloadHistory();
   connect();
 })();
 
