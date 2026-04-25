@@ -1,4 +1,5 @@
 import { createGestureRecognizer } from './touch.js';
+import { createMobileInputAdapter } from './input.js';
 
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
@@ -239,6 +240,15 @@ function connect() {
 }
 
 term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
+
+// On mobile, intercept textarea input to handle autocomplete/autocorrect.
+// The adapter hooks beforeinput on xterm's textarea and diffs replacements
+// against a shadow buffer so only the net change goes to the PTY.
+if (isMobile) {
+  createMobileInputAdapter(term, (d) => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
+  });
+}
 
 (async () => {
   await reloadHistory();
