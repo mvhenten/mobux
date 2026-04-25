@@ -41,8 +41,10 @@ Object.defineProperty(term._core.coreMouseService, 'activeProtocol', {
 });
 
 // Prevent xterm.js from switching to alternate screen buffer.
+// Instead, clear scrollback when tmux activates alt screen (window switch).
+// This prevents content from other windows accumulating in the buffer.
 const buffers = term._core._bufferService.buffers;
-buffers.activateAltBuffer = () => {};
+buffers.activateAltBuffer = () => { term.clear(); };
 buffers.activateNormalBuffer = () => {};
 
 // Enable overlay for touch devices, keep pointer-events:none for mouse
