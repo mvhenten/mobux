@@ -167,7 +167,9 @@ pub async fn send_line(session: &str, text: &str) -> Result<()> {
 
 /// Run a tmux command against a session.
 pub async fn run_command(session: &str, command: &str) -> Result<String> {
-    let target = session.to_string();
+    // Append ':' so tmux treats it as a session target, not a window index
+    // (e.g. session "0" would otherwise target window 0)
+    let target = format!("{}:", session);
     let args: Vec<String> = match command {
         "new-window"   => vec!["new-window".into(), "-t".into(), target],
         "kill-window"  => vec!["kill-window".into(), "-t".into(), target],
