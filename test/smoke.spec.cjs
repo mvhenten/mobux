@@ -70,6 +70,71 @@ test('scroll works via wheel events', async ({ page }) => {
   expect(scrollAfter).toBeLessThan(scrollBefore);
 });
 
+test('swipe left/right switches tmux windows', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  const session = sessions[0].name;
+
+  // Need at least 2 windows to test switching
+  const panesBefore = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  if (panesBefore.length < 2) { test.skip(true, 'Need 2+ windows'); return; }
+
+  const initialActive = panesBefore.find(p => p.active)?.index;
+
+  // Test via command API (same as tmux prefix+n that swipe sends)
+  const nextRes = await page.request.post(`${BASE}/api/sessions/${session}/command`, {
+    data: { command: 'next-window' },
+  });
+  expect(nextRes.ok()).toBeTruthy();
+  await page.waitForTimeout(300);
+
+  const panesAfterNext = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const afterNextActive = panesAfterNext.find(p => p.active)?.index;
+  expect(afterNextActive).not.toBe(initialActive);
+
+  // Go back with prev-window
+  const prevRes = await page.request.post(`${BASE}/api/sessions/${session}/command`, {
+    data: { command: 'prev-window' },
+  });
+  expect(prevRes.ok()).toBeTruthy();
+  await page.waitForTimeout(300);
+
+  const panesAfterPrev = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const afterPrevActive = panesAfterPrev.find(p => p.active)?.index;
+  expect(afterPrevActive).toBe(initialActive);
+});
+
+test('window switching works via command API', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  const session = sessions[0].name;
+
+  const panesBefore = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  if (panesBefore.length < 2) { test.skip(true, 'Need 2+ windows'); return; }
+
+  const initialActive = panesBefore.find(p => p.active)?.index;
+
+  // next-window
+  const nextRes = await page.request.post(`${BASE}/api/sessions/${session}/command`, {
+    data: { command: 'next-window' },
+  });
+  expect(nextRes.ok()).toBeTruthy();
+  await page.waitForTimeout(300);
+
+  const panesAfterNext = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const afterNextActive = panesAfterNext.find(p => p.active)?.index;
+  expect(afterNextActive).not.toBe(initialActive);
+
+  // prev-window back
+  const prevRes = await page.request.post(`${BASE}/api/sessions/${session}/command`, {
+    data: { command: 'prev-window' },
+  });
+  expect(prevRes.ok()).toBeTruthy();
+  await page.waitForTimeout(300);
+
+  const panesAfterPrev = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const afterPrevActive = panesAfterPrev.find(p => p.active)?.index;
+  expect(afterPrevActive).toBe(initialActive);
+});
+
 test('gesture layer translates touch to wheel', async ({ page }) => {
   const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
   await page.goto(`${BASE}/s/${sessions[0].name}`);

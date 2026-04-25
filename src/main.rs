@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
         .route("/api/sessions/{name}/send", post(api_send_to_session))
         .route("/api/sessions/{name}/history", get(api_session_history))
+        .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .nest_service("/static", ServeDir::new("web/static"))
@@ -286,6 +287,23 @@ async fn api_session_history(
     Ok(history)
 }
 
+#[derive(Deserialize)]
+struct CommandReq {
+    command: String,
+}
+
+async fn api_tmux_command(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<CommandReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &name)?;
+    let result = tmux::run_command(&name, &payload.command)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true, "output": result})))
+}
+
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -432,11 +450,11 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
                 r#"<article class="session-card" data-name="{name}">
   <div class="session-head">
     <h3>{name}</h3>
-    <div class="meta">{}w · {} attached</div>
+    <div class="meta">{} windows · {} attached</div>
   </div>
   <div class="actions">
-    <a class="btn btn-primary" href="/s/{name}">Open</a>
-    <button class="btn danger" data-kill="{name}">Kill</button>
+    <a class="btn btn-primary" href="/s/{name}">open</a>
+    <button class="btn danger" data-kill="{name}">kill</button>
   </div>
 </article>"#,
                 s.windows, s.attached
@@ -461,27 +479,28 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
 <body>
   <main class="container">
     <header class="header">
-      <h1>Mobux</h1>
-      <button id="refreshBtn" class="btn">Refresh</button>
+      <h1>🤖 mobux</h1>
+      <span class="tagline">tmux on your phone</span>
     </header>
 
     <section class="panel">
-      <h2>New session</h2>
+      <h2>// new session</h2>
       <form id="newSessionForm">
-        <input id="sessionName" placeholder="pi, api, deploy..." autocomplete="off" required />
-        <button class="btn btn-primary" type="submit">Create</button>
+        <input id="sessionName" placeholder="session-name" autocomplete="off" required />
+        <button class="btn btn-create" type="submit">create</button>
       </form>
-      <p class="hint">Allowed: letters, numbers, dot, underscore, dash</p>
     </section>
 
     {error_html}
 
     <section class="panel">
-      <h2>Sessions</h2>
+      <h2>// sessions</h2>
       <div id="sessionList" class="session-list">
         {cards}
       </div>
     </section>
+
+    <footer class="footer">mobux v{v} · ctrl-c to exit</footer>
   </main>
 
   <script src="/static/index.js?v={v}"></script>
@@ -508,7 +527,28 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 </head>
 <body class="term-body">
   <div id="terminal"></div>
+  <div id="loadquote"><q id="quote"></q><br><cite id="qauthor"></cite></div>
   <div id="touchOverlay"></div>
+  <div id="paneIndicator"></div>
+  <div id="cmdOverlayBg"></div>
+  <div id="cmdPickList">
+    <div class="cmd-header">
+      <h3>tmux</h3>
+      <button class="cmd-close" id="cmdCloseBtn">✕</button>
+    </div>
+    <button class="cmd-item" data-cmd="new-window"><span class="cmd-icon">➕</span><span class="cmd-label">New Window</span></button>
+    <button class="cmd-item" data-cmd="kill-window"><span class="cmd-icon">❌</span><span class="cmd-label">Close Window</span></button>
+    <div class="cmd-separator"></div>
+    <button class="cmd-item" data-cmd="split-h"><span class="cmd-icon">│</span><span class="cmd-label">Split Horizontal</span></button>
+    <button class="cmd-item" data-cmd="split-v"><span class="cmd-icon">─</span><span class="cmd-label">Split Vertical</span></button>
+    <button class="cmd-item" data-cmd="kill-pane"><span class="cmd-icon">🗑</span><span class="cmd-label">Close Pane</span></button>
+    <div class="cmd-separator"></div>
+    <button class="cmd-item" data-cmd="next-window"><span class="cmd-icon">▶</span><span class="cmd-label">Next Window</span></button>
+    <button class="cmd-item" data-cmd="prev-window"><span class="cmd-icon">◀</span><span class="cmd-label">Previous Window</span></button>
+    <button class="cmd-item" data-cmd="next-pane"><span class="cmd-icon">↻</span><span class="cmd-label">Next Pane</span></button>
+    <button class="cmd-item" data-cmd="prev-pane"><span class="cmd-icon">↺</span><span class="cmd-label">Previous Pane</span></button>
+    <button class="cmd-item" data-cmd="zoom-pane"><span class="cmd-icon">🔍</span><span class="cmd-label">Zoom Pane</span></button>
+  </div>
 
   <script>
     window.MOBUX_SESSION = {session_json};

@@ -15,11 +15,11 @@ function sessionCard(s) {
   <article class="session-card" data-name="${s.name}">
     <div class="session-head">
       <h3>${s.name}</h3>
-      <div class="meta">${s.windows}w · ${s.attached} attached</div>
+      <div class="meta">${s.windows} windows · ${s.attached} attached</div>
     </div>
     <div class="actions">
-      <a class="btn btn-primary" href="/s/${encodeURIComponent(s.name)}">Open</a>
-      <button class="btn danger" data-kill="${s.name}">Kill</button>
+      <a class="btn btn-primary" href="/s/${encodeURIComponent(s.name)}">open</a>
+      <button class="btn danger" data-kill="${s.name}">kill</button>
     </div>
   </article>`;
 }
@@ -37,8 +37,6 @@ async function refreshSessions() {
     alert(`Failed to load sessions: ${e.message}`);
   }
 }
-
-document.getElementById("refreshBtn")?.addEventListener("click", refreshSessions);
 
 document.getElementById("newSessionForm")?.addEventListener("submit", async (e) => {
   e.preventDefault();
