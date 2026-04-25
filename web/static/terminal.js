@@ -396,6 +396,8 @@ var gesture = null;
         // Send tmux prefix + n/p directly instead of tracking index
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(dx < 0 ? "\x02n" : "\x02p");
+          term.clear();
+          term.scrollToBottom();
           setTimeout(refreshPanes, 300);
         }
       }
@@ -426,6 +428,8 @@ var gesture = null;
     }
   }
 
+  const WINDOW_SWITCH_CMDS = new Set(['next-window', 'prev-window', 'new-window', 'kill-window']);
+
   async function runTmuxCmd(command) {
     try {
       await fetch(`/api/sessions/${encodeURIComponent(session)}/command`, {
@@ -434,6 +438,10 @@ var gesture = null;
         body: JSON.stringify({ command }),
       });
     } catch (e) {}
+    if (WINDOW_SWITCH_CMDS.has(command)) {
+      term.clear();
+      term.scrollToBottom();
+    }
     setTimeout(refreshPanes, 300);
   }
 
