@@ -555,7 +555,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     window.MOBUX_SESSION = {session_json};
   </script>
   <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-  <script src="/static/terminal.js?v={v}"></script>
+  <script type="module" src="/static/terminal.js?v={v}"></script>
 </body>
 </html>
 "#
