@@ -34,7 +34,7 @@ test('terminal renders and connects', async ({ page }) => {
   }, { timeout: 5000 });
 });
 
-test('scroll works via wheel events', async ({ page }) => {
+test('scroll works via touch gesture', async ({ page }) => {
   const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
   await page.goto(`${BASE}/s/${sessions[0].name}`);
 
@@ -43,6 +43,7 @@ test('scroll works via wheel events', async ({ page }) => {
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
 
+  // Scroll to bottom first
   await page.evaluate(() => {
     const vp = document.querySelector('.xterm-viewport');
     if (vp) vp.scrollTop = vp.scrollHeight;
@@ -54,11 +55,22 @@ test('scroll works via wheel events', async ({ page }) => {
   );
   if (scrollBefore === 0) { test.skip(true, 'No scrollback'); return; }
 
+  // Simulate downward swipe (finger moves down = scroll up)
   await page.evaluate(() => {
-    const xt = document.querySelector('.xterm');
-    xt.dispatchEvent(new WheelEvent('wheel', {
-      deltaY: -500, deltaMode: 0, bubbles: true, cancelable: true,
-    }));
+    const overlay = document.getElementById('touchOverlay');
+    if (!overlay) return;
+    overlay.style.pointerEvents = 'auto';
+    function fire(type, x, y) {
+      const t = new Touch({ identifier: 1, target: overlay, clientX: x, clientY: y, pageX: x, pageY: y });
+      overlay.dispatchEvent(new TouchEvent(type, {
+        touches: type === 'touchend' ? [] : [t],
+        changedTouches: [t],
+        bubbles: true, cancelable: true,
+      }));
+    }
+    fire('touchstart', 200, 300);
+    for (let i = 1; i <= 10; i++) fire('touchmove', 200, 300 + i * 20);
+    fire('touchend', 200, 500);
   });
   await page.waitForTimeout(200);
 
