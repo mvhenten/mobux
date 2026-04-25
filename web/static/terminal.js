@@ -393,11 +393,15 @@ var gesture = null;
   function showCmdList() {
     cmdPickList.classList.add('visible');
     cmdOverlayBg.classList.add('visible');
+    overlay.style.pointerEvents = 'none';
   }
 
   function hideCmdList() {
     cmdPickList.classList.remove('visible');
     cmdOverlayBg.classList.remove('visible');
+    if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+      overlay.style.pointerEvents = 'auto';
+    }
   }
 
   async function runTmuxCmd(command) {
