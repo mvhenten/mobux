@@ -468,13 +468,18 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
         .unwrap_or_default();
 
     format!(
-        r#"<!doctype html>
+        r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Mobux</title>
   <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="apple-touch-icon" href="/static/icon-192.svg" />
   <link rel="stylesheet" href="/static/style.css?v={v}" />
 </head>
 <body>
@@ -505,9 +510,10 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
   </main>
 
   <script src="/static/index.js?v={v}"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js');</script>
 </body>
 </html>
-"#
+"##
     )
 }
 
@@ -516,13 +522,18 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     let session_title = html_escape::encode_text(session);
 
     format!(
-        r#"<!doctype html>
+        r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Mobux · {session_title}</title>
   <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="apple-touch-icon" href="/static/icon-192.svg" />
   <link rel="stylesheet" href="/static/style.css?v={v}" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
 </head>
@@ -553,12 +564,13 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <script>
     window.MOBUX_SESSION = {session_json};
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js');
   </script>
   <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
 </body>
 </html>
-"#
+"##
     )
 }
 
