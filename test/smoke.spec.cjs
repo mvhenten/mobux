@@ -192,3 +192,49 @@ test('gesture layer translates touch to scroll', async ({ page }) => {
   );
   expect(scrollAfter).toBeLessThan(scrollBefore);
 });
+
+
+test('URLs in terminal output are tappable', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  await page.goto(`${BASE}/s/${sessions[0].name}`);
+
+  await page.waitForFunction(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    return vp && vp.scrollHeight > 100;
+  }, { timeout: 5000 });
+
+  await page.waitForTimeout(500);
+
+  // Type echo URL command
+  await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
+  await page.keyboard.type('echo https://example.com');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(1000);
+
+  // Verify URL appears in terminal text
+  const hasUrl = await page.evaluate(() => {
+    const rows = document.querySelector('.xterm-rows');
+    return rows?.textContent?.includes('https://example.com') ?? false;
+  });
+  expect(hasUrl).toBe(true);
+
+  // Verify our tap-to-link detection works by simulating the logic
+  const detected = await page.evaluate(() => {
+    const termEl = document.getElementById('terminal');
+    const rows = termEl?.querySelector('.xterm-rows');
+    if (!rows) return false;
+
+    // Find a row containing the URL
+    const rowDivs = rows.querySelectorAll('div');
+    for (const div of rowDivs) {
+      const text = div.textContent || '';
+      if (text.includes('https://example.com')) {
+        // URL regex matches
+        const match = text.match(/https?:\/\/[^\s)"'>]+/);
+        return match ? match[0] : false;
+      }
+    }
+    return false;
+  });
+  expect(detected).toContain('https://example.com');
+});

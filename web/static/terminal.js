@@ -185,14 +185,25 @@ createGestureRecognizer(overlay, {
   },
 
   onTap(x, y) {
-    // Check if tap is on a link (WebLinksAddon renders <a> tags)
-    overlay.style.pointerEvents = 'none';
-    const el = document.elementFromPoint(x, y);
-    overlay.style.pointerEvents = 'auto';
-    if (el) {
-      const link = el.closest('a[href]');
-      if (link) {
-        window.open(link.href, '_blank', 'noopener');
+    // Detect URLs in terminal text at tap position and open them.
+    // WebLinksAddon uses hover-based links which don't work on mobile,
+    // so we read the buffer text directly.
+    const cellWidth = term._core._renderService.dimensions?.css?.cell?.width || 9;
+    const cellHeight = term._core._renderService.dimensions?.css?.cell?.height || 18;
+    const rect = termEl.getBoundingClientRect();
+    const col = Math.floor((x - rect.left) / cellWidth);
+    const row = Math.floor((y - rect.top) / cellHeight);
+    const bufferRow = term.buffer.active.viewportY + row;
+    const line = term.buffer.active.getLine(bufferRow);
+    if (!line) return;
+    const text = line.translateToString(true);
+    // Find URL that spans the tapped column
+    const urlRe = /https?:\/\/[^\s)"'>]+/g;
+    let match;
+    while ((match = urlRe.exec(text)) !== null) {
+      if (col >= match.index && col < match.index + match[0].length) {
+        window.open(match[0], '_blank', 'noopener');
+        return;
       }
     }
   },
