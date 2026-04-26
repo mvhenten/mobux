@@ -41,6 +41,11 @@ export function createMobileInputAdapter(term, send) {
       return;
     }
 
+    // Track composed text (voice dictation, Gboard) so shadow stays in sync
+    if (e.inputType === 'insertCompositionText' && e.data) {
+      sent = e.data;
+    }
+
     // For normal typing, just track what will be sent
     if (e.inputType === 'insertText' && e.data) {
       sent += e.data;
