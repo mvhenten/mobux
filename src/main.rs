@@ -93,7 +93,13 @@ async fn main() -> Result<()> {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let (cert_path, key_path) = ssl::ensure_dev_cert(&extra_hosts)?;
+        let (cert_path, key_path) = match (env::var("MOBUX_CERT_FILE"), env::var("MOBUX_KEY_FILE")) {
+            (Ok(c), Ok(k)) => {
+                eprintln!("[ssl] Using provided cert: {c}, key: {k}");
+                (std::path::PathBuf::from(c), std::path::PathBuf::from(k))
+            }
+            _ => ssl::ensure_dev_cert(&extra_hosts)?,
+        };
         let tls_config = ssl::load_rustls_config(&cert_path, &key_path)?;
         let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(tls_config));
 
@@ -488,7 +494,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
   <meta name="theme-color" content="#0f1115" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="apple-touch-icon" href="/static/icon-192.svg" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
   <link rel="stylesheet" href="/static/style.css?v={v}" />
 </head>
 <body>
@@ -542,7 +548,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <meta name="theme-color" content="#0f1115" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="apple-touch-icon" href="/static/icon-192.svg" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
   <link rel="stylesheet" href="/static/style.css?v={v}" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
 </head>
