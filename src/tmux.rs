@@ -131,40 +131,6 @@ pub async fn select_pane(session: &str, window_index: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_line(session: &str, text: &str) -> Result<()> {
-    let set = Command::new("tmux")
-        .args(["set-buffer", "--", text])
-        .output()
-        .await
-        .context("failed to execute tmux set-buffer")?;
-    if !set.status.success() {
-        let msg = String::from_utf8_lossy(&set.stderr).trim().to_string();
-        return Err(anyhow!("tmux set-buffer failed: {}", msg));
-    }
-
-    let paste = Command::new("tmux")
-        .args(["paste-buffer", "-t", session])
-        .output()
-        .await
-        .context("failed to execute tmux paste-buffer")?;
-    if !paste.status.success() {
-        let msg = String::from_utf8_lossy(&paste.stderr).trim().to_string();
-        return Err(anyhow!("tmux paste-buffer failed: {}", msg));
-    }
-
-    let enter = Command::new("tmux")
-        .args(["send-keys", "-t", session, "Enter"])
-        .output()
-        .await
-        .context("failed to execute tmux send-keys")?;
-    if !enter.status.success() {
-        let msg = String::from_utf8_lossy(&enter.stderr).trim().to_string();
-        return Err(anyhow!("tmux send-keys failed: {}", msg));
-    }
-
-    Ok(())
-}
-
 /// Run a tmux command against a session.
 pub async fn run_command(session: &str, command: &str) -> Result<String> {
     // Append ':' so tmux treats it as a session target, not a window index

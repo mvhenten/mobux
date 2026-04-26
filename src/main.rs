@@ -60,7 +60,6 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/kill", post(api_kill_session))
         .route("/api/sessions/{name}/panes", get(api_list_panes))
         .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
-        .route("/api/sessions/{name}/send", post(api_send_to_session))
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/s/{name}", get(terminal_page))
@@ -260,29 +259,6 @@ async fn api_select_pane(
     Ok(Json(json!({"ok": true})))
 }
 
-#[derive(Deserialize)]
-struct SendReq {
-    text: String,
-}
-
-async fn api_send_to_session(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    Json(payload): Json<SendReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    validate_session_name(&state, &name)?;
-    let text = payload.text.trim();
-    if text.is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("text is required")));
-    }
-    if text.len() > 800 {
-        return Err(AppError::bad_request(anyhow::anyhow!("text too long")));
-    }
-    tmux::send_line(&name, text)
-        .await
-        .map_err(AppError::bad_request)?;
-    Ok(Json(json!({"ok": true})))
-}
 
 async fn api_session_history(
     State(state): State<AppState>,
