@@ -558,6 +558,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links/lib/xterm-addon-web-links.js"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
 </body>
 </html>

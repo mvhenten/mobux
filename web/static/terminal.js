@@ -41,6 +41,7 @@ const term = new Terminal({
   theme: { background: "#0f1115" },
 });
 term.open(termEl);
+term.loadAddon(new WebLinksAddon.WebLinksAddon());
 
 // Lock mouse protocol to NONE — prevents xterm.js from capturing
 // touch/mouse when tmux sends \x1b[?1000h
@@ -181,6 +182,19 @@ createGestureRecognizer(overlay, {
   onTwoPullEnd(pull, vh) {
     if (pull > vh * 0.08) location.reload(true);
     else updatePaneUI();
+  },
+
+  onTap(x, y) {
+    // Check if tap is on a link (WebLinksAddon renders <a> tags)
+    overlay.style.pointerEvents = 'none';
+    const el = document.elementFromPoint(x, y);
+    overlay.style.pointerEvents = 'auto';
+    if (el) {
+      const link = el.closest('a[href]');
+      if (link) {
+        window.open(link.href, '_blank', 'noopener');
+      }
+    }
   },
 
   onDoubleTap(x, y) {
