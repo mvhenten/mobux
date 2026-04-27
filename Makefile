@@ -4,10 +4,17 @@ MOBUX_PIN  ?= 30879
 CARGO      := $(HOME)/.cargo/bin/cargo
 PID        := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 
-.PHONY: build start stop restart status logs test
+.PHONY: build run clean start stop restart status logs test
+
+clean:
+	$(CARGO) clean -p mobux
 
 build:
 	$(CARGO) build
+
+run: build
+	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) PORT=$(MOBUX_PORT) \
+		$(CARGO) run
 
 start: build
 	@if [ -n "$(PID)" ]; then echo "already running (pid $(PID))"; exit 1; fi
