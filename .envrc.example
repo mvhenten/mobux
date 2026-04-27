@@ -1,0 +1,3 @@
+export MOBUX_USER=yourname
+export MOBUX_PIN=yourpin
+export MOBUX_PASS=yourpin

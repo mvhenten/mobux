@@ -1,6 +1,6 @@
 # 🤖 mobux
 
-**tmux on your phone. Yes, really.**
+**Touch-friendly tmux web UI.** Access your tmux sessions from a phone over Tailscale, local network, or anywhere with HTTPS.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/mvhenten/mobux/assets/sessions.png" width="270" alt="Session list">
@@ -10,90 +10,67 @@
   <img src="https://raw.githubusercontent.com/mvhenten/mobux/assets/commands.png" width="270" alt="Command menu">
 </p>
 
-For the clinically unhinged among us who think "I should SSH into my server" while
-picking up dog poop in the park. For people who can't stop thinking about that
-one running process even though the sun is shining and the birds are singing.
-For those who believe the best time to talk to your favorite LLM is while your
-golden retriever is sniffing a fire hydrant for the eleventh time.
+## Features
 
-If you're a sane person who puts their phone away and touches grass — this is not
-for you. Close this tab. Go outside. You're doing great.
-
-Still here? Of course you are. Welcome home.
-
-## What this cursed thing does
-
-- Lists your tmux sessions in a fat-finger-friendly mobile UI
-- Tap a session to get a full live terminal on your phone
-- Create, kill, split panes, switch windows — all from touch gestures
-- Long-press for a tmux command menu (new pane, close pane, split, zoom, etc.)
-- Swipe left/right to switch windows
-- Pinch to zoom the font size because your eyes aren't what they used to be
-- Two-finger pull to reload because why not
-- Double-tap to focus and bring up the keyboard
-- Voice input so you can dictate shell commands to your phone while your dog
-  judges you silently
-- Self-signed HTTPS out of the box — no nginx, no certbot, no suffering
-- Optional auth via HTTP Basic or a simple PIN
+- Full live terminal on your phone via xterm.js + WebSocket
+- Touch gesture layer: scroll with momentum, swipe to switch windows, pinch to zoom, long-press for commands
+- Tap URLs in terminal output to open them
+- Mobile keyboard autocomplete and voice dictation support
+- PWA — install as a standalone app (no browser chrome)
+- Session management: create, kill, switch windows, split panes
+- Self-signed HTTPS out of the box (no nginx/certbot needed)
+- Optional auth via HTTP Basic or PIN
 
 ## Install
 
-### From crates.io (recommended for fellow degenerates)
+### From crates.io
 
 ```bash
 cargo install mobux
 ```
 
-That's it. You now have `mobux` in your PATH. You need `tmux` installed too,
-obviously. If you don't have tmux, what are you even doing here?
-
-### From source (for the extra unhinged)
+### From source
 
 ```bash
 git clone https://github.com/mvhenten/mobux.git
 cd mobux
 cargo build --release
-# Binary is at target/release/mobux
 ```
 
-## Requirements
-
-- `tmux` in your PATH (the whole point)
-- Rust toolchain if building from source
-- A phone, a dog (optional but recommended), and questionable life choices
+Requires `tmux` in your PATH.
 
 ## Run
 
 ```bash
-# With auth (you probably want this unless you enjoy strangers in your shell)
+# With auth
 MOBUX_AUTH_USER="$USER" MOBUX_AUTH_PASS="change-me" mobux
 
 # PIN mode (username defaults to 'mobux')
 MOBUX_PIN="123456" mobux
 
-# Custom port
+# Custom port (default: 8080)
 PORT=5151 mobux
 
-# Disable TLS if you like living dangerously
+# Disable TLS
 MOBUX_TLS=0 mobux
 
-# Extra SANs for Tailscale or whatever
+# Extra SANs for Tailscale
 MOBUX_TLS_HOSTS="myhost.tailnet.ts.net,100.64.0.1" mobux
+
+# Use external certificates (e.g. from tailscale cert)
+MOBUX_CERT_FILE=host.crt MOBUX_KEY_FILE=host.key mobux
 ```
 
-Then open on your phone:
+Open on your phone: `https://<your-ip>:8080`
 
-- Local: `https://localhost:8080`
-- Over Tailscale: `https://<your-tailscale-ip>:8080`
-
-> Your browser will scream about the self-signed cert. In Chrome, type
-> `thisisunsafe` on the warning page. Yes that's a real thing. No I didn't
-> make it up.
+> Self-signed cert: your browser will show a security warning.
+> In Chrome, type `thisisunsafe` on the warning page to proceed.
 
 ## Touch gestures
 
 | Gesture | Action |
-|---------|--------|
+|---|---|
+| Tap on URL | Open link |
 | Swipe up/down | Scroll with momentum |
 | Swipe left/right | Switch tmux windows |
 | Double-tap | Focus terminal + keyboard |
@@ -101,26 +78,57 @@ Then open on your phone:
 | Pinch | Zoom font size |
 | Two-finger pull down | Reload page |
 
-## TLS details
+## PWA install
 
-HTTPS is on by default with a self-signed cert generated at startup via `rcgen`
-(pure Rust, no openssl needed). Cached in `~/.local/share/mobux/ssl/`, auto-regenerates
-after 30 days.
+Mobux can be installed as a standalone app on your phone (no browser chrome, own app switcher entry):
 
-SANs include `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, and your hostname.
-Add more with `MOBUX_TLS_HOSTS`. Override the cert dir with `MOBUX_CERT_DIR`.
+- **iOS**: Safari → Share → Add to Home Screen
+- **Android**: Chrome → Menu → Add to Home Screen
 
-## The dog walking workflow
+> Full standalone mode on Android requires a trusted certificate (see `MOBUX_CERT_FILE`/`MOBUX_KEY_FILE`).
 
-1. Start mobux on your server
-2. Leash up your dog
-3. Open mobux on your phone
-4. Ask your LLM to refactor that module while Barkley does his business
-5. Review the diff while waiting at the crosswalk
-6. Deploy from the dog park
-7. Question your life choices
-8. Repeat tomorrow
+## TLS
+
+HTTPS is on by default with a self-signed cert generated via `rcgen` (pure Rust). Cached in `~/.local/share/mobux/ssl/`, auto-regenerates after 30 days.
+
+SANs include `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, and your hostname. Add more with `MOBUX_TLS_HOSTS`. Override the cert directory with `MOBUX_CERT_DIR`.
+
+For trusted certificates (e.g. Tailscale HTTPS):
+```bash
+tailscale cert myhost.tailnet.ts.net
+MOBUX_CERT_FILE=myhost.tailnet.ts.net.crt MOBUX_KEY_FILE=myhost.tailnet.ts.net.key mobux
+```
+
+## Environment variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `MOBUX_AUTH_USER` | Auth username | (disabled) |
+| `MOBUX_AUTH_PASS` | Auth password | (disabled) |
+| `MOBUX_PIN` | PIN-only auth | (disabled) |
+| `PORT` | Listen port | `8080` |
+| `MOBUX_TLS` | Enable HTTPS (`0` to disable) | `true` |
+| `MOBUX_TLS_HOSTS` | Extra SANs (comma-separated) | |
+| `MOBUX_CERT_FILE` | External cert PEM path | (auto-generated) |
+| `MOBUX_KEY_FILE` | External key PEM path | (auto-generated) |
+| `MOBUX_CERT_DIR` | Cert cache directory | `~/.local/share/mobux/ssl/` |
+
+## Development
+
+```bash
+make start    # build + start
+make restart  # stop + start
+make stop
+make test     # playwright e2e tests
+make logs     # tail server log
+```
+
+Copy `.envrc.example` and set your credentials:
+```bash
+cp .envrc.example .envrc
+# edit .envrc with your MOBUX_USER / MOBUX_PIN
+```
 
 ## License
 
-MIT — because even bad ideas deserve to be free.
+MIT

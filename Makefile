@@ -1,6 +1,6 @@
 MOBUX_PORT ?= 5151
 MOBUX_USER ?= $(USER)
-MOBUX_PIN  ?= $(shell shuf -i 10000-99999 -n 1)
+MOBUX_PIN  ?= 30879
 CARGO      := $(HOME)/.cargo/bin/cargo
 PID        := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 
@@ -30,6 +30,4 @@ logs:
 	@tail -f /tmp/mobux.log
 
 test:
-	MOBUX_USER=$$(cat /proc/$$(lsof -ti :$(MOBUX_PORT) 2>/dev/null)/environ 2>/dev/null | tr '\0' '\n' | grep MOBUX_AUTH_USER | cut -d= -f2) \
-	MOBUX_PASS=$$(cat /proc/$$(lsof -ti :$(MOBUX_PORT) 2>/dev/null)/environ 2>/dev/null | tr '\0' '\n' | grep MOBUX_PIN | cut -d= -f2) \
-	npx playwright test
+	MOBUX_USER=$(MOBUX_USER) MOBUX_PASS=$(MOBUX_PIN) npx playwright test
