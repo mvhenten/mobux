@@ -266,13 +266,10 @@ function connect() {
 
 term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
-// On mobile, intercept textarea input to handle autocomplete/autocorrect.
-// The adapter hooks beforeinput on xterm's textarea and diffs replacements
-// against a shadow buffer so only the net change goes to the PTY.
+// On mobile, fix xterm.js's broken autocomplete diff algorithm.
+// Must be after term.open() so textarea exists.
 if (isMobile) {
-  createMobileInputAdapter(term, (d) => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
-  });
+  createMobileInputAdapter(term);
 }
 
 (async () => {

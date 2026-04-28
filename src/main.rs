@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
+        .route("/api/debug", post(api_debug_log))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
@@ -286,6 +287,20 @@ async fn api_tmux_command(
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true, "output": result})))
+}
+
+async fn api_debug_log(
+    body: String,
+) -> StatusCode {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    let path = "debug-input.log";
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+        let _ = writeln!(f, "--- {ts} ---");
+        let _ = writeln!(f, "{body}");
+    }
+    StatusCode::NO_CONTENT
 }
 
 async fn terminal_page(
