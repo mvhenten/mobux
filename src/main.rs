@@ -540,6 +540,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="apple-touch-icon" href="/static/icon-192.png" />
+  <link rel="stylesheet" href="/static/style.css?v={v}" />
   <link rel="stylesheet" href="/static/vendor/xterm.css?v={v}" />
 </head>
 <body class="term-body">
