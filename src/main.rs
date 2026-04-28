@@ -540,8 +540,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="apple-touch-icon" href="/static/icon-192.png" />
-  <link rel="stylesheet" href="/static/style.css?v={v}" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="/static/vendor/xterm.css?v={v}" />
 </head>
 <body class="term-body">
   <div id="terminal"></div>
@@ -572,8 +571,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     window.MOBUX_SESSION = {session_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links/lib/xterm-addon-web-links.js"></script>
+  <script src="/static/vendor/xterm.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
 </body>
 </html>

@@ -4,3 +4,4 @@ test-results/
 playwright-report/
 .envrc
 debug-input.log
+web/static/vendor/

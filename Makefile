@@ -4,12 +4,15 @@ MOBUX_PIN  ?= 30879
 CARGO      := $(HOME)/.cargo/bin/cargo
 PID        := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 
-.PHONY: build run clean start stop restart status logs test
+.PHONY: build run clean start stop restart status logs test web
+
+web:
+	node web/build.js
 
 clean:
 	$(CARGO) clean -p mobux
 
-build:
+build: web
 	$(CARGO) build
 
 run: build

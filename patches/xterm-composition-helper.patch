@@ -1,0 +1,108 @@
+--- /tmp/CompositionHelper.orig.ts	2026-04-28 20:09:44.578695602 +0000
++++ /home/mvhenten/development/mobux/node_modules/@xterm/xterm/src/browser/input/CompositionHelper.ts	2026-04-28 20:10:06.676551920 +0000
+@@ -58,8 +58,15 @@
+   /**
+    * Handles the compositionstart event, activating the composition view.
+    */
++  /**
++   * The textarea value captured at compositionstart, used to compute
++   * a proper diff at compositionend for mobile autocomplete.
++   */
++  private _compositionStartValue: string;
++
+   public compositionstart(): void {
+     this._isComposing = true;
++    this._compositionStartValue = this._textarea.value;
+     this._compositionPosition.start = this._textarea.value.length;
+     this._compositionView.textContent = '';
+     this._dataAlreadySent = '';
+@@ -155,22 +162,30 @@
+         // Ensure that the input has not already been sent
+         if (this._isSendingComposition) {
+           this._isSendingComposition = false;
+-          let input;
+-          // Add length of data already sent due to keydown event,
+-          // otherwise input characters can be duplicated. (Issue #3191)
+-          currentCompositionPosition.start += this._dataAlreadySent.length;
+-          if (this._isComposing) {
+-            // Use the start position of the new composition to get the string
+-            // if a new composition has started.
+-            input = this._textarea.value.substring(currentCompositionPosition.start, this._compositionPosition.start);
+-          } else {
+-            // Don't use the end position here in order to pick up any characters after the
+-            // composition has finished, for example when typing a non-composition character
+-            // (eg. 2) after a composition character.
+-            input = this._textarea.value.substring(currentCompositionPosition.start);
++
++          const oldValue = this._compositionStartValue;
++          const newValue = this._textarea.value;
++
++          // Character-level diff: find common prefix between pre-composition
++          // and post-composition textarea values. This correctly handles mobile
++          // autocomplete where the keyboard selects all text and replaces it
++          // via composition, which the original substring-offset approach got
++          // wrong (stale _dataAlreadySent offset → garbled partial text).
++          let common = 0;
++          while (common < oldValue.length && common < newValue.length &&
++                 oldValue[common] === newValue[common]) {
++            common++;
+           }
+-          if (input.length > 0) {
+-            this._coreService.triggerDataEvent(input, true);
++
++          const toDelete = oldValue.length - common;
++          const toInsert = newValue.substring(common);
++
++          let data = '';
++          for (let i = 0; i < toDelete; i++) data += C0.DEL;
++          data += toInsert;
++
++          if (data.length > 0) {
++            this._coreService.triggerDataEvent(data, true);
+           }
+         }
+       }, 0);
+@@ -189,19 +204,34 @@
+       // Ignore if a composition has started since the timeout
+       if (!this._isComposing) {
+         const newValue = this._textarea.value;
++        if (newValue === oldValue) return;
++
++        // Guard: textarea cleared to empty by xterm.js (on Enter, blur, etc.)
++        // — not user input, don't send backspaces.
++        if (newValue === '') return;
++
++        // Character-level diff: find common prefix, backspace divergent
++        // old chars, send new chars. Replaces the broken
++        // `newValue.replace(oldValue, '')` which fails when autocorrect
++        // changes characters (not just appends).
++        let common = 0;
++        while (common < oldValue.length && common < newValue.length &&
++               oldValue[common] === newValue[common]) {
++          common++;
++        }
+ 
+-        const diff = newValue.replace(oldValue, '');
++        const toDelete = oldValue.length - common;
++        const toInsert = newValue.substring(common);
+ 
+-        this._dataAlreadySent = diff;
++        let data = '';
++        for (let i = 0; i < toDelete; i++) data += C0.DEL;
++        data += toInsert;
+ 
+-        if (newValue.length > oldValue.length) {
+-          this._coreService.triggerDataEvent(diff, true);
+-        } else if (newValue.length < oldValue.length) {
+-          this._coreService.triggerDataEvent(`${C0.DEL}`, true);
+-        } else if ((newValue.length === oldValue.length) && (newValue !== oldValue)) {
+-          this._coreService.triggerDataEvent(newValue, true);
+-        }
++        this._dataAlreadySent = toInsert;
+ 
++        if (data.length > 0) {
++          this._coreService.triggerDataEvent(data, true);
++        }
+       }
+     }, 0);
+   }
