@@ -332,7 +332,7 @@ async fn api_upload(
     let upload_dir = PathBuf::from("/tmp/mobux-uploads");
     fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| AppError::bad_request(e.into()))? {
+    if let Some(field) = multipart.next_field().await.map_err(|e| AppError::bad_request(e.into()))? {
         let filename = field.file_name()
             .unwrap_or("upload")
             .to_string();
@@ -630,6 +630,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     <div id="inputRibbon" class="input-ribbon">
       <button id="uploadBtn">📷</button>
       <button data-key="\x7f">⌫</button>
+      <button data-key="\r">⏎</button>
       <button data-key="\x1b[D">←</button>
       <button data-key="\x1b[C">→</button>
       <button data-key="\x1b[A">↑</button>
