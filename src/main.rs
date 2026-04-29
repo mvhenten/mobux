@@ -332,7 +332,7 @@ async fn api_upload(
     let upload_dir = PathBuf::from("/tmp/mobux-uploads");
     fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| AppError::bad_request(e.into()))? {
+    if let Some(field) = multipart.next_field().await.map_err(|e| AppError::bad_request(e.into()))? {
         let filename = field.file_name()
             .unwrap_or("upload")
             .to_string();
