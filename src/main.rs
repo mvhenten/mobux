@@ -630,6 +630,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     <div id="inputRibbon" class="input-ribbon">
       <button id="uploadBtn">📷</button>
       <button data-key="\x7f">⌫</button>
+      <button data-key="\r">⏎</button>
       <button data-key="\x1b[D">←</button>
       <button data-key="\x1b[C">→</button>
       <button data-key="\x1b[A">↑</button>
