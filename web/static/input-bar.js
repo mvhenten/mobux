@@ -132,6 +132,46 @@ export function createInputBar(term, send) {
     }
   });
 
+  // ── Image upload ───────────────────────────────────────────────
+  const uploadBtn = document.getElementById('uploadBtn');
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/*';
+  fileInput.style.display = 'none';
+  document.body.appendChild(fileInput);
+
+  if (uploadBtn) {
+    uploadBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      fileInput.click();
+    });
+    // Prevent focus steal
+    uploadBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  }
+
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      if (!res.ok) throw new Error(await res.text());
+      const { path } = await res.json();
+
+      // Inject the file path into the text input
+      input.value = (input.value ? input.value + ' ' : '') + path;
+      input.focus();
+    } catch (err) {
+      console.error('Upload failed:', err);
+    }
+
+    // Reset so the same file can be re-selected
+    fileInput.value = '';
+  });
+
   // ── Public API ────────────────────────────────────────────────────
   return {
     show: activateInput,

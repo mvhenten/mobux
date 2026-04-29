@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
+        .route("/api/upload", post(api_upload))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
@@ -301,6 +302,46 @@ async fn api_debug_log(
         let _ = writeln!(f, "{body}");
     }
     StatusCode::NO_CONTENT
+}
+
+async fn api_upload(
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let upload_dir = PathBuf::from("/tmp/mobux-uploads");
+    fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| AppError::bad_request(e.into()))? {
+        let filename = field.file_name()
+            .unwrap_or("upload")
+            .to_string();
+
+        // Sanitize filename
+        let safe_name = filename
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>();
+
+        // Add timestamp to avoid collisions
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let dest = upload_dir.join(format!("{ts}-{safe_name}"));
+
+        let data = field.bytes().await.map_err(|e| AppError::bad_request(e.into()))?;
+        fs::write(&dest, &data).map_err(|e| AppError::bad_request(e.into()))?;
+
+        return Ok(Json(json!({
+            "path": dest.to_string_lossy(),
+            "size": data.len(),
+            "name": safe_name,
+        })));
+    }
+
+    Err(AppError::bad_request(anyhow::anyhow!("no file in upload")))
 }
 
 async fn terminal_page(
@@ -585,6 +626,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       <button data-key="\x1b[F">End</button>
       <button data-key="\x15">^U</button>
       <button data-key="\x0c">^L</button>
+      <button id="uploadBtn">📷</button>
     </div>
     <div class="input-row">
       <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />
