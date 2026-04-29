@@ -570,16 +570,16 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
-      <button data-key="\x1b">Esc</button>
-      <button data-key="\t">Tab</button>
-      <button data-key="\x03">^C</button>
-      <button data-key="\x04">^D</button>
-      <button data-key="\x1a">^Z</button>
-      <button data-key="\x1b[A">↑</button>
-      <button data-key="\x1b[B">↓</button>
+      <button data-key="\x7f">⌫</button>
       <button data-key="\x1b[D">←</button>
       <button data-key="\x1b[C">→</button>
-      <button data-key="\x7f">⌫</button>
+      <button data-key="\x1b[A">↑</button>
+      <button data-key="\x1b[B">↓</button>
+      <button data-key="\x03">^C</button>
+      <button data-key="\x04">^D</button>
+      <button data-key="\x1b">Esc</button>
+      <button data-key="\t">Tab</button>
+      <button data-key="\x1a">^Z</button>
       <button data-key="\x1b[3~">Del</button>
       <button data-key="\x1b[H">Home</button>
       <button data-key="\x1b[F">End</button>
@@ -587,8 +587,8 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       <button data-key="\x0c">^L</button>
     </div>
     <div class="input-row">
-      <input id="inputText" type="text" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />
-      <button id="inputSend" class="input-send">⏎</button>
+      <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />
+      <button id="inputSend" class="input-send" title="Send without Enter">▶</button>
     </div>
   </div>
 

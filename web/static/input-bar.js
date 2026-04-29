@@ -63,33 +63,40 @@ export function createInputBar(term, send) {
     input.focus();
   });
 
-  // Prevent ribbon buttons from stealing focus
-  ribbon.addEventListener('mousedown', (e) => e.preventDefault());
-  ribbon.addEventListener('touchstart', (e) => {
-    // Let click fire but don't move focus
+  // Prevent ribbon buttons from stealing focus, but allow scroll
+  ribbon.addEventListener('mousedown', (e) => {
     if (e.target.closest('button')) e.preventDefault();
-  }, { passive: false });
+  });
+  // Don't preventDefault touchstart — it kills ribbon scrolling.
+  // Instead, prevent focus steal via mousedown only.
 
-  // ── Text input: Enter sends, then clears ──────────────────────────
-  function sendInput() {
+  // ── Text input: two send modes ────────────────────────────────────
+  // Keyboard Enter: send text + \r (execute in shell)
+  // Green button: send text WITHOUT \r (inject into readline, still editable)
+  function sendAndExecute() {
     const text = input.value;
-    if (text) {
-      send(text);
-    }
+    if (text) send(text);
     send('\r');
     input.value = '';
+  }
+
+  function sendWithoutEnter() {
+    const text = input.value;
+    if (text) send(text);
+    input.value = '';
+    input.focus();
   }
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      sendInput();
+      sendAndExecute();
     }
   });
 
   sendBtn.addEventListener('click', (e) => {
     e.preventDefault();
-    sendInput();
+    sendWithoutEnter();
     input.focus();
   });
 
