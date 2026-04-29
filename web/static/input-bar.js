@@ -161,9 +161,8 @@ export function createInputBar(term, send) {
       if (!res.ok) throw new Error(await res.text());
       const { path } = await res.json();
 
-      // Inject the file path into the text input
-      input.value = (input.value ? input.value + ' ' : '') + path;
-      input.focus();
+      // Send path directly to terminal, ready to use
+      send(path);
     } catch (err) {
       console.error('Upload failed:', err);
     }

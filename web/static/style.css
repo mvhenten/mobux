@@ -20,129 +20,184 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
-.container {
-  max-width: 480px;
-  margin: 0 auto;
-  padding: 16px;
-  display: grid;
-  gap: 16px;
+/* ── Index page: mobile-native session list ───────────────────────── */
+.app-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
 }
-
-.header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-.header h1 {
+.app-header h1 {
   font-family: var(--mono);
   font-size: 18px;
   font-weight: 600;
-  color: var(--text);
   margin: 0;
 }
 
-.header .tagline {
+.session-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.hint { color: var(--muted); padding: 24px 16px; font-size: 14px; text-align: center; }
+
+/* Swipe row container */
+.swipe-row {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--bg);
+  position: relative;
+  z-index: 1;
+  transition: transform 0.2s ease;
+  touch-action: pan-y;
+  -webkit-tap-highlight-color: transparent;
+}
+.session-item:active {
+  background: var(--panel);
+}
+
+.session-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.session-name {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 500;
+}
+.session-meta {
   font-size: 12px;
   color: var(--muted);
 }
-
-.panel {
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 12px;
+.session-arrow {
+  font-size: 22px;
+  color: var(--muted);
 }
 
-.error {
-  color: #ffd0d0;
-  border-color: #803636;
-}
-
-h1, h2, h3 { margin: 0 0 6px 0; }
-h2, h3 { font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-.hint { color: var(--muted); margin: 6px 0 0; font-size: 12px; }
-
-#newSessionForm {
+/* Swipe actions behind the row */
+.swipe-action {
+  position: absolute;
+  top: 0;
+  bottom: 0;
   display: flex;
-  gap: 8px;
+  align-items: center;
+  z-index: 0;
 }
+.swipe-left { left: 0; }
+.swipe-right { right: 0; }
 
-input {
-  flex: 1;
+.swipe-btn {
+  height: 100%;
+  border: none;
+  padding: 0 24px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.rename-btn { background: var(--accent); }
+.kill-btn { background: var(--danger); }
+
+/* FAB */
+.fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  z-index: 50;
+}
+.fab:active { opacity: 0.8; }
+
+/* New session dialog */
+.session-dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: 320px;
+  width: calc(100% - 32px);
+}
+.session-dialog::backdrop {
+  background: rgba(0,0,0,0.6);
+}
+.session-dialog h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.session-dialog input {
+  width: 100%;
+  margin-bottom: 16px;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 14px;
-  font-family: var(--mono);
-}
-
-.session-list {
-  display: grid;
-  gap: 10px;
-}
-
-.session-card {
-  background: var(--bg);
-  border-radius: 6px;
   padding: 10px 12px;
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: center;
-}
-
-.session-head h3 {
-  margin-bottom: 1px;
+  font-size: 16px;
   font-family: var(--mono);
-  font-size: 14px;
-  font-weight: 500;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--text);
 }
-.meta { color: var(--muted); font-size: 12px; }
-.actions { display: flex; gap: 6px; }
-
-.btn {
-  border: none;
-  color: var(--muted);
-  text-decoration: none;
+.session-dialog input:focus { border-color: var(--accent); outline: none; }
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.btn-cancel {
   background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
   border-radius: 6px;
-  padding: 6px 12px;
-  font-size: 13px;
+  padding: 8px 16px;
+  font-size: 14px;
   cursor: pointer;
-  touch-action: manipulation;
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.btn:active { opacity: 0.7; }
-.btn-primary {
-  background: var(--border);
-  color: var(--text);
 }
 .btn-create {
-  background: var(--border);
-  color: var(--text);
-}
-.danger {
-  color: var(--danger);
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 14px;
+  cursor: pointer;
 }
 
-.footer {
-  text-align: center;
-  color: var(--muted);
-  font-size: 11px;
-  padding: 8px 0;
+.error {
+  color: #ffd0d0;
+  background: #2a1515;
+  padding: 12px 16px;
+  font-size: 14px;
 }
+
+h1, h2, h3 { margin: 0; }
 
 .term-body {
   height: 100dvh;
+  height: 100vh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -151,14 +206,22 @@ input {
   left: 0;
   right: 0;
   bottom: 0;
+  background: #0f1115;
 }
 
 #terminal {
   flex: 1;
   width: 100%;
-  padding: 6px;
   min-height: 0;
   overflow: hidden;
+}
+
+#terminal .xterm {
+  height: 100%;
+}
+
+#terminal .xterm-viewport {
+  height: 100% !important;
 }
 
 #touchOverlay {
@@ -193,15 +256,7 @@ input {
 #loadquote cite { color: var(--primary); font-size: 14px; }
 
 #paneIndicator {
-  position: absolute;
-  bottom: 4px;
-  left: 0;
-  right: 0;
-  text-align: center;
-  color: var(--muted);
-  font-size: 12px;
-  z-index: 6;
-  pointer-events: none;
+  display: none;
 }
 
 .term-toolbar {

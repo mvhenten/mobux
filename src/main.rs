@@ -490,21 +490,22 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
 fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> String {
     let mut cards = String::new();
     if sessions.is_empty() {
-        cards.push_str(r#"<p class="hint">No tmux sessions found.</p>"#);
+        cards.push_str(r#"<p class="hint">No tmux sessions. Tap + to create one.</p>"#);
     } else {
         for s in sessions {
             let name = html_escape::encode_text(&s.name);
             cards.push_str(&format!(
-                r#"<article class="session-card" data-name="{name}">
-  <div class="session-head">
-    <h3>{name}</h3>
-    <div class="meta">{} windows · {} attached</div>
-  </div>
-  <div class="actions">
-    <a class="btn btn-primary" href="/s/{name}">Open</a>
-    <button class="btn danger" data-kill="{name}">Kill</button>
-  </div>
-</article>"#,
+                r#"<div class="swipe-row" data-name="{name}">
+  <div class="swipe-action swipe-left"><button class="swipe-btn rename-btn">Rename</button></div>
+  <a class="session-item" href="/s/{name}">
+    <div class="session-info">
+      <span class="session-name">{name}</span>
+      <span class="session-meta">{} win · {} attached</span>
+    </div>
+    <span class="session-arrow">›</span>
+  </a>
+  <div class="swipe-action swipe-right"><button class="swipe-btn kill-btn" data-kill="{name}">Kill</button></div>
+</div>"#,
                 s.windows, s.attached
             ));
         }
@@ -530,31 +531,28 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
   <link rel="stylesheet" href="/static/style.css?v={v}" />
 </head>
 <body>
-  <main class="container">
-    <header class="header">
-      <h1>mobux</h1>
-      <span class="tagline">tmux on your phone</span>
-    </header>
+  <header class="app-header">
+    <h1>mobux</h1>
+  </header>
 
-    <section class="panel">
-      <h2>New session</h2>
-      <form id="newSessionForm">
-        <input id="sessionName" placeholder="session-name" autocomplete="off" required />
-        <button class="btn btn-create" type="submit">Create</button>
-      </form>
-    </section>
+  {error_html}
 
-    {error_html}
+  <div id="sessionList" class="session-list">
+    {cards}
+  </div>
 
-    <section class="panel">
-      <h2>Sessions</h2>
-      <div id="sessionList" class="session-list">
-        {cards}
+  <button id="fabNew" class="fab" aria-label="New session">+</button>
+
+  <dialog id="newSessionDialog" class="session-dialog">
+    <form id="newSessionForm" method="dialog">
+      <h3>New session</h3>
+      <input id="sessionName" placeholder="session-name" autocomplete="off" required />
+      <div class="dialog-actions">
+        <button type="button" class="btn-cancel" id="cancelNew">Cancel</button>
+        <button type="submit" class="btn-create">Create</button>
       </div>
-    </section>
-
-    <footer class="footer">mobux v{v} · ctrl-c to exit</footer>
-  </main>
+    </form>
+  </dialog>
 
   <script src="/static/index.js?v={v}"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
@@ -611,6 +609,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
+      <button id="uploadBtn">📷</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\x1b[D">←</button>
       <button data-key="\x1b[C">→</button>
@@ -626,7 +625,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       <button data-key="\x1b[F">End</button>
       <button data-key="\x15">^U</button>
       <button data-key="\x0c">^L</button>
-      <button id="uploadBtn">📷</button>
     </div>
     <div class="input-row">
       <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />

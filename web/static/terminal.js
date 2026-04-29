@@ -67,7 +67,8 @@ function sendResize() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const cw = term._core._renderService.dimensions?.css?.cell?.width || 9;
   const ch = term._core._renderService.dimensions?.css?.cell?.height || 18;
-  const barHeight = document.getElementById('inputBar')?.offsetHeight || 0;
+  const bar = document.getElementById('inputBar');
+  const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
   const cols = Math.max(20, Math.floor(window.innerWidth / cw) - 1);
   const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / ch) - 1);
   term.resize(cols, rows);
