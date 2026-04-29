@@ -1,5 +1,5 @@
 import { createGestureRecognizer } from './touch.js';
-import { createMobileInputAdapter } from './input.js';
+import { createInputBar } from './input-bar.js';
 
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
@@ -67,8 +67,9 @@ function sendResize() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const cw = term._core._renderService.dimensions?.css?.cell?.width || 9;
   const ch = term._core._renderService.dimensions?.css?.cell?.height || 18;
+  const barHeight = document.getElementById('inputBar')?.offsetHeight || 0;
   const cols = Math.max(20, Math.floor(window.innerWidth / cw) - 1);
-  const rows = Math.max(10, Math.floor(window.innerHeight / ch) - 1);
+  const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / ch) - 1);
   term.resize(cols, rows);
   ws.send(JSON.stringify({ type: "resize", cols, rows }));
 }
@@ -209,6 +210,10 @@ createGestureRecognizer(overlay, {
   },
 
   onDoubleTap(x, y) {
+    if (inputBar) {
+      inputBar.show();
+      return;
+    }
     overlay.style.pointerEvents = 'none';
     setTimeout(() => { overlay.style.pointerEvents = 'auto'; }, 500);
     const el = document.elementFromPoint(x, y);
@@ -266,10 +271,12 @@ function connect() {
 
 term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
 
-// On mobile, fix xterm.js's broken autocomplete diff algorithm.
-// Must be after term.open() so textarea exists.
+// ── Mobile input bar ────────────────────────────────────────────────
+let inputBar = null;
 if (isMobile) {
-  createMobileInputAdapter(term);
+  inputBar = createInputBar(term, (d) => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
+  });
 }
 
 (async () => {
