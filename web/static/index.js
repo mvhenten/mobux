@@ -84,6 +84,31 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+// ── Rename handler ──────────────────────────────────────────────────
+document.addEventListener("click", async (e) => {
+  const target = e.target;
+  if (!(target instanceof HTMLElement) || !target.classList.contains('rename-btn')) return;
+  const row = target.closest('.swipe-row');
+  if (!row) return;
+  const oldName = row.dataset.name;
+  const newName = prompt(`Rename '${oldName}' to:`, oldName);
+  if (!newName || newName === oldName) {
+    // Snap row back
+    const item = row.querySelector('.session-item');
+    if (item) { item.style.transition = 'transform 0.2s ease'; item.style.transform = 'translateX(0)'; }
+    return;
+  }
+  try {
+    await fetchJSON(`/api/sessions/${encodeURIComponent(oldName)}/rename`, {
+      method: "POST",
+      body: JSON.stringify({ name: newName }),
+    });
+    await refreshSessions();
+  } catch (err) {
+    alert(`Rename failed: ${err.message}`);
+  }
+});
+
 // ── Swipe gestures on session rows ──────────────────────────────────
 function initSwipeRows() {
   document.querySelectorAll('.swipe-row').forEach(row => {

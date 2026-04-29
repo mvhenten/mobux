@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         .route("/", get(index))
         .route("/api/sessions", get(api_sessions).post(api_create_session))
         .route("/api/sessions/{name}/kill", post(api_kill_session))
+        .route("/api/sessions/{name}/rename", post(api_rename_session))
         .route("/api/sessions/{name}/panes", get(api_list_panes))
         .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
         .route("/api/sessions/{name}/history", get(api_session_history))
@@ -236,6 +237,24 @@ async fn api_kill_session(
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
     tmux::kill_session(&name)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct RenameReq {
+    name: String,
+}
+
+async fn api_rename_session(
+    State(state): State<AppState>,
+    Path(old_name): Path<String>,
+    Json(payload): Json<RenameReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &old_name)?;
+    validate_session_name(&state, &payload.name)?;
+    tmux::rename_session(&old_name, &payload.name)
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true})))

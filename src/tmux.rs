@@ -75,6 +75,19 @@ pub async fn kill_session(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn rename_session(old_name: &str, new_name: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["rename-session", "-t", old_name, new_name])
+        .output()
+        .await
+        .context("failed to execute tmux")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux rename-session failed: {}", msg));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pane {
