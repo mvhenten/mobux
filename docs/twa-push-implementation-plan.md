@@ -221,7 +221,7 @@ No `fetch` handler. No precache. No Workbox.
 **Files**:
 - `web/static/manifest.json` (edit). Confirm `display: "standalone"`, `start_url: "/"`, `name`, `short_name`, `theme_color`, `background_color`, and `icons` covering 192 and 512 PNGs. Add a 512 icon if missing.
 - `twa/twa-manifest.json.template` (new). Bubblewrap config template with `__MOBUX_DOMAIN__` placeholder. Pre-filled fields:
-  - `packageId`: **needs user confirmation before first build** — proposed `io.github.mvhenten.mobux`. Once shipped, changing this means existing installs can't upgrade.
+  - `packageId`: `io.github.mvhenten.mobux` (confirmed 2026-05-01). Immutable after first install ships — do not change without acknowledging it's a breaking change for existing users.
   - `name`, `launcherName`, `themeColor`, `backgroundColor`.
   - `startUrl`: `/`.
   - `display`: `standalone`.
@@ -305,7 +305,6 @@ This is the gate before declaring done.
 
 - **`web-push` crate**: confirm it accepts an existing VAPID keypair from raw bytes before committing to it. If not, swap or hand-roll. Check before Phase 5.
 - **ACME requires reachable HTTP**: HTTP-01 needs port 80 reachable from Let's Encrypt. If that's not available, document DNS-01 as a future option but don't implement.
-- **TWA package id**: `io.github.mvhenten.mobux` is a guess. **Confirm with user before first `make twa` build.** Changing it later means existing installs can't upgrade.
 - **Android user-CA trust**: TWA-via-Custom-Tabs should respect user-installed CAs (Chrome trust store). Verify on a real Android device before declaring Phase 3 done. If broken, the fallback is "ACME mode required" — document and move on.
 - **PTY chunk boundaries**: a BEL byte could in principle land at a chunk boundary. Scanning each chunk independently is fine because BEL is a single byte. No multi-byte sequences to worry about.
 - **Notification flood at session boot**: some shells / programs emit BEL on startup. Test what happens when reattaching to an already-running session and decide if that's OK.
