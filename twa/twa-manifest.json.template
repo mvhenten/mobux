@@ -1,0 +1,32 @@
+{
+  "packageId": "io.github.mvhenten.mobux",
+  "host": "__MOBUX_DOMAIN__",
+  "name": "Mobux",
+  "launcherName": "Mobux",
+  "themeColor": "#0f1115",
+  "themeColorDark": "#0f1115",
+  "navigationColor": "#0f1115",
+  "navigationColorDark": "#0f1115",
+  "navigationDividerColor": "#0f1115",
+  "navigationDividerColorDark": "#0f1115",
+  "backgroundColor": "#0f1115",
+  "display": "standalone",
+  "orientation": "any",
+  "startUrl": "/",
+  "iconUrl": "https://__MOBUX_DOMAIN__/static/icon-512.png",
+  "maskableIconUrl": "https://__MOBUX_DOMAIN__/static/icon-512.png",
+  "appVersion": "1.0.0",
+  "appVersionCode": 1,
+  "shortcuts": [],
+  "signingKey": {
+    "path": "__MOBUX_KEYSTORE_PATH__",
+    "alias": "mobux"
+  },
+  "enableNotifications": true,
+  "splashScreenFadeOutDuration": 300,
+  "fallbackType": "customtabs",
+  "features": {},
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "fullScopeUrl": "https://__MOBUX_DOMAIN__/"
+}
