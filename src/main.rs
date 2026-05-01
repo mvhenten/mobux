@@ -53,6 +53,14 @@ struct AuthConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Multiple deps now pull rustls (axum-server tls, instant-acme, reqwest);
+    // each enables its own crypto backend feature, so rustls cannot pick one
+    // automatically. Install aws-lc-rs explicitly to match axum-server's
+    // TLS path that actually serves traffic.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
+
     let auth = load_auth_config();
     let data_dir = resolve_data_dir()?;
     std::fs::create_dir_all(&data_dir)
@@ -272,6 +280,19 @@ fn load_auth_config() -> Option<AuthConfig> {
     }
 }
 
+/// Routes that bypass auth so first-contact device enrollment works:
+/// the install page must be reachable to download the APK + CA, the
+/// digital-asset-links file must be reachable for the TWA verification,
+/// and the icon assets are needed by the bubblewrap build (which
+/// fetches them over HTTPS from the running server).
+fn is_public_path(path: &str) -> bool {
+    path == "/install"
+        || path.starts_with("/install/")
+        || path.starts_with("/.well-known/")
+        || path.starts_with("/static/icon-")
+        || path == "/static/manifest.json"
+}
+
 async fn auth_middleware(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -280,6 +301,10 @@ async fn auth_middleware(
     let Some(auth) = &state.auth else {
         return next.run(req).await;
     };
+
+    if is_public_path(req.uri().path()) {
+        return next.run(req).await;
+    }
 
     let cookie_ok = req
         .headers()
