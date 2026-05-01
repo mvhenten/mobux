@@ -149,35 +149,18 @@
       try {
         if (err && err.code === 'permission-denied') {
           // Permission was denied either at the browser level or (more
-          // commonly inside a TWA) at the OS app level. Confirm + deep-link
-          // straight to Mobux's notification settings page on Android so the
-          // user doesn't have to dig through Settings to find it.
-          const open = confirm(
-            'Notifications are blocked. Open Android settings to enable them for Mobux?',
+          // commonly inside a TWA) at the OS app level. Custom Tabs swallow
+          // intent: URLs unpredictably, so we just show the manual path.
+          alert(
+            'Notifications are blocked.\n\n' +
+              'Long-press the Mobux launcher icon → App info → Notifications → enable.\n\n' +
+              'Then come back and tap the bell again.',
           );
-          if (open) {
-            // Android intent: URL — launches Mobux's app-notification settings.
-            // No `scheme=` (we're not opening a custom URL scheme) and no host
-            // segment (the action is what matters). The `S.<key>=<value>` parts
-            // are string extras; APP_PACKAGE points the settings page at our APK.
-            const intentUrl =
-              'intent:#Intent;' +
-              'action=android.settings.APP_NOTIFICATION_SETTINGS;' +
-              'S.android.provider.extra.APP_PACKAGE=io.github.mvhenten.mobux;' +
-              'end';
-            // window.open hands the URL to Android's intent resolver, which
-            // knows about intent: URLs; in-window navigation gets swallowed by
-            // Custom Tabs in some TWA configurations.
-            const w = window.open(intentUrl, '_blank');
-            if (!w) {
-              window.location.href = intentUrl;
-            }
-          }
         } else {
           alert('Notifications: ' + (err && err.message ? err.message : String(err)));
         }
       } catch (_) {
-        // Some embedded contexts disallow alert/confirm; ignore.
+        // Some embedded contexts disallow alert; ignore.
       }
       // Re-sync from real state in case we partially succeeded.
       try {
