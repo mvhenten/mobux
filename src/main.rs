@@ -689,10 +689,12 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     let ca_url = format!("https://{host}/install/mobux-ca.crt");
     let apk_present = std::path::Path::new(INSTALL_APK_PATH).exists();
 
-    let install_section = if apk_present {
+    let acme = ssl::acme_mode_enabled();
+    let app_heading = if acme { "Install the app" } else { "2. Install the app" };
+    let app_section = if apk_present {
         format!(
             r##"<section class="install-card">
-  <h2>Install the app</h2>
+  <h2>{app_heading}</h2>
   <p class="install-lede">Download the Android APK, or scan the QR with your phone.</p>
   <div class="install-grid">
     <a class="install-btn" href="/install/mobux.apk" download>Download APK</a>
@@ -704,28 +706,30 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     } else {
         format!(
             r##"<section class="install-card">
-  <h2>Install the app</h2>
+  <h2>{app_heading}</h2>
   <p class="install-lede">APK not built yet.</p>
   <p class="install-hint">Run <code>make twa MOBUX_DOMAIN={host_esc}</code> on the server to build the APK.</p>
 </section>"##,
         )
     };
 
-    let ca_section = if ssl::acme_mode_enabled() {
+    let ca_section = if acme {
         String::new()
     } else {
         format!(
             r##"<section class="install-card">
-  <h2>Trust the certificate</h2>
-  <p class="install-lede">Install the local CA so Android trusts this server.</p>
+  <h2>1. Install the CA certificate</h2>
+  <p class="install-lede">Do this <strong>first</strong>. Without the CA, Android won't trust this server, the APK download will be blocked, and the installed app won't connect.</p>
   <div class="install-grid">
-    <a class="install-btn" href="/install/mobux-ca.crt" download>Download CA</a>
+    <a class="install-btn" href="/install/mobux-ca.crt" download>Download CA certificate</a>
     <div class="install-qr">{qr}</div>
   </div>
+  <p class="install-hint">After downloading, install it through Android Settings:</p>
   <ol class="install-steps">
-    <li>Settings &rarr; Security</li>
-    <li>Encryption &amp; credentials &rarr; Install a certificate</li>
-    <li>CA certificate</li>
+    <li>Settings &rarr; Security &amp; privacy (or just Security)</li>
+    <li>More security settings &rarr; Encryption &amp; credentials</li>
+    <li>Install a certificate &rarr; CA certificate</li>
+    <li>Acknowledge the warning, pick <code>mobux-ca.crt</code> from your Downloads</li>
   </ol>
 </section>"##,
             qr = qr_svg(&ca_url),
@@ -751,8 +755,8 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     <h1>mobux · install</h1>
   </header>
   <main class="install-page">
-    {install_section}
     {ca_section}
+    {app_section}
   </main>
 </body>
 </html>
