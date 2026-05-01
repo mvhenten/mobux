@@ -110,7 +110,7 @@ pub fn load_rustls_config(cert_path: &Path, key_path: &Path) -> Result<rustls::S
 // Path resolution
 // ---------------------------------------------------------------------------
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MOBUX_CONFIG_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir);

@@ -245,6 +245,43 @@ async fn serve_acme_challenge(
     }
 }
 
+/// Load (or generate-and-persist) the session cookie value. Persisting it
+/// across restarts means restarting mobux doesn't invalidate every connected
+/// client's session and re-prompt them for the basic-auth password.
+fn ensure_session_cookie_value() -> String {
+    let path = ssl::config_dir().join("session-cookie");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if trimmed.len() >= 32 {
+            return trimmed.to_string();
+        }
+    }
+
+    let value: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, &value) {
+        eprintln!(
+            "[auth] WARN: could not persist session cookie to {}: {e}. \
+             Restarts will re-prompt clients for credentials.",
+            path.display()
+        );
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    value
+}
+
 fn load_auth_config() -> Option<AuthConfig> {
     let user_env = env::var("MOBUX_AUTH_USER")
         .ok()
@@ -255,11 +292,7 @@ fn load_auth_config() -> Option<AuthConfig> {
     let pin_env = env::var("MOBUX_PIN").ok().map(|v| v.trim().to_string());
 
     let session_cookie_name = "mobux_session".to_string();
-    let session_cookie_value: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
+    let session_cookie_value = ensure_session_cookie_value();
 
     match (user_env, pass_env, pin_env) {
         (Some(user), Some(pass), _) if !user.is_empty() && !pass.is_empty() => Some(AuthConfig {
