@@ -20,7 +20,20 @@ self.addEventListener('push', (event) => {
     // Mobux app's notification channel in Android Settings.
     vibrate: [180, 80, 180],
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  // Notify any open client tabs so they can play the in-page chime
+  // (HTMLAudioElement isn't available inside the SW).
+  event.waitUntil(
+    Promise.all([
+      self.registration.showNotification(title, options),
+      self.clients
+        .matchAll({ type: 'window', includeUncontrolled: true })
+        .then((cs) =>
+          cs.forEach((c) =>
+            c.postMessage({ type: 'mobux-push', title, body: data.body, url: data.url || '/' }),
+          ),
+        ),
+    ]),
+  );
 });
 
 self.addEventListener('notificationclick', (event) => {
