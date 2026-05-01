@@ -3,11 +3,6 @@
 //! See `docs/twa-push-implementation-plan.md` (Phase 2) for the design.
 //! All API methods are sync; wrap in `tokio::task::spawn_blocking` when
 //! invoked from an async context.
-//!
-//! Subscription accessors are unused until Phase 5 (push registration UI)
-//! wires them up; `#[allow(dead_code)]` keeps clippy quiet in the meantime.
-
-#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -28,11 +23,18 @@ pub struct VapidKeys {
 }
 
 /// A persisted Web Push subscription (read shape).
+///
+/// `endpoint`, `p256dh`, and `auth` are read in Phase 6 (push delivery) — the
+/// Phase 5 `/api/push/devices` endpoint deliberately omits them, since the
+/// device-management UI only needs identifiers, labels, and timestamps.
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub id: i64,
+    #[allow(dead_code)] // consumed by Phase 6 (push delivery)
     pub endpoint: String,
+    #[allow(dead_code)] // consumed by Phase 6 (push delivery)
     pub p256dh: Vec<u8>,
+    #[allow(dead_code)] // consumed by Phase 6 (push delivery)
     pub auth: Vec<u8>,
     pub label: Option<String>,
     pub created_at: i64,

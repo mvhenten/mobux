@@ -178,6 +178,11 @@ No `fetch` handler. No precache. No Workbox.
 **Crates to add**:
 - `web-push = "0.10"` — VAPID-compatible push delivery. **Verify before implementing**: confirm the crate accepts an existing VAPID keypair (raw bytes from the DB) rather than only generating its own. If not, swap to `wpush` or hand-roll JWT signing on top of `p256` + `jsonwebtoken`.
 
+> **Verified during Phase 5 (2026-04-29):**
+> - `web-push 0.11` (current) accepts an existing keypair via `VapidSignatureBuilder::from_base64`, which takes the raw 32-byte P-256 scalar base64-encoded — perfect fit for what `db.vapid_keys()` returns.
+> - **Blocker for hermetic builds**: `web-push` transitively depends on `ece` → `openssl` → `openssl-sys`, which needs system pkg-config + libssl. Disabling `default-features` does NOT remove the openssl dep, because the http-ece encryption (the load-bearing part) lives in `ece`, not in the optional HTTP client features. Phase 5 therefore did not add `web-push` — the Phase 5 endpoints don't need it.
+> - **Recommendation for Phase 6**: hand-roll the push pipeline. The pieces are: (a) JWT signing with `p256` + `jsonwebtoken` for the VAPID auth header, (b) HTTP-ECE encryption of the payload with the `aes-gcm` + `hkdf` + `p256` crates we already pull in transitively, (c) POST via `reqwest` with the existing rustls stack. Avoids dragging openssl into the build. If hand-rolling ECE is too much, evaluate `web-push-native` (RFC8030 only, no openssl) or `wpush` as alternatives.
+
 **New API routes** (in `main.rs`):
 - `GET /api/push/vapid-public-key` → `{ key: "<base64url>" }`. Read from DB.
 - `POST /api/push/subscribe` → body: `{ endpoint, p256dh, auth, label? }`. Insert/update subscription.
