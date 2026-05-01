@@ -13,6 +13,12 @@ self.addEventListener('push', (event) => {
     tag: data.tag,
     data: { url: data.url || '/' },
     icon: '/static/icon-192.png',
+    badge: '/static/icon-192.png',
+    // Two-pulse vibration. Universal "noticed it" signal that works even
+    // when the device is on silent. Sound itself is OS-channel-controlled
+    // and can't be set from the SW; users who want a chime configure the
+    // Mobux app's notification channel in Android Settings.
+    vibrate: [180, 80, 180],
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
