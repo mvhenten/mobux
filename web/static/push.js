@@ -64,7 +64,9 @@
 
     const perm = await Notification.requestPermission();
     if (perm !== 'granted') {
-      throw new Error('notification permission denied');
+      const err = new Error('notification permission denied');
+      err.code = 'permission-denied';
+      throw err;
     }
 
     const keyRes = await fetch('/api/push/vapid-public-key');
@@ -145,9 +147,27 @@
       // see what went wrong. Notifications are an explicit user action,
       // so a short alert is fine.
       try {
-        alert('Notifications: ' + (err && err.message ? err.message : String(err)));
+        if (err && err.code === 'permission-denied') {
+          // Permission was denied either at the browser level or (more
+          // commonly inside a TWA) at the OS app level. Confirm + deep-link
+          // straight to Mobux's notification settings page on Android so the
+          // user doesn't have to dig through Settings to find it.
+          const open = confirm(
+            'Notifications are blocked. Open Android settings to enable them for Mobux?',
+          );
+          if (open) {
+            window.location.href =
+              'intent://settings#Intent;' +
+              'scheme=mobux;' +
+              'action=android.settings.APP_NOTIFICATION_SETTINGS;' +
+              'S.android.provider.extra.APP_PACKAGE=io.github.mvhenten.mobux;' +
+              'end';
+          }
+        } else {
+          alert('Notifications: ' + (err && err.message ? err.message : String(err)));
+        }
       } catch (_) {
-        // Some embedded contexts disallow alert; ignore.
+        // Some embedded contexts disallow alert/confirm; ignore.
       }
       // Re-sync from real state in case we partially succeeded.
       try {
