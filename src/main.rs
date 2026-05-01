@@ -1231,6 +1231,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
   </dialog>
 
   <script src="/static/index.js?v={v}"></script>
+  <script src="/static/chime.js?v={v}"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </body>
 </html>
@@ -1317,6 +1318,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <script src="/static/vendor/xterm.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/push.js?v={v}"></script>
+  <script src="/static/chime.js?v={v}"></script>
 </body>
 </html>
 "##
