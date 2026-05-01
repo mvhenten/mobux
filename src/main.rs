@@ -18,7 +18,10 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64URL},
+    Engine,
+};
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use rand::{distr::Alphanumeric, Rng};
@@ -36,7 +39,6 @@ struct AppState {
     session_name_re: Arc<Regex>,
     auth: Option<AuthConfig>,
     cache_bust: String,
-    #[allow(dead_code)] // wired up in subsequent phases (push registration + delivery)
     db: Arc<db::Db>,
 }
 
@@ -89,6 +91,12 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
         .route("/api/upload", post(api_upload))
+        .route("/api/push/vapid-public-key", get(api_push_vapid_public_key))
+        .route(
+            "/api/push/subscribe",
+            post(api_push_subscribe).delete(api_push_unsubscribe),
+        )
+        .route("/api/push/devices", get(api_push_devices))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
@@ -489,6 +497,108 @@ async fn api_upload(
     Err(AppError::bad_request(anyhow::anyhow!("no file in upload")))
 }
 
+// ── Web Push: VAPID public key + subscription endpoints ───────────────
+//
+// Browsers POST a `PushSubscription` JSON shape — `endpoint` is a URL string,
+// `p256dh` and `auth` are base64url-encoded byte arrays. We decode the keys
+// to raw bytes for storage so Phase 6 can hand them straight to `web-push`
+// without a second decode step.
+
+#[derive(Deserialize)]
+struct PushSubscribeReq {
+    endpoint: String,
+    p256dh: String,
+    auth: String,
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PushUnsubscribeReq {
+    endpoint: String,
+}
+
+fn decode_b64url(field: &str, value: &str) -> Result<Vec<u8>, AppError> {
+    BASE64URL
+        .decode(value)
+        .map_err(|e| AppError::bad_request(anyhow::anyhow!("invalid base64url in '{field}': {e}")))
+}
+
+async fn api_push_vapid_public_key(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let keys = state
+        .db
+        .vapid_keys()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("loading vapid keys: {e}")))?;
+    Ok(Json(json!({ "key": BASE64URL.encode(&keys.public_key) })))
+}
+
+async fn api_push_subscribe(
+    State(state): State<AppState>,
+    Json(payload): Json<PushSubscribeReq>,
+) -> Result<StatusCode, AppError> {
+    if payload.endpoint.trim().is_empty() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "endpoint must not be empty"
+        )));
+    }
+    let p256dh = decode_b64url("p256dh", &payload.p256dh)?;
+    let auth = decode_b64url("auth", &payload.auth)?;
+
+    let label = payload
+        .label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty());
+
+    state
+        .db
+        .insert_subscription(db::NewSubscription {
+            endpoint: payload.endpoint,
+            p256dh,
+            auth,
+            label,
+        })
+        .map_err(|e| AppError::internal(anyhow::anyhow!("storing subscription: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_push_unsubscribe(
+    State(state): State<AppState>,
+    Json(payload): Json<PushUnsubscribeReq>,
+) -> Result<StatusCode, AppError> {
+    if payload.endpoint.trim().is_empty() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "endpoint must not be empty"
+        )));
+    }
+    state
+        .db
+        .remove_subscription(&payload.endpoint)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("removing subscription: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_push_devices(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let subs = state
+        .db
+        .list_subscriptions()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("listing subscriptions: {e}")))?;
+    let out: Vec<serde_json::Value> = subs
+        .into_iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "created_at": s.created_at,
+                "last_seen_at": s.last_seen_at,
+            })
+        })
+        .collect();
+    Ok(Json(out))
+}
+
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -759,6 +869,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
+      <button id="pushToggleBtn" hidden title="Notifications">🔔</button>
       <button id="uploadBtn">📷</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
@@ -789,6 +900,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   </script>
   <script src="/static/vendor/xterm.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
+  <script src="/static/push.js?v={v}"></script>
 </body>
 </html>
 "##
@@ -808,10 +920,58 @@ impl AppError {
             message: err.to_string(),
         }
     }
+
+    fn internal(err: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: err.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (self.status, self.message).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64url_round_trip_p256_point() {
+        // Real-world payload shape: 65-byte uncompressed P-256 point.
+        let bytes: Vec<u8> = (0..65u8).collect();
+        let encoded = BASE64URL.encode(&bytes);
+        assert!(
+            !encoded.contains('='),
+            "URL_SAFE_NO_PAD must not emit padding"
+        );
+        assert!(
+            !encoded.contains('+') && !encoded.contains('/'),
+            "URL_SAFE_NO_PAD must use URL-safe alphabet"
+        );
+        let decoded = BASE64URL.decode(encoded).expect("round-trip decode");
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn base64url_decode_rejects_bad_input() {
+        // Padded input is wrong for URL_SAFE_NO_PAD: must reject.
+        assert!(BASE64URL.decode("AAAA=").is_err());
+        // Standard-base64 chars are also wrong here.
+        assert!(BASE64URL.decode("AA+/").is_err());
+    }
+
+    #[test]
+    fn decode_b64url_helper_returns_400_on_garbage() {
+        let err = decode_b64url("p256dh", "!!not-valid!!").expect_err("must error");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("p256dh"),
+            "error mentions field name: {}",
+            err.message
+        );
     }
 }
