@@ -2,10 +2,11 @@ use std::{
     env,
     io::{Read, Write},
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{ws::Message, Path, State, WebSocketUpgrade},
     http::{
@@ -26,6 +27,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tower_http::services::ServeDir;
 
+mod db;
 mod ssl;
 mod tmux;
 
@@ -34,6 +36,8 @@ struct AppState {
     session_name_re: Arc<Regex>,
     auth: Option<AuthConfig>,
     cache_bust: String,
+    #[allow(dead_code)] // wired up in subsequent phases (push registration + delivery)
+    db: Arc<db::Db>,
 }
 
 #[derive(Clone)]
@@ -47,10 +51,21 @@ struct AuthConfig {
 #[tokio::main]
 async fn main() -> Result<()> {
     let auth = load_auth_config();
+    let data_dir = resolve_data_dir()?;
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
+    let db_path = data_dir.join("mobux.db");
+    println!("data dir: {}", data_dir.display());
+    let db = Arc::new(db::Db::open(&db_path)?);
+    // Eagerly generate the VAPID keypair on first boot so subsequent push
+    // endpoints can rely on it being present. Idempotent on later starts.
+    let _ = db.vapid_keys()?;
+
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
         cache_bust: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
+        db,
     };
 
     let state_for_mw = state.clone();
@@ -116,6 +131,23 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_data_dir() -> Result<PathBuf> {
+    if let Some(override_dir) = env::var_os("MOBUX_DATA_DIR") {
+        let path = PathBuf::from(override_dir);
+        if path.as_os_str().is_empty() {
+            return Err(anyhow::anyhow!("MOBUX_DATA_DIR is set but empty"));
+        }
+        return Ok(path);
+    }
+    // Plan locks the default to ~/.local/share/mobux/ on Linux.
+    // `directories` resolves XDG_DATA_HOME/HOME for us. On macOS this maps to
+    // ~/Library/Application Support/mobux which is fine for the headless
+    // server use case — the override env var is the escape hatch.
+    let dirs = directories::ProjectDirs::from("", "", "mobux")
+        .ok_or_else(|| anyhow::anyhow!("could not resolve user home directory for data dir"))?;
+    Ok(dirs.data_dir().to_path_buf())
 }
 
 fn load_auth_config() -> Option<AuthConfig> {
