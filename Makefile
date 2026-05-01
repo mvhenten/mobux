@@ -4,7 +4,13 @@ MOBUX_PIN  ?= 30879
 CARGO      := $(HOME)/.cargo/bin/cargo
 PID        := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 
-.PHONY: build run clean start stop restart status logs test web
+.PHONY: build run clean start stop restart status logs test web setup setup-twa
+
+setup:
+	./bin/setup
+
+setup-twa:
+	./bin/setup-twa
 
 web:
 	node web/build.js

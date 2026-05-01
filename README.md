@@ -29,6 +29,26 @@ npm install          # installs deps, patches xterm.js, bundles
 make run             # starts on https://0.0.0.0:5151
 ```
 
+## Setup scripts
+
+Two idempotent setup scripts provision everything needed to build mobux and
+(optionally) the Trusted Web Activity APK. Both prefer user-local installs and
+never use `sudo`. Run them as many times as you like — they detect existing
+tools and skip them.
+
+| Script | Make target | What it installs |
+|---|---|---|
+| `bin/setup` | `make setup` | Rust toolchain (rustup, cargo, rustc), `clippy`, `rustfmt`, and `npm install` for the web build. After this, `cargo build` and `node web/build.js` work. |
+| `bin/setup-twa` | `make setup-twa` | TWA build toolchain: JDK 17 via SDKMAN (`~/.sdkman`), Node LTS via nvm (`~/.nvm`), Android command-line tools (`~/.android/cmdline-tools/latest`), platform-tools / build-tools / `android-34`, and `@bubblewrap/cli` (npm prefix `~/.local`). Accepts SDK licenses non-interactively. |
+
+```bash
+make setup        # rust + clippy + rustfmt + npm deps
+make setup-twa    # JDK + node + android sdk + bubblewrap (only if you build the APK)
+```
+
+`bin/setup-twa` prints PATH/env hints at the end — paste them into your
+shell rc so the user-local tools are visible in new shells.
+
 Set auth credentials via environment:
 ```bash
 export MOBUX_AUTH_USER=me
