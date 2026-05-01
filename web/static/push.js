@@ -156,12 +156,22 @@
             'Notifications are blocked. Open Android settings to enable them for Mobux?',
           );
           if (open) {
-            window.location.href =
-              'intent://settings#Intent;' +
-              'scheme=mobux;' +
+            // Android intent: URL — launches Mobux's app-notification settings.
+            // No `scheme=` (we're not opening a custom URL scheme) and no host
+            // segment (the action is what matters). The `S.<key>=<value>` parts
+            // are string extras; APP_PACKAGE points the settings page at our APK.
+            const intentUrl =
+              'intent:#Intent;' +
               'action=android.settings.APP_NOTIFICATION_SETTINGS;' +
               'S.android.provider.extra.APP_PACKAGE=io.github.mvhenten.mobux;' +
               'end';
+            // window.open hands the URL to Android's intent resolver, which
+            // knows about intent: URLs; in-window navigation gets swallowed by
+            // Custom Tabs in some TWA configurations.
+            const w = window.open(intentUrl, '_blank');
+            if (!w) {
+              window.location.href = intentUrl;
+            }
           }
         } else {
           alert('Notifications: ' + (err && err.message ? err.message : String(err)));
