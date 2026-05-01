@@ -106,6 +106,7 @@ async fn main() -> Result<()> {
             post(api_push_subscribe).delete(api_push_unsubscribe),
         )
         .route("/api/push/devices", get(api_push_devices))
+        .route("/api/push/notify", post(api_push_notify))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
@@ -663,6 +664,41 @@ async fn api_push_devices(
         })
         .collect();
     Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct PushNotifyRequest {
+    /// Defaults to "mobux" if absent.
+    title: Option<String>,
+    body: String,
+    /// Optional. Same tag from the same origin replaces an existing
+    /// notification rather than stacking.
+    tag: Option<String>,
+    /// Optional. Where to deep-link on click. Defaults to "/".
+    url: Option<String>,
+}
+
+/// Fire a Web Push notification to every subscribed device. Used by anything
+/// that wants to ping the user — Claude, a tmux pipe-pane watcher, build
+/// scripts, cron. Returns 204 on success regardless of how many devices
+/// received it (delivery is best-effort and logged).
+async fn api_push_notify(
+    State(state): State<AppState>,
+    Json(req): Json<PushNotifyRequest>,
+) -> Result<StatusCode, AppError> {
+    if req.body.trim().is_empty() {
+        return Err(AppError::bad_request(anyhow::anyhow!("body is required")));
+    }
+    let payload = push::Payload {
+        title: req.title.unwrap_or_else(|| "mobux".to_string()),
+        body: req.body,
+        tag: req.tag,
+        url: req.url,
+    };
+    // Spawn so this returns immediately — push delivery to N devices can take
+    // hundreds of ms each, and the caller doesn't need to wait.
+    tokio::spawn(push::notify(state.db.clone(), payload));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn terminal_page(

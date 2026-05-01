@@ -34,11 +34,23 @@ use crate::db::{Db, Subscription, VapidKeys};
 /// Override with `MOBUX_VAPID_CONTACT`.
 const DEFAULT_VAPID_CONTACT: &str = "mailto:admin@example.com";
 
-/// Send a "session N: 🔔" Web Push notification to every subscribed device.
+/// A single push payload.
+pub struct Payload {
+    pub title: String,
+    pub body: String,
+    /// Notification `tag`. Same tag from the same origin replaces an existing
+    /// notification rather than stacking — free OS-side coalescing.
+    pub tag: Option<String>,
+    /// Path the SW should deep-link to on click. Defaults to `/`.
+    pub url: Option<String>,
+}
+
+/// Send `payload` as a Web Push notification to every subscribed device.
 ///
-/// Spawned via `tokio::spawn` from the WS read loop so PTY forwarding is never
-/// blocked. Returns when all delivery attempts have completed (or failed).
-pub async fn notify_bell(db: Arc<Db>, session_name: String) {
+/// Best-effort: errors are logged and swallowed. Dead subscriptions
+/// (HTTP 404 / 410) are pruned from the DB on the fly. Returns when all
+/// delivery attempts have completed.
+pub async fn notify(db: Arc<Db>, payload: Payload) {
     let vapid = match db.vapid_keys() {
         Ok(v) => v,
         Err(e) => {
@@ -59,11 +71,11 @@ pub async fn notify_bell(db: Arc<Db>, session_name: String) {
         return;
     }
 
-    let payload = json!({
-        "title": "mobux",
-        "body": format!("session {session_name}: 🔔"),
-        "tag": format!("bell-{session_name}"),
-        "url": format!("/s/{session_name}"),
+    let payload_bytes = json!({
+        "title": payload.title,
+        "body": payload.body,
+        "tag": payload.tag,
+        "url": payload.url.unwrap_or_else(|| "/".to_string()),
     })
     .to_string()
     .into_bytes();
@@ -72,7 +84,8 @@ pub async fn notify_bell(db: Arc<Db>, session_name: String) {
         std::env::var("MOBUX_VAPID_CONTACT").unwrap_or_else(|_| DEFAULT_VAPID_CONTACT.to_string());
 
     eprintln!(
-        "push: notify_bell session={session_name} subscribers={}",
+        "push: notify title={:?} subscribers={}",
+        payload.title,
         subs.len()
     );
 
@@ -82,7 +95,7 @@ pub async fn notify_bell(db: Arc<Db>, session_name: String) {
     let mut pruned = 0usize;
 
     for sub in subs {
-        match deliver(&client, &vapid, &contact, &sub, payload.clone()).await {
+        match deliver(&client, &vapid, &contact, &sub, payload_bytes.clone()).await {
             DeliveryOutcome::Ok => sent += 1,
             DeliveryOutcome::Gone => {
                 if let Err(e) = db.remove_subscription(&sub.endpoint) {
@@ -98,9 +111,22 @@ pub async fn notify_bell(db: Arc<Db>, session_name: String) {
         }
     }
 
-    eprintln!(
-        "push: notify_bell session={session_name} sent={sent} failed={failed} pruned={pruned}"
-    );
+    eprintln!("push: notify sent={sent} failed={failed} pruned={pruned}");
+}
+
+/// Convenience wrapper for the WS BEL detector. Same as `notify` but with the
+/// session-bell payload baked in.
+pub async fn notify_bell(db: Arc<Db>, session_name: String) {
+    notify(
+        db,
+        Payload {
+            title: "mobux".to_string(),
+            body: format!("session {session_name}: 🔔"),
+            tag: Some(format!("bell-{session_name}")),
+            url: Some(format!("/s/{session_name}")),
+        },
+    )
+    .await
 }
 
 enum DeliveryOutcome {
