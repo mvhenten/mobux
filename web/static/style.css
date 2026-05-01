@@ -24,12 +24,94 @@ body {
 .app-header {
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .app-header h1 {
   font-family: var(--mono);
   font-size: 18px;
   font-weight: 600;
   margin: 0;
+  flex: 1;
+}
+.header-icon {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 22px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.header-icon:active { background: rgba(255,255,255,0.05); }
+.header-back {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 24px;
+  line-height: 1;
+  padding: 4px 10px 6px;
+  margin-left: -6px;
+}
+
+/* ── Settings page ─────────────────────────────────────────────────── */
+.settings-page {
+  padding: 16px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+.settings-card {
+  background: var(--card, #1a1d24);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.settings-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.settings-lede {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+.settings-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.settings-row:first-of-type { border-top: none; }
+.settings-row input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  accent-color: #6ea8ff;
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-label small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.settings-label code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(255,255,255,0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.settings-status {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--muted);
 }
 
 .session-list {

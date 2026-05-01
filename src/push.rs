@@ -28,7 +28,113 @@ use web_push_native::{
     jwt_simple::algorithms::ES256KeyPair, p256::PublicKey, Auth, WebPushBuilder,
 };
 
-use crate::db::{Db, Subscription, VapidKeys};
+use crate::db::{Db, NotificationPrefs, Subscription, VapidKeys};
+
+/// 🔔 (U+1F514) encoded as UTF-8.
+const BELL_EMOJI_UTF8: &[u8] = &[0xf0, 0x9f, 0x94, 0x94];
+
+/// OSC 133 ; D — semantic shell prompt sequence emitted after each command,
+/// carrying the exit code. Body is `\x1b]133;D;<digits>` followed by the
+/// string terminator (BEL `\x07` or ESC `\x1b\\`).
+const OSC_133_D_PREFIX: &[u8] = b"\x1b]133;D;";
+
+/// What a chunk of PTY output is asking the user to be notified about.
+#[derive(Debug, Clone, Copy)]
+pub enum Trigger {
+    Bell,
+    BellEmoji,
+    ProgramExit { code: i32 },
+}
+
+/// Scan a single chunk of PTY output for notification triggers. One chunk
+/// may produce multiple triggers; each is fired independently respecting
+/// `NotificationPrefs`.
+pub fn scan_pty_chunk(chunk: &[u8]) -> Vec<Trigger> {
+    let mut out = Vec::new();
+    if chunk.contains(&0x07) {
+        out.push(Trigger::Bell);
+    }
+    if chunk
+        .windows(BELL_EMOJI_UTF8.len())
+        .any(|w| w == BELL_EMOJI_UTF8)
+    {
+        out.push(Trigger::BellEmoji);
+    }
+    let mut start = 0;
+    while start + OSC_133_D_PREFIX.len() <= chunk.len() {
+        let Some(pos) = chunk[start..]
+            .windows(OSC_133_D_PREFIX.len())
+            .position(|w| w == OSC_133_D_PREFIX)
+        else {
+            break;
+        };
+        let code_start = start + pos + OSC_133_D_PREFIX.len();
+        let mut code_end = code_start;
+        while code_end < chunk.len() && chunk[code_end].is_ascii_digit() {
+            code_end += 1;
+        }
+        start = code_end.max(code_start + 1);
+        if code_end == code_start {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(&chunk[code_start..code_end]) {
+            if let Ok(n) = s.parse::<i32>() {
+                out.push(Trigger::ProgramExit { code: n });
+            }
+        }
+    }
+    out
+}
+
+/// Apply a trigger respecting `prefs`. Spawns `notify` (best-effort,
+/// fire-and-forget) when the corresponding pref is on.
+pub fn handle_trigger(
+    db: Arc<Db>,
+    session_name: &str,
+    trigger: Trigger,
+    prefs: NotificationPrefs,
+) {
+    match trigger {
+        Trigger::Bell if prefs.bell => {
+            tokio::spawn(notify_bell(db, session_name.to_string()));
+        }
+        Trigger::BellEmoji if prefs.bell_emoji => {
+            tokio::spawn(notify(
+                db,
+                Payload {
+                    title: "mobux".to_string(),
+                    body: format!("session {session_name}: 🔔 ping"),
+                    tag: Some(format!("emoji-{session_name}")),
+                    url: Some(format!("/s/{session_name}")),
+                },
+            ));
+        }
+        Trigger::ProgramExit { code } => {
+            let fire = if code != 0 {
+                prefs.program_exit_nonzero || prefs.program_exit
+            } else {
+                prefs.program_exit
+            };
+            if fire {
+                let label = if code == 0 {
+                    "ok".to_string()
+                } else {
+                    format!("exit {code}")
+                };
+                tokio::spawn(notify(
+                    db,
+                    Payload {
+                        title: "mobux".to_string(),
+                        body: format!("session {session_name}: {label}"),
+                        tag: Some(format!("exit-{session_name}")),
+                        url: Some(format!("/s/{session_name}")),
+                    },
+                ));
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Default VAPID contact (RFC 8292 requires `mailto:` or `https:`).
 /// Override with `MOBUX_VAPID_CONTACT`.

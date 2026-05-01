@@ -47,6 +47,36 @@ pub struct NewSubscription {
     pub label: Option<String>,
 }
 
+/// User-tunable notification preferences. Single row, id=1, in `notification_prefs`.
+#[derive(Debug, Clone, Copy)]
+pub struct NotificationPrefs {
+    /// Notify on terminal BEL (`\x07`) in any session's PTY stream.
+    pub bell: bool,
+    /// Notify when the literal 🔔 (U+1F514) emoji appears in PTY output —
+    /// useful when an LLM (or any tool) wants to ping you intentionally.
+    pub bell_emoji: bool,
+    /// Notify when a program exits (any exit code). Detected via OSC 133;D
+    /// semantic-prompt sequences; requires the user's prompt to emit them
+    /// (Starship, Powerlevel10k, or a custom PS1 — see docs).
+    pub program_exit: bool,
+    /// Notify only when a program exits with a non-zero status. Same
+    /// requirement as `program_exit`.
+    pub program_exit_nonzero: bool,
+}
+
+impl Default for NotificationPrefs {
+    fn default() -> Self {
+        // Bell + emoji are server-detectable now and on by default.
+        // Exit-code prefs are off until the user installs the shell hook.
+        Self {
+            bell: true,
+            bell_emoji: true,
+            program_exit: false,
+            program_exit_nonzero: false,
+        }
+    }
+}
+
 /// SQLite-backed state. Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct Db {
@@ -81,6 +111,14 @@ impl Db {
                 label TEXT,
                 created_at INTEGER NOT NULL,
                 last_seen_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS notification_prefs (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                bell INTEGER NOT NULL,
+                bell_emoji INTEGER NOT NULL,
+                program_exit INTEGER NOT NULL,
+                program_exit_nonzero INTEGER NOT NULL
             );",
         )
         .context("initializing sqlite schema")?;
@@ -170,6 +208,68 @@ impl Db {
             params![sub.endpoint, sub.p256dh, sub.auth, sub.label, now],
         )
         .context("upserting push subscription")?;
+        Ok(())
+    }
+
+    /// Read notification preferences. Returns the defaults (and persists them)
+    /// if the row hasn't been written yet.
+    pub fn notification_prefs(&self) -> Result<NotificationPrefs> {
+        let conn = self.lock_conn()?;
+        let row: Option<(i64, i64, i64, i64)> = conn
+            .query_row(
+                "SELECT bell, bell_emoji, program_exit, program_exit_nonzero
+                 FROM notification_prefs WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .context("reading notification_prefs")?;
+
+        if let Some((bell, bell_emoji, program_exit, program_exit_nonzero)) = row {
+            return Ok(NotificationPrefs {
+                bell: bell != 0,
+                bell_emoji: bell_emoji != 0,
+                program_exit: program_exit != 0,
+                program_exit_nonzero: program_exit_nonzero != 0,
+            });
+        }
+
+        let defaults = NotificationPrefs::default();
+        conn.execute(
+            "INSERT INTO notification_prefs
+                 (id, bell, bell_emoji, program_exit, program_exit_nonzero)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                defaults.bell as i64,
+                defaults.bell_emoji as i64,
+                defaults.program_exit as i64,
+                defaults.program_exit_nonzero as i64,
+            ],
+        )
+        .context("inserting default notification_prefs")?;
+        Ok(defaults)
+    }
+
+    /// Overwrite notification preferences. Upserts the single row.
+    pub fn set_notification_prefs(&self, prefs: NotificationPrefs) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO notification_prefs
+                 (id, bell, bell_emoji, program_exit, program_exit_nonzero)
+             VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 bell = excluded.bell,
+                 bell_emoji = excluded.bell_emoji,
+                 program_exit = excluded.program_exit,
+                 program_exit_nonzero = excluded.program_exit_nonzero",
+            params![
+                prefs.bell as i64,
+                prefs.bell_emoji as i64,
+                prefs.program_exit as i64,
+                prefs.program_exit_nonzero as i64,
+            ],
+        )
+        .context("upserting notification_prefs")?;
         Ok(())
     }
 
