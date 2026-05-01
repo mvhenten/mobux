@@ -217,6 +217,14 @@ ensure_android_cmdline_tools() {
   if [ ! -x "${CMDLINE_TOOLS_DIR}/bin/sdkmanager" ]; then
     fail "sdkmanager not found at ${CMDLINE_TOOLS_DIR}/bin/sdkmanager after install."
   fi
+
+  # Bubblewrap's AndroidSdkTools.validatePath() insists on either <SDK>/tools
+  # or <SDK>/bin existing. Modern Android SDK installs only have
+  # <SDK>/cmdline-tools/latest/bin. Symlink so the validation passes.
+  if [ ! -e "${ANDROID_SDK_ROOT}/bin" ]; then
+    ln -s cmdline-tools/latest/bin "${ANDROID_SDK_ROOT}/bin"
+    log "Created ${ANDROID_SDK_ROOT}/bin -> cmdline-tools/latest/bin (for bubblewrap)"
+  fi
 }
 
 ensure_android_sdk_packages() {

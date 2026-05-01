@@ -14,12 +14,15 @@
 | 6 | BEL detection + push delivery | ✅ merged | #19 |
 | 7 | Bubblewrap config + `make twa` | ✅ merged | #16 |
 | 8 | `/install` page + APK + CA + assetlinks | ✅ merged | #18 |
-| 9 | End-to-end smoke test (real device) | 🔄 in progress | — |
+| 9 | End-to-end smoke test (real device) | 🔄 server side ready, awaiting phone test | — |
 
 **Notes from execution:**
 - Phase 5 ruled out the `web-push` crate (transitive openssl-sys); Phase 6 picked `web-push-native` + `reqwest` (rustls), build stays openssl-free.
-- `bin/setup-twa` needed three patches during e2e — `set -u` was breaking SDKMAN's and nvm's internal shell functions, and `pipefail` + `yes |` was masking successful installs as failures and triggering an unnecessary fallback that filled the disk on the first attempt. Patches bundled with this PR.
-- Phase 9 (e2e) is manual — needs a real Android device on the same network.
+- `bin/setup-twa` needed three patches during e2e — `set -u` was breaking SDKMAN's and nvm's internal shell functions, and `pipefail` + `yes |` was masking successful installs as failures and triggering an unnecessary fallback that filled the disk on the first attempt.
+- Phase 7's `make twa` was incompatible with bubblewrap CLI: `bubblewrap init` is interactive-only and treats `--manifest=` as a remote Web App Manifest URL (not a TWA manifest). Replaced the init step with `twa/init.js`, a tiny Node script that calls `@bubblewrap/core`'s `TwaGenerator.createTwaProject()` directly with the pre-rendered manifest (and writes the matching `manifest-checksum.txt` so `bubblewrap build` doesn't prompt). Build step now uses `BUBBLEWRAP_KEYSTORE_PASSWORD`/`BUBBLEWRAP_KEY_PASSWORD` env vars instead of stdin pipe. Bubblewrap config is pre-written to `~/.bubblewrap/config.json` so JDK/SDK paths aren't prompted. `bin/setup-twa` now also creates `~/.android/bin -> cmdline-tools/latest/bin` because bubblewrap's SDK path validator only knows the legacy `<SDK>/bin` and `<SDK>/tools` layouts.
+- Auth middleware (Phase 5) was gating `/install/*`, `/.well-known/*`, and `/static/icon-*.png` — broke first-contact device enrollment and the bubblewrap icon fetch. These paths now bypass auth (still served behind TLS).
+- Adding `instant-acme` (Phase 3) and `reqwest` (Phase 6) made rustls unable to auto-pick a crypto provider (both `aws-lc-rs` and `ring` features end up enabled transitively). Explicitly install `aws-lc-rs` at the top of `main()`.
+- Phase 9 e2e is now manual — APK + CA are served at `/install`. Open on phone, install both, launch the TWA, subscribe, ring a bell.
 
 ---
 

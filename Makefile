@@ -105,22 +105,31 @@ twa:
 			exit 1; \
 		fi; \
 	fi; \
+	CA_CERT="$$CONFIG_DIR/ca.crt"; \
+	if [ -f "$$CA_CERT" ] && [ -z "$${NODE_EXTRA_CA_CERTS:-}" ]; then \
+		export NODE_EXTRA_CA_CERTS="$$CA_CERT"; \
+	fi; \
+	mkdir -p "$$HOME/.bubblewrap"; \
+	if [ ! -f "$$HOME/.bubblewrap/config.json" ]; then \
+		printf '{\n  "jdkPath": "%s",\n  "androidSdkPath": "%s"\n}\n' \
+			"$${JAVA_HOME:-$$HOME/.sdkman/candidates/java/current}" \
+			"$${ANDROID_HOME:-$$HOME/.android}" \
+			> "$$HOME/.bubblewrap/config.json"; \
+	fi; \
 	echo "Rendering twa/twa-manifest.json (MOBUX_DOMAIN=$$MOBUX_DOMAIN)"; \
 	sed -e "s|__MOBUX_DOMAIN__|$$MOBUX_DOMAIN|g" \
 		-e "s|__MOBUX_KEYSTORE_PATH__|$$KEYSTORE|g" \
 		twa/twa-manifest.json.template > twa/twa-manifest.json; \
 	if [ -d twa/app ]; then \
-		echo "Updating existing TWA project (twa/app/)"; \
-		( cd twa && bubblewrap update --manifest=twa-manifest.json ); \
-	else \
-		echo "Initializing new TWA project (twa/app/)"; \
-		mkdir -p twa/app; \
-		( cd twa/app && printf '%s\n%s\n' "$$KEYSTORE_PASSWORD" "$$KEYSTORE_PASSWORD" \
-			| bubblewrap init --manifest=../twa-manifest.json ); \
+		echo "Regenerating TWA project from manifest (twa/app/)"; \
+		rm -rf twa/app; \
 	fi; \
+	echo "Initializing TWA project (twa/app/)"; \
+	node twa/init.js; \
 	echo "Building signed APK"; \
-	( cd twa/app && printf '%s\n%s\n' "$$KEYSTORE_PASSWORD" "$$KEYSTORE_PASSWORD" \
-		| bubblewrap build ); \
+	( cd twa/app && BUBBLEWRAP_KEYSTORE_PASSWORD="$$KEYSTORE_PASSWORD" \
+		BUBBLEWRAP_KEY_PASSWORD="$$KEYSTORE_PASSWORD" \
+		bubblewrap build ); \
 	APK_SRC="twa/app/app-release-signed.apk"; \
 	if [ ! -f "$$APK_SRC" ]; then \
 		echo "Expected signed APK at $$APK_SRC but it is missing." >&2; \
