@@ -39,3 +39,5 @@ directories = "6"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 instant-acme = "0.8"
 time = "0.3"
+web-push-native = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

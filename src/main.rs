@@ -31,6 +31,7 @@ use serde_json::json;
 use tower_http::services::ServeDir;
 
 mod db;
+mod push;
 mod ssl;
 mod tmux;
 
@@ -621,8 +622,9 @@ async fn terminal_ws(
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_session_name(&state, &name)?;
+    let db = state.db.clone();
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_ws(socket, name).await {
+        if let Err(err) = handle_ws(socket, name, db).await {
             eprintln!("ws error: {err:#}");
         }
     }))
@@ -636,7 +638,11 @@ struct ResizeMsg {
     rows: u16,
 }
 
-async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -> Result<()> {
+async fn handle_ws(
+    socket: axum::extract::ws::WebSocket,
+    session_name: String,
+    db: Arc<db::Db>,
+) -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -686,6 +692,16 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -
             maybe_out = rx.recv() => {
                 match maybe_out {
                     Some(chunk) => {
+                        // BEL (\x07) → Web Push notification. Multiple BELs in
+                        // one chunk fire one notification (per-chunk debounce);
+                        // OS-side coalescing via the per-session `tag` handles
+                        // bursts across chunks.
+                        if chunk.contains(&0x07) {
+                            eprintln!("push: BEL detected on session {session_name}");
+                            let db_for_push = db.clone();
+                            let session_for_push = session_name.clone();
+                            tokio::spawn(push::notify_bell(db_for_push, session_for_push));
+                        }
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
                             break;
