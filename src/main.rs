@@ -107,6 +107,11 @@ async fn main() -> Result<()> {
         )
         .route("/api/push/devices", get(api_push_devices))
         .route("/api/push/notify", post(api_push_notify))
+        .route(
+            "/api/settings/notifications",
+            get(api_get_notification_prefs).put(api_set_notification_prefs),
+        )
+        .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
@@ -701,6 +706,124 @@ async fn api_push_notify(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Serialize, Deserialize)]
+struct NotifPrefsJson {
+    bell: bool,
+    bell_emoji: bool,
+    program_exit: bool,
+    program_exit_nonzero: bool,
+}
+
+impl From<db::NotificationPrefs> for NotifPrefsJson {
+    fn from(p: db::NotificationPrefs) -> Self {
+        Self {
+            bell: p.bell,
+            bell_emoji: p.bell_emoji,
+            program_exit: p.program_exit,
+            program_exit_nonzero: p.program_exit_nonzero,
+        }
+    }
+}
+
+impl From<NotifPrefsJson> for db::NotificationPrefs {
+    fn from(j: NotifPrefsJson) -> Self {
+        Self {
+            bell: j.bell,
+            bell_emoji: j.bell_emoji,
+            program_exit: j.program_exit,
+            program_exit_nonzero: j.program_exit_nonzero,
+        }
+    }
+}
+
+async fn api_get_notification_prefs(
+    State(state): State<AppState>,
+) -> Result<Json<NotifPrefsJson>, AppError> {
+    let prefs = state
+        .db
+        .notification_prefs()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("reading prefs: {e}")))?;
+    Ok(Json(prefs.into()))
+}
+
+async fn api_set_notification_prefs(
+    State(state): State<AppState>,
+    Json(req): Json<NotifPrefsJson>,
+) -> Result<StatusCode, AppError> {
+    state
+        .db
+        .set_notification_prefs(req.into())
+        .map_err(|e| AppError::internal(anyhow::anyhow!("writing prefs: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn settings_page(State(state): State<AppState>) -> Html<String> {
+    let v = &state.cache_bust;
+    Html(format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Mobux · Settings</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
+  <meta name="theme-color" content="#0f1115" />
+  <link rel="stylesheet" href="/static/style.css?v={v}" />
+</head>
+<body>
+  <header class="app-header">
+    <a href="/" class="header-back" aria-label="Back">‹</a>
+    <h1>settings</h1>
+  </header>
+
+  <main class="settings-page">
+    <section class="settings-card">
+      <h2>Notifications</h2>
+      <p class="settings-lede">Pick what fires a push to subscribed devices. Everything is detected by parsing the PTY stream — no shell hooks needed except the OSC-133 prompt for the exit toggles.</p>
+
+      <label class="settings-row">
+        <input type="checkbox" name="bell" />
+        <span class="settings-label">
+          <strong>Terminal bell (\x07)</strong>
+          <small>Standard ASCII BEL byte. Most apps fire this on tab-complete failures, vim errors, irc highlights.</small>
+        </span>
+      </label>
+
+      <label class="settings-row">
+        <input type="checkbox" name="bell_emoji" />
+        <span class="settings-label">
+          <strong>🔔 emoji in output</strong>
+          <small>Used for intentional pings — Claude, scripts, anything that prints the bell glyph.</small>
+        </span>
+      </label>
+
+      <label class="settings-row">
+        <input type="checkbox" name="program_exit" />
+        <span class="settings-label">
+          <strong>Program exit (any code)</strong>
+          <small>Detected via OSC 133;D semantic prompt. Requires Starship, Powerlevel10k, or a PS1 that emits <code>\e]133;D;$?\a</code>.</small>
+        </span>
+      </label>
+
+      <label class="settings-row">
+        <input type="checkbox" name="program_exit_nonzero" />
+        <span class="settings-label">
+          <strong>Program exit (non-zero only)</strong>
+          <small>Same OSC 133;D detection, fires only on failures.</small>
+        </span>
+      </label>
+
+      <div class="settings-status" id="settingsStatus" hidden>Saved.</div>
+    </section>
+  </main>
+
+  <script src="/static/settings.js?v={v}"></script>
+</body>
+</html>
+"##,
+    ))
+}
+
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -969,15 +1092,14 @@ async fn handle_ws(
             maybe_out = rx.recv() => {
                 match maybe_out {
                     Some(chunk) => {
-                        // BEL (\x07) → Web Push notification. Multiple BELs in
-                        // one chunk fire one notification (per-chunk debounce);
-                        // OS-side coalescing via the per-session `tag` handles
-                        // bursts across chunks.
-                        if chunk.contains(&0x07) {
-                            eprintln!("push: BEL detected on session {session_name}");
-                            let db_for_push = db.clone();
-                            let session_for_push = session_name.clone();
-                            tokio::spawn(push::notify_bell(db_for_push, session_for_push));
+                        let prefs = db.notification_prefs().unwrap_or_default();
+                        for trigger in push::scan_pty_chunk(&chunk) {
+                            push::handle_trigger(
+                                db.clone(),
+                                &session_name,
+                                trigger,
+                                prefs,
+                            );
                         }
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
@@ -1086,6 +1208,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
 <body>
   <header class="app-header">
     <h1>mobux</h1>
+    <a href="/settings" class="header-icon" aria-label="Settings">⚙</a>
   </header>
 
   {error_html}
