@@ -141,6 +141,14 @@
       }
     } catch (err) {
       console.error('[push] toggle failed:', err);
+      // No console on a phone — surface the error directly so the user can
+      // see what went wrong. Notifications are an explicit user action,
+      // so a short alert is fine.
+      try {
+        alert('Notifications: ' + (err && err.message ? err.message : String(err)));
+      } catch (_) {
+        // Some embedded contexts disallow alert; ignore.
+      }
       // Re-sync from real state in case we partially succeeded.
       try {
         const reg = await navigator.serviceWorker.getRegistration('/');

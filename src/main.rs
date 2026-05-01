@@ -316,14 +316,17 @@ fn load_auth_config() -> Option<AuthConfig> {
 /// Routes that bypass auth so first-contact device enrollment works:
 /// the install page must be reachable to download the APK + CA, the
 /// digital-asset-links file must be reachable for the TWA verification,
-/// and the icon assets are needed by the bubblewrap build (which
-/// fetches them over HTTPS from the running server).
+/// the icon assets are needed by the bubblewrap build (which fetches
+/// them over HTTPS from the running server), and the service worker
+/// must be reachable for the SW registration request — some Android
+/// browsers fetch /sw.js without page credentials.
 fn is_public_path(path: &str) -> bool {
     path == "/install"
         || path.starts_with("/install/")
         || path.starts_with("/.well-known/")
         || path.starts_with("/static/icon-")
         || path == "/static/manifest.json"
+        || path == "/sw.js"
 }
 
 async fn auth_middleware(
