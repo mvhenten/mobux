@@ -18,6 +18,8 @@
 - **Session management** — create, rename, kill sessions from a mobile-native home screen
 - **Secure** — self-signed TLS by default, HTTP Basic auth with PIN
 - **PWA** — installable as a home screen app
+- **TWA** — `make twa` builds a signed Android APK that mobux serves at `/install`; install once, get a real launcher icon and OS-level push notifications
+- **Push on bell** — terminal `\x07` (BEL) fires a Web Push notification to every subscribed device, deep-linked back to the source session
 
 ## Quick Start
 
@@ -104,7 +106,14 @@ On mobile, the xterm.js hidden textarea is bypassed. Instead:
 | `/api/sessions/:name/command` | POST | Run tmux command |
 | `/api/sessions/:name/history` | GET | Capture scrollback |
 | `/api/upload` | POST | Upload file (multipart) |
+| `/api/push/vapid-public-key` | GET | VAPID public key (base64url) for client `pushManager.subscribe` |
+| `/api/push/subscribe` | POST / DELETE | Register / unregister a Web Push subscription |
+| `/api/push/devices` | GET | List subscribed devices |
 | `/ws/:name` | WS | Terminal WebSocket |
+| `/install` | GET | Self-service install page (CA cert, APK, QR codes) — no auth |
+| `/install/mobux.apk` | GET | Built APK download — no auth |
+| `/install/mobux-ca.crt` | GET | Local CA cert for Android trust store — no auth |
+| `/.well-known/assetlinks.json` | GET | Digital Asset Links file proving the APK owns the domain — no auth |
 
 ## Development
 
@@ -125,27 +134,62 @@ Prereqs: run `bin/setup-twa` once (installs JDK 17, Node, Android cmdline-tools,
 `@bubblewrap/cli`). Then a single command builds everything:
 
 ```bash
-make twa MOBUX_DOMAIN=mobux.example.com
+make twa MOBUX_DOMAIN=mobux.example.com:5151   # port included if non-standard
 ```
 
 This will:
 
 1. Generate a signing keystore at `~/.config/mobux/twa-signing.keystore` on
-   first run (with a random password written to `~/.config/mobux/twa-signing.password`,
+   first run (random password written to `~/.config/mobux/twa-signing.password`,
    mode 0600). Override the password via `MOBUX_TWA_KEYSTORE_PASSWORD`, override
    the config dir via `MOBUX_CONFIG_DIR`.
 2. Render `twa/twa-manifest.json` from the template with your domain.
-3. Run `bubblewrap init` (or `update` if the project already exists) and
-   `bubblewrap build`.
-4. Copy the signed APK to `web/static/install/mobux.apk`.
-5. Write `web/static/.well-known/assetlinks.json` with the cert fingerprint so
-   Android trusts the TWA→domain link.
+3. Bootstrap the bubblewrap project skeleton via `node twa/init.js`, which
+   calls `@bubblewrap/core` directly with the rendered manifest. The bundled
+   `bubblewrap init` CLI is interactive-only and treats `--manifest=` as a
+   remote PWA manifest URL — neither fits a one-command build.
+4. Run `bubblewrap build` (passwords passed as `BUBBLEWRAP_KEYSTORE_PASSWORD` /
+   `BUBBLEWRAP_KEY_PASSWORD` env vars).
+5. Copy the signed APK to `web/static/install/mobux.apk`.
+6. Write `web/static/.well-known/assetlinks.json` with the cert fingerprint so
+   Android trusts the TWA → domain link.
+
+The build needs mobux running with TLS during the icon-fetch step (bubblewrap
+fetches `iconUrl` from the live server). If you use mobux's own self-signed CA,
+set `NODE_EXTRA_CA_CERTS=$HOME/.config/mobux/ca.crt` before running `make twa`
+(the target sets it automatically when the file exists).
 
 **BACK UP YOUR KEYSTORE.** `~/.config/mobux/twa-signing.keystore` (and the
 matching password file) are the only thing standing between you and a broken
 upgrade path: lose the key and existing installs cannot upgrade — only fresh
 install with a new package will work, and the package id `io.github.mvhenten.mobux`
 is then burned for those users.
+
+## Install on a phone
+
+Once the APK is built, the rest of the install is self-service from the phone.
+
+1. On the phone, open `https://<your-mobux-host>/install` in Chrome. (You'll
+   get a "Not secure" warning until step 2 completes — tap through.)
+2. **Install the CA certificate first.** Tap "Download CA certificate", then
+   open Android Settings → Security & privacy → Encryption & credentials →
+   Install a certificate → CA certificate → pick `mobux-ca.crt` from
+   Downloads. The page has the exact menu path; follow the steps in order.
+3. Reload `/install` — the address bar padlock should go green.
+4. Tap "Download APK", install. The Mobux app appears in your launcher.
+5. Open the app, attach to a session, tap 🔔 in the input bar, accept the
+   notification permission.
+6. Test it: from any session, run `echo -e '\a'` with the phone locked —
+   the lock screen lights up with `session N: 🔔` and tapping it opens the
+   session.
+
+For a desktop → phone handoff (e.g. you're configuring a fresh phone from
+your laptop), `/install` shows a QR code next to each download button. Scan it
+with the phone camera to jump straight to the right URL.
+
+If you're running mobux behind a publicly-trusted cert (Let's Encrypt — set
+`MOBUX_ACME_DOMAINS` and `MOBUX_ACME_EMAIL`), the CA install step is skipped
+entirely; the install page won't even render that section.
 
 ## License
 
