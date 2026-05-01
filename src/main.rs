@@ -16,7 +16,7 @@ use axum::{
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::{SinkExt, StreamExt};
@@ -64,7 +64,13 @@ async fn main() -> Result<()> {
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
-        cache_bust: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
+        cache_bust: format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ),
         db,
     };
 
@@ -75,7 +81,10 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/kill", post(api_kill_session))
         .route("/api/sessions/{name}/rename", post(api_rename_session))
         .route("/api/sessions/{name}/panes", get(api_list_panes))
-        .route("/api/sessions/{name}/panes/{pane}/select", post(api_select_pane))
+        .route(
+            "/api/sessions/{name}/panes/{pane}/select",
+            post(api_select_pane),
+        )
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
@@ -86,7 +95,10 @@ async fn main() -> Result<()> {
         .nest_service("/static", ServeDir::new("web/static"))
         .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state_for_mw, auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            state_for_mw,
+            auth_middleware,
+        ));
 
     let port = env::var("PORT")
         .ok()
@@ -100,7 +112,9 @@ async fn main() -> Result<()> {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
     }
 
-    let use_tls = env::var("MOBUX_TLS").map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true);
+    let use_tls = env::var("MOBUX_TLS")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true);
 
     if use_tls {
         let extra_hosts: Vec<String> = env::var("MOBUX_TLS_HOSTS")
@@ -110,15 +124,30 @@ async fn main() -> Result<()> {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let (cert_path, key_path) = match (env::var("MOBUX_CERT_FILE"), env::var("MOBUX_KEY_FILE")) {
+        let (cert_path, key_path) = match (env::var("MOBUX_CERT_FILE"), env::var("MOBUX_KEY_FILE"))
+        {
             (Ok(c), Ok(k)) => {
                 eprintln!("[ssl] Using provided cert: {c}, key: {k}");
                 (std::path::PathBuf::from(c), std::path::PathBuf::from(k))
             }
-            _ => ssl::ensure_dev_cert(&extra_hosts)?,
+            _ => {
+                // ACME mode needs the HTTP-01 route reachable BEFORE the order
+                // runs, so spin up a tiny HTTP-only server first. Same server
+                // stays up for renewals.
+                let challenges = if ssl::acme_mode_enabled() {
+                    let c = ssl::new_acme_challenges();
+                    spawn_acme_http_server(c.clone()).await?;
+                    Some(c)
+                } else {
+                    None
+                };
+                let paths = ssl::ensure_certs(&extra_hosts, challenges).await?;
+                (paths.cert, paths.key)
+            }
         };
         let tls_config = ssl::load_rustls_config(&cert_path, &key_path)?;
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(tls_config));
+        let rustls_config =
+            axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(tls_config));
 
         println!("mobux listening on https://{}", addr);
         axum_server::bind_rustls(addr, rustls_config)
@@ -141,18 +170,67 @@ fn resolve_data_dir() -> Result<PathBuf> {
         }
         return Ok(path);
     }
-    // Plan locks the default to ~/.local/share/mobux/ on Linux.
-    // `directories` resolves XDG_DATA_HOME/HOME for us. On macOS this maps to
-    // ~/Library/Application Support/mobux which is fine for the headless
-    // server use case — the override env var is the escape hatch.
     let dirs = directories::ProjectDirs::from("", "", "mobux")
         .ok_or_else(|| anyhow::anyhow!("could not resolve user home directory for data dir"))?;
     Ok(dirs.data_dir().to_path_buf())
 }
 
+/// Bind a tiny HTTP-only axum server that serves
+/// `/.well-known/acme-challenge/{token}`. Only used in ACME mode. Port comes
+/// from `MOBUX_ACME_HTTP_PORT` (default 80).
+async fn spawn_acme_http_server(challenges: ssl::AcmeChallenges) -> Result<()> {
+    let port: u16 = env::var("MOBUX_ACME_HTTP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(80);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    let router = Router::new()
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(serve_acme_challenge),
+        )
+        .layer(Extension(challenges));
+
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        anyhow::anyhow!(
+            "ACME mode: failed to bind HTTP listener on {addr} for HTTP-01 challenges \
+             (set MOBUX_ACME_HTTP_PORT to override): {e}"
+        )
+    })?;
+
+    eprintln!("[ssl] ACME: HTTP-01 challenge server listening on http://{addr}");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).await {
+            eprintln!("[ssl] ACME HTTP server exited with error: {e}");
+        }
+    });
+
+    Ok(())
+}
+
+async fn serve_acme_challenge(
+    Path(token): Path<String>,
+    Extension(challenges): Extension<ssl::AcmeChallenges>,
+) -> Response {
+    match ssl::lookup_acme_challenge(&challenges, &token) {
+        Some(value) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            value,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown acme challenge token").into_response(),
+    }
+}
+
 fn load_auth_config() -> Option<AuthConfig> {
-    let user_env = env::var("MOBUX_AUTH_USER").ok().map(|v| v.trim().to_string());
-    let pass_env = env::var("MOBUX_AUTH_PASS").ok().map(|v| v.trim().to_string());
+    let user_env = env::var("MOBUX_AUTH_USER")
+        .ok()
+        .map(|v| v.trim().to_string());
+    let pass_env = env::var("MOBUX_AUTH_PASS")
+        .ok()
+        .map(|v| v.trim().to_string());
     let pin_env = env::var("MOBUX_PIN").ok().map(|v| v.trim().to_string());
 
     let session_cookie_name = "mobux_session".to_string();
@@ -170,7 +248,9 @@ fn load_auth_config() -> Option<AuthConfig> {
             session_cookie_value,
         }),
         (user_opt, None, Some(pin)) if !pin.is_empty() => Some(AuthConfig {
-            user: user_opt.filter(|u| !u.is_empty()).unwrap_or_else(|| "mobux".to_string()),
+            user: user_opt
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| "mobux".to_string()),
             pass: pin,
             session_cookie_name,
             session_cookie_value,
@@ -233,8 +313,10 @@ async fn auth_middleware(
     }
 
     let mut resp = (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
-    resp.headers_mut()
-        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"mobux\""));
+    resp.headers_mut().insert(
+        WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"mobux\""),
+    );
     resp
 }
 
@@ -259,7 +341,9 @@ async fn api_create_session(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let name = payload.name.trim();
     validate_session_name(&state, name)?;
-    tmux::new_session(name).await.map_err(AppError::bad_request)?;
+    tmux::new_session(name)
+        .await
+        .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true, "name": name})))
 }
 
@@ -297,7 +381,9 @@ async fn api_list_panes(
     Path(name): Path<String>,
 ) -> Result<Json<Vec<tmux::Pane>>, AppError> {
     validate_session_name(&state, &name)?;
-    let panes = tmux::list_panes(&name).await.map_err(AppError::bad_request)?;
+    let panes = tmux::list_panes(&name)
+        .await
+        .map_err(AppError::bad_request)?;
     Ok(Json(panes))
 }
 
@@ -311,7 +397,6 @@ async fn api_select_pane(
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true})))
 }
-
 
 async fn api_session_history(
     State(state): State<AppState>,
@@ -341,9 +426,7 @@ async fn api_tmux_command(
     Ok(Json(json!({"ok": true, "output": result})))
 }
 
-async fn api_debug_log(
-    body: String,
-) -> StatusCode {
+async fn api_debug_log(body: String) -> StatusCode {
     use std::fs::OpenOptions;
     use std::io::Write as _;
     let path = "debug-input.log";
@@ -364,15 +447,23 @@ async fn api_upload(
     let upload_dir = PathBuf::from("/tmp/mobux-uploads");
     fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
 
-    if let Some(field) = multipart.next_field().await.map_err(|e| AppError::bad_request(e.into()))? {
-        let filename = field.file_name()
-            .unwrap_or("upload")
-            .to_string();
+    if let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::bad_request(e.into()))?
+    {
+        let filename = field.file_name().unwrap_or("upload").to_string();
 
         // Sanitize filename
         let safe_name = filename
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
 
         // Add timestamp to avoid collisions
@@ -382,7 +473,10 @@ async fn api_upload(
             .as_millis();
         let dest = upload_dir.join(format!("{ts}-{safe_name}"));
 
-        let data = field.bytes().await.map_err(|e| AppError::bad_request(e.into()))?;
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::bad_request(e.into()))?;
         fs::write(&dest, &data).map_err(|e| AppError::bad_request(e.into()))?;
 
         return Ok(Json(json!({
@@ -563,7 +657,12 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     }
 
     let error_html = error
-        .map(|e| format!(r#"<section class="panel error">{}</section>"#, html_escape::encode_text(e)))
+        .map(|e| {
+            format!(
+                r#"<section class="panel error">{}</section>"#,
+                html_escape::encode_text(e)
+            )
+        })
         .unwrap_or_default();
 
     format!(
