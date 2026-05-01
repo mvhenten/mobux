@@ -11,7 +11,7 @@ use axum::{
     extract::{ws::Message, Path, State, WebSocketUpgrade},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
-        HeaderValue, Request, StatusCode,
+        HeaderMap, HeaderValue, Request, StatusCode,
     },
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -101,6 +101,10 @@ async fn main() -> Result<()> {
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
+        .route("/install", get(install_page))
+        .route("/install/mobux.apk", get(serve_install_apk))
+        .route("/install/mobux-ca.crt", get(serve_install_ca))
+        .route("/.well-known/assetlinks.json", get(serve_assetlinks))
         .nest_service("/static", ServeDir::new("web/static"))
         .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
@@ -614,6 +618,178 @@ async fn serve_sw() -> impl axum::response::IntoResponse {
         [(header::CONTENT_TYPE, "text/javascript")],
         include_str!("../web/static/sw.js"),
     )
+}
+
+// ── /install: TWA install page (APK + CA download, with QR codes) ────
+//
+// Pure server-rendered, no client JS. The QR codes encode absolute URLs
+// (built from the request `Host` header) so a desktop browser visitor can
+// scan from a phone and land on the right asset on the right host.
+
+const INSTALL_APK_PATH: &str = "web/static/install/mobux.apk";
+const INSTALL_ASSETLINKS_PATH: &str = "web/static/.well-known/assetlinks.json";
+
+fn host_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost")
+        .to_string()
+}
+
+/// Render a QR code as inline SVG. Returns the SVG document text. Falls back
+/// to a short error string baked into the page if encoding fails — QR
+/// generation should never abort the install page render.
+fn qr_svg(data: &str) -> String {
+    use qrcode::render::svg;
+    use qrcode::{EcLevel, QrCode};
+
+    match QrCode::with_error_correction_level(data.as_bytes(), EcLevel::M) {
+        Ok(code) => code
+            .render::<svg::Color<'_>>()
+            .min_dimensions(220, 220)
+            .dark_color(svg::Color("#0f1115"))
+            .light_color(svg::Color("#ffffff"))
+            .quiet_zone(true)
+            .build(),
+        Err(_) => "<!-- qr encode failed -->".to_string(),
+    }
+}
+
+async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html<String> {
+    let host = host_from_headers(&headers);
+    let host_esc = html_escape::encode_text(&host);
+
+    let apk_url = format!("https://{host}/install/mobux.apk");
+    let ca_url = format!("https://{host}/install/mobux-ca.crt");
+    let apk_present = std::path::Path::new(INSTALL_APK_PATH).exists();
+
+    let install_section = if apk_present {
+        format!(
+            r##"<section class="install-card">
+  <h2>Install the app</h2>
+  <p class="install-lede">Download the Android APK, or scan the QR with your phone.</p>
+  <div class="install-grid">
+    <a class="install-btn" href="/install/mobux.apk" download>Download APK</a>
+    <div class="install-qr">{qr}</div>
+  </div>
+</section>"##,
+            qr = qr_svg(&apk_url),
+        )
+    } else {
+        format!(
+            r##"<section class="install-card">
+  <h2>Install the app</h2>
+  <p class="install-lede">APK not built yet.</p>
+  <p class="install-hint">Run <code>make twa MOBUX_DOMAIN={host_esc}</code> on the server to build the APK.</p>
+</section>"##,
+        )
+    };
+
+    let ca_section = if ssl::acme_mode_enabled() {
+        String::new()
+    } else {
+        format!(
+            r##"<section class="install-card">
+  <h2>Trust the certificate</h2>
+  <p class="install-lede">Install the local CA so Android trusts this server.</p>
+  <div class="install-grid">
+    <a class="install-btn" href="/install/mobux-ca.crt" download>Download CA</a>
+    <div class="install-qr">{qr}</div>
+  </div>
+  <ol class="install-steps">
+    <li>Settings &rarr; Security</li>
+    <li>Encryption &amp; credentials &rarr; Install a certificate</li>
+    <li>CA certificate</li>
+  </ol>
+</section>"##,
+            qr = qr_svg(&ca_url),
+        )
+    };
+
+    let v = &state.cache_bust;
+    Html(format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mobux · Install</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#0f1115" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
+  <link rel="stylesheet" href="/static/style.css?v={v}" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>mobux · install</h1>
+  </header>
+  <main class="install-page">
+    {install_section}
+    {ca_section}
+  </main>
+</body>
+</html>
+"##,
+    ))
+}
+
+async fn serve_install_apk() -> Response {
+    serve_file_or_404(
+        INSTALL_APK_PATH,
+        "application/vnd.android.package-archive",
+        Some("mobux.apk"),
+    )
+    .await
+}
+
+async fn serve_install_ca() -> Response {
+    if ssl::acme_mode_enabled() {
+        return (StatusCode::NOT_FOUND, "ACME mode: no local CA to install").into_response();
+    }
+    let path = ssl::ca_cert_path();
+    serve_file_or_404(
+        path.to_string_lossy().as_ref(),
+        "application/x-x509-ca-cert",
+        Some("mobux-ca.crt"),
+    )
+    .await
+}
+
+async fn serve_assetlinks() -> Response {
+    serve_file_or_404(INSTALL_ASSETLINKS_PATH, "application/json", None).await
+}
+
+/// Read a file from disk and return it as a Response with the given
+/// Content-Type. 404 if the file is absent. Optionally sets a
+/// `Content-Disposition: attachment; filename=...` header so browsers
+/// download instead of trying to render.
+async fn serve_file_or_404(
+    path: &str,
+    content_type: &'static str,
+    download_name: Option<&'static str>,
+) -> Response {
+    use axum::http::header;
+    let bytes = match tokio::fs::read(path).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+
+    let mut resp = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        bytes,
+    )
+        .into_response();
+
+    if let Some(name) = download_name {
+        let disp = format!("attachment; filename=\"{name}\"");
+        if let Ok(v) = HeaderValue::from_str(&disp) {
+            resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    resp
 }
 
 async fn terminal_ws(

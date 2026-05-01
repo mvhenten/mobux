@@ -41,3 +41,4 @@ instant-acme = "0.8"
 time = "0.3"
 web-push-native = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }

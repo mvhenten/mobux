@@ -482,3 +482,79 @@ h1, h2, h3 { margin: 0; }
 .input-send:active {
   background: #3a7a4a;
 }
+
+/* ── /install page ────────────────────────────────────────────────── */
+.install-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.install-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+.install-card h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.install-lede {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 16px;
+}
+.install-hint {
+  color: var(--text);
+  font-size: 14px;
+  margin: 0;
+}
+.install-hint code {
+  font-family: var(--mono);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 13px;
+}
+.install-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+.install-btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  text-decoration: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.install-btn:active {
+  opacity: 0.8;
+}
+.install-qr {
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px;
+  line-height: 0;
+}
+.install-qr svg {
+  display: block;
+  width: 220px;
+  height: 220px;
+}
+.install-steps {
+  margin: 16px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
