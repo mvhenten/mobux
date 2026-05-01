@@ -120,7 +120,9 @@ fn config_dir() -> PathBuf {
     PathBuf::from(home).join(".config").join("mobux")
 }
 
-fn ca_cert_path() -> PathBuf {
+/// Path to the local root CA cert PEM. Used by the install page in CA mode
+/// so users can download and trust the CA on their device.
+pub fn ca_cert_path() -> PathBuf {
     config_dir().join("ca.crt")
 }
 
