@@ -1,6 +1,25 @@
 # Implementation Plan: TWA Wrapper + Web Push Notifications
 
-**Status**: Draft, 2026-05-01. All non-functional requirements settled. No code written yet. This document is meant to be picked up by an implementing agent (or future-you) and executed phase by phase.
+**Status**: Draft, 2026-05-01. All non-functional requirements settled.
+
+## Live progress
+
+| Phase | What | Status | PR |
+|---|---|---|---|
+| 1 | Setup scripts (`bin/setup`, `bin/setup-twa`) | ✅ merged | #14 |
+| 2 | SQLite + VAPID state layer | ✅ merged | #13 |
+| 3 | Cert layer rewrite (CA + ACME) | ✅ merged | #15 |
+| 4 | Service worker rewrite (push-only) | ✅ merged | #12 |
+| 5 | Push registration UI + endpoints | ✅ merged | #17 |
+| 6 | BEL detection + push delivery | ✅ merged | #19 |
+| 7 | Bubblewrap config + `make twa` | ✅ merged | #16 |
+| 8 | `/install` page + APK + CA + assetlinks | ✅ merged | #18 |
+| 9 | End-to-end smoke test (real device) | 🔄 in progress | — |
+
+**Notes from execution:**
+- Phase 5 ruled out the `web-push` crate (transitive openssl-sys); Phase 6 picked `web-push-native` + `reqwest` (rustls), build stays openssl-free.
+- `bin/setup-twa` needed three patches during e2e — `set -u` was breaking SDKMAN's and nvm's internal shell functions, and `pipefail` + `yes |` was masking successful installs as failures and triggering an unnecessary fallback that filled the disk on the first attempt. Patches bundled with this PR.
+- Phase 9 (e2e) is manual — needs a real Android device on the same network.
 
 ---
 

@@ -91,6 +91,12 @@ ensure_jdk17() {
     log "JDK 17 already installed via SDKMAN (${installed})"
   else
     log "Installing JDK ${JDK_VERSION} via SDKMAN"
+    # SDKMAN's internal install scripts reference unset positional params, so
+    # `sdk install` blows up under `set -u`. And `yes n | sdk install` exits
+    # `yes` on SIGPIPE which `pipefail` reports as a failure even when the
+    # install itself succeeded. Relax both around SDKMAN calls.
+    set +u
+    set +o pipefail
     # `sdk install` asks "Do you want to set <ver> as default?" — answer no.
     if ! yes n | sdk install java "${JDK_VERSION}"; then
       # Fallback: pick the newest 17.x Temurin that SDKMAN currently offers.
@@ -98,11 +104,15 @@ ensure_jdk17() {
       fallback="$(sdk list java 2>/dev/null \
         | grep -Eo '17\.[0-9.]+-tem' | sort -u | tail -n1 || true)"
       if [ -z "${fallback}" ]; then
+        set -u
+        set -o pipefail
         fail "Could not install JDK 17 via SDKMAN (no 17.x-tem candidate found)."
       fi
       log "Pinned JDK ${JDK_VERSION} not available; falling back to ${fallback}"
       yes n | sdk install java "${fallback}"
     fi
+    set -u
+    set -o pipefail
     # Refresh detection after install.
     installed="$(find "${java_dir}" -mindepth 1 -maxdepth 1 -type d -name '17.*' \
       -printf '%f\n' 2>/dev/null | head -n1)"
@@ -144,15 +154,17 @@ ensure_nvm() {
 }
 
 ensure_node_lts() {
+  # nvm's shell functions reference unset vars, same as SDKMAN. Keep -u off
+  # for the whole function body and restore on every exit path.
   set +u
   # shellcheck disable=SC1091
   . "${NVM_DIR}/nvm.sh"
-  set -u
 
   # `nvm which lts/*` exits 0 and prints the path if any LTS is installed.
   if nvm which 'lts/*' >/dev/null 2>&1; then
     nvm use --lts >/dev/null 2>&1 || true
     log "Node LTS already installed via nvm: $(node --version 2>/dev/null || echo unknown)"
+    set -u
     return 0
   fi
 
@@ -160,6 +172,7 @@ ensure_node_lts() {
   nvm install --lts
   nvm use --lts >/dev/null
   log "Node: $(node --version)"
+  set -u
 }
 
 # ---------------------------------------------------------------------------
@@ -231,14 +244,19 @@ ensure_android_sdk_packages() {
     log "Android SDK packages already installed (platform-tools, platforms;android-${ANDROID_API_LEVEL}, build-tools;${ANDROID_BUILD_TOOLS})"
   else
     log "Installing Android SDK packages: ${needed[*]}"
-    # Pre-accept licenses so the install never blocks waiting for input.
+    # `yes |` exits via SIGPIPE when sdkmanager closes its stdin, which
+    # `pipefail` reports as failure even when the install succeeded.
+    set +o pipefail
     yes | "${sdkmanager}" --licenses >/dev/null 2>&1 || true
     yes | "${sdkmanager}" "${needed[@]}" >/dev/null
+    set -o pipefail
   fi
 
   # Always (re-)accept licenses; cheap and idempotent.
   log "Accepting Android SDK licenses (non-interactive)"
+  set +o pipefail
   yes | "${sdkmanager}" --licenses >/dev/null 2>&1 || true
+  set -o pipefail
 }
 
 # ---------------------------------------------------------------------------
