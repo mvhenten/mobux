@@ -115,6 +115,38 @@ make test       # playwright smoke tests (mobile Chrome)
 make restart    # stop + start as background daemon
 ```
 
+## Building the TWA
+
+mobux ships its own Trusted Web Activity APK so you can install it as a real
+Android app (full-screen, no browser chrome, push notifications). The APK is
+built per-domain — different domain, different APK.
+
+Prereqs: run `bin/setup-twa` once (installs JDK 17, Node, Android cmdline-tools,
+`@bubblewrap/cli`). Then a single command builds everything:
+
+```bash
+make twa MOBUX_DOMAIN=mobux.example.com
+```
+
+This will:
+
+1. Generate a signing keystore at `~/.config/mobux/twa-signing.keystore` on
+   first run (with a random password written to `~/.config/mobux/twa-signing.password`,
+   mode 0600). Override the password via `MOBUX_TWA_KEYSTORE_PASSWORD`, override
+   the config dir via `MOBUX_CONFIG_DIR`.
+2. Render `twa/twa-manifest.json` from the template with your domain.
+3. Run `bubblewrap init` (or `update` if the project already exists) and
+   `bubblewrap build`.
+4. Copy the signed APK to `web/static/install/mobux.apk`.
+5. Write `web/static/.well-known/assetlinks.json` with the cert fingerprint so
+   Android trusts the TWA→domain link.
+
+**BACK UP YOUR KEYSTORE.** `~/.config/mobux/twa-signing.keystore` (and the
+matching password file) are the only thing standing between you and a broken
+upgrade path: lose the key and existing installs cannot upgrade — only fresh
+install with a new package will work, and the package id `io.github.mvhenten.mobux`
+is then burned for those users.
+
 ## License
 
 ISC
