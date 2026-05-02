@@ -379,12 +379,13 @@ test('horizontal swipe on reader switches windows', async ({ page }) => {
 
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
-  await page.waitForTimeout(800);
+  // switchWindow no-ops unless the WebSocket is open.
+  await page.waitForFunction(() => window.__mobuxView.test.wsReady(), { timeout: 5000 });
+  await page.waitForTimeout(300);
 
   await page.evaluate(() => window.__mobuxView.swap('reader'));
   await page.waitForTimeout(300);
 
-  // Re-read active idx after navigation/persistence settle.
   const startIdx = (await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json())
     .findIndex(p => p.active);
 

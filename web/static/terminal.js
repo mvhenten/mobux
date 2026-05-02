@@ -296,6 +296,7 @@ window.__mobuxView = {
     terminalRows: () => core.term.rows,
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
+    wsReady: () => core.ws?.readyState === WebSocket.OPEN,
   },
 };
 
