@@ -398,6 +398,29 @@ h1, h2, h3 { margin: 0; }
   margin: 0 1px;
 }
 
+/* Bubble: when consecutive lines share a single background colour,
+   they fuse into one chat-bubble container with a 1px lighter border.
+   Lines inside lose their own chip styling so the bubble's outline
+   is the sole visible boundary. */
+.rb-bubble {
+  display: block;
+  margin: 6px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.rb-bubble .rb-bubble-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+  margin: 0;
+  display: block;
+}
+
 
 #touchOverlay {
   position: absolute;

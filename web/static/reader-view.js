@@ -92,28 +92,50 @@ function renderInlineBlock(className, runs) {
 function renderTextBlock(block) {
   const el = document.createElement('div');
   el.className = 'rb rb-text';
-  for (const line of block.lines) {
-    const lineEl = document.createElement('div');
-    lineEl.className = 'rb-line';
-    appendRuns(lineEl, line.runs);
-    el.appendChild(lineEl);
-  }
+  appendLinesWithBubbles(el, block.lines, 'rb-line');
   return el;
 }
 
 function renderCodeBlock(block) {
   const wrap = document.createElement('div');
   wrap.className = 'rb rb-code';
-  for (const line of block.lines) {
-    const lineEl = document.createElement('div');
-    lineEl.className = 'rb-codeline';
-    appendRuns(lineEl, line.runs);
-    wrap.appendChild(lineEl);
-  }
+  appendLinesWithBubbles(wrap, block.lines, 'rb-codeline');
   return wrap;
 }
 
-function appendRuns(parent, runs) {
+// Walk a list of `{ runs, bubbleBg }` lines and emit DOM, fusing
+// consecutive same-bubbleBg lines into a single .rb-bubble container.
+// Runs inside a bubble render without their own bg chip styling so the
+// bubble's border is the only visible boundary.
+function appendLinesWithBubbles(parent, lines, lineClass) {
+  let i = 0;
+  while (i < lines.length) {
+    const bg = lines[i].bubbleBg;
+    if (bg) {
+      const bubble = document.createElement('div');
+      bubble.className = 'rb-bubble';
+      bubble.style.background = bg;
+      bubble.style.borderColor = `color-mix(in srgb, ${bg} 78%, white 22%)`;
+      while (i < lines.length && lines[i].bubbleBg === bg) {
+        const lineEl = document.createElement('div');
+        lineEl.className = `${lineClass} rb-bubble-line`;
+        appendRuns(lineEl, lines[i].runs, { skipBg: true });
+        bubble.appendChild(lineEl);
+        i++;
+      }
+      parent.appendChild(bubble);
+    } else {
+      const lineEl = document.createElement('div');
+      lineEl.className = lineClass;
+      appendRuns(lineEl, lines[i].runs);
+      parent.appendChild(lineEl);
+      i++;
+    }
+  }
+}
+
+function appendRuns(parent, runs, opts) {
+  const skipBg = opts && opts.skipBg;
   if (!runs || runs.length === 0) {
     parent.appendChild(document.createTextNode('\u00a0'));
     return;
@@ -122,19 +144,15 @@ function appendRuns(parent, runs) {
     if (!run.text) continue;
     const span = document.createElement('span');
     span.textContent = run.text;
-    applyAttrs(span, run.attrs);
+    applyAttrs(span, run.attrs, skipBg);
     parent.appendChild(span);
   }
 }
 
-function applyAttrs(el, a) {
+function applyAttrs(el, a, skipBg) {
   if (!a) return;
   if (a.fg) el.style.color = a.fg;
-  if (a.bg) {
-    // Render backgrounded runs as a contiguous chip: small padding,
-    // rounded, with a 1px border one shade lighter than the fill so
-    // adjacent same-bg runs across glyphs read as one block instead
-    // of a tight per-glyph highlight.
+  if (a.bg && !skipBg) {
     el.style.background = a.bg;
     el.style.padding = '0 3px';
     el.style.borderRadius = '3px';
@@ -145,7 +163,7 @@ function applyAttrs(el, a) {
   if (a.italic) el.style.fontStyle = 'italic';
   if (a.underline) el.style.textDecoration = 'underline';
   if (a.dim) el.style.opacity = '0.6';
-  if (a.inverse) {
+  if (a.inverse && !skipBg) {
     const fg = el.style.color || 'currentColor';
     const bg = el.style.background || 'transparent';
     el.style.color = bg;

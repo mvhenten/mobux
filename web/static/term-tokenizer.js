@@ -172,6 +172,24 @@ function isHeader(text) {
   return HEADER_BRACKET_RE.test(text) || HEADER_HASH_RE.test(text);
 }
 
+// Compute the bubble background for a line: the bg colour shared by
+// every non-whitespace run, or null if the line is mixed / unbgd.
+// Lines with a single colour spanning their whole content render as
+// chat-bubble blocks rather than per-glyph chips, and consecutive
+// lines with the same bubbleBg fuse into one bubble.
+function lineBubbleBg(runs) {
+  let bg = null;
+  let sawContent = false;
+  for (const r of runs) {
+    if (!r.text || r.text.trim().length === 0) continue;
+    sawContent = true;
+    if (r.attrs.bg === null) return null;
+    if (bg === null) bg = r.attrs.bg;
+    else if (bg !== r.attrs.bg) return null;
+  }
+  return sawContent ? bg : null;
+}
+
 // ── Logical-line iteration ─────────────────────────────────────────
 // Coalesces wrapped rows so the reader gets one entry per logical
 // line and can reflow on its own width.
@@ -219,7 +237,7 @@ export function tokenize(buffer, cols) {
       continue;
     }
     if (inFence) {
-      codeLines.push({ runs, text });
+      codeLines.push({ runs, text, bubbleBg: lineBubbleBg(runs) });
       continue;
     }
 
@@ -239,7 +257,7 @@ export function tokenize(buffer, cols) {
       blocks.push({ type: 'prompt', runs, text });
       continue;
     }
-    pushTextLine({ runs, text });
+    pushTextLine({ runs, text, bubbleBg: lineBubbleBg(runs) });
   }
   if (inFence) flushCode();
   return blocks;
@@ -248,5 +266,5 @@ export function tokenize(buffer, cols) {
 // Exposed for unit tests.
 export const _internals = {
   isRule, isPrompt, isHeader, attrsEqual, attrsAreDefault,
-  paletteColour, rgbColour,
+  paletteColour, rgbColour, lineBubbleBg,
 };

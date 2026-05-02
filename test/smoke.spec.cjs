@@ -478,6 +478,43 @@ test('reader strips trailing default-attr whitespace from lines', async ({ page 
   expect(trailers).toEqual([]);
 });
 
+test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const BLUE_BG = '\x1b[44m';
+  const RESET2 = '\x1b[0m';
+  await injectRaw(
+    page,
+    // Leading newline pushes past any pending shell prompt so the
+    // first bubble line isn't shared with the prompt run.
+    `\n${BLUE_BG}bubble line one${RESET2}\n` +
+    `${BLUE_BG}bubble line two${RESET2}\n` +
+    `${BLUE_BG}bubble line three${RESET2}\n` +
+    `plain trailing line\n`,
+  );
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('#reader .rb-bubble'))
+      .some((b) => (b.querySelectorAll('.rb-bubble-line').length >= 3)),
+    { timeout: 3000 },
+  );
+
+  const bubbles = await page.evaluate(() => {
+    const els = document.querySelectorAll('#reader .rb-bubble');
+    return Array.from(els).map((b) => ({
+      lines: b.querySelectorAll('.rb-bubble-line').length,
+      text: (b.textContent || '').trim(),
+    }));
+  });
+  const fused = bubbles.find((b) => b.text.includes('bubble line one') && b.text.includes('bubble line three'));
+  expect(fused).toBeTruthy();
+  expect(fused.lines).toBeGreaterThanOrEqual(3);
+});
+
 test('reader is vertically scrollable when content overflows', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
