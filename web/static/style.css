@@ -322,17 +322,68 @@ h1, h2, h3 { margin: 0; }
   background: #0f1115;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+
+  /* ANSI 16 palette — default xterm colours, theme-overridable. */
+  --ansi-0:  #1e1e1e;  --ansi-1:  #cc6666;  --ansi-2:  #b5bd68;  --ansi-3:  #f0c674;
+  --ansi-4:  #81a2be;  --ansi-5:  #b294bb;  --ansi-6:  #8abeb7;  --ansi-7:  #c5c8c6;
+  --ansi-8:  #5c6370;  --ansi-9:  #e06c75;  --ansi-10: #98c379;  --ansi-11: #e5c07b;
+  --ansi-12: #61afef;  --ansi-13: #c678dd;  --ansi-14: #56b6c2;  --ansi-15: #ffffff;
 }
 #reader.hidden { display: none; }
 #terminal.hidden { display: none; }
 #touchOverlay.hidden { display: none; }
 
-.reader-line {
+/* Block container — every block gets a small vertical rhythm. */
+.rb { margin: 0; }
+.rb + .rb { margin-top: 2px; }
+
+.rb-blank { min-height: 0.6em; }
+
+.rb-rule {
+  border: 0;
+  border-top: 1px solid #2a2f3a;
+  margin: 10px 0;
+}
+
+.rb-prompt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: #8a93a6;
+  margin-top: 8px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  margin: 0;
 }
-.reader-line.blank { min-height: 1.45em; }
+
+.rb-header {
+  font-weight: 700;
+  color: #eef2fb;
+  margin: 12px 0 4px;
+  font-size: 17px;
+}
+
+.rb-text { white-space: normal; }
+.rb-text .rb-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rb-code {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #161a22;
+  border: 1px solid #232936;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-x: auto;
+  white-space: pre;
+  -webkit-overflow-scrolling: touch;
+}
+.rb-code .rb-codeline {
+  white-space: pre;
+  min-height: 1.4em;
+}
 
 
 #touchOverlay {

@@ -373,6 +373,111 @@ test('long-press on reader opens menu and toggle-view returns to xterm', async (
   ).toBe('xterm');
 });
 
+// ── Tokenizer / colour rendering ────────────────────────────────
+// Inject ANSI sequences and assert the reader emits the right block
+// types with the right colours, so we can refactor the tokenizer
+// without silently regressing colour or block detection.
+
+const RED  = '\x1b[31m';
+const GREEN = '\x1b[32m';
+const BOLD = '\x1b[1m';
+const RESET = '\x1b[0m';
+
+async function injectRaw(page, str) {
+  await page.evaluate((s) => window.__mobuxView.test.inject(s), str);
+}
+
+async function blockSummary(page) {
+  return await page.evaluate(() => {
+    const blocks = document.querySelectorAll('#reader > .rb');
+    return Array.from(blocks).map((b) => ({
+      classes: Array.from(b.classList).filter((c) => c !== 'rb'),
+      text: (b.textContent || '').trim().slice(0, 80),
+    }));
+  });
+}
+
+test('reader colours preserved (red + green spans)', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+  await injectRaw(page, `${RED}- removed${RESET}\n${GREEN}+ added${RESET}\n`);
+  await page.waitForTimeout(200);
+
+  const colours = await page.evaluate(() => {
+    const spans = document.querySelectorAll('#reader span');
+    return Array.from(spans)
+      .map((s) => ({ t: s.textContent, c: s.style.color }))
+      .filter((s) => s.t && s.c);
+  });
+  const reds = colours.filter((c) => /var\(--ansi-1\)|rgb\(204|cc6666/.test(c.c));
+  const greens = colours.filter((c) => /var\(--ansi-2\)|b5bd68/.test(c.c));
+  expect(reds.length).toBeGreaterThan(0);
+  expect(greens.length).toBeGreaterThan(0);
+  expect(reds.some((r) => r.t.includes('removed'))).toBe(true);
+  expect(greens.some((g) => g.t.includes('added'))).toBe(true);
+});
+
+test('reader detects prompt, header, rule, code blocks', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  // Clear prior content visually then inject a structured snippet.
+  await injectRaw(page,
+    [
+      '~/dev (main) $',
+      '[Context]',
+      '\u2500'.repeat(40),
+      '```',
+      '  fn hello() {}',
+      '```',
+      'plain prose line.',
+    ].join('\n') + '\n');
+  await page.waitForTimeout(250);
+
+  const summary = await blockSummary(page);
+  const types = summary.map((b) => b.classes.join(' '));
+  expect(types.some((t) => t.includes('rb-prompt'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-header'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-rule'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-code'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-text'))).toBe(true);
+
+  // Code block must contain the fenced content.
+  const codeText = await page.locator('#reader .rb-code').textContent();
+  expect(codeText).toContain('fn hello()');
+  // Triple-backtick fences themselves must NOT appear in output.
+  expect(codeText).not.toContain('```');
+});
+
+test('reader strips trailing default-attr whitespace from lines', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await injectRaw(page, 'TRAILMARK content                                  \n');
+  await page.waitForTimeout(200);
+  // No rendered .rb-line should have trailing whitespace — the
+  // tokenizer collapses default-attr trailing space.
+  const trailers = await page.evaluate(() => {
+    const lines = Array.from(document.querySelectorAll('#reader .rb-line'));
+    return lines
+      .map((l) => l.textContent || '')
+      .filter((t) => t.length > 0 && /[ \t]$/.test(t));
+  });
+  expect(trailers).toEqual([]);
+});
+
 test('view preference persists per window', async ({ page }) => {
   const session = SESSION;
   const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();

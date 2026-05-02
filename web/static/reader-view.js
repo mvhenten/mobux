@@ -1,12 +1,11 @@
 // ReaderView — phone-friendly view of the terminal buffer.
 //
-// Reads xterm.js's already-parsed buffer (so all cursor moves, redraws,
-// colors etc. are resolved) and renders each row as a wrapped block of
-// proportional text with native browser scroll. No fixed grid, no
-// monospace requirement, copy-paste / native text selection work.
-//
-// v1 is intentionally dumb: full-buffer rerender on every data event,
-// debounced. No block segmentation, no chat bubbles. Those land on top.
+// Reads xterm.js's already-parsed buffer, runs it through the
+// streaming tokenizer to extract semantic blocks (prompt, code, text,
+// rule, header, blank) with per-run colour, and renders each block
+// with its own DOM/CSS styling. Colours are preserved.
+
+import { tokenize } from './term-tokenizer.js';
 
 const RENDER_DEBOUNCE_MS = 50;
 const STICK_TO_BOTTOM_PX = 80;
@@ -30,9 +29,6 @@ export class ReaderView {
     if (this.overlay) this.overlay.classList.add('hidden');
     this.core.addEventListener('data', this._onData);
     this.core.addEventListener('history', this._onHistory);
-    // Catch every parsed write — covers WS bytes, history reload,
-    // and direct term.write from anything else (test injects, future
-    // features). Without this, only WS-driven updates re-render.
     this._writeSub = this.core.term.onWriteParsed(() => this._scheduleRender());
     this._render();
   }
@@ -59,45 +55,99 @@ export class ReaderView {
 
   _render() {
     const buffer = this.core.getActiveBuffer();
-    const total = buffer.length;
+    const cols = this.core.term.cols;
     const stickToBottom =
       this.host.scrollHeight - this.host.scrollTop - this.host.clientHeight
         < STICK_TO_BOTTOM_PX;
 
-    // Coalesce wrapped logical lines: xterm marks continuation rows
-    // with isWrapped=true. We join them so the reader can reflow on
-    // its own width.
-    const lines = [];
-    let current = '';
-    for (let y = 0; y < total; y++) {
-      const line = buffer.getLine(y);
-      if (!line) continue;
-      const text = line.translateToString(true);
-      if (line.isWrapped) {
-        current += text;
-      } else {
-        if (current.length > 0 || y > 0) lines.push(current);
-        current = text;
-      }
-    }
-    lines.push(current);
-
+    const blocks = tokenize(buffer, cols);
     const frag = document.createDocumentFragment();
-    for (const text of lines) {
-      const div = document.createElement('div');
-      div.className = 'reader-line';
-      if (text.length === 0) {
-        div.classList.add('blank');
-        div.textContent = '\u00a0';
-      } else {
-        div.textContent = text;
-      }
-      frag.appendChild(div);
-    }
+    for (const block of blocks) frag.appendChild(renderBlock(block));
     this.host.replaceChildren(frag);
 
-    if (stickToBottom) {
-      this.host.scrollTop = this.host.scrollHeight;
-    }
+    if (stickToBottom) this.host.scrollTop = this.host.scrollHeight;
   }
+}
+
+// ── Block rendering ────────────────────────────────────────────────
+function renderBlock(block) {
+  switch (block.type) {
+    case 'blank':  return makeEl('div', 'rb rb-blank', '\u00a0');
+    case 'rule':   return makeEl('hr',  'rb rb-rule');
+    case 'header': return renderInlineBlock('rb rb-header', block.runs);
+    case 'prompt': return renderInlineBlock('rb rb-prompt', block.runs);
+    case 'text':   return renderTextBlock(block);
+    case 'code':   return renderCodeBlock(block);
+    default:       return makeEl('div', 'rb', block.text || '');
+  }
+}
+
+function renderInlineBlock(className, runs) {
+  const el = document.createElement('div');
+  el.className = className;
+  appendRuns(el, runs);
+  return el;
+}
+
+function renderTextBlock(block) {
+  const el = document.createElement('div');
+  el.className = 'rb rb-text';
+  for (const line of block.lines) {
+    const lineEl = document.createElement('div');
+    lineEl.className = 'rb-line';
+    appendRuns(lineEl, line.runs);
+    el.appendChild(lineEl);
+  }
+  return el;
+}
+
+function renderCodeBlock(block) {
+  const wrap = document.createElement('pre');
+  wrap.className = 'rb rb-code';
+  const code = document.createElement('code');
+  for (const line of block.lines) {
+    const lineEl = document.createElement('div');
+    lineEl.className = 'rb-codeline';
+    appendRuns(lineEl, line.runs);
+    code.appendChild(lineEl);
+  }
+  wrap.appendChild(code);
+  return wrap;
+}
+
+function appendRuns(parent, runs) {
+  if (!runs || runs.length === 0) {
+    parent.appendChild(document.createTextNode('\u00a0'));
+    return;
+  }
+  for (const run of runs) {
+    if (!run.text) continue;
+    const span = document.createElement('span');
+    span.textContent = run.text;
+    applyAttrs(span, run.attrs);
+    parent.appendChild(span);
+  }
+}
+
+function applyAttrs(el, a) {
+  if (!a) return;
+  if (a.fg) el.style.color = a.fg;
+  if (a.bg) el.style.background = a.bg;
+  if (a.bold) el.style.fontWeight = '600';
+  if (a.italic) el.style.fontStyle = 'italic';
+  if (a.underline) el.style.textDecoration = 'underline';
+  if (a.dim) el.style.opacity = '0.6';
+  if (a.inverse) {
+    const fg = el.style.color || 'currentColor';
+    const bg = el.style.background || 'transparent';
+    el.style.color = bg;
+    el.style.background = fg;
+  }
+}
+
+function makeEl(tag, className, text) {
+  const el = document.createElement(tag);
+  el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
 }
