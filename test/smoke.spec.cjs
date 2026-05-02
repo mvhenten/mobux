@@ -478,6 +478,34 @@ test('reader strips trailing default-attr whitespace from lines', async ({ page 
   expect(trailers).toEqual([]);
 });
 
+test('reader is vertically scrollable when content overflows', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  // Inject 200 lines so we definitely exceed viewport.
+  const big = Array.from({ length: 200 }, (_, i) => `line ${i} content`).join('\n');
+  await injectRaw(page, big + '\n');
+  await page.waitForTimeout(300);
+
+  const metrics = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    return { scroll: r.scrollHeight, client: r.clientHeight };
+  });
+  expect(metrics.scroll).toBeGreaterThan(metrics.client);
+
+  const moved = await page.evaluate(() => {
+    const r = document.getElementById('reader');
+    r.scrollTop = 0;
+    r.scrollTop = 200;
+    return r.scrollTop;
+  });
+  expect(moved).toBeGreaterThan(0);
+});
+
 test('view preference persists per window', async ({ page }) => {
   const session = SESSION;
   const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();

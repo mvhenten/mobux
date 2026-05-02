@@ -102,16 +102,14 @@ function renderTextBlock(block) {
 }
 
 function renderCodeBlock(block) {
-  const wrap = document.createElement('pre');
+  const wrap = document.createElement('div');
   wrap.className = 'rb rb-code';
-  const code = document.createElement('code');
   for (const line of block.lines) {
     const lineEl = document.createElement('div');
     lineEl.className = 'rb-codeline';
     appendRuns(lineEl, line.runs);
-    code.appendChild(lineEl);
+    wrap.appendChild(lineEl);
   }
-  wrap.appendChild(code);
   return wrap;
 }
 
@@ -132,7 +130,17 @@ function appendRuns(parent, runs) {
 function applyAttrs(el, a) {
   if (!a) return;
   if (a.fg) el.style.color = a.fg;
-  if (a.bg) el.style.background = a.bg;
+  if (a.bg) {
+    // Render backgrounded runs as a contiguous chip: small padding,
+    // rounded, with a 1px border one shade lighter than the fill so
+    // adjacent same-bg runs across glyphs read as one block instead
+    // of a tight per-glyph highlight.
+    el.style.background = a.bg;
+    el.style.padding = '0 3px';
+    el.style.borderRadius = '3px';
+    el.style.border = `1px solid color-mix(in srgb, ${a.bg} 78%, white 22%)`;
+    el.classList.add('rb-chip');
+  }
   if (a.bold) el.style.fontWeight = '600';
   if (a.italic) el.style.fontStyle = 'italic';
   if (a.underline) el.style.textDecoration = 'underline';

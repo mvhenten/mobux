@@ -376,13 +376,26 @@ h1, h2, h3 { margin: 0; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 1.4;
-  overflow-x: auto;
-  white-space: pre;
-  -webkit-overflow-scrolling: touch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .rb-code .rb-codeline {
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   min-height: 1.4em;
+}
+
+/* Backgrounded runs render as inline-block chips so the fill, border
+   and rounded corners read as one contiguous block rather than a
+   tight per-glyph highlight. */
+.rb-chip {
+  display: inline-block;
+  vertical-align: baseline;
+  line-height: 1.25;
+  margin: 0 1px;
 }
 
 
