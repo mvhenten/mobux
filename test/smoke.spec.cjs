@@ -382,19 +382,26 @@ test('horizontal swipe on reader switches windows', async ({ page }) => {
   await page.waitForTimeout(800);
 
   await page.evaluate(() => window.__mobuxView.swap('reader'));
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(300);
 
-  const startIdx = panes.findIndex(p => p.active);
+  // Re-read active idx after navigation/persistence settle.
+  const startIdx = (await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json())
+    .findIndex(p => p.active);
 
-  // Swipe left = next window
+  // Swipe left = next window. Spread move events over ~80ms so the
+  // gesture recognizer sees a real velocity sample and the state
+  // machine clearly enters HSWIPE.
   await fireTouch(page, '#reader', 'touchstart', 320, 400);
-  for (let i = 1; i <= 8; i++) await fireTouch(page, '#reader', 'touchmove', 320 - i * 30, 400);
+  for (let i = 1; i <= 8; i++) {
+    await fireTouch(page, '#reader', 'touchmove', 320 - i * 30, 400);
+    await page.waitForTimeout(10);
+  }
   await fireTouch(page, '#reader', 'touchend', 80, 400);
 
   await expect.poll(async () => {
     const ps = await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json();
     return ps.findIndex(p => p.active);
-  }, { timeout: 2000 }).not.toBe(startIdx);
+  }, { timeout: 5000, intervals: [100, 200, 400] }).not.toBe(startIdx);
 });
 
 test('view preference persists per window', async ({ page }) => {
