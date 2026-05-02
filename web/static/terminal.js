@@ -1,9 +1,11 @@
 import { TerminalCore } from './terminal-core.js';
+import { ReaderView } from './reader-view.js';
 import { createGestureRecognizer } from './touch.js';
 import { createInputBar } from './input-bar.js';
 
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
+const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");
 const loadquote = document.getElementById("loadquote");
 const paneIndicator = document.getElementById("paneIndicator");
@@ -162,6 +164,41 @@ let inputBar = null;
 if (isMobile) {
   inputBar = createInputBar(core.term, (d) => core.send(d));
 }
+
+// ── View swap (xterm <-> reader) ────────────────────────────────────
+const reader = new ReaderView({ host: readerEl, core, overlay });
+let currentView = 'xterm';
+
+function swapView(mode) {
+  if (mode !== 'xterm' && mode !== 'reader') return;
+  if (mode === currentView) return;
+  if (mode === 'reader') {
+    termEl.classList.add('hidden');
+    reader.mount();
+  } else {
+    reader.unmount();
+    termEl.classList.remove('hidden');
+    setTimeout(() => core.resize(), 0);
+  }
+  currentView = mode;
+  try { localStorage.setItem('mobux.view.default', mode); } catch (_) {}
+  window.dispatchEvent(new CustomEvent('mobux:viewchange', { detail: mode }));
+}
+
+window.__mobuxView = {
+  swap: swapView,
+  get current() { return currentView; },
+};
+
+// Apply persisted preference (devtools-only entry point for now;
+// long-press menu toggle lands in the next commit)
+try {
+  const stored = localStorage.getItem('mobux.view.default');
+  if (stored === 'reader') {
+    // defer so the buffer has content to render
+    setTimeout(() => swapView('reader'), 200);
+  }
+} catch (_) {}
 
 // ── Boot ────────────────────────────────────────────────────────────
 (async () => {

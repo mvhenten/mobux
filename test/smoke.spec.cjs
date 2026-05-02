@@ -238,3 +238,62 @@ test('URLs in terminal output are tappable', async ({ page }) => {
   });
   expect(detected).toContain('https://example.com');
 });
+
+test('reader view renders buffer text', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  await page.goto(`${BASE}/s/${sessions[0].name}`);
+
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    return vp && vp.scrollHeight > 100;
+  }, { timeout: 5000 });
+
+  // Type a unique marker into the terminal so we can find it in reader output.
+  await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
+  await page.keyboard.type('echo MOBUX_READER_MARKER_42');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(800);
+
+  // Swap to reader view via the devtools API.
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await expect(page.locator('#reader')).toBeVisible();
+  await expect(page.locator('#terminal')).toBeHidden();
+
+  const readerText = await page.locator('#reader').textContent();
+  expect(readerText).toContain('MOBUX_READER_MARKER_42');
+
+  // Swap back.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(100);
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#reader')).toBeHidden();
+});
+
+test('reader view live-updates on new output', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  await page.goto(`${BASE}/s/${sessions[0].name}`);
+
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    return vp && vp.scrollHeight > 100;
+  }, { timeout: 5000 });
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
+  await page.keyboard.type('echo MOBUX_LIVE_PROBE_99');
+  await page.keyboard.press('Enter');
+
+  await expect.poll(
+    async () => (await page.locator('#reader').textContent()) || '',
+    { timeout: 3000 }
+  ).toContain('MOBUX_LIVE_PROBE_99');
+
+  // Cleanup
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+});

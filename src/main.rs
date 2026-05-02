@@ -1261,6 +1261,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 </head>
 <body class="term-body">
   <div id="terminal"></div>
+  <div id="reader" class="hidden"></div>
   <div id="loadquote"><q id="quote"></q><br><cite id="qauthor"></cite></div>
   <div id="touchOverlay"></div>
   <div id="paneIndicator"></div>
