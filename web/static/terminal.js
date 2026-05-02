@@ -236,8 +236,8 @@ function applyView(mode, { persist = true } = {}) {
   if (mode === currentView) { updateToggleLabel(); return; }
   if (mode === 'reader') {
     termEl.classList.add('hidden');
-    // Reader handles its own scroll natively; the xterm touch overlay
-    // would otherwise sit over #reader and eat every touch.
+    // Reader has its own gesture recogniser on #reader. Disable the
+    // xterm overlay so it doesn't sit on top and eat every touch.
     overlay.style.pointerEvents = 'none';
     reader.mount();
     mountReaderGestures();
@@ -301,9 +301,11 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
-    readerScrollY: () => reader._scrollY,
-    readerMaxScroll: () => reader._maxScroll,
+    readerScrollY: () => reader.scrollY,
+    readerMaxScroll: () => reader.maxScroll,
+    readerInnerHeight: () => reader.innerHeight,
     readerScrollBy: (dy) => reader.scrollBy(dy),
+    readerStickToBottom: () => reader.stickToBottom(),
   },
 };
 
