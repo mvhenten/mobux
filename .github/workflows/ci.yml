@@ -33,7 +33,10 @@ jobs:
       - name: Start tmux + mobux
         run: |
           sudo apt-get install -y tmux
-          tmux new-session -d -s test "echo 'test session running'; sleep 300"
+          # Placeholder session so the tmux server is up and the mobux
+          # health check below sees something. The smoke suite creates
+          # and tears down its own dedicated session in beforeAll.
+          tmux new-session -d -s placeholder "sleep 86400"
           MOBUX_TLS=0 PORT=5151 ./target/debug/mobux &
           sleep 2
           curl -sf http://localhost:5151/api/sessions || (echo "Server failed to start"; exit 1)

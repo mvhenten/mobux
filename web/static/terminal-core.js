@@ -1,0 +1,170 @@
+// TerminalCore — owns the xterm.js Terminal, the WebSocket to the tmux PTY,
+// resize math, history reload and the pane (window) list. No DOM concerns
+// beyond the host element passed in; no gesture or input-bar code. This is
+// the data plane that any view layer (xterm, reader, …) plugs into.
+
+const WINDOW_SWITCH_CMDS = new Set([
+  'next-window', 'prev-window', 'new-window', 'kill-window',
+]);
+
+export class TerminalCore extends EventTarget {
+  constructor({ session, host, isMobile }) {
+    super();
+    this.session = session;
+    this.host = host;
+    this.isMobile = isMobile;
+
+    this.term = new Terminal({
+      cursorBlink: true,
+      fontSize: isMobile ? 14 : 15,
+      convertEol: false,
+      scrollback: 10000,
+      theme: { background: '#0f1115' },
+    });
+    this.term.open(host);
+    this.term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+    // Lock mouse protocol to NONE — prevents xterm.js from capturing
+    // touch/mouse when tmux sends \x1b[?1000h
+    Object.defineProperty(this.term._core.coreMouseService, 'activeProtocol', {
+      set() {}, get() { return 'NONE'; }, configurable: true,
+    });
+
+    // Block alternate screen buffer — tmux alt screen has no scrollback
+    const buffers = this.term._core._bufferService.buffers;
+    buffers.activateAltBuffer = () => {};
+    buffers.activateNormalBuffer = () => {};
+
+    this.ws = null;
+    this.panes = [];
+    this.activeIndex = 0;
+
+    this.term.onData((d) => this.send(d));
+  }
+
+  // ── WebSocket lifecycle ───────────────────────────────────────────
+  connect() {
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    this.ws = new WebSocket(
+      `${wsProto}://${location.host}/ws/${encodeURIComponent(this.session)}`,
+    );
+    this.ws.binaryType = 'arraybuffer';
+    this.ws.onopen = () => {
+      this.resize();
+      this.refreshPanes();
+      this.dispatchEvent(new Event('open'));
+    };
+    this.ws.onmessage = async (ev) => {
+      let bytes;
+      if (typeof ev.data === 'string') {
+        this.term.write(ev.data);
+        bytes = ev.data;
+      } else if (ev.data instanceof ArrayBuffer) {
+        const u8 = new Uint8Array(ev.data);
+        this.term.write(u8);
+        bytes = u8;
+      } else if (ev.data instanceof Blob) {
+        const u8 = new Uint8Array(await ev.data.arrayBuffer());
+        this.term.write(u8);
+        bytes = u8;
+      }
+      this.dispatchEvent(new CustomEvent('data', { detail: bytes }));
+    };
+    this.ws.onclose = () => {};
+    this.ws.onerror = () => {};
+  }
+
+  reconnect() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    if (this.ws) { try { this.ws.close(); } catch (_) {} }
+    this.connect();
+  }
+
+  send(data) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data);
+    }
+  }
+
+  // ── Resize ────────────────────────────────────────────────────────
+  resize() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const cell = this.cellSize();
+    const bar = document.getElementById('inputBar');
+    const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
+    const cols = Math.max(20, Math.floor(window.innerWidth / cell.width) - 1);
+    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
+    this.term.resize(cols, rows);
+    this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  }
+
+  cellSize() {
+    const dims = this.term._core._renderService.dimensions?.css?.cell;
+    return { width: dims?.width || 9, height: dims?.height || 18 };
+  }
+
+  // ── Buffer / scroll passthroughs ──────────────────────────────────
+  getActiveBuffer() { return this.term.buffer.active; }
+  scrollLines(n)    { this.term.scrollLines(n); }
+  scrollToBottom()  { this.term.scrollToBottom(); }
+  clear()           { this.term.clear(); }
+
+  setFontSize(px) {
+    if (px !== this.term.options.fontSize) {
+      this.term.options.fontSize = px;
+      this.resize();
+    }
+  }
+  getFontSize() { return this.term.options.fontSize; }
+
+  // ── Panes (= tmux windows) ────────────────────────────────────────
+  async refreshPanes() {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(this.session)}/panes`);
+      if (!res.ok) return;
+      this.panes = await res.json();
+      this.activeIndex = this.panes.findIndex((p) => p.active);
+      if (this.activeIndex < 0) this.activeIndex = 0;
+      this.dispatchEvent(new CustomEvent('panes', {
+        detail: { panes: this.panes, activeIndex: this.activeIndex },
+      }));
+    } catch (_) {}
+  }
+
+  switchWindow(direction) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.send(direction === 'next' ? '\x02n' : '\x02p');
+    this.clear();
+    this.scrollToBottom();
+    setTimeout(() => { this.refreshPanes(); this.reloadHistory(); }, 300);
+  }
+
+  async runTmuxCmd(command) {
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(this.session)}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+    } catch (_) {}
+    if (WINDOW_SWITCH_CMDS.has(command)) {
+      this.clear();
+      this.scrollToBottom();
+    }
+    setTimeout(() => { this.refreshPanes(); this.reloadHistory(); }, 300);
+  }
+
+  // ── History ───────────────────────────────────────────────────────
+  async reloadHistory() {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(this.session)}/history`);
+      if (!res.ok) return;
+      const history = await res.text();
+      if (history.trim()) {
+        this.term.write(history.replace(/\n/g, '\r\n'));
+        this.scrollToBottom();
+        this.dispatchEvent(new CustomEvent('history', { detail: history }));
+      }
+    } catch (_) {}
+  }
+}

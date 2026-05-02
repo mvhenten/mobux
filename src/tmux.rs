@@ -91,6 +91,7 @@ pub async fn rename_session(old_name: &str, new_name: &str) -> Result<()> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pane {
+    pub id: String,
     pub index: String,
     pub title: String,
     pub active: bool,
@@ -103,7 +104,7 @@ pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
             "list-windows",
             "-t", session,
             "-F",
-            "#{window_index}\t#{window_name}\t#{window_active}",
+            "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}",
         ])
         .output()
         .await
@@ -118,13 +119,14 @@ pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
     let mut out = vec![];
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() != 3 {
+        if parts.len() != 4 {
             continue;
         }
         out.push(Pane {
-            index: parts[0].to_string(),
-            title: parts[1].to_string(),
-            active: parts[2] == "1",
+            id: parts[0].to_string(),
+            index: parts[1].to_string(),
+            title: parts[2].to_string(),
+            active: parts[3] == "1",
         });
     }
     Ok(out)

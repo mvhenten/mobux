@@ -1,8 +1,11 @@
+import { TerminalCore } from './terminal-core.js';
+import { ReaderView } from './reader-view.js';
 import { createGestureRecognizer } from './touch.js';
 import { createInputBar } from './input-bar.js';
 
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
+const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");
 const loadquote = document.getElementById("loadquote");
 const paneIndicator = document.getElementById("paneIndicator");
@@ -31,72 +34,18 @@ const quotes = [
   document.getElementById("qauthor").textContent = "\u2014 " + author;
 }
 
-// ── Terminal setup ──────────────────────────────────────────────────
+// ── Core ────────────────────────────────────────────────────────────
 const isMobile = window.innerWidth < 620;
-const term = new Terminal({
-  cursorBlink: true,
-  fontSize: isMobile ? 14 : 15,
-  convertEol: false,
-  scrollback: 10000,
-  theme: { background: "#0f1115" },
-});
-term.open(termEl);
-term.loadAddon(new WebLinksAddon.WebLinksAddon());
-
-// Lock mouse protocol to NONE — prevents xterm.js from capturing
-// touch/mouse when tmux sends \x1b[?1000h
-Object.defineProperty(term._core.coreMouseService, 'activeProtocol', {
-  set() {}, get() { return 'NONE'; }, configurable: true,
-});
-
-// Block alternate screen buffer — tmux alt screen has no scrollback
-const buffers = term._core._bufferService.buffers;
-buffers.activateAltBuffer = () => {};
-buffers.activateNormalBuffer = () => {};
+const core = new TerminalCore({ session, host: termEl, isMobile });
 
 // Enable overlay for touch devices
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
   overlay.style.pointerEvents = 'auto';
 }
 
-// ── WebSocket connection ────────────────────────────────────────────
-const wsProto = location.protocol === "https:" ? "wss" : "ws";
-let ws;
-
-function sendResize() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const cw = term._core._renderService.dimensions?.css?.cell?.width || 9;
-  const ch = term._core._renderService.dimensions?.css?.cell?.height || 18;
-  const bar = document.getElementById('inputBar');
-  const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
-  const cols = Math.max(20, Math.floor(window.innerWidth / cw) - 1);
-  const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / ch) - 1);
-  term.resize(cols, rows);
-  ws.send(JSON.stringify({ type: "resize", cols, rows }));
-}
-
-function reconnect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-  if (ws) { try { ws.close(); } catch(e) {} }
-  connect();
-}
-
-// ── Pane management ─────────────────────────────────────────────────
-let panes = [];
-let activeIndex = 0;
-
-async function refreshPanes() {
-  try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/panes`);
-    if (!res.ok) return;
-    panes = await res.json();
-    activeIndex = panes.findIndex((p) => p.active);
-    if (activeIndex < 0) activeIndex = 0;
-    updatePaneUI();
-  } catch (e) {}
-}
-
+// ── Pane indicator ──────────────────────────────────────────────────
 function updatePaneUI() {
+  const { panes, activeIndex } = core;
   if (panes.length <= 1) {
     paneIndicator.textContent = panes.length === 1 ? panes[0].title : "";
   } else {
@@ -104,32 +53,11 @@ function updatePaneUI() {
     paneIndicator.textContent = `${current ? current.title : "?"} (${activeIndex + 1}/${panes.length})`;
   }
 }
-
-function switchWindow(direction) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(direction === 'next' ? "\x02n" : "\x02p");
-    term.clear();
-    term.scrollToBottom();
-    setTimeout(() => { refreshPanes(); reloadHistory(); }, 300);
-  }
-}
-
-const WINDOW_SWITCH_CMDS = new Set(['next-window', 'prev-window', 'new-window', 'kill-window']);
-
-async function runTmuxCmd(command) {
-  try {
-    await fetch(`/api/sessions/${encodeURIComponent(session)}/command`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
-    });
-  } catch (e) {}
-  if (WINDOW_SWITCH_CMDS.has(command)) {
-    term.clear();
-    term.scrollToBottom();
-  }
-  setTimeout(() => { refreshPanes(); reloadHistory(); }, 300);
-}
+core.addEventListener('panes', () => {
+  updatePaneUI();
+  pruneViewPrefs();
+  applyStoredViewForActiveWindow();
+});
 
 // ── Command pick list ───────────────────────────────────────────────
 function showCmdList() {
@@ -147,33 +75,31 @@ function hideCmdList() {
 }
 
 cmdPickList.addEventListener('click', (e) => {
-  const item = e.target.closest('[data-cmd]');
-  if (item) { runTmuxCmd(item.dataset.cmd); hideCmdList(); }
+  const cmdItem = e.target.closest('[data-cmd]');
+  if (cmdItem) { core.runTmuxCmd(cmdItem.dataset.cmd); hideCmdList(); return; }
+  const actionItem = e.target.closest('[data-action]');
+  if (actionItem?.dataset.action === 'toggle-view') {
+    swapView(currentView === 'xterm' ? 'reader' : 'xterm');
+    hideCmdList();
+  }
 });
 cmdCloseBtn.addEventListener('click', hideCmdList);
 cmdOverlayBg.addEventListener('click', hideCmdList);
 
-// ── Scroll ──────────────────────────────────────────────────────────
+// ── Touch gestures ──────────────────────────────────────────────────
 function scrollByPixels(dy) {
-  const cellHeight = term._core._renderService.dimensions?.css?.cell?.height || 18;
-  const lines = Math.round(dy / cellHeight);
-  if (lines !== 0) term.scrollLines(lines);
+  const lines = Math.round(dy / core.cellSize().height);
+  if (lines !== 0) core.scrollLines(lines);
 }
 
-// ── Touch gestures (single state machine) ───────────────────────────
 createGestureRecognizer(overlay, {
   onScroll: scrollByPixels,
-
-  onReconnect: reconnect,
-
-  getFontSize: () => term.options.fontSize,
+  onReconnect: () => core.reconnect(),
+  getFontSize: () => core.getFontSize(),
 
   onPinch(scale, startSize) {
     const newSize = Math.round(Math.max(8, Math.min(32, startSize * scale)));
-    if (newSize !== term.options.fontSize) {
-      term.options.fontSize = newSize;
-      sendResize();
-    }
+    core.setFontSize(newSize);
   },
 
   onTwoPullMove(pull, vh) {
@@ -190,16 +116,15 @@ createGestureRecognizer(overlay, {
     // Detect URLs in terminal text at tap position and open them.
     // WebLinksAddon uses hover-based links which don't work on mobile,
     // so we read the buffer text directly.
-    const cellWidth = term._core._renderService.dimensions?.css?.cell?.width || 9;
-    const cellHeight = term._core._renderService.dimensions?.css?.cell?.height || 18;
+    const cell = core.cellSize();
     const rect = termEl.getBoundingClientRect();
-    const col = Math.floor((x - rect.left) / cellWidth);
-    const row = Math.floor((y - rect.top) / cellHeight);
-    const bufferRow = term.buffer.active.viewportY + row;
-    const line = term.buffer.active.getLine(bufferRow);
+    const col = Math.floor((x - rect.left) / cell.width);
+    const row = Math.floor((y - rect.top) / cell.height);
+    const buffer = core.getActiveBuffer();
+    const bufferRow = buffer.viewportY + row;
+    const line = buffer.getLine(bufferRow);
     if (!line) return;
     const text = line.translateToString(true);
-    // Find URL that spans the tapped column
     const urlRe = /https?:\/\/[^\s)"'>]+/g;
     let match;
     while ((match = urlRe.exec(text)) !== null) {
@@ -225,67 +150,144 @@ createGestureRecognizer(overlay, {
     }
   },
 
-  onHSwipe: switchWindow,
+  onHSwipe: (dir) => core.switchWindow(dir),
 
   onLongPress: showCmdList,
 });
 
-// ── History loading ─────────────────────────────────────────────────
-async function reloadHistory() {
-  try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(session)}/history`);
-    if (!res.ok) return;
-    const history = await res.text();
-    if (history.trim()) {
-      // Prepend history above current viewport
-      term.write(history.replace(/\n/g, '\r\n'));
-      term.scrollToBottom();
-    }
-  } catch (e) {}
-}
-
-// ── Connect & reveal ────────────────────────────────────────────────
+// ── Reveal on first output ──────────────────────────────────────────
 let revealTimer = null;
 function scheduleReveal() {
   if (!loadquote || !loadquote.parentNode) return;
   clearTimeout(revealTimer);
   revealTimer = setTimeout(() => {
-    term.scrollToBottom();
+    core.scrollToBottom();
     loadquote.style.opacity = '0';
     setTimeout(() => { if (loadquote.parentNode) loadquote.remove(); }, 300);
   }, 800);
 }
-
-function connect() {
-  ws = new WebSocket(`${wsProto}://${location.host}/ws/${encodeURIComponent(session)}`);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => { sendResize(); refreshPanes(); };
-  ws.onmessage = async (ev) => {
-    if (typeof ev.data === "string") term.write(ev.data);
-    else if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
-    else if (ev.data instanceof Blob) term.write(new Uint8Array(await ev.data.arrayBuffer()));
-    scheduleReveal();
-  };
-  ws.onclose = () => {};
-  ws.onerror = () => {};
-}
-
-term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
+core.addEventListener('data', scheduleReveal);
 
 // ── Mobile input bar ────────────────────────────────────────────────
 let inputBar = null;
 if (isMobile) {
-  inputBar = createInputBar(term, (d) => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(d);
-  });
+  inputBar = createInputBar(core.term, (d) => core.send(d));
 }
 
+// ── View swap (xterm <-> reader) ────────────────────────────────────
+const reader = new ReaderView({ host: readerEl, core, overlay });
+let currentView = 'xterm';
+
+const VIEW_DEFAULT_KEY = 'mobux.view.default';
+const viewPrefKey = (windowId) => `mobux.view.${session}.${windowId}`;
+
+function activeWindowId() {
+  const p = core.panes[core.activeIndex];
+  return p?.id || null;
+}
+
+function storedDefaultView() {
+  try { return localStorage.getItem(VIEW_DEFAULT_KEY) || 'xterm'; }
+  catch (_) { return 'xterm'; }
+}
+
+function storedViewFor(windowId) {
+  if (!windowId) return null;
+  try { return localStorage.getItem(viewPrefKey(windowId)); }
+  catch (_) { return null; }
+}
+
+function updateToggleLabel() {
+  if (!viewToggleLabel) return;
+  if (currentView === 'reader') {
+    viewToggleLabel.textContent = 'Terminal View';
+    if (viewToggleIcon) viewToggleIcon.textContent = '\u25a3';
+  } else {
+    viewToggleLabel.textContent = 'Reader View';
+    if (viewToggleIcon) viewToggleIcon.textContent = '\ud83d\udcd6';
+  }
+}
+
+function applyView(mode, { persist = true } = {}) {
+  if (mode !== 'xterm' && mode !== 'reader') return;
+  if (mode === currentView) { updateToggleLabel(); return; }
+  if (mode === 'reader') {
+    termEl.classList.add('hidden');
+    reader.mount();
+  } else {
+    reader.unmount();
+    termEl.classList.remove('hidden');
+    setTimeout(() => core.resize(), 0);
+  }
+  currentView = mode;
+  if (persist) {
+    try {
+      localStorage.setItem(VIEW_DEFAULT_KEY, mode);
+      const wid = activeWindowId();
+      if (wid) localStorage.setItem(viewPrefKey(wid), mode);
+    } catch (_) {}
+  }
+  updateToggleLabel();
+  window.dispatchEvent(new CustomEvent('mobux:viewchange', { detail: mode }));
+}
+
+function swapView(mode) { applyView(mode, { persist: true }); }
+
+function applyStoredViewForActiveWindow() {
+  const wid = activeWindowId();
+  const stored = storedViewFor(wid);
+  const mode = stored || storedDefaultView();
+  applyView(mode, { persist: false });
+}
+
+function pruneViewPrefs() {
+  const live = new Set(core.panes.map((p) => p.id).filter(Boolean));
+  const prefix = `mobux.view.${session}.`;
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(prefix) && !live.has(k.slice(prefix.length))) {
+        localStorage.removeItem(k);
+      }
+    }
+  } catch (_) {}
+}
+
+window.__mobuxView = {
+  swap: swapView,
+  get current() { return currentView; },
+  send: (d) => core.send(d),
+  test: {
+    inject: (str) => new Promise((resolve) =>
+      core.term.write(str.replace(/\n/g, '\r\n'), resolve)),
+    injectLines: (n, prefix = 'inject') => {
+      let s = '';
+      for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
+      return new Promise((resolve) => core.term.write(s, resolve));
+    },
+    bufferLength: () => core.getActiveBuffer().length,
+    terminalRows: () => core.term.rows,
+    viewportY: () => core.getActiveBuffer().viewportY,
+    scrollToBottom: () => core.scrollToBottom(),
+  },
+};
+
+// Apply stored default at boot so the user lands in their preferred
+// view even before the first /panes refresh resolves. Per-window
+// override (if any) is applied later in the panes listener.
+const bootDefault = storedDefaultView();
+if (bootDefault === 'reader') {
+  setTimeout(() => applyView('reader', { persist: false }), 0);
+}
+
+updateToggleLabel();
+
+// ── Boot ────────────────────────────────────────────────────────────
 (async () => {
-  await reloadHistory();
-  connect();
+  await core.reloadHistory();
+  core.connect();
 })();
 
-window.addEventListener("resize", sendResize);
-setTimeout(sendResize, 100);
-setInterval(refreshPanes, 5000);
-
+window.addEventListener("resize", () => core.resize());
+setTimeout(() => core.resize(), 100);
+setInterval(() => core.refreshPanes(), 5000);

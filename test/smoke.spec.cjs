@@ -1,12 +1,39 @@
 const { test, expect } = require('@playwright/test');
+const { execSync } = require('child_process');
 
 const BASE = process.env.MOBUX_URL || 'https://localhost:5151';
 const USER = process.env.MOBUX_USER || '';
 const PASS = process.env.MOBUX_PASS || '';
 const AUTH = (USER && PASS) ? 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64') : null;
+const SESSION = process.env.MOBUX_TEST_SESSION || 'mobux-smoke';
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
+});
+
+test.beforeAll(() => {
+  // Create a dedicated tmux session for the suite so tests never
+  // mutate (or get polluted by) whatever the user is currently doing.
+  // Seed it with enough lines that the scrollback tests have something
+  // to scroll through.
+  try { execSync(`tmux kill-session -t ${SESSION}`, { stdio: 'pipe' }); } catch (_) {}
+  // Pre-seed with enough lines for scroll tests; quiet otherwise so
+  // assertions don't race against live output. Use bash so tests that
+  // type real commands (URL detection, etc.) hit a working prompt.
+  execSync(
+    `tmux new-session -d -s ${SESSION} "bash --norc --noprofile"`,
+    { stdio: 'pipe' },
+  );
+  execSync(`tmux send-keys -t ${SESSION} "PS1='\\$ '" Enter`, { stdio: 'pipe' });
+  execSync(`tmux send-keys -t ${SESSION} "clear" Enter`, { stdio: 'pipe' });
+  // Add a second window so multi-window tests don't skip.
+  execSync(`tmux new-window -t ${SESSION} -n second "sh -c 'while true; do sleep 60; done'"`, { stdio: 'pipe' });
+  execSync(`tmux select-window -t ${SESSION}:0`, { stdio: 'pipe' });
+  execSync('sleep 0.3');
+});
+
+test.afterAll(() => {
+  try { execSync(`tmux kill-session -t ${SESSION}`, { stdio: 'pipe' }); } catch (_) {}
 });
 
 test('index loads', async ({ page }) => {
@@ -22,8 +49,7 @@ test('sessions API works', async ({ page }) => {
 });
 
 test('terminal renders and connects', async ({ page }) => {
-  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
-  await page.goto(`${BASE}/s/${sessions[0].name}`);
+  await page.goto(`${BASE}/s/${SESSION}`);
 
   await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
   await expect(page.locator('#touchOverlay')).toBeAttached();
@@ -35,27 +61,28 @@ test('terminal renders and connects', async ({ page }) => {
 });
 
 test('scroll works via touch gesture', async ({ page }) => {
-  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
-  await page.goto(`${BASE}/s/${sessions[0].name}`);
+  await page.goto(`${BASE}/s/${SESSION}`);
 
-  await page.waitForFunction(() => {
-    const vp = document.querySelector('.xterm-viewport');
-    return vp && vp.scrollHeight > 100;
-  }, { timeout: 5000 });
-
-  // Scroll to bottom first
-  await page.evaluate(() => {
-    const vp = document.querySelector('.xterm-viewport');
-    if (vp) vp.scrollTop = vp.scrollHeight;
-  });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  // Wait for WS attach + redraw to settle so it doesn't clobber our inject.
+  await page.waitForTimeout(800);
+  // Inject 300 lines directly into xterm so we have guaranteed scrollback
+  // independent of session redraw timing.
+  await page.evaluate(() => window.__mobuxView.test.injectLines(300, 'scrollseed'));
   await page.waitForTimeout(200);
 
-  const scrollBefore = await page.evaluate(() =>
-    document.querySelector('.xterm-viewport')?.scrollTop ?? 0
-  );
-  if (scrollBefore === 0) { test.skip(true, 'No scrollback'); return; }
+  // Park at the bottom; xterm tracks scroll position via viewportY in
+  // its buffer (not via the .xterm-viewport DOM scrollTop, which is
+  // virtualized in xterm.js v5+).
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  // Let any in-flight WS bytes finish; sticky-bottom keeps viewportY
+  // pinned to (bufferLen - rows) until we touch.
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  const yBefore = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(yBefore).toBeGreaterThan(0);
 
-  // Simulate downward swipe (finger moves down = scroll up)
+  // Simulate downward swipe (finger moves down = scroll up = viewportY decreases)
   await page.evaluate(() => {
     const overlay = document.getElementById('touchOverlay');
     if (!overlay) return;
@@ -72,17 +99,15 @@ test('scroll works via touch gesture', async ({ page }) => {
     for (let i = 1; i <= 10; i++) fire('touchmove', 200, 300 + i * 20);
     fire('touchend', 200, 500);
   });
-  await page.waitForTimeout(200);
 
-  const scrollAfter = await page.evaluate(() =>
-    document.querySelector('.xterm-viewport')?.scrollTop ?? 0
-  );
-  expect(scrollAfter).toBeLessThan(scrollBefore);
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.test.viewportY()),
+    { timeout: 2000 }
+  ).toBeLessThan(yBefore);
 });
 
 test('swipe left/right switches tmux windows', async ({ page }) => {
-  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
-  const session = sessions[0].name;
+  const session = SESSION;
 
   // Need at least 2 windows to test switching
   const panesBefore = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
@@ -114,8 +139,7 @@ test('swipe left/right switches tmux windows', async ({ page }) => {
 });
 
 test('window switching works via command API', async ({ page }) => {
-  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
-  const session = sessions[0].name;
+  const session = SESSION;
 
   const panesBefore = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
   if (panesBefore.length < 2) { test.skip(true, 'Need 2+ windows'); return; }
@@ -145,58 +169,9 @@ test('window switching works via command API', async ({ page }) => {
   expect(afterPrevActive).toBe(initialActive);
 });
 
-test('gesture layer translates touch to scroll', async ({ page }) => {
-  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
-  await page.goto(`${BASE}/s/${sessions[0].name}`);
-
-  await page.waitForFunction(() => {
-    const vp = document.querySelector('.xterm-viewport');
-    return vp && vp.scrollHeight > 100;
-  }, { timeout: 5000 });
-
-  // Scroll to bottom first so we can detect upward scroll
-  await page.evaluate(() => {
-    const vp = document.querySelector('.xterm-viewport');
-    if (vp) vp.scrollTop = vp.scrollHeight;
-  });
-  await page.waitForTimeout(100);
-
-  const scrollBefore = await page.evaluate(() =>
-    document.querySelector('.xterm-viewport')?.scrollTop ?? 0
-  );
-  if (scrollBefore === 0) { test.skip(true, 'No scrollback'); return; }
-
-  // Simulate upward swipe on touch overlay
-  await page.evaluate(() => {
-    const overlay = document.getElementById('touchOverlay');
-    if (!overlay) return;
-    overlay.style.pointerEvents = 'auto';
-
-    function fire(type, x, y) {
-      const t = new Touch({ identifier: 1, target: overlay, clientX: x, clientY: y, pageX: x, pageY: y });
-      overlay.dispatchEvent(new TouchEvent(type, {
-        touches: type === 'touchend' ? [] : [t],
-        changedTouches: [t],
-        bubbles: true, cancelable: true,
-      }));
-    }
-
-    fire('touchstart', 200, 300);
-    for (let i = 1; i <= 10; i++) fire('touchmove', 200, 300 + i * 20);
-    fire('touchend', 200, 500);
-  });
-  await page.waitForTimeout(200);
-
-  const scrollAfter = await page.evaluate(() =>
-    document.querySelector('.xterm-viewport')?.scrollTop ?? 0
-  );
-  expect(scrollAfter).toBeLessThan(scrollBefore);
-});
-
 
 test('URLs in terminal output are tappable', async ({ page }) => {
-  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
-  await page.goto(`${BASE}/s/${sessions[0].name}`);
+  await page.goto(`${BASE}/s/${SESSION}`);
 
   await page.waitForFunction(() => {
     const vp = document.querySelector('.xterm-viewport');
@@ -205,8 +180,13 @@ test('URLs in terminal output are tappable', async ({ page }) => {
 
   await page.waitForTimeout(500);
 
-  // Type echo URL command
+  // Clear any prior test pollution so the URL line stays in the visible viewport.
   await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
+  await page.keyboard.type('clear');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  // Type echo URL command
   await page.keyboard.type('echo https://example.com');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(1000);
@@ -237,4 +217,127 @@ test('URLs in terminal output are tappable', async ({ page }) => {
     return false;
   });
   expect(detected).toContain('https://example.com');
+});
+
+test('reader view renders buffer text', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  // Wait for WS attach + redraw to settle so it doesn't clobber our inject.
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.test.inject('MOBUX_READER_MARKER_42\n'));
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+
+  await expect.poll(
+    async () => (await page.locator('#reader').textContent()) || '',
+    { timeout: 3000 }
+  ).toContain('MOBUX_READER_MARKER_42');
+
+  await expect(page.locator('#reader')).toBeVisible();
+  await expect(page.locator('#terminal')).toBeHidden();
+
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(100);
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#reader')).toBeHidden();
+});
+
+test('reader view live-updates on new output', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await page.evaluate(() => window.__mobuxView.test.inject('MOBUX_LIVE_PROBE_99\n'));
+
+  await expect.poll(
+    async () => (await page.locator('#reader').textContent()) || '',
+    { timeout: 3000 }
+  ).toContain('MOBUX_LIVE_PROBE_99');
+
+  // Cleanup
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+});
+
+test('long-press menu toggles reader view', async ({ page }) => {
+  // Start clean: no stored view preference
+  await page.addInitScript(() => {
+    try { localStorage.clear(); } catch (_) {}
+  });
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    return vp && vp.scrollHeight > 100;
+  }, { timeout: 5000 });
+
+  // Initial state: xterm visible, toggle says "Reader View"
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#viewToggleLabel')).toHaveText('Reader View');
+
+  // Open menu and tap toggle
+  await page.evaluate(() => {
+    document.getElementById('cmdPickList').classList.add('visible');
+  });
+  await page.locator('#viewToggleBtn').click();
+
+  // Reader is now active, label flips
+  await expect(page.locator('#reader')).toBeVisible();
+  await expect(page.locator('#terminal')).toBeHidden();
+  await expect(page.locator('#viewToggleLabel')).toHaveText('Terminal View');
+
+  // Tap again to flip back
+  await page.evaluate(() => {
+    document.getElementById('cmdPickList').classList.add('visible');
+  });
+  await page.locator('#viewToggleBtn').click();
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#reader')).toBeHidden();
+  await expect(page.locator('#viewToggleLabel')).toHaveText('Reader View');
+});
+
+test('panes API returns window id', async ({ page }) => {
+  const panes = await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json();
+  expect(panes.length).toBeGreaterThan(0);
+  for (const p of panes) {
+    expect(p.id).toMatch(/^@\d+$/);
+    expect(typeof p.index).toBe('string');
+  }
+});
+
+test('view preference persists per window', async ({ page }) => {
+  const session = SESSION;
+  const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const activeId = panes.find(p => p.active).id;
+
+  await page.goto(`${BASE}/s/${session}`);
+  await page.evaluate(() => { try { localStorage.clear(); } catch (_) {} });
+  await page.reload();
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // Flip to reader via the API
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const stored = await page.evaluate(({ session, id }) => ({
+    perWindow: localStorage.getItem(`mobux.view.${session}.${id}`),
+    default: localStorage.getItem('mobux.view.default'),
+  }), { session, id: activeId });
+  expect(stored.perWindow).toBe('reader');
+  expect(stored.default).toBe('reader');
+
+  // Reload — should land in reader for this window
+  await page.reload();
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.current),
+    { timeout: 3000 }
+  ).toBe('reader');
 });
