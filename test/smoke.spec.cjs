@@ -541,6 +541,34 @@ test('reader supports synthetic scrolling when content overflows', async ({ page
   expect(moved.mid).toBeGreaterThan(0);
 });
 
+test('reader status bar stays filled after a tmux window switch', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(300);
+
+  const before = await page.evaluate(() => ({
+    sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+    filled: window.__mobuxView.test.statusBarFilled(),
+  }));
+  expect(before.filled).toBe(true);
+  expect(before.sbH).toBeGreaterThan(0);
+
+  await page.evaluate(() => window.__mobuxView.test.switchWindow('next'));
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => window.__mobuxView.test.switchWindow('prev'));
+  await page.waitForTimeout(1500);
+
+  const after = await page.evaluate(() => ({
+    sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+    filled: window.__mobuxView.test.statusBarFilled(),
+  }));
+  expect(after.filled).toBe(true);
+  expect(after.sbH).toBeGreaterThan(0);
+});
+
 test('view preference persists per window', async ({ page }) => {
   const session = SESSION;
   const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();

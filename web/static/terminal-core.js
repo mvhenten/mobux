@@ -136,7 +136,32 @@ export class TerminalCore extends EventTarget {
     this.send(direction === 'next' ? '\x02n' : '\x02p');
     this.clear();
     this.scrollToBottom();
-    setTimeout(() => { this.refreshPanes(); this.reloadHistory(); }, 300);
+    setTimeout(async () => {
+      await this.refreshPanes();
+      await this.reloadHistory();
+      // tmux paints the visible region (including its status row) in
+      // response to C-b n/p, but reloadHistory above writes scrollback
+      // *after* that paint, displacing the status row. Provoke a fresh
+      // tmux redraw so the status row reappears on the last visible
+      // line. A no-op TIOCSWINSZ doesn't fire SIGWINCH, so nudge rows
+      // by one and back.
+      this._forceRedraw();
+    }, 300);
+  }
+
+  _forceRedraw() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const cell = this.cellSize();
+    const bar = document.getElementById('inputBar');
+    const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
+    const cols = Math.max(20, Math.floor(window.innerWidth / cell.width) - 1);
+    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
+    this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
+    setTimeout(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.term.resize(cols, rows);
+      this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }, 50);
   }
 
   async runTmuxCmd(command) {

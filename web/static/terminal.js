@@ -314,6 +314,9 @@ window.__mobuxView = {
     readerInnerHeight: () => reader.innerHeight,
     readerScrollBy: (dy) => reader.scrollBy(dy),
     readerStickToBottom: () => reader.stickToBottom(),
+    switchWindow: (dir) => core.switchWindow(dir),
+    statusBarOffsetHeight: () => document.querySelector('.reader-statusbar')?.offsetHeight ?? 0,
+    statusBarFilled: () => document.querySelector('.reader-statusbar')?.classList.contains('reader-statusbar--filled') ?? false,
   },
 };
 
