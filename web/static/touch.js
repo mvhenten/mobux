@@ -24,7 +24,8 @@ const PINCH_SCALE_THRESHOLD = 0.08;
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
 //              onLongPress(), onReconnect() }
-export function createGestureRecognizer(overlay, callbacks) {
+export function createGestureRecognizer(overlay, callbacks, options = {}) {
+  const { passiveScroll = false } = options;
   const physics = createScrollPhysics(callbacks.onScroll);
 
   let state = 'IDLE';
@@ -85,7 +86,10 @@ export function createGestureRecognizer(overlay, callbacks) {
   }
 
   function onTouchMove(e) {
-    e.preventDefault();
+    // In passiveScroll mode we let native scroll handle vertical drags
+    // (so e.g. ReaderView can scroll its overflow box). We still detect
+    // long-press, h-swipe, and tap classification.
+    if (!passiveScroll) e.preventDefault();
 
     // Two-finger move
     if (e.touches.length === 2 && (state === 'TWO' || state === 'PINCH' || state === 'TWOPULL')) {
@@ -125,7 +129,9 @@ export function createGestureRecognizer(overlay, callbacks) {
       const ady = Math.abs(y - startY);
       if (ady > TAP_PX && ady >= adx) {
         clearLongPress();
-        transition('SCROLL');
+        // In passive mode we hand vertical scroll to the browser and
+        // stop classifying — no momentum/fling injection.
+        transition(passiveScroll ? 'IDLE' : 'SCROLL');
       } else if (adx > TAP_PX && adx > ady) {
         clearLongPress();
         transition('HSWIPE');
@@ -187,7 +193,7 @@ export function createGestureRecognizer(overlay, callbacks) {
   }
 
   overlay.addEventListener('touchstart', onTouchStart, { passive: false });
-  overlay.addEventListener('touchmove', onTouchMove, { passive: false });
+  overlay.addEventListener('touchmove', onTouchMove, { passive: passiveScroll });
   overlay.addEventListener('touchend', onTouchEnd, { passive: false });
   overlay.addEventListener('touchcancel', onTouchCancel, { passive: false });
 

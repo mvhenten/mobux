@@ -155,6 +155,25 @@ createGestureRecognizer(overlay, {
   onLongPress: showCmdList,
 });
 
+// Reader view runs in passive-scroll mode so #reader can scroll
+// natively. We only need long-press (menu) and h-swipe (window switch).
+let readerGestures = null;
+function mountReaderGestures() {
+  if (readerGestures) return;
+  readerGestures = createGestureRecognizer(readerEl, {
+    onReconnect: () => core.reconnect(),
+    onLongPress: showCmdList,
+    onHSwipe: (dir) => core.switchWindow(dir),
+    onTap: () => {},
+    onDoubleTap: () => { if (inputBar) inputBar.show(); },
+  }, { passiveScroll: true });
+}
+function unmountReaderGestures() {
+  if (!readerGestures) return;
+  readerGestures.destroy();
+  readerGestures = null;
+}
+
 // ── Reveal on first output ──────────────────────────────────────────
 let revealTimer = null;
 function scheduleReveal() {
@@ -213,10 +232,18 @@ function applyView(mode, { persist = true } = {}) {
   if (mode === currentView) { updateToggleLabel(); return; }
   if (mode === 'reader') {
     termEl.classList.add('hidden');
+    // Reader handles its own scroll natively; the xterm touch overlay
+    // would otherwise sit over #reader and eat every touch.
+    overlay.style.pointerEvents = 'none';
     reader.mount();
+    mountReaderGestures();
   } else {
+    unmountReaderGestures();
     reader.unmount();
     termEl.classList.remove('hidden');
+    if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+      overlay.style.pointerEvents = 'auto';
+    }
     setTimeout(() => core.resize(), 0);
   }
   currentView = mode;
@@ -269,6 +296,7 @@ window.__mobuxView = {
     terminalRows: () => core.term.rows,
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
+    wsReady: () => core.ws?.readyState === WebSocket.OPEN,
   },
 };
 
