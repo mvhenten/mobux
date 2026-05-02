@@ -310,6 +310,92 @@ test('panes API returns window id', async ({ page }) => {
     expect(typeof p.index).toBe('string');
   }
 });
+// ── Reader-view touch behaviour ─────────────────────────────────────
+// These tests guard against the regression where the xterm touch
+// overlay sat over #reader and ate every touch — making scroll, swipe,
+// and (on real phones) the long-press menu unreachable.
+
+async function fireTouch(page, selector, type, x, y) {
+  await page.evaluate(({ selector, type, x, y }) => {
+    const el = document.querySelector(selector);
+    const t = new Touch({ identifier: 1, target: el, clientX: x, clientY: y, pageX: x, pageY: y });
+    el.dispatchEvent(new TouchEvent(type, {
+      touches: type === 'touchend' ? [] : [t],
+      changedTouches: [t],
+      bubbles: true, cancelable: true,
+    }));
+  }, { selector, type, x, y });
+}
+
+test('reader view disables xterm touch overlay', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(200);
+
+  const overlayPE = await page.evaluate(() =>
+    getComputedStyle(document.getElementById('touchOverlay')).pointerEvents
+  );
+  expect(overlayPE).toBe('none');
+
+  // Flipping back must restore overlay so xterm gestures keep working.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(150);
+  const overlayPEAfter = await page.evaluate(() =>
+    getComputedStyle(document.getElementById('touchOverlay')).pointerEvents
+  );
+  expect(overlayPEAfter).toBe('auto');
+});
+
+test('long-press on reader opens menu and toggle-view returns to xterm', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.test.injectLines(120, 'rl'));
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(250);
+
+  // Long-press inside #reader — the gesture recognizer mounted on it
+  // should fire onLongPress and reveal the cmd pick list.
+  await fireTouch(page, '#reader', 'touchstart', 200, 400);
+  await page.waitForTimeout(700);
+  await fireTouch(page, '#reader', 'touchend', 200, 400);
+
+  await expect(page.locator('#cmdPickList')).toHaveClass(/visible/, { timeout: 1500 });
+
+  await page.locator('[data-action="toggle-view"]').click();
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.current),
+    { timeout: 1500 }
+  ).toBe('xterm');
+});
+
+test('horizontal swipe on reader switches windows', async ({ page }) => {
+  const panes = await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json();
+  if (panes.length < 2) { test.skip(true, 'Need 2+ windows'); return; }
+
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(200);
+
+  const startIdx = panes.findIndex(p => p.active);
+
+  // Swipe left = next window
+  await fireTouch(page, '#reader', 'touchstart', 320, 400);
+  for (let i = 1; i <= 8; i++) await fireTouch(page, '#reader', 'touchmove', 320 - i * 30, 400);
+  await fireTouch(page, '#reader', 'touchend', 80, 400);
+
+  await expect.poll(async () => {
+    const ps = await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json();
+    return ps.findIndex(p => p.active);
+  }, { timeout: 2000 }).not.toBe(startIdx);
+});
 
 test('view preference persists per window', async ({ page }) => {
   const session = SESSION;
