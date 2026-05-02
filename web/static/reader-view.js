@@ -24,7 +24,7 @@
 //   stickToBottom()     — pin to latest output
 //   scrollY, maxScroll, innerHeight (read-only getters for tests)
 
-import { tokenize } from './term-tokenizer.js';
+import { tokenize, extractRuns } from './term-tokenizer.js';
 
 const RENDER_THROTTLE_MS = 50;
 const STICK_TO_BOTTOM_PX = 80;
@@ -65,7 +65,9 @@ export class ReaderView {
 
     this._inner = document.createElement('div');
     this._inner.className = 'reader-inner';
-    this.host.replaceChildren(this._inner);
+    this._statusBar = document.createElement('div');
+    this._statusBar.className = 'reader-statusbar';
+    this.host.replaceChildren(this._inner, this._statusBar);
 
     this._scrollY = 0;
     this._maxScroll = 0;
@@ -99,6 +101,7 @@ export class ReaderView {
       this._renderTimer = null;
     }
     this._inner = null;
+    this._statusBar = null;
   }
 
   scrollBy(dy) {
@@ -147,7 +150,8 @@ export class ReaderView {
   _recomputeBounds() {
     if (!this._inner) { this._maxScroll = 0; return; }
     const innerH = this._inner.scrollHeight;
-    const hostH = this.host.clientHeight;
+    const statusH = this._statusBar ? this._statusBar.offsetHeight : 0;
+    const hostH = this.host.clientHeight - statusH;
     this._maxScroll = Math.max(0, innerH - hostH);
   }
 
@@ -156,12 +160,17 @@ export class ReaderView {
     const buffer = this.core.getActiveBuffer();
     const cols = this.core.term.cols;
 
-    // Snapshot stickiness BEFORE the DOM swap so a re-flow that
-    // grows the content doesn't accidentally yank the user away
-    // from the bottom (or strand them mid-page on growth).
     const wasAtBottom = this._atBottom;
 
-    const blocks = tokenize(buffer, cols);
+    // The very last buffer row is the tmux status line (when status
+    // is on). It does not belong in the scrollable bubble flow — we
+    // peel it off, render it into a dedicated bottom-pinned element,
+    // and tokenise the rest as normal.
+    const total = buffer.length;
+    const statusEndY = total > 0 ? total - 1 : 0;
+    renderStatusBar(this._statusBar, buffer, cols, statusEndY);
+
+    const blocks = tokenize(buffer, cols, { endY: statusEndY });
     const frag = document.createDocumentFragment();
     for (const block of blocks) frag.appendChild(renderBlock(block));
     this._inner.replaceChildren(frag);
@@ -171,6 +180,41 @@ export class ReaderView {
     else this._scrollY = Math.min(this._scrollY, this._maxScroll);
     this._applyTransform();
   }
+}
+
+// ── Status bar (tmux's bottom row) ────────────────────────────────
+function renderStatusBar(host, buffer, cols, rowIndex) {
+  if (!host) return;
+  const line = buffer.getLine(rowIndex);
+  if (!line) { host.replaceChildren(); host.classList.remove('reader-statusbar--filled'); return; }
+  const runs = extractRuns([line], cols);
+  const hasContent = runs.some((r) => r.text && r.text.trim().length > 0);
+  if (!hasContent) {
+    host.replaceChildren();
+    host.classList.remove('reader-statusbar--filled');
+    return;
+  }
+  const inner = document.createElement('div');
+  inner.className = 'reader-statusbar-inner';
+  appendRuns(inner, runs);
+  host.replaceChildren(inner);
+  host.classList.add('reader-statusbar--filled');
+  // Use the run with the dominant background as the strip background
+  // so the bar reads as one continuous surface rather than chips.
+  const bg = dominantBg(runs);
+  host.style.background = bg || '';
+}
+
+function dominantBg(runs) {
+  const counts = new Map();
+  for (const r of runs) {
+    if (!r.attrs || !r.attrs.bg) continue;
+    counts.set(r.attrs.bg, (counts.get(r.attrs.bg) || 0) + (r.text ? r.text.length : 0));
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [bg, c] of counts) if (c > bestCount) { best = bg; bestCount = c; }
+  return best;
 }
 
 // ── Block rendering ────────────────────────────────────────────────
