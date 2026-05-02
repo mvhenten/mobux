@@ -20,6 +20,7 @@ export class ReaderView {
     this._renderTimer = null;
     this._onData = () => this._scheduleRender();
     this._onHistory = () => this._scheduleRender();
+    this._writeSub = null;
   }
 
   mount() {
@@ -29,6 +30,10 @@ export class ReaderView {
     if (this.overlay) this.overlay.classList.add('hidden');
     this.core.addEventListener('data', this._onData);
     this.core.addEventListener('history', this._onHistory);
+    // Catch every parsed write — covers WS bytes, history reload,
+    // and direct term.write from anything else (test injects, future
+    // features). Without this, only WS-driven updates re-render.
+    this._writeSub = this.core.term.onWriteParsed(() => this._scheduleRender());
     this._render();
   }
 
@@ -39,6 +44,7 @@ export class ReaderView {
     if (this.overlay) this.overlay.classList.remove('hidden');
     this.core.removeEventListener('data', this._onData);
     this.core.removeEventListener('history', this._onHistory);
+    if (this._writeSub) { this._writeSub.dispose(); this._writeSub = null; }
     clearTimeout(this._renderTimer);
   }
 

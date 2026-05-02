@@ -257,6 +257,19 @@ window.__mobuxView = {
   swap: swapView,
   get current() { return currentView; },
   send: (d) => core.send(d),
+  test: {
+    inject: (str) => new Promise((resolve) =>
+      core.term.write(str.replace(/\n/g, '\r\n'), resolve)),
+    injectLines: (n, prefix = 'inject') => {
+      let s = '';
+      for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
+      return new Promise((resolve) => core.term.write(s, resolve));
+    },
+    bufferLength: () => core.getActiveBuffer().length,
+    terminalRows: () => core.term.rows,
+    viewportY: () => core.getActiveBuffer().viewportY,
+    scrollToBottom: () => core.scrollToBottom(),
+  },
 };
 
 // Apply stored default at boot so the user lands in their preferred
