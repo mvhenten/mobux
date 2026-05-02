@@ -1,9 +1,20 @@
-// ReaderView — phone-friendly view of the terminal buffer.
+// ReaderView — phone-friendly view of the terminal buffer with
+// fully synthetic scrolling.
 //
-// Reads xterm.js's already-parsed buffer, runs it through the
-// streaming tokenizer to extract semantic blocks (prompt, code, text,
-// rule, header, blank) with per-run colour, and renders each block
-// with its own DOM/CSS styling. Colours are preserved.
+// Native overflow scrolling on mobile WebViews has been a steady
+// source of pain (engaged-only-after-fresh-touch on iOS Safari,
+// occasional locked-state on Android Chrome with large scrollbacks,
+// momentum quirks during reflow). Rather than fight the platform
+// we render into an inner box and translate it ourselves, driven by
+// the same gesture recogniser + physics engine that powers the
+// xterm view. This sidesteps every native-scroll edge case at the
+// cost of native scrollbars and overscroll bounce, both of which
+// we don't need here.
+//
+// Public surface used by terminal.js:
+//   mount(), unmount()
+//   scrollBy(dy)      — feed by gesture recogniser onScroll
+//   stickToBottom()   — caller can pin to bottom (e.g. on tap)
 
 import { tokenize } from './term-tokenizer.js';
 
@@ -17,6 +28,9 @@ export class ReaderView {
     this.overlay = overlay;
     this.mounted = false;
     this._renderTimer = null;
+    this._scrollY = 0;
+    this._maxScroll = 0;
+    this._inner = null;
     this._onData = () => this._scheduleRender();
     this._onHistory = () => this._scheduleRender();
     this._writeSub = null;
@@ -27,6 +41,16 @@ export class ReaderView {
     this.mounted = true;
     this.host.classList.remove('hidden');
     if (this.overlay) this.overlay.classList.add('hidden');
+
+    // Build the inner content layer once; subsequent renders just
+    // replace its children.
+    this._inner = document.createElement('div');
+    this._inner.className = 'reader-inner';
+    this.host.replaceChildren(this._inner);
+
+    this._scrollY = 0;
+    this._maxScroll = 0;
+
     this.core.addEventListener('data', this._onData);
     this.core.addEventListener('history', this._onHistory);
     this._writeSub = this.core.term.onWriteParsed(() => this._scheduleRender());
@@ -42,6 +66,33 @@ export class ReaderView {
     this.core.removeEventListener('history', this._onHistory);
     if (this._writeSub) { this._writeSub.dispose(); this._writeSub = null; }
     clearTimeout(this._renderTimer);
+    this._renderTimer = null;
+  }
+
+  // dy > 0 means content moves up (reveal lines below).
+  // dy < 0 means content moves down (reveal lines above).
+  // Mirrors the xterm scroll convention so we can reuse the same
+  // gesture recogniser + physics.
+  scrollBy(dy) {
+    if (!this.mounted) return;
+    this._setScroll(this._scrollY + dy);
+  }
+
+  stickToBottom() {
+    if (!this.mounted) return;
+    this._setScroll(this._maxScroll);
+  }
+
+  _setScroll(y) {
+    const clamped = Math.max(0, Math.min(this._maxScroll, y));
+    if (clamped === this._scrollY) return;
+    this._scrollY = clamped;
+    this._applyTransform();
+  }
+
+  _applyTransform() {
+    if (!this._inner) return;
+    this._inner.style.transform = `translate3d(0, ${-this._scrollY}px, 0)`;
   }
 
   _scheduleRender() {
@@ -54,18 +105,27 @@ export class ReaderView {
   }
 
   _render() {
+    if (!this._inner) return;
     const buffer = this.core.getActiveBuffer();
     const cols = this.core.term.cols;
-    const stickToBottom =
-      this.host.scrollHeight - this.host.scrollTop - this.host.clientHeight
-        < STICK_TO_BOTTOM_PX;
+
+    // Were we pinned to bottom before this render? If so, stay pinned
+    // after re-flow; otherwise preserve the absolute scroll offset.
+    const wasAtBottom = this._scrollY >= this._maxScroll - STICK_TO_BOTTOM_PX;
 
     const blocks = tokenize(buffer, cols);
     const frag = document.createDocumentFragment();
     for (const block of blocks) frag.appendChild(renderBlock(block));
-    this.host.replaceChildren(frag);
+    this._inner.replaceChildren(frag);
 
-    if (stickToBottom) this.host.scrollTop = this.host.scrollHeight;
+    // Re-measure after layout.
+    const innerH = this._inner.scrollHeight;
+    const hostH = this.host.clientHeight;
+    this._maxScroll = Math.max(0, innerH - hostH);
+
+    if (wasAtBottom) this._scrollY = this._maxScroll;
+    else this._scrollY = Math.min(this._scrollY, this._maxScroll);
+    this._applyTransform();
   }
 }
 
@@ -103,10 +163,6 @@ function renderCodeBlock(block) {
   return wrap;
 }
 
-// Walk a list of `{ runs, bubbleBg }` lines and emit DOM, fusing
-// consecutive same-bubbleBg lines into a single .rb-bubble container.
-// Runs inside a bubble render without their own bg chip styling so the
-// bubble's border is the only visible boundary.
 function appendLinesWithBubbles(parent, lines, lineClass) {
   let i = 0;
   while (i < lines.length) {

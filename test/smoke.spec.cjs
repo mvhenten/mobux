@@ -389,7 +389,7 @@ async function injectRaw(page, str) {
 
 async function blockSummary(page) {
   return await page.evaluate(() => {
-    const blocks = document.querySelectorAll('#reader > .rb');
+    const blocks = document.querySelectorAll('#reader .rb');
     return Array.from(blocks).map((b) => ({
       classes: Array.from(b.classList).filter((c) => c !== 'rb'),
       text: (b.textContent || '').trim().slice(0, 80),
@@ -515,7 +515,7 @@ test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => 
   expect(fused.lines).toBeGreaterThanOrEqual(3);
 });
 
-test('reader is vertically scrollable when content overflows', async ({ page }) => {
+test('reader supports synthetic scrolling when content overflows', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
@@ -523,24 +523,22 @@ test('reader is vertically scrollable when content overflows', async ({ page }) 
   await page.evaluate(() => window.__mobuxView.swap('reader'));
   await page.waitForTimeout(150);
 
-  // Inject 200 lines so we definitely exceed viewport.
   const big = Array.from({ length: 200 }, (_, i) => `line ${i} content`).join('\n');
   await injectRaw(page, big + '\n');
   await page.waitForTimeout(300);
 
-  const metrics = await page.evaluate(() => {
-    const r = document.getElementById('reader');
-    return { scroll: r.scrollHeight, client: r.clientHeight };
-  });
-  expect(metrics.scroll).toBeGreaterThan(metrics.client);
+  const max = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(max).toBeGreaterThan(0);
 
+  // Drive scroll synthetically and verify the inner translates.
   const moved = await page.evaluate(() => {
-    const r = document.getElementById('reader');
-    r.scrollTop = 0;
-    r.scrollTop = 200;
-    return r.scrollTop;
+    window.__mobuxView.test.readerScrollBy(-1e6);
+    const top = window.__mobuxView.test.readerScrollY();
+    window.__mobuxView.test.readerScrollBy(500);
+    return { top, mid: window.__mobuxView.test.readerScrollY() };
   });
-  expect(moved).toBeGreaterThan(0);
+  expect(moved.top).toBe(0);
+  expect(moved.mid).toBeGreaterThan(0);
 });
 
 test('view preference persists per window', async ({ page }) => {
