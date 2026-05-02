@@ -53,7 +53,11 @@ function updatePaneUI() {
     paneIndicator.textContent = `${current ? current.title : "?"} (${activeIndex + 1}/${panes.length})`;
   }
 }
-core.addEventListener('panes', updatePaneUI);
+core.addEventListener('panes', () => {
+  updatePaneUI();
+  pruneViewPrefs();
+  applyStoredViewForActiveWindow();
+});
 
 // ── Command pick list ───────────────────────────────────────────────
 function showCmdList() {
@@ -71,8 +75,13 @@ function hideCmdList() {
 }
 
 cmdPickList.addEventListener('click', (e) => {
-  const item = e.target.closest('[data-cmd]');
-  if (item) { core.runTmuxCmd(item.dataset.cmd); hideCmdList(); }
+  const cmdItem = e.target.closest('[data-cmd]');
+  if (cmdItem) { core.runTmuxCmd(cmdItem.dataset.cmd); hideCmdList(); return; }
+  const actionItem = e.target.closest('[data-action]');
+  if (actionItem?.dataset.action === 'toggle-view') {
+    swapView(currentView === 'xterm' ? 'reader' : 'xterm');
+    hideCmdList();
+  }
 });
 cmdCloseBtn.addEventListener('click', hideCmdList);
 cmdOverlayBg.addEventListener('click', hideCmdList);
@@ -169,9 +178,39 @@ if (isMobile) {
 const reader = new ReaderView({ host: readerEl, core, overlay });
 let currentView = 'xterm';
 
-function swapView(mode) {
+const VIEW_DEFAULT_KEY = 'mobux.view.default';
+const viewPrefKey = (windowId) => `mobux.view.${session}.${windowId}`;
+
+function activeWindowId() {
+  const p = core.panes[core.activeIndex];
+  return p?.id || null;
+}
+
+function storedDefaultView() {
+  try { return localStorage.getItem(VIEW_DEFAULT_KEY) || 'xterm'; }
+  catch (_) { return 'xterm'; }
+}
+
+function storedViewFor(windowId) {
+  if (!windowId) return null;
+  try { return localStorage.getItem(viewPrefKey(windowId)); }
+  catch (_) { return null; }
+}
+
+function updateToggleLabel() {
+  if (!viewToggleLabel) return;
+  if (currentView === 'reader') {
+    viewToggleLabel.textContent = 'Terminal View';
+    if (viewToggleIcon) viewToggleIcon.textContent = '\u25a3';
+  } else {
+    viewToggleLabel.textContent = 'Reader View';
+    if (viewToggleIcon) viewToggleIcon.textContent = '\ud83d\udcd6';
+  }
+}
+
+function applyView(mode, { persist = true } = {}) {
   if (mode !== 'xterm' && mode !== 'reader') return;
-  if (mode === currentView) return;
+  if (mode === currentView) { updateToggleLabel(); return; }
   if (mode === 'reader') {
     termEl.classList.add('hidden');
     reader.mount();
@@ -181,24 +220,54 @@ function swapView(mode) {
     setTimeout(() => core.resize(), 0);
   }
   currentView = mode;
-  try { localStorage.setItem('mobux.view.default', mode); } catch (_) {}
+  if (persist) {
+    try {
+      localStorage.setItem(VIEW_DEFAULT_KEY, mode);
+      const wid = activeWindowId();
+      if (wid) localStorage.setItem(viewPrefKey(wid), mode);
+    } catch (_) {}
+  }
+  updateToggleLabel();
   window.dispatchEvent(new CustomEvent('mobux:viewchange', { detail: mode }));
+}
+
+function swapView(mode) { applyView(mode, { persist: true }); }
+
+function applyStoredViewForActiveWindow() {
+  const wid = activeWindowId();
+  const stored = storedViewFor(wid);
+  const mode = stored || storedDefaultView();
+  applyView(mode, { persist: false });
+}
+
+function pruneViewPrefs() {
+  const live = new Set(core.panes.map((p) => p.id).filter(Boolean));
+  const prefix = `mobux.view.${session}.`;
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(prefix) && !live.has(k.slice(prefix.length))) {
+        localStorage.removeItem(k);
+      }
+    }
+  } catch (_) {}
 }
 
 window.__mobuxView = {
   swap: swapView,
   get current() { return currentView; },
+  send: (d) => core.send(d),
 };
 
-// Apply persisted preference (devtools-only entry point for now;
-// long-press menu toggle lands in the next commit)
-try {
-  const stored = localStorage.getItem('mobux.view.default');
-  if (stored === 'reader') {
-    // defer so the buffer has content to render
-    setTimeout(() => swapView('reader'), 200);
-  }
-} catch (_) {}
+// Apply stored default at boot so the user lands in their preferred
+// view even before the first /panes refresh resolves. Per-window
+// override (if any) is applied later in the panes listener.
+const bootDefault = storedDefaultView();
+if (bootDefault === 'reader') {
+  setTimeout(() => applyView('reader', { persist: false }), 0);
+}
+
+updateToggleLabel();
 
 // ── Boot ────────────────────────────────────────────────────────────
 (async () => {

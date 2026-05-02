@@ -205,8 +205,13 @@ test('URLs in terminal output are tappable', async ({ page }) => {
 
   await page.waitForTimeout(500);
 
-  // Type echo URL command
+  // Clear any prior test pollution so the URL line stays in the visible viewport.
   await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
+  await page.keyboard.type('clear');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  // Type echo URL command
   await page.keyboard.type('echo https://example.com');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(1000);
@@ -285,9 +290,8 @@ test('reader view live-updates on new output', async ({ page }) => {
   await page.evaluate(() => window.__mobuxView.swap('reader'));
   await page.waitForTimeout(150);
 
-  await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
-  await page.keyboard.type('echo MOBUX_LIVE_PROBE_99');
-  await page.keyboard.press('Enter');
+  // Hidden #terminal can't receive keystrokes — send via the exposed core.send.
+  await page.evaluate(() => window.__mobuxView.send('echo MOBUX_LIVE_PROBE_99\r'));
 
   await expect.poll(
     async () => (await page.locator('#reader').textContent()) || '',
@@ -296,4 +300,84 @@ test('reader view live-updates on new output', async ({ page }) => {
 
   // Cleanup
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
+});
+
+test('long-press menu toggles reader view', async ({ page }) => {
+  // Start clean: no stored view preference
+  await page.addInitScript(() => {
+    try { localStorage.clear(); } catch (_) {}
+  });
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  await page.goto(`${BASE}/s/${sessions[0].name}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    return vp && vp.scrollHeight > 100;
+  }, { timeout: 5000 });
+
+  // Initial state: xterm visible, toggle says "Reader View"
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#viewToggleLabel')).toHaveText('Reader View');
+
+  // Open menu and tap toggle
+  await page.evaluate(() => {
+    document.getElementById('cmdPickList').classList.add('visible');
+  });
+  await page.locator('#viewToggleBtn').click();
+
+  // Reader is now active, label flips
+  await expect(page.locator('#reader')).toBeVisible();
+  await expect(page.locator('#terminal')).toBeHidden();
+  await expect(page.locator('#viewToggleLabel')).toHaveText('Terminal View');
+
+  // Tap again to flip back
+  await page.evaluate(() => {
+    document.getElementById('cmdPickList').classList.add('visible');
+  });
+  await page.locator('#viewToggleBtn').click();
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#reader')).toBeHidden();
+  await expect(page.locator('#viewToggleLabel')).toHaveText('Reader View');
+});
+
+test('panes API returns window id', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  const panes = await (await page.request.get(`${BASE}/api/sessions/${sessions[0].name}/panes`)).json();
+  expect(panes.length).toBeGreaterThan(0);
+  for (const p of panes) {
+    expect(p.id).toMatch(/^@\d+$/);
+    expect(typeof p.index).toBe('string');
+  }
+});
+
+test('view preference persists per window', async ({ page }) => {
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  const session = sessions[0].name;
+  const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const activeId = panes.find(p => p.active).id;
+
+  await page.goto(`${BASE}/s/${session}`);
+  await page.evaluate(() => { try { localStorage.clear(); } catch (_) {} });
+  await page.reload();
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // Flip to reader via the API
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const stored = await page.evaluate(({ session, id }) => ({
+    perWindow: localStorage.getItem(`mobux.view.${session}.${id}`),
+    default: localStorage.getItem('mobux.view.default'),
+  }), { session, id: activeId });
+  expect(stored.perWindow).toBe('reader');
+  expect(stored.default).toBe('reader');
+
+  // Reload — should land in reader for this window
+  await page.reload();
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.current),
+    { timeout: 3000 }
+  ).toBe('reader');
 });
