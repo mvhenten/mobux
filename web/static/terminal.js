@@ -170,6 +170,14 @@ function mountReaderGestures() {
     onTap: () => {},
     onDoubleTap: () => { if (inputBar) inputBar.show(); },
     onScroll: (dy) => reader.scrollBy(dy),
+    onTwoPullMove(pull, vh) {
+      if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
+      else if (pull > vh * 0.03) paneIndicator.textContent = '↓ Pull to reload...';
+    },
+    onTwoPullEnd(pull, vh) {
+      if (pull > vh * 0.08) location.reload(true);
+      else updatePaneUI();
+    },
   }, { passiveScroll: false });
 }
 function unmountReaderGestures() {
