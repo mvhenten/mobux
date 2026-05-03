@@ -170,6 +170,14 @@ function mountReaderGestures() {
     onTap: () => {},
     onDoubleTap: () => { if (inputBar) inputBar.show(); },
     onScroll: (dy) => reader.scrollBy(dy),
+    onTwoPullMove(pull, vh) {
+      if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
+      else if (pull > vh * 0.03) paneIndicator.textContent = '↓ Pull to reload...';
+    },
+    onTwoPullEnd(pull, vh) {
+      if (pull > vh * 0.08) location.reload(true);
+      else updatePaneUI();
+    },
   }, { passiveScroll: false });
 }
 function unmountReaderGestures() {
@@ -236,8 +244,8 @@ function applyView(mode, { persist = true } = {}) {
   if (mode === currentView) { updateToggleLabel(); return; }
   if (mode === 'reader') {
     termEl.classList.add('hidden');
-    // Reader handles its own scroll natively; the xterm touch overlay
-    // would otherwise sit over #reader and eat every touch.
+    // Reader has its own gesture recogniser on #reader. Disable the
+    // xterm overlay so it doesn't sit on top and eat every touch.
     overlay.style.pointerEvents = 'none';
     reader.mount();
     mountReaderGestures();
@@ -301,9 +309,14 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
-    readerScrollY: () => reader._scrollY,
-    readerMaxScroll: () => reader._maxScroll,
+    readerScrollY: () => reader.scrollY,
+    readerMaxScroll: () => reader.maxScroll,
+    readerInnerHeight: () => reader.innerHeight,
     readerScrollBy: (dy) => reader.scrollBy(dy),
+    readerStickToBottom: () => reader.stickToBottom(),
+    switchWindow: (dir) => core.switchWindow(dir),
+    statusBarOffsetHeight: () => document.querySelector('.reader-statusbar')?.offsetHeight ?? 0,
+    statusBarFilled: () => document.querySelector('.reader-statusbar')?.classList.contains('reader-statusbar--filled') ?? false,
   },
 };
 

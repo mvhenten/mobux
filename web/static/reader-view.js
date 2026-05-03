@@ -1,24 +1,32 @@
-// ReaderView — phone-friendly view of the terminal buffer with
-// fully synthetic scrolling.
+// ReaderView — phone-friendly view of the terminal buffer with a
+// fully synthetic scroller.
 //
-// Native overflow scrolling on mobile WebViews has been a steady
-// source of pain (engaged-only-after-fresh-touch on iOS Safari,
-// occasional locked-state on Android Chrome with large scrollbacks,
-// momentum quirks during reflow). Rather than fight the platform
-// we render into an inner box and translate it ourselves, driven by
-// the same gesture recogniser + physics engine that powers the
-// xterm view. This sidesteps every native-scroll edge case at the
-// cost of native scrollbars and overscroll bounce, both of which
-// we don't need here.
+// Why synthetic: native `overflow: auto` on mobile WebViews has been
+// a steady source of grief — engaged-only-after-fresh-touch on iOS
+// Safari, occasional locked state on Android Chrome with large
+// scrollbacks, momentum quirks during reflow. We render into an
+// inner box and translate it ourselves, driven by the same gesture
+// recogniser + physics engine that powers the xterm view. No native
+// scrollbars, no overscroll bounce — neither of which we want here.
 //
-// Public surface used by terminal.js:
+// ── Coordinate system ─────────────────────────────────────────────
+// `_scrollY` is positive-down, in CSS pixels.
+//   _scrollY = 0          → top of content visible
+//   _scrollY = _maxScroll → bottom of content visible
+// The inner box is translated by `translate3d(0, -_scrollY, 0)`.
+// `scrollBy(dy)` adds `dy` to `_scrollY`. This matches xterm's
+// convention so finger-DOWN reveals content above (dy < 0 from the
+// gesture recogniser), preserving muscle memory between views.
+//
+// ── Public surface (used by terminal.js) ──────────────────────────
 //   mount(), unmount()
-//   scrollBy(dy)      — feed by gesture recogniser onScroll
-//   stickToBottom()   — caller can pin to bottom (e.g. on tap)
+//   scrollBy(dy)        — fed by gesture recogniser onScroll
+//   stickToBottom()     — pin to latest output
+//   scrollY, maxScroll, innerHeight (read-only getters for tests)
 
-import { tokenize } from './term-tokenizer.js';
+import { tokenize, extractRuns } from './term-tokenizer.js';
 
-const RENDER_DEBOUNCE_MS = 50;
+const RENDER_THROTTLE_MS = 50;
 const STICK_TO_BOTTOM_PX = 80;
 
 export class ReaderView {
@@ -27,14 +35,27 @@ export class ReaderView {
     this.core = core;
     this.overlay = overlay;
     this.mounted = false;
-    this._renderTimer = null;
+
+    /** @type {HTMLDivElement|null} */
+    this._inner = null;
     this._scrollY = 0;
     this._maxScroll = 0;
-    this._inner = null;
-    this._onData = () => this._scheduleRender();
-    this._onHistory = () => this._scheduleRender();
+    // True when the viewport was within STICK_TO_BOTTOM_PX of the
+    // bottom at the most recent _setScroll/_render. Drives the
+    // pin-to-latest-output behaviour without re-deriving from the
+    // (about-to-change) maxScroll on every render.
+    this._atBottom = true;
+
+    this._renderTimer = null;
     this._writeSub = null;
+    this._resizeObserver = null;
+    this._onWindowResize = () => this._handleResize();
+    this._onWriteParsed = () => this._scheduleRender();
   }
+
+  get scrollY() { return this._scrollY; }
+  get maxScroll() { return this._maxScroll; }
+  get innerHeight() { return this._inner ? this._inner.scrollHeight : 0; }
 
   mount() {
     if (this.mounted) return;
@@ -42,18 +63,27 @@ export class ReaderView {
     this.host.classList.remove('hidden');
     if (this.overlay) this.overlay.classList.add('hidden');
 
-    // Build the inner content layer once; subsequent renders just
-    // replace its children.
     this._inner = document.createElement('div');
     this._inner.className = 'reader-inner';
-    this.host.replaceChildren(this._inner);
+    this._statusBar = document.createElement('div');
+    this._statusBar.className = 'reader-statusbar';
+    this.host.replaceChildren(this._inner, this._statusBar);
 
     this._scrollY = 0;
     this._maxScroll = 0;
+    this._atBottom = true;
 
-    this.core.addEventListener('data', this._onData);
-    this.core.addEventListener('history', this._onHistory);
-    this._writeSub = this.core.term.onWriteParsed(() => this._scheduleRender());
+    // onWriteParsed is the single source of truth for "buffer
+    // changed". xterm fires it after every write — history reload,
+    // WS data, and synthetic test injects all flow through here.
+    this._writeSub = this.core.term.onWriteParsed(this._onWriteParsed);
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this._resizeObserver = new ResizeObserver(() => this._handleResize());
+      this._resizeObserver.observe(this.host);
+    }
+    window.addEventListener('resize', this._onWindowResize);
+
     this._render();
   }
 
@@ -62,17 +92,18 @@ export class ReaderView {
     this.mounted = false;
     this.host.classList.add('hidden');
     if (this.overlay) this.overlay.classList.remove('hidden');
-    this.core.removeEventListener('data', this._onData);
-    this.core.removeEventListener('history', this._onHistory);
+
     if (this._writeSub) { this._writeSub.dispose(); this._writeSub = null; }
-    clearTimeout(this._renderTimer);
-    this._renderTimer = null;
+    if (this._resizeObserver) { this._resizeObserver.disconnect(); this._resizeObserver = null; }
+    window.removeEventListener('resize', this._onWindowResize);
+    if (this._renderTimer !== null) {
+      clearTimeout(this._renderTimer);
+      this._renderTimer = null;
+    }
+    this._inner = null;
+    this._statusBar = null;
   }
 
-  // dy > 0 means content moves up (reveal lines below).
-  // dy < 0 means content moves down (reveal lines above).
-  // Mirrors the xterm scroll convention so we can reuse the same
-  // gesture recogniser + physics.
   scrollBy(dy) {
     if (!this.mounted) return;
     this._setScroll(this._scrollY + dy);
@@ -80,11 +111,13 @@ export class ReaderView {
 
   stickToBottom() {
     if (!this.mounted) return;
+    this._atBottom = true;
     this._setScroll(this._maxScroll);
   }
 
   _setScroll(y) {
     const clamped = Math.max(0, Math.min(this._maxScroll, y));
+    this._atBottom = clamped >= this._maxScroll - STICK_TO_BOTTOM_PX;
     if (clamped === this._scrollY) return;
     this._scrollY = clamped;
     this._applyTransform();
@@ -97,11 +130,29 @@ export class ReaderView {
 
   _scheduleRender() {
     if (!this.mounted) return;
-    if (this._renderTimer) return;
+    if (this._renderTimer !== null) return;
     this._renderTimer = setTimeout(() => {
       this._renderTimer = null;
       this._render();
-    }, RENDER_DEBOUNCE_MS);
+    }, RENDER_THROTTLE_MS);
+  }
+
+  _handleResize() {
+    if (!this.mounted || !this._inner) return;
+    // Host height changed (orientation, virtual keyboard, parent
+    // layout). Re-measure and re-pin if we were at the bottom.
+    this._recomputeBounds();
+    if (this._atBottom) this._scrollY = this._maxScroll;
+    else this._scrollY = Math.min(this._scrollY, this._maxScroll);
+    this._applyTransform();
+  }
+
+  _recomputeBounds() {
+    if (!this._inner) { this._maxScroll = 0; return; }
+    const innerH = this._inner.scrollHeight;
+    const statusH = this._statusBar ? this._statusBar.offsetHeight : 0;
+    const hostH = this.host.clientHeight - statusH;
+    this._maxScroll = Math.max(0, innerH - hostH);
   }
 
   _render() {
@@ -109,24 +160,61 @@ export class ReaderView {
     const buffer = this.core.getActiveBuffer();
     const cols = this.core.term.cols;
 
-    // Were we pinned to bottom before this render? If so, stay pinned
-    // after re-flow; otherwise preserve the absolute scroll offset.
-    const wasAtBottom = this._scrollY >= this._maxScroll - STICK_TO_BOTTOM_PX;
+    const wasAtBottom = this._atBottom;
 
-    const blocks = tokenize(buffer, cols);
+    // The very last buffer row is the tmux status line (when status
+    // is on). It does not belong in the scrollable bubble flow — we
+    // peel it off, render it into a dedicated bottom-pinned element,
+    // and tokenise the rest as normal.
+    const total = buffer.length;
+    const statusEndY = total > 0 ? total - 1 : 0;
+    renderStatusBar(this._statusBar, buffer, cols, statusEndY);
+
+    const blocks = tokenize(buffer, cols, { endY: statusEndY });
     const frag = document.createDocumentFragment();
     for (const block of blocks) frag.appendChild(renderBlock(block));
     this._inner.replaceChildren(frag);
 
-    // Re-measure after layout.
-    const innerH = this._inner.scrollHeight;
-    const hostH = this.host.clientHeight;
-    this._maxScroll = Math.max(0, innerH - hostH);
-
+    this._recomputeBounds();
     if (wasAtBottom) this._scrollY = this._maxScroll;
     else this._scrollY = Math.min(this._scrollY, this._maxScroll);
     this._applyTransform();
   }
+}
+
+// ── Status bar (tmux's bottom row) ────────────────────────────────
+function renderStatusBar(host, buffer, cols, rowIndex) {
+  if (!host) return;
+  const line = buffer.getLine(rowIndex);
+  if (!line) { host.replaceChildren(); host.classList.remove('reader-statusbar--filled'); return; }
+  const runs = extractRuns([line], cols);
+  const hasContent = runs.some((r) => r.text && r.text.trim().length > 0);
+  if (!hasContent) {
+    host.replaceChildren();
+    host.classList.remove('reader-statusbar--filled');
+    return;
+  }
+  const inner = document.createElement('div');
+  inner.className = 'reader-statusbar-inner';
+  appendRuns(inner, runs);
+  host.replaceChildren(inner);
+  host.classList.add('reader-statusbar--filled');
+  // Use the run with the dominant background as the strip background
+  // so the bar reads as one continuous surface rather than chips.
+  const bg = dominantBg(runs);
+  host.style.background = bg || '';
+}
+
+function dominantBg(runs) {
+  const counts = new Map();
+  for (const r of runs) {
+    if (!r.attrs || !r.attrs.bg) continue;
+    counts.set(r.attrs.bg, (counts.get(r.attrs.bg) || 0) + (r.text ? r.text.length : 0));
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [bg, c] of counts) if (c > bestCount) { best = bg; bestCount = c; }
+  return best;
 }
 
 // ── Block rendering ────────────────────────────────────────────────
@@ -180,13 +268,13 @@ function appendLinesWithBubbles(parent, lines, lineClass) {
         i++;
       }
       parent.appendChild(bubble);
-    } else {
-      const lineEl = document.createElement('div');
-      lineEl.className = lineClass;
-      appendRuns(lineEl, lines[i].runs);
-      parent.appendChild(lineEl);
-      i++;
+      continue;
     }
+    const lineEl = document.createElement('div');
+    lineEl.className = lineClass;
+    appendRuns(lineEl, lines[i].runs);
+    parent.appendChild(lineEl);
+    i++;
   }
 }
 

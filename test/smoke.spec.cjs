@@ -541,6 +541,34 @@ test('reader supports synthetic scrolling when content overflows', async ({ page
   expect(moved.mid).toBeGreaterThan(0);
 });
 
+test('reader status bar stays filled after a tmux window switch', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(300);
+
+  const before = await page.evaluate(() => ({
+    sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+    filled: window.__mobuxView.test.statusBarFilled(),
+  }));
+  expect(before.filled).toBe(true);
+  expect(before.sbH).toBeGreaterThan(0);
+
+  await page.evaluate(() => window.__mobuxView.test.switchWindow('next'));
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => window.__mobuxView.test.switchWindow('prev'));
+  await page.waitForTimeout(1500);
+
+  const after = await page.evaluate(() => ({
+    sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+    filled: window.__mobuxView.test.statusBarFilled(),
+  }));
+  expect(after.filled).toBe(true);
+  expect(after.sbH).toBeGreaterThan(0);
+});
+
 test('view preference persists per window', async ({ page }) => {
   const session = SESSION;
   const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
@@ -570,4 +598,220 @@ test('view preference persists per window', async ({ page }) => {
     async () => await page.evaluate(() => window.__mobuxView.current),
     { timeout: 3000 }
   ).toBe('reader');
+});
+
+// ── Synthetic viewport (reader) ─────────────────────────────────────
+// Direct coverage of the translate3d-based scroller in reader-view.js.
+// All tests reset state via swap('xterm') / swap('reader') so they're
+// independent and can run in any order.
+
+async function bootReader(page) {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+  // Make sure we start from a clean reader mount.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(50);
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+}
+
+async function fillReader(page, n = 300, prefix = 'svline') {
+  await page.evaluate((args) => window.__mobuxView.test.injectLines(args.n, args.prefix), { n, prefix });
+  await page.waitForFunction(
+    () => window.__mobuxView.test.readerMaxScroll() > 0,
+    { timeout: 3000 },
+  );
+}
+
+function readTransformY(page) {
+  return page.evaluate(() => {
+    const el = document.querySelector('#reader .reader-inner');
+    if (!el) return null;
+    const t = el.style.transform || '';
+    const m = t.match(/translate3d\(\s*0(?:px)?\s*,\s*(-?[\d.]+)px/);
+    return m ? parseFloat(m[1]) : null;
+  });
+}
+
+test('synthetic viewport: translate3d transform reflects scrollY', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page);
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  expect(await readTransformY(page)).toBe(0);
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(250));
+  const y = await readTransformY(page);
+  const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(sy).toBeGreaterThan(0);
+  expect(y).toBeLessThan(0);
+  expect(Math.round(-y)).toBe(Math.round(sy));
+});
+
+test('synthetic viewport: clamps at 0', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page);
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(sy).toBe(0);
+});
+
+test('synthetic viewport: clamps at max with overflowing content', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page);
+
+  const { sy, max } = await page.evaluate(() => {
+    window.__mobuxView.test.readerScrollBy(9e9);
+    return {
+      sy: window.__mobuxView.test.readerScrollY(),
+      max: window.__mobuxView.test.readerMaxScroll(),
+    };
+  });
+  expect(max).toBeGreaterThan(0);
+  expect(sy).toBe(max);
+});
+
+test('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page, 200, 'sticky');
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(9e9));
+  const before = await page.evaluate(() => ({
+    sy: window.__mobuxView.test.readerScrollY(),
+    max: window.__mobuxView.test.readerMaxScroll(),
+  }));
+  expect(before.sy).toBe(before.max);
+
+  await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'sticky2'));
+  await page.waitForFunction((prev) => {
+    const m = window.__mobuxView.test.readerMaxScroll();
+    return m > prev;
+  }, before.max, { timeout: 3000 });
+
+  const after = await page.evaluate(() => ({
+    sy: window.__mobuxView.test.readerScrollY(),
+    max: window.__mobuxView.test.readerMaxScroll(),
+  }));
+  expect(after.max).toBeGreaterThan(before.max);
+  expect(after.sy).toBe(after.max);
+});
+
+test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page, 200, 'noscroll');
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  const before = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(before).toBe(0);
+
+  await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'tail'));
+  // Wait for the throttled render to flush (RENDER_THROTTLE_MS = 50ms).
+  await page.waitForTimeout(250);
+
+  const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(sy).toBeGreaterThanOrEqual(0);
+  expect(sy).toBeLessThanOrEqual(5);
+});
+
+test('synthetic viewport: resize changes maxScroll', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 800 });
+  await bootReader(page);
+  await fillReader(page, 300, 'resz');
+
+  const tall = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+
+  await page.setViewportSize({ width: 400, height: 400 });
+  await page.waitForFunction(
+    (prev) => window.__mobuxView.test.readerMaxScroll() > prev,
+    tall,
+    { timeout: 3000 },
+  );
+  const shortMax = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(shortMax).toBeGreaterThan(tall);
+
+  await page.setViewportSize({ width: 400, height: 1000 });
+  await page.waitForFunction(
+    (prev) => window.__mobuxView.test.readerMaxScroll() < prev,
+    shortMax,
+    { timeout: 3000 },
+  );
+  const tallerMax = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(tallerMax).toBeLessThan(shortMax);
+});
+
+test('synthetic viewport: mount/unmount has no duplicate inner', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page, 150, 'mu');
+
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(() => window.__mobuxView.swap('xterm'));
+    await page.waitForTimeout(80);
+    await page.evaluate(() => window.__mobuxView.swap('reader'));
+    await page.waitForTimeout(150);
+  }
+
+  const innerCount = await page.locator('#reader .reader-inner').count();
+  expect(innerCount).toBe(1);
+
+  // After remount, scrollY must be valid (>= 0 and <= max).
+  const { sy, max } = await page.evaluate(() => ({
+    sy: window.__mobuxView.test.readerScrollY(),
+    max: window.__mobuxView.test.readerMaxScroll(),
+  }));
+  expect(sy).toBeGreaterThanOrEqual(0);
+  expect(sy).toBeLessThanOrEqual(max);
+});
+
+test('synthetic viewport: history smoke renders blocks and overflows', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(50);
+
+  // Inject BEFORE swapping to reader so the first render sees history.
+  await page.evaluate(() => window.__mobuxView.test.injectLines(200, 'hist'));
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+
+  await page.waitForFunction(
+    () => document.querySelectorAll('#reader .rb-line').length >= 100
+      && window.__mobuxView.test.readerMaxScroll() > 0,
+    { timeout: 5000 },
+  );
+
+  const max = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(max).toBeGreaterThan(0);
+  // Text lines fuse into rb-text blocks; count individual rendered
+  // lines (.rb-line) rather than block containers.
+  const lineCount = await page.locator('#reader .rb-line').count();
+  expect(lineCount).toBeGreaterThanOrEqual(100);
+});
+
+test('synthetic viewport: bubble fusion under translated inner', async ({ page }) => {
+  await bootReader(page);
+
+  const BLUE_BG = '\x1b[44m';
+  const RESET2 = '\x1b[0m';
+  await page.evaluate((args) => window.__mobuxView.test.inject(args.s), {
+    s: `\n${BLUE_BG}sv bubble one${RESET2}\n` +
+       `${BLUE_BG}sv bubble two${RESET2}\n` +
+       `${BLUE_BG}sv bubble three${RESET2}\n`,
+  });
+
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('#reader .rb-bubble'))
+      .some((b) => b.querySelectorAll('.rb-bubble-line').length >= 3),
+    { timeout: 3000 },
+  );
+
+  // Confirm the inner is the translated container (so fusion happens
+  // inside the synthetic viewport, not some bare DOM).
+  const insideInner = await page.evaluate(() => {
+    const inner = document.querySelector('#reader .reader-inner');
+    const b = document.querySelector('#reader .rb-bubble');
+    return !!(inner && b && inner.contains(b));
+  });
+  expect(insideInner).toBe(true);
 });
