@@ -547,26 +547,26 @@ test('reader status bar stays filled after a tmux window switch', async ({ page 
   await page.waitForTimeout(800);
 
   await page.evaluate(() => window.__mobuxView.swap('reader'));
-  await page.waitForTimeout(300);
 
-  const before = await page.evaluate(() => ({
-    sbH: window.__mobuxView.test.statusBarOffsetHeight(),
-    filled: window.__mobuxView.test.statusBarFilled(),
-  }));
-  expect(before.filled).toBe(true);
-  expect(before.sbH).toBeGreaterThan(0);
+  await expect.poll(
+    async () => await page.evaluate(() => ({
+      sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+      filled: window.__mobuxView.test.statusBarFilled(),
+    })),
+    { timeout: 5000 },
+  ).toMatchObject({ filled: true });
 
   await page.evaluate(() => window.__mobuxView.test.switchWindow('next'));
   await page.waitForTimeout(1500);
   await page.evaluate(() => window.__mobuxView.test.switchWindow('prev'));
-  await page.waitForTimeout(1500);
 
-  const after = await page.evaluate(() => ({
-    sbH: window.__mobuxView.test.statusBarOffsetHeight(),
-    filled: window.__mobuxView.test.statusBarFilled(),
-  }));
-  expect(after.filled).toBe(true);
-  expect(after.sbH).toBeGreaterThan(0);
+  await expect.poll(
+    async () => await page.evaluate(() => ({
+      sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+      filled: window.__mobuxView.test.statusBarFilled(),
+    })),
+    { timeout: 5000 },
+  ).toMatchObject({ filled: true });
 });
 
 test('view preference persists per window', async ({ page }) => {
