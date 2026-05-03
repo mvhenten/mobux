@@ -39,6 +39,30 @@ export class TerminalCore extends EventTarget {
     this.panes = [];
     this.activeIndex = 0;
 
+    // OSC 133 (FinalTerm / shell-integration) markers, by absolute
+    // buffer row. Shells that opt in emit:
+    //   ESC ] 133 ; A ST     prompt start  (the line is a prompt)
+    //   ESC ] 133 ; B ST     prompt end / command line follows
+    //   ESC ] 133 ; C ST     command output starts on the next row
+    //   ESC ] 133 ; D[;N] ST command ended (optional exit code)
+    // The reader uses these to classify lines deterministically
+    // instead of guessing at sigils. `oscDetected` flips true on the
+    // first marker so the UI can stop showing the setup hint.
+    this.oscMarkers = new Map();
+    this.oscDetected = false;
+    this.term.parser.registerOscHandler(133, (data) => {
+      const kind = (data || '').charAt(0);
+      if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return false;
+      const buf = this.term.buffer.active;
+      const absY = buf.baseY + buf.cursorY;
+      this.oscMarkers.set(absY, kind);
+      if (!this.oscDetected) {
+        this.oscDetected = true;
+        this.dispatchEvent(new Event('osc-detected'));
+      }
+      return true;
+    });
+
     this.term.onData((d) => this.send(d));
   }
 

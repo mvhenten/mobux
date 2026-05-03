@@ -451,6 +451,35 @@ test('reader detects prompt, header, rule, code blocks', async ({ page }) => {
   expect(codeText).not.toContain('```');
 });
 
+test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  // The text on the marked line ends with no recognised prompt sigil
+  // and would otherwise classify as 'text'. With the OSC 133 ; A
+  // marker emitted right before it, the tokenizer must classify it
+  // as a prompt.
+  await injectRaw(page, '\x1b]133;A\x07my-shell-prompt-no-sigil\nrun output line\n');
+  await page.waitForTimeout(250);
+
+  const summary = await blockSummary(page);
+  const promptHit = summary.find(
+    (b) => b.classes.includes('rb-prompt') && b.text.includes('my-shell-prompt-no-sigil'),
+  );
+  expect(promptHit).toBeTruthy();
+
+  // After detection, the "shell integration not detected" hint
+  // should be hidden.
+  const hintHidden = await page.evaluate(() => {
+    const el = document.querySelector('.reader-osc-hint');
+    return !el || el.hidden;
+  });
+  expect(hintHidden).toBe(true);
+});
+
 test('reader strips trailing default-attr whitespace from lines', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });

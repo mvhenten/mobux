@@ -67,7 +67,14 @@ export class ReaderView {
     this._inner.className = 'reader-inner';
     this._statusBar = document.createElement('div');
     this._statusBar.className = 'reader-statusbar';
-    this.host.replaceChildren(this._inner, this._statusBar);
+    this._oscHint = this._buildOscHint();
+    this.host.replaceChildren(this._inner, this._oscHint, this._statusBar);
+    this._refreshOscHint();
+    // The hint can also disappear after the first OSC 133 marker
+    // arrives mid-session (e.g. the user just pasted the snippet
+    // into ~/.zshrc and reloaded).
+    this._onOscDetected = () => this._refreshOscHint();
+    this.core.addEventListener('osc-detected', this._onOscDetected);
 
     this._scrollY = 0;
     this._maxScroll = 0;
@@ -96,12 +103,38 @@ export class ReaderView {
     if (this._writeSub) { this._writeSub.dispose(); this._writeSub = null; }
     if (this._resizeObserver) { this._resizeObserver.disconnect(); this._resizeObserver = null; }
     window.removeEventListener('resize', this._onWindowResize);
+    if (this._onOscDetected) {
+      this.core.removeEventListener('osc-detected', this._onOscDetected);
+      this._onOscDetected = null;
+    }
     if (this._renderTimer !== null) {
       clearTimeout(this._renderTimer);
       this._renderTimer = null;
     }
     this._inner = null;
     this._statusBar = null;
+    this._oscHint = null;
+  }
+
+  _buildOscHint() {
+    const el = document.createElement('div');
+    el.className = 'reader-osc-hint';
+    el.hidden = true;
+    el.innerHTML =
+      '<span>Shell integration not detected. Reader uses heuristics — set up <a href="/settings#shell-integration">OSC 133</a> for cleaner prompt detection.</span>' +
+      '<button type="button" class="reader-osc-dismiss" aria-label="Dismiss">×</button>';
+    el.querySelector('.reader-osc-dismiss').addEventListener('click', () => {
+      try { localStorage.setItem('mobux.osc133.dismissed', '1'); } catch (_) {}
+      el.hidden = true;
+    });
+    return el;
+  }
+
+  _refreshOscHint() {
+    if (!this._oscHint) return;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem('mobux.osc133.dismissed') === '1'; } catch (_) {}
+    this._oscHint.hidden = this.core.oscDetected || dismissed;
   }
 
   scrollBy(dy) {
@@ -170,7 +203,10 @@ export class ReaderView {
     const statusEndY = total > 0 ? total - 1 : 0;
     renderStatusBar(this._statusBar, buffer, cols, statusEndY);
 
-    const blocks = tokenize(buffer, cols, { endY: statusEndY });
+    const blocks = tokenize(buffer, cols, {
+      endY: statusEndY,
+      oscMarkers: this.core.oscMarkers,
+    });
     const frag = document.createDocumentFragment();
     for (const block of blocks) frag.appendChild(renderBlock(block));
     this._inner.replaceChildren(frag);
