@@ -281,6 +281,9 @@ test('long-press menu toggles reader view', async ({ page }) => {
   await expect(page.locator('#terminal')).toBeVisible();
   await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
 
+  // Reveal the input bar so the ribbon view-toggle is in the viewport.
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
+
   await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
   await page.locator("#viewToggleBtn").click({ force: true });
 
@@ -351,6 +354,7 @@ test('reader view toggle button in input ribbon flips back to xterm', async ({ p
   await page.evaluate(() => window.__mobuxView.swap('reader'));
   await page.waitForTimeout(250);
 
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
   await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
   await page.locator("#viewToggleBtn").click({ force: true });
   await expect.poll(
