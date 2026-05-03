@@ -193,8 +193,8 @@ function lineBubbleBg(runs) {
 // ── Logical-line iteration ─────────────────────────────────────────
 // Coalesces wrapped rows so the reader gets one entry per logical
 // line and can reflow on its own width.
-function* logicalLines(buffer) {
-  const total = buffer.length;
+function* logicalLines(buffer, endY) {
+  const total = endY != null ? endY : buffer.length;
   let chain = [];
   for (let y = 0; y < total; y++) {
     const line = buffer.getLine(y);
@@ -210,7 +210,8 @@ function* logicalLines(buffer) {
 }
 
 // ── Main entry point ───────────────────────────────────────────────
-export function tokenize(buffer, cols) {
+export function tokenize(buffer, cols, opts) {
+  const endY = opts && opts.endY != null ? opts.endY : buffer.length;
   const blocks = [];
   let inFence = false;
   let codeLines = [];
@@ -227,7 +228,7 @@ export function tokenize(buffer, cols) {
     else blocks.push({ type: 'text', lines: [line] });
   }
 
-  for (const chain of logicalLines(buffer)) {
+  for (const chain of logicalLines(buffer, endY)) {
     const runs = extractRuns(chain, cols);
     const text = runs.map((r) => r.text).join('');
 
