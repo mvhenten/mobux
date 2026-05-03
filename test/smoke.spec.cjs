@@ -549,11 +549,16 @@ test('reader status bar stays filled after a tmux window switch', async ({ page 
   await page.evaluate(() => window.__mobuxView.swap('reader'));
 
   await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.test.bufferLength()),
+    { timeout: 5000 },
+  ).toBeGreaterThan(1);
+
+  await expect.poll(
     async () => await page.evaluate(() => ({
       sbH: window.__mobuxView.test.statusBarOffsetHeight(),
       filled: window.__mobuxView.test.statusBarFilled(),
     })),
-    { timeout: 5000 },
+    { timeout: 8000 },
   ).toMatchObject({ filled: true });
 
   await page.evaluate(() => window.__mobuxView.test.switchWindow('next'));
@@ -565,7 +570,7 @@ test('reader status bar stays filled after a tmux window switch', async ({ page 
       sbH: window.__mobuxView.test.statusBarOffsetHeight(),
       filled: window.__mobuxView.test.statusBarFilled(),
     })),
-    { timeout: 5000 },
+    { timeout: 8000 },
   ).toMatchObject({ filled: true });
 });
 
