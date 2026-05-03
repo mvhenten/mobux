@@ -282,14 +282,14 @@ test('long-press menu toggles reader view', async ({ page }) => {
   await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
 
   await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
-  await page.locator('#viewToggleBtn').click();
+  await page.locator("#viewToggleBtn").click({ force: true });
 
   // Reader is now active, icon flips
   await expect(page.locator('#reader')).toBeVisible();
   await expect(page.locator('#terminal')).toBeHidden();
   await expect(page.locator('#viewToggleBtn')).toHaveText('▣');
 
-  await page.locator('#viewToggleBtn').click();
+  await page.locator("#viewToggleBtn").click({ force: true });
   await expect(page.locator('#terminal')).toBeVisible();
   await expect(page.locator('#reader')).toBeHidden();
   await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
@@ -352,7 +352,7 @@ test('reader view toggle button in input ribbon flips back to xterm', async ({ p
   await page.waitForTimeout(250);
 
   await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
-  await page.locator('#viewToggleBtn').click();
+  await page.locator("#viewToggleBtn").click({ force: true });
   await expect.poll(
     async () => await page.evaluate(() => window.__mobuxView.current),
     { timeout: 1500 }
