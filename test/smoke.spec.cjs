@@ -373,6 +373,174 @@ test('long-press on reader opens menu and toggle-view returns to xterm', async (
   ).toBe('xterm');
 });
 
+// ── Tokenizer / colour rendering ────────────────────────────────
+// Inject ANSI sequences and assert the reader emits the right block
+// types with the right colours, so we can refactor the tokenizer
+// without silently regressing colour or block detection.
+
+const RED  = '\x1b[31m';
+const GREEN = '\x1b[32m';
+const BOLD = '\x1b[1m';
+const RESET = '\x1b[0m';
+
+async function injectRaw(page, str) {
+  await page.evaluate((s) => window.__mobuxView.test.inject(s), str);
+}
+
+async function blockSummary(page) {
+  return await page.evaluate(() => {
+    const blocks = document.querySelectorAll('#reader .rb');
+    return Array.from(blocks).map((b) => ({
+      classes: Array.from(b.classList).filter((c) => c !== 'rb'),
+      text: (b.textContent || '').trim().slice(0, 80),
+    }));
+  });
+}
+
+test('reader colours preserved (red + green spans)', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+  await injectRaw(page, `${RED}- removed${RESET}\n${GREEN}+ added${RESET}\n`);
+  await page.waitForTimeout(200);
+
+  const colours = await page.evaluate(() => {
+    const spans = document.querySelectorAll('#reader span');
+    return Array.from(spans)
+      .map((s) => ({ t: s.textContent, c: s.style.color }))
+      .filter((s) => s.t && s.c);
+  });
+  const reds = colours.filter((c) => /var\(--ansi-1\)|rgb\(204|cc6666/.test(c.c));
+  const greens = colours.filter((c) => /var\(--ansi-2\)|b5bd68/.test(c.c));
+  expect(reds.length).toBeGreaterThan(0);
+  expect(greens.length).toBeGreaterThan(0);
+  expect(reds.some((r) => r.t.includes('removed'))).toBe(true);
+  expect(greens.some((g) => g.t.includes('added'))).toBe(true);
+});
+
+test('reader detects prompt, header, rule, code blocks', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  // Clear prior content visually then inject a structured snippet.
+  await injectRaw(page,
+    [
+      '~/dev (main) $',
+      '[Context]',
+      '\u2500'.repeat(40),
+      '```',
+      '  fn hello() {}',
+      '```',
+      'plain prose line.',
+    ].join('\n') + '\n');
+  await page.waitForTimeout(250);
+
+  const summary = await blockSummary(page);
+  const types = summary.map((b) => b.classes.join(' '));
+  expect(types.some((t) => t.includes('rb-prompt'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-header'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-rule'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-code'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-text'))).toBe(true);
+
+  // Code block must contain the fenced content.
+  const codeText = await page.locator('#reader .rb-code').textContent();
+  expect(codeText).toContain('fn hello()');
+  // Triple-backtick fences themselves must NOT appear in output.
+  expect(codeText).not.toContain('```');
+});
+
+test('reader strips trailing default-attr whitespace from lines', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await injectRaw(page, 'TRAILMARK content                                  \n');
+  await page.waitForTimeout(200);
+  // No rendered .rb-line should have trailing whitespace — the
+  // tokenizer collapses default-attr trailing space.
+  const trailers = await page.evaluate(() => {
+    const lines = Array.from(document.querySelectorAll('#reader .rb-line'));
+    return lines
+      .map((l) => l.textContent || '')
+      .filter((t) => t.length > 0 && /[ \t]$/.test(t));
+  });
+  expect(trailers).toEqual([]);
+});
+
+test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const BLUE_BG = '\x1b[44m';
+  const RESET2 = '\x1b[0m';
+  await injectRaw(
+    page,
+    // Leading newline pushes past any pending shell prompt so the
+    // first bubble line isn't shared with the prompt run.
+    `\n${BLUE_BG}bubble line one${RESET2}\n` +
+    `${BLUE_BG}bubble line two${RESET2}\n` +
+    `${BLUE_BG}bubble line three${RESET2}\n` +
+    `plain trailing line\n`,
+  );
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('#reader .rb-bubble'))
+      .some((b) => (b.querySelectorAll('.rb-bubble-line').length >= 3)),
+    { timeout: 3000 },
+  );
+
+  const bubbles = await page.evaluate(() => {
+    const els = document.querySelectorAll('#reader .rb-bubble');
+    return Array.from(els).map((b) => ({
+      lines: b.querySelectorAll('.rb-bubble-line').length,
+      text: (b.textContent || '').trim(),
+    }));
+  });
+  const fused = bubbles.find((b) => b.text.includes('bubble line one') && b.text.includes('bubble line three'));
+  expect(fused).toBeTruthy();
+  expect(fused.lines).toBeGreaterThanOrEqual(3);
+});
+
+test('reader supports synthetic scrolling when content overflows', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const big = Array.from({ length: 200 }, (_, i) => `line ${i} content`).join('\n');
+  await injectRaw(page, big + '\n');
+  await page.waitForTimeout(300);
+
+  const max = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(max).toBeGreaterThan(0);
+
+  // Drive scroll synthetically and verify the inner translates.
+  const moved = await page.evaluate(() => {
+    window.__mobuxView.test.readerScrollBy(-1e6);
+    const top = window.__mobuxView.test.readerScrollY();
+    window.__mobuxView.test.readerScrollBy(500);
+    return { top, mid: window.__mobuxView.test.readerScrollY() };
+  });
+  expect(moved.top).toBe(0);
+  expect(moved.mid).toBeGreaterThan(0);
+});
+
 test('view preference persists per window', async ({ page }) => {
   const session = SESSION;
   const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();

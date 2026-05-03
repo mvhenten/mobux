@@ -155,8 +155,11 @@ createGestureRecognizer(overlay, {
   onLongPress: showCmdList,
 });
 
-// Reader view runs in passive-scroll mode so #reader can scroll
-// natively. We only need long-press (menu) and h-swipe (window switch).
+// ReaderView uses fully synthetic scroll: native overflow scrolling
+// on mobile WebViews has been unreliable (engaged-only-after-fresh-touch
+// on iOS, locked-state on Android with large scrollbacks). We feed the
+// gesture recogniser's onScroll/fling output straight into reader's
+// translateY transform.
 let readerGestures = null;
 function mountReaderGestures() {
   if (readerGestures) return;
@@ -166,7 +169,8 @@ function mountReaderGestures() {
     onHSwipe: (dir) => core.switchWindow(dir),
     onTap: () => {},
     onDoubleTap: () => { if (inputBar) inputBar.show(); },
-  }, { passiveScroll: true });
+    onScroll: (dy) => reader.scrollBy(dy),
+  }, { passiveScroll: false });
 }
 function unmountReaderGestures() {
   if (!readerGestures) return;
@@ -297,6 +301,9 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
+    readerScrollY: () => reader._scrollY,
+    readerMaxScroll: () => reader._maxScroll,
+    readerScrollBy: (dy) => reader.scrollBy(dy),
   },
 };
 
