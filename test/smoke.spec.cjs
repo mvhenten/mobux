@@ -7,6 +7,13 @@ const PASS = process.env.MOBUX_PASS || '';
 const AUTH = (USER && PASS) ? 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64') : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || 'mobux-smoke';
 
+// Tmux command used to set up/tear down the test session. Defaults to the
+// host's `tmux`. Override with `MOBUX_TEST_TMUX` to target a containerized
+// mobux's tmux server, e.g. `MOBUX_TEST_TMUX="podman exec mobux-podman tmux"`
+// when running `make podman-test`.
+const TMUX_CMD = process.env.MOBUX_TEST_TMUX || 'tmux';
+const tmux = (args) => execSync(`${TMUX_CMD} ${args}`, { stdio: 'pipe' });
+
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
 });
@@ -16,24 +23,21 @@ test.beforeAll(() => {
   // mutate (or get polluted by) whatever the user is currently doing.
   // Seed it with enough lines that the scrollback tests have something
   // to scroll through.
-  try { execSync(`tmux kill-session -t ${SESSION}`, { stdio: 'pipe' }); } catch (_) {}
+  try { tmux(`kill-session -t ${SESSION}`); } catch (_) {}
   // Pre-seed with enough lines for scroll tests; quiet otherwise so
   // assertions don't race against live output. Use bash so tests that
   // type real commands (URL detection, etc.) hit a working prompt.
-  execSync(
-    `tmux new-session -d -s ${SESSION} "bash --norc --noprofile"`,
-    { stdio: 'pipe' },
-  );
-  execSync(`tmux send-keys -t ${SESSION} "PS1='\\$ '" Enter`, { stdio: 'pipe' });
-  execSync(`tmux send-keys -t ${SESSION} "clear" Enter`, { stdio: 'pipe' });
+  tmux(`new-session -d -s ${SESSION} "bash --norc --noprofile"`);
+  tmux(`send-keys -t ${SESSION} "PS1='\\$ '" Enter`);
+  tmux(`send-keys -t ${SESSION} "clear" Enter`);
   // Add a second window so multi-window tests don't skip.
-  execSync(`tmux new-window -t ${SESSION} -n second "sh -c 'while true; do sleep 60; done'"`, { stdio: 'pipe' });
-  execSync(`tmux select-window -t ${SESSION}:0`, { stdio: 'pipe' });
+  tmux(`new-window -t ${SESSION} -n second "sh -c 'while true; do sleep 60; done'"`);
+  tmux(`select-window -t ${SESSION}:0`);
   execSync('sleep 0.3');
 });
 
 test.afterAll(() => {
-  try { execSync(`tmux kill-session -t ${SESSION}`, { stdio: 'pipe' }); } catch (_) {}
+  try { tmux(`kill-session -t ${SESSION}`); } catch (_) {}
 });
 
 test('index loads', async ({ page }) => {

@@ -1,10 +1,24 @@
-MOBUX_PORT ?= 5151
-MOBUX_USER ?= $(USER)
-MOBUX_PIN  ?= 30879
-CARGO      := $(HOME)/.cargo/bin/cargo
-PID        := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
+# All start/stop targets find the running PID by port, never by binary
+# path. NEVER use `pkill -f mobux` or `pkill -f target/debug/mobux` — a
+# smoke instance and the long-running instance share the same binary
+# path, and a broad pkill kills both. Use `make stop` / `make smoke-stop`
+# (port-keyed) or kill the PID you captured from `$!` directly.
 
-.PHONY: build run clean start stop restart status logs test web setup setup-twa twa
+MOBUX_PORT       ?= 5151
+MOBUX_SMOKE_PORT ?= 8281
+MOBUX_USER       ?= $(USER)
+MOBUX_PIN        ?= 30879
+CARGO            := $(HOME)/.cargo/bin/cargo
+PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
+SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
+
+.PHONY: build run clean start stop restart status logs test web setup setup-twa twa \
+        smoke-start smoke-stop smoke-logs smoke-status \
+        podman-build podman-run podman-stop podman-test
+
+PODMAN_IMAGE     ?= localhost/mobux:dev
+PODMAN_PORT      ?= 8381
+PODMAN_NAME      ?= mobux-podman
 
 setup:
 	./bin/setup
@@ -45,8 +59,82 @@ status:
 logs:
 	@tail -f /tmp/mobux.log
 
+# ---------------------------------------------------------------------------
+# smoke-*: throw-away mobux instance for local end-to-end verification.
+# Distinct port + isolated data dir so the long-running `make start`
+# instance is never touched. Always kill by port (SMOKE_PID), never by
+# binary pattern.
+# ---------------------------------------------------------------------------
+smoke-start: build
+	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke already running (pid $(SMOKE_PID)) on $(MOBUX_SMOKE_PORT)"; exit 1; fi
+	@if [ "$(MOBUX_SMOKE_PORT)" = "$(MOBUX_PORT)" ]; then echo "MOBUX_SMOKE_PORT must differ from MOBUX_PORT"; exit 1; fi
+	@mkdir -p /tmp/mobux-smoke
+	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
+		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
+		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null & disown
+	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
+		&& echo "smoke mobux running on port $(MOBUX_SMOKE_PORT) (data /tmp/mobux-smoke)" \
+		|| { echo "smoke FAILED to start"; tail /tmp/mobux-smoke/mobux.log; exit 1; }
+
+smoke-stop:
+	@if [ -z "$(SMOKE_PID)" ]; then echo "smoke not running"; exit 0; fi
+	kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"
+
+smoke-logs:
+	@tail -f /tmp/mobux-smoke/mobux.log
+
+smoke-status:
+	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke running (pid $(SMOKE_PID)) on port $(MOBUX_SMOKE_PORT)"; else echo "smoke not running"; fi
+
 test:
 	MOBUX_USER=$(MOBUX_USER) MOBUX_PASS=$(MOBUX_PIN) npx playwright test
+
+# Run the playwright suite against an isolated smoke instance instead of
+# the long-running `make start` server. Always tears down on exit so a
+# failed test doesn't leak a smoke process. Tmux is still shared with
+# the host (smoke creates real `mobux-smoke` sessions); for full
+# isolation see the podman follow-up.
+.PHONY: test-smoke
+test-smoke:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test
+
+# ---------------------------------------------------------------------------
+# podman-*: containerised mobux instance for full test isolation. Each run
+# gets its own tmux server inside the container, so playwright tests
+# can create/kill sessions without colliding with the host's tmux.
+# `podman-test` mirrors `test-smoke` but inside the container.
+# ---------------------------------------------------------------------------
+podman-build:
+	podman build -t $(PODMAN_IMAGE) -f Containerfile .
+
+podman-run: podman-build
+	-@podman rm -f $(PODMAN_NAME) >/dev/null 2>&1
+	@podman run -d --name $(PODMAN_NAME) -p $(PODMAN_PORT):8080 \
+		-e MOBUX_AUTH_USER=test -e MOBUX_PIN=00000 \
+		$(PODMAN_IMAGE) >/dev/null
+	@echo "mobux running in container on http://localhost:$(PODMAN_PORT) (test/00000)"
+
+podman-stop:
+	-@podman rm -f $(PODMAN_NAME) >/dev/null 2>&1 && echo "stopped $(PODMAN_NAME)" || echo "not running"
+
+podman-test: podman-build
+	-@podman rm -f $(PODMAN_NAME) >/dev/null 2>&1
+	@podman run -d --name $(PODMAN_NAME) -p $(PODMAN_PORT):8080 \
+		-e MOBUX_AUTH_USER=test -e MOBUX_PIN=00000 \
+		$(PODMAN_IMAGE) >/dev/null
+	@trap 'podman rm -f $(PODMAN_NAME) >/dev/null 2>&1' EXIT; \
+		for i in $$(seq 1 30); do \
+			if curl -fsS -u test:00000 -o /dev/null http://localhost:$(PODMAN_PORT)/ 2>/dev/null; then break; fi; \
+			sleep 0.5; \
+		done; \
+		MOBUX_URL=http://localhost:$(PODMAN_PORT) \
+		MOBUX_USER=test MOBUX_PASS=00000 \
+		MOBUX_TEST_TMUX="podman exec $(PODMAN_NAME) tmux" \
+		npx playwright test
 
 # ---------------------------------------------------------------------------
 # twa: build the signed TWA APK + matching assetlinks.json for MOBUX_DOMAIN.
