@@ -13,7 +13,12 @@ PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
 .PHONY: build run clean start stop restart status logs test web setup setup-twa twa \
-        smoke-start smoke-stop smoke-logs smoke-status
+        smoke-start smoke-stop smoke-logs smoke-status \
+        podman-build podman-run podman-stop podman-test
+
+PODMAN_IMAGE     ?= localhost/mobux:dev
+PODMAN_PORT      ?= 8381
+PODMAN_NAME      ?= mobux-podman
 
 setup:
 	./bin/setup
@@ -95,6 +100,40 @@ test-smoke:
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test
+
+# ---------------------------------------------------------------------------
+# podman-*: containerised mobux instance for full test isolation. Each run
+# gets its own tmux server inside the container, so playwright tests
+# can create/kill sessions without colliding with the host's tmux.
+# `podman-test` mirrors `test-smoke` but inside the container.
+# ---------------------------------------------------------------------------
+podman-build:
+	podman build -t $(PODMAN_IMAGE) -f Containerfile .
+
+podman-run: podman-build
+	-@podman rm -f $(PODMAN_NAME) >/dev/null 2>&1
+	@podman run -d --name $(PODMAN_NAME) -p $(PODMAN_PORT):8080 \
+		-e MOBUX_AUTH_USER=test -e MOBUX_PIN=00000 \
+		$(PODMAN_IMAGE) >/dev/null
+	@echo "mobux running in container on http://localhost:$(PODMAN_PORT) (test/00000)"
+
+podman-stop:
+	-@podman rm -f $(PODMAN_NAME) >/dev/null 2>&1 && echo "stopped $(PODMAN_NAME)" || echo "not running"
+
+podman-test: podman-build
+	-@podman rm -f $(PODMAN_NAME) >/dev/null 2>&1
+	@podman run -d --name $(PODMAN_NAME) -p $(PODMAN_PORT):8080 \
+		-e MOBUX_AUTH_USER=test -e MOBUX_PIN=00000 \
+		$(PODMAN_IMAGE) >/dev/null
+	@trap 'podman rm -f $(PODMAN_NAME) >/dev/null 2>&1' EXIT; \
+		for i in $$(seq 1 30); do \
+			if curl -fsS -u test:00000 -o /dev/null http://localhost:$(PODMAN_PORT)/ 2>/dev/null; then break; fi; \
+			sleep 0.5; \
+		done; \
+		MOBUX_URL=http://localhost:$(PODMAN_PORT) \
+		MOBUX_USER=test MOBUX_PASS=00000 \
+		MOBUX_TEST_TMUX="podman exec $(PODMAN_NAME) tmux" \
 		npx playwright test
 
 # ---------------------------------------------------------------------------
