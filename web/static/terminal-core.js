@@ -16,6 +16,11 @@ export class TerminalCore extends EventTarget {
 
     this.term = new Terminal({
       cursorBlink: true,
+      // Match the reader's `--mono` stack (style.css). xterm's default
+      // is `courier-new`, which looks far worse than SF Mono / Cascadia
+      // Code / Consolas; using the same family here keeps view-toggle
+      // visually consistent.
+      fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
       fontSize: isMobile ? 14 : 15,
       convertEol: false,
       scrollback: 10000,
