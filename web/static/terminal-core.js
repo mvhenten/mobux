@@ -8,20 +8,26 @@ const WINDOW_SWITCH_CMDS = new Set([
 ]);
 
 export class TerminalCore extends EventTarget {
-  constructor({ session, host, isMobile }) {
+  constructor({ session, host }) {
     super();
     this.session = session;
     this.host = host;
-    this.isMobile = isMobile;
 
     this.term = new Terminal({
       cursorBlink: true,
-      // Match the reader's `--mono` stack (style.css). xterm's default
-      // is `courier-new`, which looks far worse than SF Mono / Cascadia
-      // Code / Consolas; using the same family here keeps view-toggle
-      // visually consistent.
+      // Match the reader's typography (style.css `.rb-line`): same
+      // mono stack, same 13px font, line-height bumped from xterm's
+      // default 1.0 to 1.25 for a bit of breathing room. Toggling
+      // between xterm and reader views now reads as the same content
+      // in the same font, just laid out differently.
       fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
-      fontSize: isMobile ? 14 : 15,
+      fontSize: 13,
+      lineHeight: 1.25,
+      // Try to match the reader's lighter look. If Roboto Mono on
+      // Android lacks a 300 face, Chromium will faux-thin; if it
+      // keeps drawing 400, no harm done. Drop this back to 'normal'
+      // if the result looks weird.
+      fontWeight: 300,
       convertEol: false,
       scrollback: 10000,
       theme: { background: '#0f1115' },
@@ -121,10 +127,23 @@ export class TerminalCore extends EventTarget {
     const cell = this.cellSize();
     const bar = document.getElementById('inputBar');
     const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
-    const cols = Math.max(20, Math.floor(window.innerWidth / cell.width) - 1);
+    // #terminal has horizontal padding (style.css). Subtract it so
+    // xterm doesn't overrun the inner content box and shave a column
+    // off the right edge.
+    const pad = this._horizontalPadding();
+    const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
     const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  }
+
+  _horizontalPadding() {
+    try {
+      const cs = getComputedStyle(this.host);
+      return (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    } catch (_) {
+      return 0;
+    }
   }
 
   cellSize() {
@@ -183,7 +202,8 @@ export class TerminalCore extends EventTarget {
     const cell = this.cellSize();
     const bar = document.getElementById('inputBar');
     const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
-    const cols = Math.max(20, Math.floor(window.innerWidth / cell.width) - 1);
+    const pad = this._horizontalPadding();
+    const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
     const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {

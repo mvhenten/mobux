@@ -330,6 +330,10 @@ h1, h2, h3 { margin: 0; }
   width: 100%;
   min-height: 0;
   overflow: hidden;
+  /* Same horizontal breathing room the reader uses. xterm cells fit
+     inside the padding; resize() subtracts it from the col calc. */
+  padding: 0 12px;
+  box-sizing: border-box;
 }
 
 #terminal .xterm {

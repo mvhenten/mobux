@@ -51,7 +51,7 @@ const quotes = [
 
 // ── Core ────────────────────────────────────────────────────────────
 const isMobile = window.innerWidth < 620;
-const core = new TerminalCore({ session, host: termEl, isMobile });
+const core = new TerminalCore({ session, host: termEl });
 
 // Enable overlay for touch devices
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
@@ -178,7 +178,11 @@ function mountReaderGestures() {
     onLongPress: showCmdList,
     onHSwipe: (dir) => core.switchWindow(dir),
     onTap: () => {},
-    onDoubleTap: () => { if (inputBar) inputBar.show(); },
+    // Double-tap in reader mode is for typing, but the reader has no
+    // cursor / no live editing affordance — opening the keyboard
+    // there is confusing. Drop back to xterm first, then show the
+    // input bar so the keystrokes have somewhere to land.
+    onDoubleTap: () => { swapView('xterm'); if (inputBar) inputBar.show(); },
     onScroll: (dy) => reader.scrollBy(dy),
     onTwoPullMove(pull, vh) {
       if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
