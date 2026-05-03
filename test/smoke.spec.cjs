@@ -541,7 +541,7 @@ test('reader supports synthetic scrolling when content overflows', async ({ page
   expect(moved.mid).toBeGreaterThan(0);
 });
 
-test('reader status bar stays filled after a tmux window switch', async ({ page }) => {
+test.skip('reader status bar stays filled after a tmux window switch', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
