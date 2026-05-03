@@ -44,6 +44,10 @@ struct AppState {
     cache_bust: String,
     db: Arc<db::Db>,
     stt: Arc<transcribe::SpeechToText>,
+    /// Bearer-equivalent secret that the tmux `alert-bell` hook posts back
+    /// with on the internal trigger endpoint. Generated fresh on every
+    /// startup; the hook is reinstalled with the new value.
+    internal_token: Arc<String>,
 }
 
 #[derive(Clone)]
@@ -92,6 +96,12 @@ async fn main() -> Result<()> {
         );
     }
 
+    let internal_token: String = (&mut rand::rng())
+        .sample_iter(Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
@@ -104,7 +114,28 @@ async fn main() -> Result<()> {
         ),
         db,
         stt,
+        internal_token: Arc::new(internal_token),
     };
+
+    // Stand up the internal hook-callback listener on a 127.0.0.1 port
+    // (separate from the public listener — no TLS, no auth middleware).
+    // Bind first so we know the assigned port before installing the
+    // tmux hook that targets it.
+    let internal_app = Router::new()
+        .route("/internal/trigger", post(api_internal_trigger))
+        .with_state(state.clone());
+    let internal_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let internal_port = internal_listener.local_addr()?.port();
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(internal_listener, internal_app).await {
+            eprintln!("internal listener error: {e:#}");
+        }
+    });
+    if let Err(e) = tmux::install_bell_hook(internal_port, &state.internal_token).await {
+        eprintln!("warning: failed to install tmux alert-bell hook: {e:#}");
+    } else {
+        println!("tmux alert-bell hook installed (internal port {internal_port})");
+    }
 
     let state_for_mw = state.clone();
     let app = Router::new()
@@ -807,6 +838,45 @@ async fn api_push_notify(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct InternalTriggerQuery {
+    kind: String,
+    session: String,
+    window: Option<String>,
+}
+
+/// Internal endpoint hit by the `tmux alert-bell` hook. Bound to 127.0.0.1
+/// only and authenticated by `state.internal_token`, so an attacker who
+/// can't already run code on the host can't push fake notifications.
+/// tmux is the source of truth for whether a bell happened — this handler
+/// just routes the event to the push pipeline.
+async fn api_internal_trigger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<InternalTriggerQuery>,
+) -> StatusCode {
+    let token = headers
+        .get("X-Mobux-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if token != state.internal_token.as_str() {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if !state.session_name_re.is_match(&q.session) {
+        return StatusCode::BAD_REQUEST;
+    }
+    match q.kind.as_str() {
+        "bell" => {
+            let prefs = state.db.notification_prefs().unwrap_or_default();
+            if prefs.bell {
+                push::fire_bell(state.db.clone(), &q.session, q.window.as_deref());
+            }
+        }
+        _ => return StatusCode::BAD_REQUEST,
+    }
+    StatusCode::NO_CONTENT
+}
+
 #[derive(serde::Serialize, Deserialize)]
 struct NotifPrefsJson {
     bell: bool,
@@ -1343,9 +1413,8 @@ async fn terminal_ws(
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_session_name(&state, &name)?;
-    let db = state.db.clone();
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_ws(socket, name, db).await {
+        if let Err(err) = handle_ws(socket, name).await {
             eprintln!("ws error: {err:#}");
         }
     }))
@@ -1359,11 +1428,7 @@ struct ResizeMsg {
     rows: u16,
 }
 
-async fn handle_ws(
-    socket: axum::extract::ws::WebSocket,
-    session_name: String,
-    db: Arc<db::Db>,
-) -> Result<()> {
+async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -1430,15 +1495,11 @@ async fn handle_ws(
             maybe_out = rx.recv() => {
                 match maybe_out {
                     Some(chunk) => {
-                        let prefs = db.notification_prefs().unwrap_or_default();
-                        for trigger in push::scan_pty_chunk(&chunk) {
-                            push::handle_trigger(
-                                db.clone(),
-                                &session_name,
-                                trigger,
-                                prefs,
-                            );
-                        }
+                        // Notification triggers no longer come from this
+                        // path — bells flow through the tmux `alert-bell`
+                        // hook (see `tmux::install_bell_hook`), which
+                        // tmux fires exactly once per real bell. Repaint
+                        // chunks here are just rendering, never events.
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
                             break;
