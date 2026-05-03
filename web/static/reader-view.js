@@ -121,7 +121,7 @@ export class ReaderView {
     el.className = 'reader-osc-hint';
     el.hidden = true;
     el.innerHTML =
-      '<span>Shell integration not detected. Reader uses heuristics — set up <a href="/settings#shell-integration">OSC 133</a> for cleaner prompt detection.</span>' +
+      '<span>Shell integration not detected. <a href="/settings#shell-integration">Set up OSC 133 →</a> mobux can install it for you.</span>' +
       '<button type="button" class="reader-osc-dismiss" aria-label="Dismiss">×</button>';
     el.querySelector('.reader-osc-dismiss').addEventListener('click', () => {
       try { localStorage.setItem('mobux.osc133.dismissed', '1'); } catch (_) {}

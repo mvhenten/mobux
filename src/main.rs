@@ -32,6 +32,7 @@ use tower_http::services::ServeDir;
 
 mod db;
 mod push;
+mod shell_integration;
 mod ssl;
 mod tmux;
 
@@ -110,6 +111,18 @@ async fn main() -> Result<()> {
         .route(
             "/api/settings/notifications",
             get(api_get_notification_prefs).put(api_set_notification_prefs),
+        )
+        .route(
+            "/api/shell-integration/status",
+            get(api_shell_integration_status),
+        )
+        .route(
+            "/api/shell-integration/install",
+            post(api_shell_integration_install),
+        )
+        .route(
+            "/api/shell-integration/uninstall",
+            post(api_shell_integration_uninstall),
         )
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
@@ -757,6 +770,31 @@ async fn api_set_notification_prefs(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct ShellIntegrationReq {
+    shell: shell_integration::Shell,
+}
+
+async fn api_shell_integration_status(
+) -> Result<Json<shell_integration::Status>, AppError> {
+    let s = shell_integration::status().map_err(AppError::internal)?;
+    Ok(Json(s))
+}
+
+async fn api_shell_integration_install(
+    Json(req): Json<ShellIntegrationReq>,
+) -> Result<Json<shell_integration::Status>, AppError> {
+    let s = shell_integration::install(req.shell).map_err(AppError::internal)?;
+    Ok(Json(s))
+}
+
+async fn api_shell_integration_uninstall(
+    Json(req): Json<ShellIntegrationReq>,
+) -> Result<Json<shell_integration::Status>, AppError> {
+    let s = shell_integration::uninstall(req.shell).map_err(AppError::internal)?;
+    Ok(Json(s))
+}
+
 async fn settings_page(State(state): State<AppState>) -> Html<String> {
     let v = &state.cache_bust;
     Html(format!(
@@ -818,22 +856,46 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
 
     <section class="settings-card" id="shell-integration">
       <h2>Shell integration</h2>
-      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristic detection — works, but guesses at what's a prompt vs. what just happens to end with <code>$</code> or <code>&gt;</code>. Paste the snippet for your shell into the rc file and reload the terminal.</p>
+      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristics. Click install below — mobux appends a fenced, version-pinned block to the rc file (and backs it up first). Nothing outside the fence is ever touched. Uninstall removes only that block.</p>
 
-      <details class="settings-detail" open>
-        <summary>bash <code>~/.bashrc</code></summary>
+      <div class="shell-integration-cards" id="shellIntegrationCards">
+        <article class="shell-card" data-shell="bash">
+          <header class="shell-card-head">
+            <strong>bash</strong>
+            <code>~/.bashrc</code>
+            <span class="shell-card-state" data-state>…</span>
+          </header>
+          <div class="shell-card-actions" data-actions></div>
+          <details class="shell-card-snippet">
+            <summary>Show snippet</summary>
 <pre class="settings-snippet"><code>PS0='\e]133;C\a'
 PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'</code></pre>
-      </details>
+          </details>
+        </article>
 
-      <details class="settings-detail">
-        <summary>zsh <code>~/.zshrc</code></summary>
+        <article class="shell-card" data-shell="zsh">
+          <header class="shell-card-head">
+            <strong>zsh</strong>
+            <code>~/.zshrc</code>
+            <span class="shell-card-state" data-state>…</span>
+          </header>
+          <div class="shell-card-actions" data-actions></div>
+          <details class="shell-card-snippet">
+            <summary>Show snippet</summary>
 <pre class="settings-snippet"><code>preexec() {{ print -Pn '\e]133;C\a' }}
 precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}</code></pre>
-      </details>
+          </details>
+        </article>
 
-      <details class="settings-detail">
-        <summary>fish <code>~/.config/fish/config.fish</code></summary>
+        <article class="shell-card" data-shell="fish">
+          <header class="shell-card-head">
+            <strong>fish</strong>
+            <code>~/.config/fish/config.fish</code>
+            <span class="shell-card-state" data-state>…</span>
+          </header>
+          <div class="shell-card-actions" data-actions></div>
+          <details class="shell-card-snippet">
+            <summary>Show snippet</summary>
 <pre class="settings-snippet"><code>function __mobux_osc133_preexec --on-event fish_preexec
     printf '\e]133;C\a'
 end
@@ -843,13 +905,17 @@ end
 function __mobux_osc133_prompt --on-event fish_prompt
     printf '\e]133;A\a'
 end</code></pre>
-      </details>
+          </details>
+        </article>
+      </div>
 
-      <p class="settings-foot">After reloading the shell, switch to a session and watch any prompt: the &quot;Shell integration not detected&quot; hint in the reader view should disappear, and prompts should highlight cleanly even when they don't end with a recognised sigil.</p>
+      <div class="settings-status" id="shellIntegrationStatus" hidden></div>
+      <p class="settings-foot">After install, reload the shell (open a new pane). The &quot;Shell integration not detected&quot; hint in the reader view should disappear.</p>
     </section>
   </main>
 
   <script src="/static/settings.js?v={v}"></script>
+  <script src="/static/shell-integration.js?v={v}"></script>
 </body>
 </html>
 "##,

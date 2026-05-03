@@ -148,6 +148,70 @@ body {
   color: var(--muted);
 }
 
+.shell-integration-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.shell-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.2);
+  padding: 10px 12px;
+}
+.shell-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.shell-card-head code {
+  font-size: 11px;
+  color: var(--muted);
+}
+.shell-card-state {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+.shell-card-state[data-tone="ok"]   { color: #6ee7a4; }
+.shell-card-state[data-tone="warn"] { color: #fbbf24; }
+.shell-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.shell-card-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+  color: inherit;
+  cursor: pointer;
+}
+.shell-card-btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.1);
+}
+.shell-card-btn:disabled { opacity: 0.5; cursor: wait; }
+.shell-card-snippet {
+  margin-top: 8px;
+}
+.shell-card-snippet summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.shell-card-snippet .settings-snippet {
+  border-top: none;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
 .session-list {
   display: flex;
   flex-direction: column;

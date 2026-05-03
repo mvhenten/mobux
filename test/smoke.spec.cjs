@@ -843,3 +843,58 @@ test('synthetic viewport: bubble fusion under translated inner', async ({ page }
   });
   expect(insideInner).toBe(true);
 });
+
+// ── Shell integration installer ─────────────────────────────────────
+// Smoke runs with HOME=/tmp/mobux-smoke/home (see Makefile smoke-start)
+// so install/uninstall touch a sandboxed rc file, never the developer's.
+const fs = require('fs');
+const path = require('path');
+const SMOKE_HOME = '/tmp/mobux-smoke/home';
+
+test('shell-integration: status returns expected shape', async ({ page }) => {
+  const res = await page.request.get(`${BASE}/api/shell-integration/status`);
+  expect(res.ok()).toBeTruthy();
+  const body = await res.json();
+  for (const k of ['bash', 'zsh', 'fish']) {
+    expect(body[k]).toBeTruthy();
+    expect(typeof body[k].kind).toBe('string');
+  }
+});
+
+test('shell-integration: install + uninstall bash, preserves prior content', async ({ page }) => {
+  const rc = path.join(SMOKE_HOME, '.bashrc');
+  try { fs.unlinkSync(rc); } catch (_) {}
+  for (const f of fs.readdirSync(SMOKE_HOME).filter((n) => n.startsWith('.bashrc.mobux.bak.'))) {
+    try { fs.unlinkSync(path.join(SMOKE_HOME, f)); } catch (_) {}
+  }
+  fs.writeFileSync(rc, 'export PRIOR=1\n');
+
+  const installRes = await page.request.post(`${BASE}/api/shell-integration/install`, {
+    data: { shell: 'bash' },
+    headers: { 'Content-Type': 'application/json' },
+  });
+  expect(installRes.ok()).toBeTruthy();
+  const after = await installRes.json();
+  expect(after.bash.kind).toBe('installed');
+  expect(after.bash.version).toBe(1);
+
+  const body = fs.readFileSync(rc, 'utf8');
+  expect(body).toContain('export PRIOR=1');
+  expect(body).toContain('# >>> mobux OSC 133 (managed) >>>');
+  expect(body).toContain('# <<< mobux OSC 133 (managed) <<<');
+
+  const backups = fs.readdirSync(SMOKE_HOME).filter((n) => n.startsWith('.bashrc.mobux.bak.'));
+  expect(backups.length).toBeGreaterThan(0);
+
+  const uninstallRes = await page.request.post(`${BASE}/api/shell-integration/uninstall`, {
+    data: { shell: 'bash' },
+    headers: { 'Content-Type': 'application/json' },
+  });
+  expect(uninstallRes.ok()).toBeTruthy();
+  const final = await uninstallRes.json();
+  expect(final.bash.kind).toBe('not_installed');
+
+  const cleaned = fs.readFileSync(rc, 'utf8');
+  expect(cleaned).toContain('export PRIOR=1');
+  expect(cleaned).not.toContain('mobux OSC 133');
+});
