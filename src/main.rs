@@ -1282,14 +1282,13 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     <button class="cmd-item" data-cmd="prev-window"><span class="cmd-icon">◀</span><span class="cmd-label">Previous Window</span></button>
     <button class="cmd-item" data-cmd="next-pane"><span class="cmd-icon">↻</span><span class="cmd-label">Next Pane</span></button>
     <button class="cmd-item" data-cmd="prev-pane"><span class="cmd-icon">↺</span><span class="cmd-label">Previous Pane</span></button>
-    <button class="cmd-item" data-cmd="zoom-pane"><span class="cmd-icon">🔍</span><span class="cmd-label">Zoom Pane</span></button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-action="toggle-view" id="viewToggleBtn"><span class="cmd-icon" id="viewToggleIcon">📖</span><span class="cmd-label" id="viewToggleLabel">Reader View</span></button>
+    <button class="cmd-item" data-cmd="zoom-pane"><span class="cmd-icon">🔍</span><span class="cmd-label">Zoom Pane</span></button>
   </div>
 
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
-      <button id="pushToggleBtn" hidden title="Notifications">🔔</button>
+      <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
       <button id="uploadBtn">📷</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
@@ -1320,7 +1319,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   </script>
   <script src="/static/vendor/xterm.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
-  <script src="/static/push.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
 </html>

@@ -277,29 +277,25 @@ test('long-press menu toggles reader view', async ({ page }) => {
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
 
-  // Initial state: xterm visible, toggle says "Reader View"
+  // Initial state: xterm visible, ribbon toggle shows reader icon
   await expect(page.locator('#terminal')).toBeVisible();
-  await expect(page.locator('#viewToggleLabel')).toHaveText('Reader View');
+  await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
 
-  // Open menu and tap toggle
-  await page.evaluate(() => {
-    document.getElementById('cmdPickList').classList.add('visible');
-  });
-  await page.locator('#viewToggleBtn').click();
+  // Reveal the input bar so the ribbon view-toggle is in the viewport.
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
 
-  // Reader is now active, label flips
+  await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
+  await page.locator("#viewToggleBtn").click({ force: true });
+
+  // Reader is now active, icon flips
   await expect(page.locator('#reader')).toBeVisible();
   await expect(page.locator('#terminal')).toBeHidden();
-  await expect(page.locator('#viewToggleLabel')).toHaveText('Terminal View');
+  await expect(page.locator('#viewToggleBtn')).toHaveText('▣');
 
-  // Tap again to flip back
-  await page.evaluate(() => {
-    document.getElementById('cmdPickList').classList.add('visible');
-  });
-  await page.locator('#viewToggleBtn').click();
+  await page.locator("#viewToggleBtn").click({ force: true });
   await expect(page.locator('#terminal')).toBeVisible();
   await expect(page.locator('#reader')).toBeHidden();
-  await expect(page.locator('#viewToggleLabel')).toHaveText('Reader View');
+  await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
 });
 
 test('panes API returns window id', async ({ page }) => {
@@ -349,7 +345,7 @@ test('reader view disables xterm touch overlay', async ({ page }) => {
   expect(overlayPEAfter).toBe('auto');
 });
 
-test('long-press on reader opens menu and toggle-view returns to xterm', async ({ page }) => {
+test('reader view toggle button in input ribbon flips back to xterm', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
@@ -358,15 +354,9 @@ test('long-press on reader opens menu and toggle-view returns to xterm', async (
   await page.evaluate(() => window.__mobuxView.swap('reader'));
   await page.waitForTimeout(250);
 
-  // Long-press inside #reader — the gesture recognizer mounted on it
-  // should fire onLongPress and reveal the cmd pick list.
-  await fireTouch(page, '#reader', 'touchstart', 200, 400);
-  await page.waitForTimeout(700);
-  await fireTouch(page, '#reader', 'touchend', 200, 400);
-
-  await expect(page.locator('#cmdPickList')).toHaveClass(/visible/, { timeout: 1500 });
-
-  await page.locator('[data-action="toggle-view"]').click();
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
+  await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
+  await page.locator("#viewToggleBtn").click({ force: true });
   await expect.poll(
     async () => await page.evaluate(() => window.__mobuxView.current),
     { timeout: 1500 }

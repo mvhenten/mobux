@@ -77,11 +77,6 @@ function hideCmdList() {
 cmdPickList.addEventListener('click', (e) => {
   const cmdItem = e.target.closest('[data-cmd]');
   if (cmdItem) { core.runTmuxCmd(cmdItem.dataset.cmd); hideCmdList(); return; }
-  const actionItem = e.target.closest('[data-action]');
-  if (actionItem?.dataset.action === 'toggle-view') {
-    swapView(currentView === 'xterm' ? 'reader' : 'xterm');
-    hideCmdList();
-  }
 });
 cmdCloseBtn.addEventListener('click', hideCmdList);
 cmdOverlayBg.addEventListener('click', hideCmdList);
@@ -229,13 +224,14 @@ function storedViewFor(windowId) {
 }
 
 function updateToggleLabel() {
-  if (!viewToggleLabel) return;
+  const btn = document.getElementById('viewToggleBtn');
+  if (!btn) return;
   if (currentView === 'reader') {
-    viewToggleLabel.textContent = 'Terminal View';
-    if (viewToggleIcon) viewToggleIcon.textContent = '\u25a3';
+    btn.textContent = '▣';
+    btn.title = 'Switch to terminal view';
   } else {
-    viewToggleLabel.textContent = 'Reader View';
-    if (viewToggleIcon) viewToggleIcon.textContent = '\ud83d\udcd6';
+    btn.textContent = '📖';
+    btn.title = 'Switch to reader view';
   }
 }
 
@@ -271,6 +267,16 @@ function applyView(mode, { persist = true } = {}) {
 }
 
 function swapView(mode) { applyView(mode, { persist: true }); }
+
+// Ribbon view-toggle button (mobile input bar).
+const viewToggleBtn = document.getElementById('viewToggleBtn');
+if (viewToggleBtn) {
+  viewToggleBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  viewToggleBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    swapView(currentView === 'xterm' ? 'reader' : 'xterm');
+  });
+}
 
 function applyStoredViewForActiveWindow() {
   const wid = activeWindowId();
