@@ -102,7 +102,8 @@ pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
     let output = Command::new("tmux")
         .args([
             "list-windows",
-            "-t", session,
+            "-t",
+            session,
             "-F",
             "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}",
         ])
@@ -152,16 +153,16 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     // (e.g. session "0" would otherwise target window 0)
     let target = format!("{}:", session);
     let args: Vec<String> = match command {
-        "new-window"   => vec!["new-window".into(), "-t".into(), target],
-        "kill-window"  => vec!["kill-window".into(), "-t".into(), target],
-        "split-h"      => vec!["split-window".into(), "-h".into(), "-t".into(), target],
-        "split-v"      => vec!["split-window".into(), "-v".into(), "-t".into(), target],
-        "next-window"  => vec!["next-window".into(), "-t".into(), target],
-        "prev-window"  => vec!["previous-window".into(), "-t".into(), target],
-        "next-pane"    => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
-        "prev-pane"    => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
-        "kill-pane"    => vec!["kill-pane".into(), "-t".into(), target],
-        "zoom-pane"    => vec!["resize-pane".into(), "-Z".into(), "-t".into(), target],
+        "new-window" => vec!["new-window".into(), "-t".into(), target],
+        "kill-window" => vec!["kill-window".into(), "-t".into(), target],
+        "split-h" => vec!["split-window".into(), "-h".into(), "-t".into(), target],
+        "split-v" => vec!["split-window".into(), "-v".into(), "-t".into(), target],
+        "next-window" => vec!["next-window".into(), "-t".into(), target],
+        "prev-window" => vec!["previous-window".into(), "-t".into(), target],
+        "next-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
+        "prev-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
+        "kill-pane" => vec!["kill-pane".into(), "-t".into(), target],
+        "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), target],
         _ => return Err(anyhow!("unknown command: {}", command)),
     };
 
@@ -175,8 +176,10 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // Graceful: don't error on last pane/window close or missing session
-        if msg.contains("no remaining") || msg.contains("session not found")
-            || msg.contains("can't find") || msg.contains("no current")
+        if msg.contains("no remaining")
+            || msg.contains("session not found")
+            || msg.contains("can't find")
+            || msg.contains("no current")
         {
             return Ok(msg);
         }
@@ -186,6 +189,49 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Install a tmux server-wide `alert-bell` hook that POSTs to mobux's
+/// internal trigger endpoint. tmux fires the hook exactly once per actual
+/// bell event (its own dedupe — the bell flag clears when the user views
+/// the window), and exposes the originating session and window via format
+/// substitutions, so the deep-link URL can be constructed inside the hook
+/// command itself with no additional tmux query.
+///
+/// The hook is `set -g`, so it covers every session on this tmux server,
+/// including ones the user attaches to outside mobux. Re-installing on
+/// each mobux startup keeps `port` and `token` in sync if either changes.
+pub async fn install_bell_hook(port: u16, token: &str) -> Result<()> {
+    // The hook payload runs through `run-shell -b` and uses tmux format
+    // substitutions for session/window. `--max-time` keeps a hung curl
+    // from clogging the tmux dispatcher; failures are silently dropped
+    // so a stopped mobux can never break tmux.
+    // Inside tmux's single-quoted argument: `?` and `&` are literal,
+    // `#{...}` is a tmux format substitution that runs before the shell
+    // command executes. Inside the bash double-quoted URL, `?` and `&`
+    // are also literal, so the URL is passed to curl as-is.
+    //
+    // Note: tmux exposes `hook_session_name` for the bell event, but
+    // `hook_window_index` is empty in alert-bell context — the in-scope
+    // `window_index` (the bell's window) is what we want for the
+    // deep-link URL.
+    let hook_cmd = format!(
+        "run-shell -b 'curl -fsS --max-time 2 \
+          -H \"X-Mobux-Token: {token}\" \
+          -X POST \
+          \"http://127.0.0.1:{port}/internal/trigger?kind=bell&session=#{{hook_session_name}}&window=#{{window_index}}\" \
+          >/dev/null 2>&1 || true'"
+    );
+    let output = Command::new("tmux")
+        .args(["set-hook", "-g", "alert-bell", &hook_cmd])
+        .output()
+        .await
+        .context("failed to execute tmux set-hook")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux set-hook alert-bell failed: {}", msg));
+    }
+    Ok(())
+}
+
 /// Capture the scrollback history of the active pane in a session.
 /// Returns the content with ANSI escape sequences preserved.
 pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
@@ -193,10 +239,12 @@ pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
     let output = Command::new("tmux")
         .args([
             "capture-pane",
-            "-p",     // print to stdout
-            "-e",     // include escape sequences (colors)
-            "-S", &start,  // start N lines back
-            "-t", session,
+            "-p", // print to stdout
+            "-e", // include escape sequences (colors)
+            "-S",
+            &start, // start N lines back
+            "-t",
+            session,
         ])
         .output()
         .await
@@ -209,4 +257,3 @@ pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-
