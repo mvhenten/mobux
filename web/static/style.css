@@ -453,6 +453,9 @@ h1, h2, h3 { margin: 0; }
 .rb-text .rb-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .rb-code {
@@ -507,6 +510,9 @@ h1, h2, h3 { margin: 0; }
   padding: 0 !important;
   margin: 0;
   display: block;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 
