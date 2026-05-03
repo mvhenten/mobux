@@ -20,7 +20,9 @@
 //! [`web-push-native`]: https://crates.io/crates/web-push-native
 //! [`reqwest`]: https://crates.io/crates/reqwest
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
 use serde_json::json;
@@ -29,6 +31,66 @@ use web_push_native::{
 };
 
 use crate::db::{Db, NotificationPrefs, Subscription, VapidKeys};
+use crate::tmux;
+
+/// Per-process notification suppression / dedupe state, shared between the
+/// WS handler (which knows when tmux is about to repaint) and the trigger
+/// dispatcher.
+///
+/// `scan_suppressed`: per-session "skip scanning until this Instant".
+/// Set when the server knows tmux will paint already-seen content (initial
+/// WS attach, window/pane switch, resize). Re-paint chunks during this
+/// window are not scanned for triggers.
+///
+/// `recent_fires`: backstop dedupe keyed on `(session, tag)`. If the same
+/// tag fired in the last `DEDUP_WINDOW`, the second fire is dropped. Catches
+/// edge cases where suppression timing didn't quite cover a repaint.
+#[derive(Default)]
+pub struct NotifyState {
+    scan_suppressed: Mutex<HashMap<String, Instant>>,
+    recent_fires: Mutex<HashMap<(String, String), Instant>>,
+}
+
+const DEDUP_WINDOW: Duration = Duration::from_secs(5);
+
+impl NotifyState {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Suppress trigger scanning for `session` for at least `dur`. Extends
+    /// an existing window; never shrinks it.
+    pub fn suppress(&self, session: &str, dur: Duration) {
+        let until = Instant::now() + dur;
+        let mut g = self.scan_suppressed.lock().unwrap();
+        let cur = g.get(session).copied();
+        if cur.is_none_or(|c| until > c) {
+            g.insert(session.to_string(), until);
+        }
+    }
+
+    pub fn is_suppressed(&self, session: &str) -> bool {
+        let g = self.scan_suppressed.lock().unwrap();
+        g.get(session).is_some_and(|t| Instant::now() < *t)
+    }
+
+    /// Returns true if `(session, tag)` has NOT fired within `DEDUP_WINDOW`,
+    /// recording the fire as a side effect. Returns false otherwise.
+    fn try_record_fire(&self, session: &str, tag: &str) -> bool {
+        let now = Instant::now();
+        let mut g = self.recent_fires.lock().unwrap();
+        let key = (session.to_string(), tag.to_string());
+        if let Some(prev) = g.get(&key) {
+            if now.duration_since(*prev) < DEDUP_WINDOW {
+                return false;
+            }
+        }
+        g.insert(key, now);
+        // Opportunistic GC so the map can't grow without bound.
+        g.retain(|_, t| now.duration_since(*t) < DEDUP_WINDOW * 4);
+        true
+    }
+}
 
 /// 🔔 (U+1F514) encoded as UTF-8.
 const BELL_EMOJI_UTF8: &[u8] = &[0xf0, 0x9f, 0x94, 0x94];
@@ -86,53 +148,81 @@ pub fn scan_pty_chunk(chunk: &[u8]) -> Vec<Trigger> {
     out
 }
 
-/// Apply a trigger respecting `prefs`. Spawns `notify` (best-effort,
+/// Apply a trigger respecting `prefs`. Looks up the active tmux window so
+/// the notification can deep-link at the originating window, dedupes
+/// against `state.recent_fires`, then spawns `notify` (best-effort,
 /// fire-and-forget) when the corresponding pref is on.
 pub fn handle_trigger(
     db: Arc<Db>,
+    state: Arc<NotifyState>,
     session_name: &str,
     trigger: Trigger,
     prefs: NotificationPrefs,
 ) {
+    let session = session_name.to_string();
+    tokio::spawn(async move {
+        let payload = match build_payload(&session, trigger, prefs).await {
+            Some(p) => p,
+            None => return,
+        };
+        let tag = payload.tag.clone().unwrap_or_default();
+        if !state.try_record_fire(&session, &tag) {
+            return;
+        }
+        notify(db, payload).await;
+    });
+}
+
+async fn build_payload(
+    session: &str,
+    trigger: Trigger,
+    prefs: NotificationPrefs,
+) -> Option<Payload> {
     match trigger {
-        Trigger::Bell if prefs.bell => {
-            tokio::spawn(notify_bell(db, session_name.to_string()));
-        }
-        Trigger::BellEmoji if prefs.bell_emoji => {
-            tokio::spawn(notify(
-                db,
-                Payload {
-                    title: "mobux".to_string(),
-                    body: format!("session {session_name}: 🔔 ping"),
-                    tag: Some(format!("emoji-{session_name}")),
-                    url: Some(format!("/s/{session_name}")),
-                },
-            ));
-        }
+        Trigger::Bell if prefs.bell => Some(Payload {
+            title: "mobux".to_string(),
+            body: format!("session {session}: 🔔"),
+            tag: Some(format!("bell-{session}")),
+            url: Some(session_url(session).await),
+        }),
+        Trigger::BellEmoji if prefs.bell_emoji => Some(Payload {
+            title: "mobux".to_string(),
+            body: format!("session {session}: 🔔 ping"),
+            tag: Some(format!("emoji-{session}")),
+            url: Some(session_url(session).await),
+        }),
         Trigger::ProgramExit { code } => {
             let fire = if code != 0 {
                 prefs.program_exit_nonzero || prefs.program_exit
             } else {
                 prefs.program_exit
             };
-            if fire {
-                let label = if code == 0 {
-                    "ok".to_string()
-                } else {
-                    format!("exit {code}")
-                };
-                tokio::spawn(notify(
-                    db,
-                    Payload {
-                        title: "mobux".to_string(),
-                        body: format!("session {session_name}: {label}"),
-                        tag: Some(format!("exit-{session_name}")),
-                        url: Some(format!("/s/{session_name}")),
-                    },
-                ));
+            if !fire {
+                return None;
             }
+            let label = if code == 0 {
+                "ok".to_string()
+            } else {
+                format!("exit {code}")
+            };
+            Some(Payload {
+                title: "mobux".to_string(),
+                body: format!("session {session}: {label}"),
+                tag: Some(format!("exit-{session}")),
+                url: Some(session_url(session).await),
+            })
         }
-        _ => {}
+        _ => None,
+    }
+}
+
+/// Build the deep-link URL for a notification from `session`. When the
+/// active tmux window can be queried, embeds it as `?w={index}` so the
+/// client can switch to the originating window on click.
+async fn session_url(session: &str) -> String {
+    match tmux::active_window_index(session).await {
+        Ok(idx) if !idx.is_empty() => format!("/s/{session}?w={idx}"),
+        _ => format!("/s/{session}"),
     }
 }
 
@@ -218,21 +308,6 @@ pub async fn notify(db: Arc<Db>, payload: Payload) {
     }
 
     eprintln!("push: notify sent={sent} failed={failed} pruned={pruned}");
-}
-
-/// Convenience wrapper for the WS BEL detector. Same as `notify` but with the
-/// session-bell payload baked in.
-pub async fn notify_bell(db: Arc<Db>, session_name: String) {
-    notify(
-        db,
-        Payload {
-            title: "mobux".to_string(),
-            body: format!("session {session_name}: 🔔"),
-            tag: Some(format!("bell-{session_name}")),
-            url: Some(format!("/s/{session_name}")),
-        },
-    )
-    .await
 }
 
 enum DeliveryOutcome {

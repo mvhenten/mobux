@@ -41,6 +41,7 @@ struct AppState {
     auth: Option<AuthConfig>,
     cache_bust: String,
     db: Arc<db::Db>,
+    notify_state: Arc<push::NotifyState>,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ async fn main() -> Result<()> {
                 .as_secs()
         ),
         db,
+        notify_state: push::NotifyState::new(),
     };
 
     let state_for_mw = state.clone();
@@ -472,6 +474,11 @@ async fn api_select_pane(
     Path((name, pane)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
+    // Suppress *before* running the command — tmux's repaint can race the
+    // response on a busy host.
+    state
+        .notify_state
+        .suppress(&name, std::time::Duration::from_millis(1000));
     tmux::select_pane(&name, &pane)
         .await
         .map_err(AppError::bad_request)?;
@@ -500,6 +507,26 @@ async fn api_tmux_command(
     Json(payload): Json<CommandReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
+    // Any of these triggers a tmux repaint of the new active region;
+    // suppress trigger scanning so the repaint doesn't re-fire
+    // notifications for already-visible content.
+    if matches!(
+        payload.command.as_str(),
+        "next-window"
+            | "prev-window"
+            | "new-window"
+            | "kill-window"
+            | "next-pane"
+            | "prev-pane"
+            | "kill-pane"
+            | "zoom-pane"
+            | "split-h"
+            | "split-v"
+    ) {
+        state
+            .notify_state
+            .suppress(&name, std::time::Duration::from_millis(1000));
+    }
     let result = tmux::run_command(&name, &payload.command)
         .await
         .map_err(AppError::bad_request)?;
@@ -885,7 +912,11 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     let apk_present = std::path::Path::new(INSTALL_APK_PATH).exists();
 
     let acme = ssl::acme_mode_enabled();
-    let app_heading = if acme { "Install the app" } else { "2. Install the app" };
+    let app_heading = if acme {
+        "Install the app"
+    } else {
+        "2. Install the app"
+    };
     let app_section = if apk_present {
         format!(
             r##"<section class="install-card">
@@ -1023,8 +1054,9 @@ async fn terminal_ws(
 ) -> Result<Response, AppError> {
     validate_session_name(&state, &name)?;
     let db = state.db.clone();
+    let notify_state = state.notify_state.clone();
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_ws(socket, name, db).await {
+        if let Err(err) = handle_ws(socket, name, db, notify_state).await {
             eprintln!("ws error: {err:#}");
         }
     }))
@@ -1042,7 +1074,14 @@ async fn handle_ws(
     socket: axum::extract::ws::WebSocket,
     session_name: String,
     db: Arc<db::Db>,
+    notify_state: Arc<push::NotifyState>,
 ) -> Result<()> {
+    use std::time::Duration;
+    // tmux paints the visible region of the active window when the WS
+    // attaches. Treat the first ~2s of output as repaint and skip
+    // notification scanning, otherwise any 🔔/BEL/exit-code already on
+    // screen fires a fresh notification on every page reload.
+    notify_state.suppress(&session_name, Duration::from_millis(2000));
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -1092,14 +1131,17 @@ async fn handle_ws(
             maybe_out = rx.recv() => {
                 match maybe_out {
                     Some(chunk) => {
-                        let prefs = db.notification_prefs().unwrap_or_default();
-                        for trigger in push::scan_pty_chunk(&chunk) {
-                            push::handle_trigger(
-                                db.clone(),
-                                &session_name,
-                                trigger,
-                                prefs,
-                            );
+                        if !notify_state.is_suppressed(&session_name) {
+                            let prefs = db.notification_prefs().unwrap_or_default();
+                            for trigger in push::scan_pty_chunk(&chunk) {
+                                push::handle_trigger(
+                                    db.clone(),
+                                    notify_state.clone(),
+                                    &session_name,
+                                    trigger,
+                                    prefs,
+                                );
+                            }
                         }
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
@@ -1119,8 +1161,21 @@ async fn handle_ws(
                                         if let Ok(m) = master.lock() {
                                             let _ = m.resize(PtySize { rows: rz.rows, cols: rz.cols, pixel_width: 0, pixel_height: 0});
                                         }
+                                        // Resize provokes a tmux repaint;
+                                        // suppress so on-screen 🔔/BEL
+                                        // don't re-fire.
+                                        notify_state.suppress(&session_name, Duration::from_millis(700));
                                         continue;
                                     }
+                                }
+                                // Ctrl-B (\x02) prefixes nearly every tmux
+                                // navigation — window/pane switches, kill,
+                                // etc. — and each provokes a repaint.
+                                // Suppress for ~1s so the repaint doesn't
+                                // re-trigger notifications on already-
+                                // visible content.
+                                if t.as_bytes().contains(&0x02) {
+                                    notify_state.suppress(&session_name, Duration::from_millis(1000));
                                 }
                                 if let Ok(mut w) = writer.lock() {
                                     let _ = w.write_all(t.as_bytes());
@@ -1128,6 +1183,9 @@ async fn handle_ws(
                                 }
                             }
                             Message::Binary(b) => {
+                                if b.contains(&0x02) {
+                                    notify_state.suppress(&session_name, Duration::from_millis(1000));
+                                }
                                 if let Ok(mut w) = writer.lock() {
                                     let _ = w.write_all(&b);
                                     let _ = w.flush();

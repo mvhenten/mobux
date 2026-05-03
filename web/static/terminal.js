@@ -336,10 +336,47 @@ if (bootDefault === 'reader') {
 
 updateToggleLabel();
 
+// ── Notification deep-link ─────────────────────────────────────────
+// A push notification's URL embeds ?w={window_index} for the tmux
+// window that produced the trigger. On boot we honor that, and on a
+// click into an already-open tab the SW posts {type:'mobux-navigate'}
+// so we can switch without a reload.
+function selectWindow(windowIndex) {
+  if (windowIndex == null || windowIndex === '') return;
+  fetch(
+    `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select`,
+    { method: 'POST' },
+  ).then(() => {
+    // Mirror runTmuxCmd: clear, then reload after tmux has time to paint.
+    core.clear();
+    core.scrollToBottom();
+    setTimeout(() => { core.refreshPanes(); core.reloadHistory(); }, 300);
+  }).catch(() => {});
+}
+
+function windowFromUrl(href) {
+  try { return new URL(href, location.origin).searchParams.get('w'); }
+  catch (_) { return null; }
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    if (ev.data?.type === 'mobux-navigate') {
+      selectWindow(windowFromUrl(ev.data.url));
+    }
+  });
+}
+
 // ── Boot ────────────────────────────────────────────────────────────
 (async () => {
   await core.reloadHistory();
   core.connect();
+  const w = windowFromUrl(location.href);
+  if (w != null) {
+    // Wait briefly for the WS to attach so refreshPanes after the
+    // switch sees the new active window.
+    setTimeout(() => selectWindow(w), 500);
+  }
 })();
 
 window.addEventListener("resize", () => core.resize());

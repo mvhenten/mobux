@@ -102,7 +102,8 @@ pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
     let output = Command::new("tmux")
         .args([
             "list-windows",
-            "-t", session,
+            "-t",
+            session,
             "-F",
             "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}",
         ])
@@ -152,16 +153,16 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     // (e.g. session "0" would otherwise target window 0)
     let target = format!("{}:", session);
     let args: Vec<String> = match command {
-        "new-window"   => vec!["new-window".into(), "-t".into(), target],
-        "kill-window"  => vec!["kill-window".into(), "-t".into(), target],
-        "split-h"      => vec!["split-window".into(), "-h".into(), "-t".into(), target],
-        "split-v"      => vec!["split-window".into(), "-v".into(), "-t".into(), target],
-        "next-window"  => vec!["next-window".into(), "-t".into(), target],
-        "prev-window"  => vec!["previous-window".into(), "-t".into(), target],
-        "next-pane"    => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
-        "prev-pane"    => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
-        "kill-pane"    => vec!["kill-pane".into(), "-t".into(), target],
-        "zoom-pane"    => vec!["resize-pane".into(), "-Z".into(), "-t".into(), target],
+        "new-window" => vec!["new-window".into(), "-t".into(), target],
+        "kill-window" => vec!["kill-window".into(), "-t".into(), target],
+        "split-h" => vec!["split-window".into(), "-h".into(), "-t".into(), target],
+        "split-v" => vec!["split-window".into(), "-v".into(), "-t".into(), target],
+        "next-window" => vec!["next-window".into(), "-t".into(), target],
+        "prev-window" => vec!["previous-window".into(), "-t".into(), target],
+        "next-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
+        "prev-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
+        "kill-pane" => vec!["kill-pane".into(), "-t".into(), target],
+        "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), target],
         _ => return Err(anyhow!("unknown command: {}", command)),
     };
 
@@ -175,8 +176,10 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // Graceful: don't error on last pane/window close or missing session
-        if msg.contains("no remaining") || msg.contains("session not found")
-            || msg.contains("can't find") || msg.contains("no current")
+        if msg.contains("no remaining")
+            || msg.contains("session not found")
+            || msg.contains("can't find")
+            || msg.contains("no current")
         {
             return Ok(msg);
         }
@@ -186,6 +189,23 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Return the index of the currently active window in a session, e.g. "0".
+/// Used by the push notifier to deep-link a notification at the window
+/// that produced the trigger.
+pub async fn active_window_index(session: &str) -> Result<String> {
+    let target = format!("{}:", session);
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", &target, "#{window_index}"])
+        .output()
+        .await
+        .context("failed to execute tmux")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux display-message failed: {}", msg));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Capture the scrollback history of the active pane in a session.
 /// Returns the content with ANSI escape sequences preserved.
 pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
@@ -193,10 +213,12 @@ pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
     let output = Command::new("tmux")
         .args([
             "capture-pane",
-            "-p",     // print to stdout
-            "-e",     // include escape sequences (colors)
-            "-S", &start,  // start N lines back
-            "-t", session,
+            "-p", // print to stdout
+            "-e", // include escape sequences (colors)
+            "-S",
+            &start, // start N lines back
+            "-t",
+            session,
         ])
         .output()
         .await
@@ -209,4 +231,3 @@ pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-

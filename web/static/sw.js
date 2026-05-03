@@ -39,10 +39,21 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const url = event.notification.data?.url || '/';
+  // Match an open client by session (the path /s/{session}). On a hit,
+  // focus the existing tab and tell it to navigate internally — no
+  // duplicate tab, no full reload.
+  let target;
+  try { target = new URL(url, self.location.origin); }
+  catch (_) { target = new URL('/', self.location.origin); }
   event.waitUntil(
-    clients.matchAll({ type: 'window' }).then((all) => {
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((all) => {
       for (const client of all) {
-        if (client.url.includes(url)) return client.focus();
+        let cu;
+        try { cu = new URL(client.url); } catch (_) { continue; }
+        if (cu.pathname === target.pathname) {
+          client.postMessage({ type: 'mobux-navigate', url });
+          return client.focus();
+        }
       }
       return clients.openWindow(url);
     })
