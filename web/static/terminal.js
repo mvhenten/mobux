@@ -27,6 +27,21 @@ const quotes = [
   ["Controlling complexity is the essence of computer programming.", "Brian Kernighan"],
   ["Any sufficiently advanced technology is indistinguishable from magic.", "Arthur C. Clarke"],
   ["Information is the resolution of uncertainty.", "Claude Shannon"],
+  ["Looking back, we were the luckiest people in the world; there was no choice but to be pioneers.", "Margaret Hamilton"],
+
+  // Contemporary craft
+  ["Any fool can write code that a computer can understand. Good programmers write code that humans can understand.", "Martin Fowler"],
+  ["Truth can only be found in one place: the code.", "Robert C. Martin"],
+  ["I'm not a great programmer; I'm just a good programmer with great habits.", "Kent Beck"],
+  ["Duplication is far cheaper than the wrong abstraction.", "Sandi Metz"],
+  ["It's harder to read code than to write it.", "Joel Spolsky"],
+  ["I call it my billion-dollar mistake.", "Tony Hoare, on null"],
+  ["Programmers know the value of everything and the cost of nothing.", "Rich Hickey"],
+  ["Fancy algorithms are slow when n is small, and n is usually small.", "Rob Pike"],
+  ["There are only two kinds of programming languages: the ones people complain about and the ones nobody uses.", "Bjarne Stroustrup"],
+  ["Ruby is designed to make programmers happy.", "Yukihiro Matsumoto"],
+  ["The three chief virtues of a programmer are: laziness, impatience, and hubris.", "Larry Wall"],
+  ["If you're not failing every now and again, it's a sign you're not doing anything very innovative.", "John Carmack"],
 ];
 {
   const [text, author] = quotes[Math.floor(Math.random() * quotes.length)];
