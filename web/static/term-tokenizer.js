@@ -129,13 +129,18 @@ export function extractRuns(rowChain, cols) {
     }
   }
   if (cur) runs.push(cur);
-  // Trim trailing default-attr whitespace from the last run.
-  if (runs.length > 0) {
+  // Trim trailing whitespace from the last run. Terminal apps often
+  // pad lines with spaces; when those spaces carry a non-default bg
+  // (e.g. tail of a syntax-highlighted token), they render as tiny
+  // empty chips at the end of the line. Strip them regardless of attrs.
+  while (runs.length > 0) {
     const last = runs[runs.length - 1];
-    if (attrsAreDefault(last.attrs)) {
-      last.text = last.text.replace(/\s+$/u, '');
-      if (last.text.length === 0) runs.pop();
+    last.text = last.text.replace(/\s+$/u, '');
+    if (last.text.length === 0) {
+      runs.pop();
+      continue;
     }
+    break;
   }
   return runs;
 }
