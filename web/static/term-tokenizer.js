@@ -197,26 +197,48 @@ function lineBubbleBg(runs) {
 
 // ── Logical-line iteration ─────────────────────────────────────────
 // Coalesces wrapped rows so the reader gets one entry per logical
-// line and can reflow on its own width.
+// line and can reflow on its own width. `startY` is the absolute
+// buffer row where the chain begins — needed to look up OSC 133
+// shell-integration markers attached to specific rows.
 function* logicalLines(buffer, endY) {
   const total = endY != null ? endY : buffer.length;
   let chain = [];
+  let chainStartY = -1;
   for (let y = 0; y < total; y++) {
     const line = buffer.getLine(y);
     if (!line) continue;
     if (line.isWrapped && chain.length > 0) {
       chain.push(line);
     } else {
-      if (chain.length > 0) yield chain;
+      if (chain.length > 0) yield { chain, startY: chainStartY };
       chain = [line];
+      chainStartY = y;
     }
   }
-  if (chain.length > 0) yield chain;
+  if (chain.length > 0) yield { chain, startY: chainStartY };
+}
+
+// First OSC 133 marker found anywhere in [startY, startY+len). A
+// chain may span several wrapped rows; the marker can land on any of
+// them (e.g. a prompt whose own line wraps).
+function oscKindForChain(oscMarkers, startY, len) {
+  if (!oscMarkers || oscMarkers.size === 0) return null;
+  for (let y = startY; y < startY + len; y++) {
+    const k = oscMarkers.get(y);
+    if (k) return k;
+  }
+  return null;
 }
 
 // ── Main entry point ───────────────────────────────────────────────
+// `opts.oscMarkers` (Map<absY, 'A'|'B'|'C'|'D'>) is consulted before
+// the heuristic classifiers: a row marked A is the prompt, the row
+// after C starts command output. Without markers the classifier
+// falls back to the same heuristics it used before — same behaviour
+// for shells without integration.
 export function tokenize(buffer, cols, opts) {
   const endY = opts && opts.endY != null ? opts.endY : buffer.length;
+  const oscMarkers = opts && opts.oscMarkers;
   const blocks = [];
   let inFence = false;
   let codeLines = [];
@@ -233,9 +255,10 @@ export function tokenize(buffer, cols, opts) {
     else blocks.push({ type: 'text', lines: [line] });
   }
 
-  for (const chain of logicalLines(buffer, endY)) {
+  for (const { chain, startY } of logicalLines(buffer, endY)) {
     const runs = extractRuns(chain, cols);
     const text = runs.map((r) => r.text).join('');
+    const oscKind = oscKindForChain(oscMarkers, startY, chain.length);
 
     if (FENCE_RE.test(text)) {
       if (inFence) { flushCode(); inFence = false; }
@@ -251,6 +274,11 @@ export function tokenize(buffer, cols, opts) {
       blocks.push({ type: 'blank' });
       continue;
     }
+    // OSC 133 ; A / B marks the line as a prompt deterministically —
+    // no sigil-guessing. `C` and `D` mark output start/end; they
+    // don't change the line's own classification, but a future
+    // change could group C..D as a single 'output' block.
+    const isOscPrompt = oscKind === 'A' || oscKind === 'B';
     if (isRule(text)) {
       blocks.push({ type: 'rule' });
       continue;
@@ -259,7 +287,7 @@ export function tokenize(buffer, cols, opts) {
       blocks.push({ type: 'header', runs, text });
       continue;
     }
-    if (isPrompt(text)) {
+    if (isOscPrompt || isPrompt(text)) {
       blocks.push({ type: 'prompt', runs, text });
       continue;
     }
@@ -272,5 +300,5 @@ export function tokenize(buffer, cols, opts) {
 // Exposed for unit tests.
 export const _internals = {
   isRule, isPrompt, isHeader, attrsEqual, attrsAreDefault,
-  paletteColour, rgbColour, lineBubbleBg,
+  paletteColour, rgbColour, lineBubbleBg, oscKindForChain,
 };

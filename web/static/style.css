@@ -113,6 +113,40 @@ body {
   font-size: 13px;
   color: var(--muted);
 }
+.settings-detail {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.2);
+}
+.settings-detail summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 13px;
+  user-select: none;
+}
+.settings-detail summary code {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 6px;
+}
+.settings-snippet {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre;
+  overflow-x: auto;
+  background: transparent;
+  color: #d8dde6;
+}
+.settings-foot {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
 
 .session-list {
   display: flex;
@@ -356,6 +390,33 @@ h1, h2, h3 { margin: 0; }
 }
 .reader-statusbar-inner { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .reader-statusbar-inner span { background: transparent !important; border: 0 !important; padding: 0 !important; }
+.reader-osc-hint {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 8px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  background: rgba(20, 24, 32, 0.92);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  color: #c8cdd6;
+}
+.reader-osc-hint a { color: #7ec8ff; }
+.reader-osc-dismiss {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  margin-left: auto;
+}
 #reader.hidden { display: none; }
 #terminal.hidden { display: none; }
 #touchOverlay.hidden { display: none; }
@@ -392,6 +453,9 @@ h1, h2, h3 { margin: 0; }
 .rb-text .rb-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .rb-code {
@@ -446,6 +510,9 @@ h1, h2, h3 { margin: 0; }
   padding: 0 !important;
   margin: 0;
   display: block;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 

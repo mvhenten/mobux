@@ -71,7 +71,7 @@ smoke-start: build
 	@mkdir -p /tmp/mobux-smoke
 	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
-		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null & disown
+		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
 		&& echo "smoke mobux running on port $(MOBUX_SMOKE_PORT) (data /tmp/mobux-smoke)" \
 		|| { echo "smoke FAILED to start"; tail /tmp/mobux-smoke/mobux.log; exit 1; }

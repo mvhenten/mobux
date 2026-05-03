@@ -815,6 +815,38 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
 
       <div class="settings-status" id="settingsStatus" hidden>Saved.</div>
     </section>
+
+    <section class="settings-card" id="shell-integration">
+      <h2>Shell integration</h2>
+      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristic detection — works, but guesses at what's a prompt vs. what just happens to end with <code>$</code> or <code>&gt;</code>. Paste the snippet for your shell into the rc file and reload the terminal.</p>
+
+      <details class="settings-detail" open>
+        <summary>bash <code>~/.bashrc</code></summary>
+<pre class="settings-snippet"><code>PS0='\e]133;C\a'
+PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'</code></pre>
+      </details>
+
+      <details class="settings-detail">
+        <summary>zsh <code>~/.zshrc</code></summary>
+<pre class="settings-snippet"><code>preexec() {{ print -Pn '\e]133;C\a' }}
+precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}</code></pre>
+      </details>
+
+      <details class="settings-detail">
+        <summary>fish <code>~/.config/fish/config.fish</code></summary>
+<pre class="settings-snippet"><code>function __mobux_osc133_preexec --on-event fish_preexec
+    printf '\e]133;C\a'
+end
+function __mobux_osc133_postexec --on-event fish_postexec
+    printf '\e]133;D;%s\a' $status
+end
+function __mobux_osc133_prompt --on-event fish_prompt
+    printf '\e]133;A\a'
+end</code></pre>
+      </details>
+
+      <p class="settings-foot">After reloading the shell, switch to a session and watch any prompt: the &quot;Shell integration not detected&quot; hint in the reader view should disappear, and prompts should highlight cleanly even when they don't end with a recognised sigil.</p>
+    </section>
   </main>
 
   <script src="/static/settings.js?v={v}"></script>
