@@ -32,6 +32,7 @@ use tower_http::services::ServeDir;
 
 mod db;
 mod push;
+mod shell_integration;
 mod ssl;
 mod tmux;
 
@@ -110,6 +111,18 @@ async fn main() -> Result<()> {
         .route(
             "/api/settings/notifications",
             get(api_get_notification_prefs).put(api_set_notification_prefs),
+        )
+        .route(
+            "/api/shell-integration/status",
+            get(api_shell_integration_status),
+        )
+        .route(
+            "/api/shell-integration/install",
+            post(api_shell_integration_install),
+        )
+        .route(
+            "/api/shell-integration/uninstall",
+            post(api_shell_integration_uninstall),
         )
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
@@ -757,6 +770,30 @@ async fn api_set_notification_prefs(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct ShellIntegrationReq {
+    shell: shell_integration::Shell,
+}
+
+async fn api_shell_integration_status() -> Result<Json<shell_integration::Status>, AppError> {
+    let s = shell_integration::status().map_err(AppError::internal)?;
+    Ok(Json(s))
+}
+
+async fn api_shell_integration_install(
+    Json(req): Json<ShellIntegrationReq>,
+) -> Result<Json<shell_integration::Status>, AppError> {
+    let s = shell_integration::install(req.shell).map_err(AppError::internal)?;
+    Ok(Json(s))
+}
+
+async fn api_shell_integration_uninstall(
+    Json(req): Json<ShellIntegrationReq>,
+) -> Result<Json<shell_integration::Status>, AppError> {
+    let s = shell_integration::uninstall(req.shell).map_err(AppError::internal)?;
+    Ok(Json(s))
+}
+
 async fn settings_page(State(state): State<AppState>) -> Html<String> {
     let v = &state.cache_bust;
     Html(format!(
@@ -818,22 +855,51 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
 
     <section class="settings-card" id="shell-integration">
       <h2>Shell integration</h2>
-      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristic detection — works, but guesses at what's a prompt vs. what just happens to end with <code>$</code> or <code>&gt;</code>. Paste the snippet for your shell into the rc file and reload the terminal.</p>
+      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristics. Click install — mobux appends a managed, fenced block to your rc file and keeps a timestamped backup. Nothing outside the fence is touched.</p>
 
-      <details class="settings-detail" open>
-        <summary>bash <code>~/.bashrc</code></summary>
+      <div class="shell-card" data-shell="bash">
+        <div class="shell-card-head">
+          <strong>bash</strong> <code>~/.bashrc</code>
+          <span class="shell-state" data-role="state">…</span>
+        </div>
+        <div class="shell-card-actions">
+          <button type="button" data-action="install">Install</button>
+          <button type="button" data-action="uninstall">Uninstall</button>
+        </div>
+        <details class="settings-detail">
+          <summary>Show snippet</summary>
 <pre class="settings-snippet"><code>PS0='\e]133;C\a'
 PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'</code></pre>
-      </details>
+        </details>
+      </div>
 
-      <details class="settings-detail">
-        <summary>zsh <code>~/.zshrc</code></summary>
+      <div class="shell-card" data-shell="zsh">
+        <div class="shell-card-head">
+          <strong>zsh</strong> <code>~/.zshrc</code>
+          <span class="shell-state" data-role="state">…</span>
+        </div>
+        <div class="shell-card-actions">
+          <button type="button" data-action="install">Install</button>
+          <button type="button" data-action="uninstall">Uninstall</button>
+        </div>
+        <details class="settings-detail">
+          <summary>Show snippet</summary>
 <pre class="settings-snippet"><code>preexec() {{ print -Pn '\e]133;C\a' }}
 precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}</code></pre>
-      </details>
+        </details>
+      </div>
 
-      <details class="settings-detail">
-        <summary>fish <code>~/.config/fish/config.fish</code></summary>
+      <div class="shell-card" data-shell="fish">
+        <div class="shell-card-head">
+          <strong>fish</strong> <code>~/.config/fish/config.fish</code>
+          <span class="shell-state" data-role="state">…</span>
+        </div>
+        <div class="shell-card-actions">
+          <button type="button" data-action="install">Install</button>
+          <button type="button" data-action="uninstall">Uninstall</button>
+        </div>
+        <details class="settings-detail">
+          <summary>Show snippet</summary>
 <pre class="settings-snippet"><code>function __mobux_osc133_preexec --on-event fish_preexec
     printf '\e]133;C\a'
 end
@@ -843,13 +909,16 @@ end
 function __mobux_osc133_prompt --on-event fish_prompt
     printf '\e]133;A\a'
 end</code></pre>
-      </details>
+        </details>
+      </div>
 
-      <p class="settings-foot">After reloading the shell, switch to a session and watch any prompt: the &quot;Shell integration not detected&quot; hint in the reader view should disappear, and prompts should highlight cleanly even when they don't end with a recognised sigil.</p>
+      <div class="settings-status" id="shellIntegrationStatus" hidden></div>
+      <p class="settings-foot">Reload the shell after installing. The fenced block is the contract — mobux only ever modifies what's between the fences. A timestamped <code>.mobux.bak.&lt;ts&gt;</code> is written next to the rc file before any change.</p>
     </section>
   </main>
 
   <script src="/static/settings.js?v={v}"></script>
+  <script src="/static/shell-integration.js?v={v}"></script>
 </body>
 </html>
 "##,
@@ -917,7 +986,11 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     let apk_present = std::path::Path::new(INSTALL_APK_PATH).exists();
 
     let acme = ssl::acme_mode_enabled();
-    let app_heading = if acme { "Install the app" } else { "2. Install the app" };
+    let app_heading = if acme {
+        "Install the app"
+    } else {
+        "2. Install the app"
+    };
     let app_section = if apk_present {
         format!(
             r##"<section class="install-card">
