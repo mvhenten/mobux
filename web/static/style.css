@@ -147,6 +147,60 @@ body {
   font-size: 12px;
   color: var(--muted);
 }
+.shell-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.15);
+}
+.shell-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+.shell-card-head code {
+  font-size: 12px;
+  color: var(--muted);
+}
+.shell-card-head .shell-state {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.shell-state--on { color: #6ee7b7; border-color: #234b3a; background: rgba(110,231,183,0.08); }
+.shell-state--off { color: var(--muted); }
+.shell-state--warn { color: #fbbf24; border-color: #553f17; background: rgba(251,191,36,0.08); }
+.shell-state--missing { color: var(--muted); font-style: italic; }
+.shell-card-actions {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+.shell-card-actions button {
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: inherit;
+  cursor: pointer;
+}
+.shell-card-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+}
+.shell-card-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.shell-card .settings-detail {
+  margin-top: 0;
+}
 
 .session-list {
   display: flex;

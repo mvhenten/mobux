@@ -899,3 +899,58 @@ test('input bar lifts above on-screen keyboard via visualViewport', async ({ pag
     { timeout: 2000 },
   ).toBe('');
 });
+
+test('shell integration: status, install, and uninstall round-trip', async ({ page }) => {
+  const fs = require('fs');
+  const path = require('path');
+  const rcPath = path.join(SANDBOX_HOME, '.bashrc');
+  const FENCE_OPEN = '# >>> mobux OSC 133 (managed) >>>';
+  const FENCE_CLOSE = '# <<< mobux OSC 133 (managed) <<<';
+
+  // Clean any prior fence/backups left by earlier test runs sharing the
+  // sandbox HOME.
+  try { fs.unlinkSync(rcPath); } catch (_) {}
+  try {
+    for (const f of fs.readdirSync(SANDBOX_HOME)) {
+      if (f.startsWith('.bashrc.mobux.bak.')) {
+        fs.unlinkSync(path.join(SANDBOX_HOME, f));
+      }
+    }
+  } catch (_) {}
+
+  const statusRes = await page.request.get(`${BASE}/api/shell-integration/status`);
+  expect(statusRes.ok()).toBeTruthy();
+  const status = await statusRes.json();
+  for (const sh of ['bash', 'zsh', 'fish']) {
+    expect(status[sh]).toBeTruthy();
+    expect(typeof status[sh].state).toBe('string');
+  }
+
+  const installRes = await page.request.post(`${BASE}/api/shell-integration/install`, {
+    data: { shell: 'bash' },
+    headers: { 'Content-Type': 'application/json' },
+  });
+  expect(installRes.ok()).toBeTruthy();
+  const afterInstall = await installRes.json();
+  expect(afterInstall.bash.state).toBe('installed');
+  expect(afterInstall.bash.version).toBe(1);
+
+  const rcContent = fs.readFileSync(rcPath, 'utf8');
+  expect(rcContent).toContain(FENCE_OPEN);
+  expect(rcContent).toContain(FENCE_CLOSE);
+  expect(rcContent).toContain('PS0=');
+
+  const uninstallRes = await page.request.post(`${BASE}/api/shell-integration/uninstall`, {
+    data: { shell: 'bash' },
+    headers: { 'Content-Type': 'application/json' },
+  });
+  expect(uninstallRes.ok()).toBeTruthy();
+  const afterUninstall = await uninstallRes.json();
+  expect(['not_installed', 'not_present']).toContain(afterUninstall.bash.state);
+
+  if (fs.existsSync(rcPath)) {
+    const post = fs.readFileSync(rcPath, 'utf8');
+    expect(post).not.toContain(FENCE_OPEN);
+    expect(post).not.toContain(FENCE_CLOSE);
+  }
+});
