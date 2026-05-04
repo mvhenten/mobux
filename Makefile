@@ -68,8 +68,10 @@ logs:
 smoke-start: build
 	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke already running (pid $(SMOKE_PID)) on $(MOBUX_SMOKE_PORT)"; exit 1; fi
 	@if [ "$(MOBUX_SMOKE_PORT)" = "$(MOBUX_PORT)" ]; then echo "MOBUX_SMOKE_PORT must differ from MOBUX_PORT"; exit 1; fi
-	@mkdir -p /tmp/mobux-smoke
+	@mkdir -p /tmp/mobux-smoke/home
 	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
+		HOME=/tmp/mobux-smoke/home HISTFILE=/dev/null \
+		MOBUX_TMUX_SOCKET=mobux-test \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
@@ -77,8 +79,8 @@ smoke-start: build
 		|| { echo "smoke FAILED to start"; tail /tmp/mobux-smoke/mobux.log; exit 1; }
 
 smoke-stop:
-	@if [ -z "$(SMOKE_PID)" ]; then echo "smoke not running"; exit 0; fi
-	kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"
+	@if [ -n "$(SMOKE_PID)" ]; then kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"; else echo "smoke not running"; fi
+	@tmux -L mobux-test kill-server 2>/dev/null || true
 
 smoke-logs:
 	@tail -f /tmp/mobux-smoke/mobux.log
