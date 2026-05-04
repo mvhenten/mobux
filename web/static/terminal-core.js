@@ -263,8 +263,10 @@ function makeAcetermAdapter(host, sendCb) {
   // tests). Force it off — for a phone-shaped scrollback-pinned reader
   // we always want the full history available.
   libterm.noScrollBack = function() { return false; };
-  injectAcetermDarkCss();
-  const editor = Aceterm.createEditor(host, null);
+  // theme-tomorrow_night.js is loaded as a classic <script> in
+  // render_terminal_page, so the module is already registered with
+  // Ace's loader by the time we ask for it here — no XHR.
+  const editor = Aceterm.createEditor(host, 'ace/theme/tomorrow_night');
   editor.setSession(libterm.aceSession);
   editor.renderer.setShowGutter(false);
   editor.renderer.setShowPrintMargin(false);
@@ -437,32 +439,6 @@ function makeLineAdapter(cells) {
       };
     },
   };
-}
-
-// Ace's default theme is "textmate" (light-on-white). We don't want
-// to lazy-load a real ace/theme/<name> bundle (extra HTTP, version
-// pinning) — just override the relevant rules to mobux's --bg /
-// --text values. Idempotent: only injects once.
-function injectAcetermDarkCss() {
-  if (document.getElementById('mobux-aceterm-dark')) return;
-  const style = document.createElement('style');
-  style.id = 'mobux-aceterm-dark';
-  style.textContent = `
-    #terminal .ace_editor,
-    #terminal .ace_scroller,
-    #terminal .ace_content {
-      background: #0f1115 !important;
-      color: #d8dde6;
-    }
-    #terminal .ace_gutter,
-    #terminal .ace_print-margin,
-    #terminal .ace_active-line { display: none !important; background: transparent !important; }
-    #terminal .ace_cursor { color: #d8dde6 !important; border-color: #d8dde6 !important; }
-    #terminal .ace_marker-layer .ace_selection { background: rgba(126, 200, 255, 0.25) !important; }
-    /* Default Ace text colour for unstyled cells. */
-    #terminal .ace_line, #terminal .ace_text-layer { color: #d8dde6; }
-  `;
-  document.head.appendChild(style);
 }
 
 function aliasXtermClasses(host) {
