@@ -843,3 +843,56 @@ test('synthetic viewport: bubble fusion under translated inner', async ({ page }
   });
   expect(insideInner).toBe(true);
 });
+
+test('input bar lifts above on-screen keyboard via visualViewport', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await page.setViewportSize({ width: 380, height: 800 });
+
+  await page.evaluate(() => {
+    const bar = document.getElementById('inputBar');
+    bar.classList.remove('hidden');
+    const vv = window.visualViewport;
+    window.__origVVHeight = vv.height;
+    window.__origVVOffset = vv.offsetTop;
+    Object.defineProperty(vv, 'height', {
+      configurable: true,
+      get: () => (typeof window.__stubVVHeight === 'number' ? window.__stubVVHeight : window.__origVVHeight),
+    });
+    Object.defineProperty(vv, 'offsetTop', {
+      configurable: true,
+      get: () => (typeof window.__stubVVOffset === 'number' ? window.__stubVVOffset : window.__origVVOffset),
+    });
+  });
+
+  await page.evaluate(() => {
+    window.__stubVVHeight = window.innerHeight - 300;
+    window.__stubVVOffset = 0;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(
+    async () => await page.evaluate(() => document.getElementById('inputBar').style.transform),
+    { timeout: 2000 },
+  ).toMatch(/translateY\(-\d+(\.\d+)?px\)/);
+
+  const ty = await page.evaluate(() => {
+    const m = document.getElementById('inputBar').style.transform.match(/translateY\((-?[\d.]+)px\)/);
+    return m ? parseFloat(m[1]) : 0;
+  });
+  expect(ty).toBeLessThan(0);
+
+  await page.evaluate(() => {
+    window.__stubVVHeight = window.innerHeight;
+    window.__stubVVOffset = 0;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(
+    async () => await page.evaluate(() => document.getElementById('inputBar').style.transform),
+    { timeout: 2000 },
+  ).toBe('');
+});
