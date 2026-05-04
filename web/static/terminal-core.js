@@ -37,6 +37,11 @@ export class TerminalCore extends EventTarget {
     this.term = makeAcetermAdapter(host, (data) => this.send(data));
     this._wireWriteParsedFanout();
     this._wireOsc133();
+    // Spike-only debug peephole.
+    if (typeof window !== 'undefined') {
+      window.__lt = this.term._libterm;
+      window.__ed = this.term._editor;
+    }
   }
 
   // ── WebSocket lifecycle ───────────────────────────────────────────
@@ -202,8 +207,12 @@ export class TerminalCore extends EventTarget {
   }
 
   _wireWriteParsedFanout() {
+    // libterm emits `afterWrite` after each `write()`. There is no
+    // `refresh` event — `refresh` is a method on Terminal, not an
+    // EventEmitter signal. Use `afterWrite` to fire the
+    // `onWriteParsed` subscribers the reader relies on.
     if (this.term._libterm && this.term._libterm.on) {
-      this.term._libterm.on('refresh', () => {
+      this.term._libterm.on('afterWrite', () => {
         for (const cb of this.term._writeParsedSubs) cb();
       });
     }
@@ -231,6 +240,13 @@ export class TerminalCore extends EventTarget {
 function makeAcetermAdapter(host, sendCb) {
   const initialCols = 120, initialRows = 35;
   const libterm = Aceterm(initialCols, initialRows, sendCb);
+  // libterm switches `noScrollBack()` to true when the program enables
+  // mouseEvents/applicationKeypad (tmux turns mouse events on). That
+  // shrinks Ace's session to just the visible region, hiding all
+  // scrollback from the renderer (and from `viewportY` in the smoke
+  // tests). Force it off — for a phone-shaped scrollback-pinned reader
+  // we always want the full history available.
+  libterm.noScrollBack = function() { return false; };
   const editor = Aceterm.createEditor(host, null);
   editor.setSession(libterm.aceSession);
   editor.renderer.setShowGutter(false);
@@ -247,19 +263,12 @@ function makeAcetermAdapter(host, sendCb) {
   // for xterm.js's class names. Alias them onto Ace's structurally
   // equivalent elements so existing assertions about visibility /
   // scrolling don't have to know which renderer is mounted.
-  // Wait one frame for Ace to mount its layers.
-  setTimeout(() => {
-    try {
-      // .ace_scroller hosts the rendered text grid and is the scrolling
-      // viewport — same role as xterm's .xterm-viewport / .xterm-screen.
-      const scroller = host.querySelector('.ace_scroller');
-      if (scroller) {
-        scroller.classList.add('xterm-viewport', 'xterm-screen');
-      }
-      const text = host.querySelector('.ace_text-layer');
-      if (text) text.classList.add('xterm-rows');
-    } catch (_) {}
-  }, 0);
+  // Synchronous — racing against page-side `expect(...).toBeVisible`
+  // means setTimeout(0) is too late.
+  aliasXtermClasses(host);
+  // Re-apply after Ace's first async layout in case it rebuilds the
+  // scroller/text-layer DOM (it does on resize / theme change).
+  editor.renderer.on('afterRender', () => aliasXtermClasses(host));
 
   const writeParsedSubs = [];
   const dataSubs = [];
@@ -293,7 +302,20 @@ function makeAcetermAdapter(host, sendCb) {
     resize(cols, rows) { libterm.resize(cols, rows); },
     clear() { libterm.clear && libterm.clear(); },
     scrollToBottom() {
-      try { editor.session.setScrollTop(-1); } catch (_) {}
+      try {
+        // Resolve Ace's "stick to bottom" by setting the explicit
+        // pixel scrollTop. Reading `session.getScrollTop()` after
+        // `setScrollTop(-1)` returns -1 (the sentinel), which makes
+        // synchronous callers (smoke tests) see no scroll. Setting
+        // an explicit pixel offset commits the position.
+        const lh = editor.renderer.lineHeight || 18;
+        const docLen = editor.session.doc.getLength();
+        const sh = (editor.renderer.scroller
+          ? editor.renderer.scroller.clientHeight
+          : (editor.renderer.$size && editor.renderer.$size.scrollerHeight)) || 0;
+        const maxScroll = Math.max(0, docLen * lh - sh);
+        editor.session.setScrollTop(maxScroll);
+      } catch (_) {}
     },
     scrollLines(n) {
       const r = editor.renderer;
@@ -317,13 +339,13 @@ function makeAcetermAdapter(host, sendCb) {
 
     buffer: {
       get active() {
-        return makeBufferAdapter(libterm);
+        return makeBufferAdapter(libterm, editor);
       },
     },
   };
 }
 
-function makeBufferAdapter(lt) {
+function makeBufferAdapter(lt, editor) {
   return {
     get length() {
       return Math.max(lt.lines ? lt.lines.length : 0, lt.rows + (lt.ybase || 0));
@@ -331,7 +353,18 @@ function makeBufferAdapter(lt) {
     get cursorX() { return lt.x || 0; },
     get cursorY() { return lt.y || 0; },
     get baseY() { return lt.ybase || 0; },
-    get viewportY() { return lt.ybase || 0; },
+    // xterm's `viewportY` is "the absolute row index of the topmost
+    // VISIBLE row" — tracks the user's scroll position. In aceterm
+    // libterm renders into Ace's session whose viewport scrolls
+    // independently of libterm's `ybase`, so read Ace's first
+    // visible row instead.
+    get viewportY() {
+      if (editor && editor.renderer) {
+        const r = editor.renderer;
+        return r.getFirstVisibleRow ? r.getFirstVisibleRow() : 0;
+      }
+      return lt.ybase || 0;
+    },
     getLine(y) {
       if (!lt.lines || !lt.lines[y]) return null;
       return makeLineAdapter(lt.lines[y]);
@@ -387,6 +420,22 @@ function makeLineAdapter(cells) {
       };
     },
   };
+}
+
+function aliasXtermClasses(host) {
+  try {
+    // .ace_scroller hosts the rendered text grid and is the scrolling
+    // viewport — same role as xterm's .xterm-viewport / .xterm-screen.
+    const scroller = host.querySelector('.ace_scroller');
+    if (scroller) scroller.classList.add('xterm-viewport', 'xterm-screen');
+    const text = host.querySelector('.ace_text-layer');
+    if (text) text.classList.add('xterm-rows');
+    // Ace's hidden textarea is the one that actually receives
+    // keystrokes — alias to xterm's helper-textarea so the smoke
+    // suite can `.focus()` it the same way.
+    const ta = host.querySelector('.ace_text-input');
+    if (ta) ta.classList.add('xterm-helper-textarea');
+  } catch (_) {}
 }
 
 // Ace's MouseHandler treats touchmove as drag-select on mobile —
