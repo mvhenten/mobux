@@ -240,6 +240,22 @@ export class TerminalCore extends EventTarget {
 function makeAcetermAdapter(host, sendCb) {
   const initialCols = 120, initialRows = 35;
   const libterm = Aceterm(initialCols, initialRows, sendCb);
+  // libterm globals live on the Terminal class. Match the xterm-
+  // side defaults: 10k-line scrollback (was 1000) and mobux's
+  // base16-ish palette (was Tango, which made blues/cyans clash
+  // with the reader CSS).
+  const Terminal = libterm.constructor;
+  if (Terminal) {
+    Terminal.scrollback = 10000;
+    if (typeof Terminal.setColors === 'function') {
+      Terminal.setColors(undefined, undefined, [
+        '#1e1e1e', '#cc6666', '#b5bd68', '#f0c674',
+        '#81a2be', '#b294bb', '#8abeb7', '#c5c8c6',
+        '#5c6370', '#e06c75', '#98c379', '#e5c07b',
+        '#61afef', '#c678dd', '#56b6c2', '#ffffff',
+      ]);
+    }
+  }
   // libterm switches `noScrollBack()` to true when the program enables
   // mouseEvents/applicationKeypad (tmux turns mouse events on). That
   // shrinks Ace's session to just the visible region, hiding all
