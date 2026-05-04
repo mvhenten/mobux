@@ -40,9 +40,14 @@ export function createInputBar(term, send) {
   }
 
   function hide() {
+    bar.style.transform = '';
     bar.classList.add('hidden');
     input.blur();
     resizeTerminal();
+  }
+
+  function computeKeyboardOffset(innerHeight, vvHeight, vvOffsetTop) {
+    return Math.max(0, innerHeight - vvHeight - vvOffsetTop);
   }
 
   function resizeTerminal() {
@@ -110,18 +115,31 @@ export function createInputBar(term, send) {
     setTimeout(() => input.focus(), 50);
   }
 
-  // ── Detect keyboard dismiss ───────────────────────────────────────
-  // Use visualViewport to detect when the software keyboard closes
+  // ── Track on-screen keyboard via visualViewport ───────────────────
+  // Translate the bar up by the keyboard height so it sits above the
+  // software keyboard (Android Chrome doesn't shrink the layout vp).
   if (window.visualViewport) {
-    let lastHeight = window.visualViewport.height;
-    window.visualViewport.addEventListener('resize', () => {
-      const h = window.visualViewport.height;
-      // Keyboard closed: viewport grew significantly
+    const vv = window.visualViewport;
+    let lastHeight = vv.height;
+
+    const applyOffset = () => {
+      const offset = computeKeyboardOffset(window.innerHeight, vv.height, vv.offsetTop);
+      if (bar.classList.contains('hidden')) return offset;
+      bar.style.transform = offset > 0 ? `translateY(${-offset}px)` : '';
+      return offset;
+    };
+
+    const onViewportChange = () => {
+      applyOffset();
+      const h = vv.height;
       if (h > lastHeight + 50 && !bar.classList.contains('hidden')) {
         hide();
       }
       lastHeight = h;
-    });
+    };
+
+    vv.addEventListener('resize', onViewportChange);
+    vv.addEventListener('scroll', onViewportChange);
   }
 
   // Also hide on Escape
@@ -173,6 +191,7 @@ export function createInputBar(term, send) {
 
   // ── Public API ────────────────────────────────────────────────────
   return {
+    _computeKeyboardOffset: computeKeyboardOffset,
     show: activateInput,
     hide,
     destroy() {
