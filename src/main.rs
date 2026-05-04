@@ -1084,11 +1084,16 @@ async fn handle_ws(
     })?;
 
     let mut cmd = CommandBuilder::new("bash");
+    let tmux_bin = match std::env::var("MOBUX_TMUX_SOCKET") {
+        Ok(s) if !s.is_empty() => format!("tmux -L {}", s),
+        _ => "tmux".to_string(),
+    };
     cmd.args([
         "-c",
         &format!(
-            "tmux set-option -g mouse on 2>/dev/null; tmux set-window-option -g aggressive-resize on 2>/dev/null; tmux attach-session -t {}",
-            &session_name
+            "{tmux} set-option -g mouse on 2>/dev/null; {tmux} set-window-option -g aggressive-resize on 2>/dev/null; {tmux} attach-session -t {session}",
+            tmux = tmux_bin,
+            session = session_name,
         ),
     ]);
     let mut child = pair.slave.spawn_command(cmd)?;

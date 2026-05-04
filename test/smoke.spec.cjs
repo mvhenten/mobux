@@ -7,11 +7,14 @@ const PASS = process.env.MOBUX_PASS || '';
 const AUTH = (USER && PASS) ? 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64') : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || 'mobux-smoke';
 
-// Tmux command used to set up/tear down the test session. Defaults to the
-// host's `tmux`. Override with `MOBUX_TEST_TMUX` to target a containerized
-// mobux's tmux server, e.g. `MOBUX_TEST_TMUX="podman exec mobux-podman tmux"`
-// when running `make podman-test`.
-const TMUX_CMD = process.env.MOBUX_TEST_TMUX || 'tmux';
+// Tmux command used to set up/tear down the test session. Defaults to a
+// dedicated tmux server (`tmux -L mobux-test`) so tests never touch the
+// host's default tmux server. Override with `MOBUX_TEST_TMUX` to target
+// a containerized mobux's tmux server, e.g.
+// `MOBUX_TEST_TMUX="podman exec mobux-podman tmux"` for `make podman-test`.
+const TMUX_CMD = process.env.MOBUX_TEST_TMUX || 'tmux -L mobux-test';
+const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || '/tmp/mobux-smoke/home';
+const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
 const tmux = (args) => execSync(`${TMUX_CMD} ${args}`, { stdio: 'pipe' });
 
 test.use({
@@ -27,11 +30,11 @@ test.beforeAll(() => {
   // Pre-seed with enough lines for scroll tests; quiet otherwise so
   // assertions don't race against live output. Use bash so tests that
   // type real commands (URL detection, etc.) hit a working prompt.
-  tmux(`new-session -d -s ${SESSION} "bash --norc --noprofile"`);
+  tmux(`new-session -d -s ${SESSION} ${SHELL_ENV} "bash --norc --noprofile"`);
   tmux(`send-keys -t ${SESSION} "PS1='\\$ '" Enter`);
   tmux(`send-keys -t ${SESSION} "clear" Enter`);
   // Add a second window so multi-window tests don't skip.
-  tmux(`new-window -t ${SESSION} -n second "sh -c 'while true; do sleep 60; done'"`);
+  tmux(`new-window -t ${SESSION} ${SHELL_ENV} -n second "sh -c 'while true; do sleep 60; done'"`);
   tmux(`select-window -t ${SESSION}:0`);
   execSync('sleep 0.3');
 });

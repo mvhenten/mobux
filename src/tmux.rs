@@ -2,6 +2,19 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use tokio::process::Command;
 
+/// Build a `tmux` Command, prefixed with `-L <socket>` when
+/// `MOBUX_TMUX_SOCKET` is set. Lets tests run against a dedicated tmux
+/// server without colliding with the host's default server.
+pub fn tmux_command() -> Command {
+    let mut cmd = Command::new("tmux");
+    if let Ok(socket) = std::env::var("MOBUX_TMUX_SOCKET") {
+        if !socket.is_empty() {
+            cmd.arg("-L").arg(socket);
+        }
+    }
+    cmd
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -12,7 +25,7 @@ pub struct Session {
 }
 
 pub async fn list_sessions() -> Result<Vec<Session>> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "list-sessions",
             "-F",
@@ -50,7 +63,7 @@ pub async fn list_sessions() -> Result<Vec<Session>> {
 }
 
 pub async fn new_session(name: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["new-session", "-d", "-s", name])
         .output()
         .await
@@ -63,7 +76,7 @@ pub async fn new_session(name: &str) -> Result<()> {
 }
 
 pub async fn kill_session(name: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["kill-session", "-t", name])
         .output()
         .await
@@ -76,7 +89,7 @@ pub async fn kill_session(name: &str) -> Result<()> {
 }
 
 pub async fn rename_session(old_name: &str, new_name: &str) -> Result<()> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["rename-session", "-t", old_name, new_name])
         .output()
         .await
@@ -99,7 +112,7 @@ pub struct Pane {
 
 pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
     // List windows (the main navigable units in tmux)
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "list-windows",
             "-t", session,
@@ -134,7 +147,7 @@ pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
 
 pub async fn select_pane(session: &str, window_index: &str) -> Result<()> {
     let target = format!("{}:{}", session, window_index);
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(["select-window", "-t", &target])
         .output()
         .await
@@ -166,7 +179,7 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
     };
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args(&args_ref)
         .output()
         .await
@@ -190,7 +203,7 @@ pub async fn run_command(session: &str, command: &str) -> Result<String> {
 /// Returns the content with ANSI escape sequences preserved.
 pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
     let start = format!("-{}", lines);
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "capture-pane",
             "-p",     // print to stdout
