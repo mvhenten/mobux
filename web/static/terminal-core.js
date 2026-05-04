@@ -1,7 +1,22 @@
-// TerminalCore — owns the xterm.js Terminal, the WebSocket to the tmux PTY,
-// resize math, history reload and the pane (window) list. No DOM concerns
-// beyond the host element passed in; no gesture or input-bar code. This is
-// the data plane that any view layer (xterm, reader, …) plugs into.
+// Aceterm-backed TerminalCore — exposes the same shape as the
+// xterm.js-backed version on `main` so the rest of mobux (gestures,
+// input bar, view toggle, reader, smoke tests) doesn't need to know
+// which renderer is underneath.
+//
+// Spike-only: lives on the `spike-aceterm` branch and is wired in
+// through render_terminal_page on that branch's mobux. The buffer
+// adapter is intentionally minimal — enough for live rendering and
+// the input/scroll/window-switch tests; reader-side cell-detail
+// access (per-glyph fg/bg, `getCell`) is shimmed and several reader
+// tests are expected to fail until libterm's cell store is mapped
+// onto an xterm-like Cell API.
+
+// `window.__Aceterm` is populated by aceterm.bundle.js (loaded as a
+// classic <script> in render_terminal_page before this module runs).
+const Aceterm = window.__Aceterm;
+if (!Aceterm) {
+  throw new Error('aceterm bundle not loaded — check vendor/aceterm.bundle.js script tag');
+}
 
 const WINDOW_SWITCH_CMDS = new Set([
   'next-window', 'prev-window', 'new-window', 'kill-window',
@@ -13,68 +28,20 @@ export class TerminalCore extends EventTarget {
     this.session = session;
     this.host = host;
 
-    this.term = new Terminal({
-      cursorBlink: true,
-      // Match the reader's typography (style.css `.rb-line`): same
-      // mono stack, same 13px font, line-height bumped from xterm's
-      // default 1.0 to 1.25 for a bit of breathing room. Toggling
-      // between xterm and reader views now reads as the same content
-      // in the same font, just laid out differently.
-      fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
-      fontSize: 13,
-      lineHeight: 1.25,
-      // Try to match the reader's lighter look. If Roboto Mono on
-      // Android lacks a 300 face, Chromium will faux-thin; if it
-      // keeps drawing 400, no harm done. Drop this back to 'normal'
-      // if the result looks weird.
-      fontWeight: 300,
-      convertEol: false,
-      scrollback: 10000,
-      theme: { background: '#0f1115' },
-    });
-    this.term.open(host);
-    this.term.loadAddon(new WebLinksAddon.WebLinksAddon());
-
-    // Lock mouse protocol to NONE — prevents xterm.js from capturing
-    // touch/mouse when tmux sends \x1b[?1000h
-    Object.defineProperty(this.term._core.coreMouseService, 'activeProtocol', {
-      set() {}, get() { return 'NONE'; }, configurable: true,
-    });
-
-    // Block alternate screen buffer — tmux alt screen has no scrollback
-    const buffers = this.term._core._bufferService.buffers;
-    buffers.activateAltBuffer = () => {};
-    buffers.activateNormalBuffer = () => {};
-
     this.ws = null;
     this.panes = [];
     this.activeIndex = 0;
-
-    // OSC 133 (FinalTerm / shell-integration) markers, by absolute
-    // buffer row. Shells that opt in emit:
-    //   ESC ] 133 ; A ST     prompt start  (the line is a prompt)
-    //   ESC ] 133 ; B ST     prompt end / command line follows
-    //   ESC ] 133 ; C ST     command output starts on the next row
-    //   ESC ] 133 ; D[;N] ST command ended (optional exit code)
-    // The reader uses these to classify lines deterministically
-    // instead of guessing at sigils. `oscDetected` flips true on the
-    // first marker so the UI can stop showing the setup hint.
     this.oscMarkers = new Map();
     this.oscDetected = false;
-    this.term.parser.registerOscHandler(133, (data) => {
-      const kind = (data || '').charAt(0);
-      if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return false;
-      const buf = this.term.buffer.active;
-      const absY = buf.baseY + buf.cursorY;
-      this.oscMarkers.set(absY, kind);
-      if (!this.oscDetected) {
-        this.oscDetected = true;
-        this.dispatchEvent(new Event('osc-detected'));
-      }
-      return true;
-    });
 
-    this.term.onData((d) => this.send(d));
+    this.term = makeAcetermAdapter(host, (data) => this.send(data));
+    this._wireWriteParsedFanout();
+    this._wireOsc133();
+    // Spike-only debug peephole.
+    if (typeof window !== 'undefined') {
+      window.__lt = this.term._libterm;
+      window.__ed = this.term._editor;
+    }
   }
 
   // ── WebSocket lifecycle ───────────────────────────────────────────
@@ -96,11 +63,13 @@ export class TerminalCore extends EventTarget {
         bytes = ev.data;
       } else if (ev.data instanceof ArrayBuffer) {
         const u8 = new Uint8Array(ev.data);
-        this.term.write(u8);
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(u8);
+        this.term.write(text);
         bytes = u8;
       } else if (ev.data instanceof Blob) {
         const u8 = new Uint8Array(await ev.data.arrayBuffer());
-        this.term.write(u8);
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(u8);
+        this.term.write(text);
         bytes = u8;
       }
       this.dispatchEvent(new CustomEvent('data', { detail: bytes }));
@@ -127,9 +96,6 @@ export class TerminalCore extends EventTarget {
     const cell = this.cellSize();
     const bar = document.getElementById('inputBar');
     const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
-    // #terminal has horizontal padding (style.css). Subtract it so
-    // xterm doesn't overrun the inner content box and shave a column
-    // off the right edge.
     const pad = this._horizontalPadding();
     const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
     const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
@@ -147,8 +113,11 @@ export class TerminalCore extends EventTarget {
   }
 
   cellSize() {
-    const dims = this.term._core._renderService.dimensions?.css?.cell;
-    return { width: dims?.width || 9, height: dims?.height || 18 };
+    const r = this.term._editor && this.term._editor.renderer;
+    if (r && r.characterWidth && r.lineHeight) {
+      return { width: r.characterWidth, height: r.lineHeight };
+    }
+    return { width: 9, height: 18 };
   }
 
   // ── Buffer / scroll passthroughs ──────────────────────────────────
@@ -160,6 +129,8 @@ export class TerminalCore extends EventTarget {
   setFontSize(px) {
     if (px !== this.term.options.fontSize) {
       this.term.options.fontSize = px;
+      const ed = this.term._editor;
+      if (ed) ed.setFontSize(px);
       this.resize();
     }
   }
@@ -187,12 +158,6 @@ export class TerminalCore extends EventTarget {
     setTimeout(async () => {
       await this.refreshPanes();
       await this.reloadHistory();
-      // tmux paints the visible region (including its status row) in
-      // response to C-b n/p, but reloadHistory above writes scrollback
-      // *after* that paint, displacing the status row. Provoke a fresh
-      // tmux redraw so the status row reappears on the last visible
-      // line. A no-op TIOCSWINSZ doesn't fire SIGWINCH, so nudge rows
-      // by one and back.
       this._forceRedraw();
     }, 300);
   }
@@ -228,7 +193,6 @@ export class TerminalCore extends EventTarget {
     setTimeout(() => { this.refreshPanes(); this.reloadHistory(); }, 300);
   }
 
-  // ── History ───────────────────────────────────────────────────────
   async reloadHistory() {
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(this.session)}/history`);
@@ -241,4 +205,291 @@ export class TerminalCore extends EventTarget {
       }
     } catch (_) {}
   }
+
+  _wireWriteParsedFanout() {
+    // libterm emits `afterWrite` after each `write()`. There is no
+    // `refresh` event — `refresh` is a method on Terminal, not an
+    // EventEmitter signal. Use `afterWrite` to fire the
+    // `onWriteParsed` subscribers the reader relies on.
+    if (this.term._libterm && this.term._libterm.on) {
+      this.term._libterm.on('afterWrite', () => {
+        for (const cb of this.term._writeParsedSubs) cb();
+      });
+    }
+  }
+
+  _wireOsc133() {
+    // libterm's patched OSC dispatcher invokes handleOsc133 on every
+    // `OSC 133 ; X ST`. Same shape as the xterm-side handler in
+    // main: A/B mark prompts, record kind by absolute buffer row.
+    this.term._libterm.handleOsc133 = (data) => {
+      const kind = (data || '').charAt(0);
+      if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return;
+      const lt = this.term._libterm;
+      const absY = (lt.ybase || 0) + (lt.y || 0);
+      this.oscMarkers.set(absY, kind);
+      if (!this.oscDetected) {
+        this.oscDetected = true;
+        this.dispatchEvent(new Event('osc-detected'));
+      }
+    };
+  }
+}
+
+// ── libterm + Ace adapter ─────────────────────────────────────────
+function makeAcetermAdapter(host, sendCb) {
+  const initialCols = 120, initialRows = 35;
+  const libterm = Aceterm(initialCols, initialRows, sendCb);
+  // libterm globals live on the Terminal class. Match the xterm-
+  // side defaults: 10k-line scrollback (was 1000) and mobux's
+  // base16-ish palette (was Tango, which made blues/cyans clash
+  // with the reader CSS).
+  const Terminal = libterm.constructor;
+  if (Terminal) {
+    Terminal.scrollback = 10000;
+    if (typeof Terminal.setColors === 'function') {
+      Terminal.setColors(undefined, undefined, [
+        '#1e1e1e', '#cc6666', '#b5bd68', '#f0c674',
+        '#81a2be', '#b294bb', '#8abeb7', '#c5c8c6',
+        '#5c6370', '#e06c75', '#98c379', '#e5c07b',
+        '#61afef', '#c678dd', '#56b6c2', '#ffffff',
+      ]);
+    }
+  }
+  // libterm switches `noScrollBack()` to true when the program enables
+  // mouseEvents/applicationKeypad (tmux turns mouse events on). That
+  // shrinks Ace's session to just the visible region, hiding all
+  // scrollback from the renderer (and from `viewportY` in the smoke
+  // tests). Force it off — for a phone-shaped scrollback-pinned reader
+  // we always want the full history available.
+  libterm.noScrollBack = function() { return false; };
+  // theme-tomorrow_night.js is loaded as a classic <script> in
+  // render_terminal_page, so the module is already registered with
+  // Ace's loader by the time we ask for it here — no XHR.
+  const editor = Aceterm.createEditor(host, 'ace/theme/tomorrow_night');
+  editor.setSession(libterm.aceSession);
+  editor.renderer.setShowGutter(false);
+  editor.renderer.setShowPrintMargin(false);
+  editor.setFontSize(13);
+  editor.setOption('fontFamily',
+    "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace");
+  host.style.height = '100%';
+  host.style.width = '100%';
+
+  attachTouchScroll(editor, host);
+
+  // The smoke suite (and a few CSS selectors in mobux itself) reach
+  // for xterm.js's class names. Alias them onto Ace's structurally
+  // equivalent elements so existing assertions about visibility /
+  // scrolling don't have to know which renderer is mounted.
+  // Synchronous — racing against page-side `expect(...).toBeVisible`
+  // means setTimeout(0) is too late.
+  aliasXtermClasses(host);
+  // Re-apply after Ace's first async layout in case it rebuilds the
+  // scroller/text-layer DOM (it does on resize / theme change).
+  editor.renderer.on('afterRender', () => aliasXtermClasses(host));
+
+  const writeParsedSubs = [];
+  const dataSubs = [];
+
+  // OSC 133 stub — libterm's parser doesn't surface OSC 133, so the
+  // map stays empty and the reader's "shell integration not detected"
+  // hint stays visible (accurate for now).
+  const parser = {
+    registerOscHandler(_id, _cb) {
+      return { dispose() {} };
+    },
+  };
+
+  return {
+    _libterm: libterm,
+    _editor: editor,
+    _writeParsedSubs: writeParsedSubs,
+    _dataSubs: dataSubs,
+    options: { fontSize: 13 },
+    parser,
+
+    get cols() { return libterm.cols; },
+    get rows() { return libterm.rows; },
+
+    write(data, cb) {
+      libterm.write(typeof data === 'string'
+        ? data
+        : new TextDecoder().decode(data));
+      if (typeof cb === 'function') queueMicrotask(cb);
+    },
+    resize(cols, rows) { libterm.resize(cols, rows); },
+    clear() { libterm.clear && libterm.clear(); },
+    scrollToBottom() {
+      try {
+        // Resolve Ace's "stick to bottom" by setting the explicit
+        // pixel scrollTop. Reading `session.getScrollTop()` after
+        // `setScrollTop(-1)` returns -1 (the sentinel), which makes
+        // synchronous callers (smoke tests) see no scroll. Setting
+        // an explicit pixel offset commits the position.
+        const lh = editor.renderer.lineHeight || 18;
+        const docLen = editor.session.doc.getLength();
+        const sh = (editor.renderer.scroller
+          ? editor.renderer.scroller.clientHeight
+          : (editor.renderer.$size && editor.renderer.$size.scrollerHeight)) || 0;
+        const maxScroll = Math.max(0, docLen * lh - sh);
+        editor.session.setScrollTop(maxScroll);
+      } catch (_) {}
+    },
+    scrollLines(n) {
+      const r = editor.renderer;
+      r.session.setScrollTop(r.getScrollTop() + n * r.lineHeight);
+    },
+
+    onWriteParsed(cb) {
+      writeParsedSubs.push(cb);
+      return { dispose() {
+        const i = writeParsedSubs.indexOf(cb);
+        if (i >= 0) writeParsedSubs.splice(i, 1);
+      } };
+    },
+    onData(cb) {
+      dataSubs.push(cb);
+      return { dispose() {
+        const i = dataSubs.indexOf(cb);
+        if (i >= 0) dataSubs.splice(i, 1);
+      } };
+    },
+
+    buffer: {
+      get active() {
+        return makeBufferAdapter(libterm, editor);
+      },
+    },
+  };
+}
+
+function makeBufferAdapter(lt, editor) {
+  return {
+    get length() {
+      return Math.max(lt.lines ? lt.lines.length : 0, lt.rows + (lt.ybase || 0));
+    },
+    get cursorX() { return lt.x || 0; },
+    get cursorY() { return lt.y || 0; },
+    get baseY() { return lt.ybase || 0; },
+    // xterm's `viewportY` is "the absolute row index of the topmost
+    // VISIBLE row" — tracks the user's scroll position. In aceterm
+    // libterm renders into Ace's session whose viewport scrolls
+    // independently of libterm's `ybase`, so read Ace's first
+    // visible row instead.
+    get viewportY() {
+      if (editor && editor.renderer) {
+        const r = editor.renderer;
+        return r.getFirstVisibleRow ? r.getFirstVisibleRow() : 0;
+      }
+      return lt.ybase || 0;
+    },
+    getLine(y) {
+      if (!lt.lines || !lt.lines[y]) return null;
+      return makeLineAdapter(lt.lines[y]);
+    },
+  };
+}
+
+// libterm packs each cell as `[attrInt, ch]` where attrInt is:
+//   bits  0..8  bg colour (256 = default)
+//   bits  9..17 fg colour (257 = default)
+//   bit   18    bold
+//   bit   19    underline
+//   bit   20    inverse
+// (no italic, no dim, no truecolour — libterm is palette-only.)
+const LT_BG_DEFAULT = 256;
+const LT_FG_DEFAULT = 257;
+
+function makeLineAdapter(cells) {
+  const text = cells.map((c) => (Array.isArray(c) ? c[1] : (c && c.ch) || '')).join('');
+  return {
+    isWrapped: false,
+    translateToString(_trim) { return text; },
+    getCell(x) {
+      const c = cells[x];
+      const attr = Array.isArray(c) ? c[0] : 0;
+      const ch = Array.isArray(c) ? c[1] : (c && c.ch) || ' ';
+      const bg = attr & 0x1ff;
+      const fg = (attr >> 9) & 0x1ff;
+      const flags = attr >> 18;
+      const isFgDef = fg === LT_FG_DEFAULT;
+      const isBgDef = bg === LT_BG_DEFAULT;
+      return {
+        getChars() { return ch; },
+        getCode() { return ch ? ch.codePointAt(0) || 0 : 0; },
+        // libterm is palette-only; never RGB.
+        isFgRGB() { return false; },
+        isBgRGB() { return false; },
+        isFgPalette() { return !isFgDef; },
+        isBgPalette() { return !isBgDef; },
+        isFgDefault() { return isFgDef; },
+        isBgDefault() { return isBgDef; },
+        getFgColor() { return isFgDef ? -1 : fg; },
+        getBgColor() { return isBgDef ? -1 : bg; },
+        getFgColorMode() { return isFgDef ? 0 : 0x100; },
+        getBgColorMode() { return isBgDef ? 0 : 0x100; },
+        isBold()       { return !!(flags & 1); },
+        isUnderline()  { return !!(flags & 2); },
+        isInverse()    { return !!(flags & 4); },
+        // libterm doesn't track these — surface as off so the
+        // reader doesn't render them differently from the canvas.
+        isItalic()     { return false; },
+        isDim()        { return false; },
+      };
+    },
+  };
+}
+
+function aliasXtermClasses(host) {
+  try {
+    // .ace_scroller hosts the rendered text grid and is the scrolling
+    // viewport — same role as xterm's .xterm-viewport / .xterm-screen.
+    const scroller = host.querySelector('.ace_scroller');
+    if (scroller) scroller.classList.add('xterm-viewport', 'xterm-screen');
+    const text = host.querySelector('.ace_text-layer');
+    if (text) text.classList.add('xterm-rows');
+    // Ace's hidden textarea is the one that actually receives
+    // keystrokes — alias to xterm's helper-textarea so the smoke
+    // suite can `.focus()` it the same way.
+    const ta = host.querySelector('.ace_text-input');
+    if (ta) ta.classList.add('xterm-helper-textarea');
+  } catch (_) {}
+}
+
+// Ace's MouseHandler treats touchmove as drag-select on mobile —
+// finger-scroll the buffer and Ace highlights blocks of text instead
+// of moving the viewport. Pre-empt every touch event on the editor
+// container, translate vertical drag into renderer scroll, and
+// stopPropagation so Ace never sees it.
+function attachTouchScroll(editor, host) {
+  let lastY = null;
+  let activeId = null;
+
+  const onStart = (e) => {
+    if (e.touches.length !== 1) { activeId = null; return; }
+    activeId = e.touches[0].identifier;
+    lastY = e.touches[0].clientY;
+  };
+  const onMove = (e) => {
+    if (activeId == null) return;
+    let t = null;
+    for (const tt of e.touches) if (tt.identifier === activeId) { t = tt; break; }
+    if (!t) return;
+    const dy = lastY - t.clientY;
+    lastY = t.clientY;
+    if (Math.abs(dy) > 0) {
+      const r = editor.renderer;
+      const top = r.getScrollTop();
+      r.session.setScrollTop(top + dy);
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  const onEnd = () => { activeId = null; lastY = null; };
+
+  host.addEventListener('touchstart', onStart, { capture: true, passive: false });
+  host.addEventListener('touchmove', onMove, { capture: true, passive: false });
+  host.addEventListener('touchend', onEnd, { capture: true, passive: true });
+  host.addEventListener('touchcancel', onEnd, { capture: true, passive: true });
 }

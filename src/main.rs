@@ -1349,7 +1349,13 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     window.MOBUX_SESSION = {session_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
-  <script src="/static/vendor/xterm.bundle.js?v={v}"></script>
+  <!-- Spike: aceterm renderer (libterm + Ace VirtualRenderer).
+       ace.js + aceterm.bundle.js pin window.__Aceterm; terminal.js
+       imports the spike's TerminalCore (terminal-core.js on this
+       branch is aceterm-backed, same external API as main). -->
+  <script src="/static/vendor/ace.js?v={v}"></script>
+  <script src="/static/vendor/theme-tomorrow_night.js?v={v}"></script>
+  <script src="/static/vendor/aceterm.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>

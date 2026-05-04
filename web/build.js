@@ -53,7 +53,26 @@ execSync([
   `--outfile=${path.join(VENDOR, 'xterm.bundle.js')}`,
 ].join(' '), { cwd: ROOT, stdio: 'inherit' });
 
-// 3. Copy CSS
+// 3. Bundle the aceterm driver. The libterm + Ace adapter lives at
+//    web/static/vendor/aceterm/aceterm.js but uses CommonJS-style
+//    requires; bundle through esbuild so `terminal-core.js` can pick
+//    up `window.__Aceterm` from a single global script. Without this
+//    CI runs without aceterm.bundle.js and the page never mounts the
+//    renderer (404 on the bundle URL → throws on load).
+const ACETERM_ENTRY = path.join(ROOT, 'web', 'static', 'aceterm-globals-entry.js');
+if (fs.existsSync(ACETERM_ENTRY)) {
+  console.log('[build] Bundling aceterm...');
+  execSync([
+    'npx esbuild',
+    ACETERM_ENTRY,
+    '--bundle',
+    '--format=iife',
+    '--target=es2020',
+    `--outfile=${path.join(VENDOR, 'aceterm.bundle.js')}`,
+  ].join(' '), { cwd: ROOT, stdio: 'inherit' });
+}
+
+// 4. Copy CSS
 const cssSource = path.join(ROOT, 'node_modules', '@xterm', 'xterm', 'css', 'xterm.css');
 const cssDest = path.join(VENDOR, 'xterm.css');
 fs.copyFileSync(cssSource, cssDest);
