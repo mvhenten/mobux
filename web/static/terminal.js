@@ -201,15 +201,20 @@ function unmountReaderGestures() {
 }
 
 // ── Reveal on first output ──────────────────────────────────────────
-let revealTimer = null;
+// Fire on the first `data` event, not on settle. The previous
+// implementation reset an 800 ms timer per event, which never
+// settled when the attached session pumped continuous output (e.g.
+// a TUI like Claude Code), leaving the loading splash up forever.
+let revealScheduled = false;
 function scheduleReveal() {
+  if (revealScheduled) return;
   if (!loadquote || !loadquote.parentNode) return;
-  clearTimeout(revealTimer);
-  revealTimer = setTimeout(() => {
+  revealScheduled = true;
+  setTimeout(() => {
     core.scrollToBottom();
     loadquote.style.opacity = '0';
     setTimeout(() => { if (loadquote.parentNode) loadquote.remove(); }, 300);
-  }, 800);
+  }, 200);
 }
 core.addEventListener('data', scheduleReveal);
 
