@@ -694,21 +694,24 @@ h1, h2, h3 { margin: 0; }
 }
 
 /* ── Mobile input bar ──────────────────────────────────────────────── */
+/* The bar is a flex item inside `.term-body` so #terminal and #reader
+   shrink to the remaining space. Previously it was `position: fixed`
+   and lifted via a JS `translateY` to clear the keyboard, which left
+   the host elements rendering BEHIND the bar — Ace's terminal painted
+   its bottom rows under an opaque black ribbon. As a flex sibling the
+   bar takes its own row in the column and the content area is bounded
+   above it. Keyboard tracking just shrinks `body` to `vv.height`; the
+   bar moves with the body bottom automatically — no transform. */
 .input-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  flex-shrink: 0;
   z-index: 100;
   background: #1a1d23;
   border-top: 1px solid #333;
   display: flex;
   flex-direction: column;
-  transition: transform 0.15s ease;
 }
 .input-bar.hidden {
-  transform: translateY(100%);
-  pointer-events: none;
+  display: none;
 }
 
 .input-ribbon {
