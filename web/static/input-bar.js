@@ -42,6 +42,7 @@ export function createInputBar(term, send) {
   function hide() {
     bar.style.transform = '';
     bar.classList.add('hidden');
+    document.body.style.height = '';
     input.blur();
     resizeTerminal();
   }
@@ -118,14 +119,32 @@ export function createInputBar(term, send) {
   // ── Track on-screen keyboard via visualViewport ───────────────────
   // Translate the bar up by the keyboard height so it sits above the
   // software keyboard (Android Chrome doesn't shrink the layout vp).
+  // Also shrink the layout container (.term-body) to match the visual
+  // viewport so #reader / #terminal don't render content underneath
+  // the lifted bar.
   if (window.visualViewport) {
     const vv = window.visualViewport;
     let lastHeight = vv.height;
+    let lastOffset = 0;
 
     const applyOffset = () => {
       const offset = computeKeyboardOffset(window.innerHeight, vv.height, vv.offsetTop);
-      if (bar.classList.contains('hidden')) return offset;
+      if (bar.classList.contains('hidden')) {
+        document.body.style.height = '';
+        lastOffset = 0;
+        return offset;
+      }
       bar.style.transform = offset > 0 ? `translateY(${-offset}px)` : '';
+      // Shrink .term-body (the body itself) so flex children pick up
+      // the new viewport height. .term-body has explicit `height:
+      // 100vh`, which overrides `bottom:0` — so we override `height`
+      // directly when the keyboard is up. Reader's ResizeObserver and
+      // the dispatched window 'resize' below take care of relayout.
+      document.body.style.height = offset > 0 ? `${vv.height}px` : '';
+      if (offset !== lastOffset) {
+        lastOffset = offset;
+        resizeTerminal();
+      }
       return offset;
     };
 

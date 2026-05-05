@@ -96,11 +96,18 @@ export class TerminalCore extends EventTarget {
     const cell = this.cellSize();
     const bar = document.getElementById('inputBar');
     const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
+    const kb = this._keyboardOffset();
     const pad = this._horizontalPadding();
     const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
+    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight - kb) / cell.height) - 1);
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  }
+
+  _keyboardOffset() {
+    const vv = window.visualViewport;
+    if (!vv) return 0;
+    return Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
   }
 
   _horizontalPadding() {
@@ -167,9 +174,10 @@ export class TerminalCore extends EventTarget {
     const cell = this.cellSize();
     const bar = document.getElementById('inputBar');
     const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
+    const kb = this._keyboardOffset();
     const pad = this._horizontalPadding();
     const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
+    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight - kb) / cell.height) - 1);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
