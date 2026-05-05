@@ -1036,3 +1036,60 @@ test('content area shrinks under on-screen keyboard so reader text stays visible
     { timeout: 2000 },
   ).toBe('');
 });
+
+test('reader re-pins to bottom synchronously when keyboard appears', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await page.setViewportSize({ width: 380, height: 800 });
+  await page.evaluate(() => window.__mobuxView.test.injectLines(50, 'line'));
+  await page.waitForTimeout(200);
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__mobuxView.test.readerStickToBottom());
+  await page.waitForTimeout(100);
+
+  await page.evaluate(() => {
+    const bar = document.getElementById('inputBar');
+    bar.classList.remove('hidden');
+    const vv = window.visualViewport;
+    Object.defineProperty(vv, 'height', {
+      configurable: true,
+      get: () => (typeof window.__stubVVHeight === 'number' ? window.__stubVVHeight : window.innerHeight),
+    });
+    Object.defineProperty(vv, 'offsetTop', {
+      configurable: true,
+      get: () => (typeof window.__stubVVOffset === 'number' ? window.__stubVVOffset : 0),
+    });
+  });
+
+  const before = await page.evaluate(() => ({
+    scrollY: window.__mobuxView.test.readerScrollY(),
+    maxScroll: window.__mobuxView.test.readerMaxScroll(),
+    readerH: document.getElementById('reader').clientHeight,
+  }));
+  expect(before.scrollY).toBe(before.maxScroll);
+  expect(before.scrollY).toBeGreaterThan(0);
+
+  // Dispatch keyboard appearance and read state in the SAME task.
+  // Without a synchronous re-pin from input-bar, scrollY stays at the
+  // pre-keyboard maxScroll while readerH has shrunk — a visible gap
+  // appears between the content bottom and the lifted input bar.
+  const sync = await page.evaluate(() => {
+    window.__stubVVHeight = window.innerHeight - 300;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+    return {
+      scrollY: window.__mobuxView.test.readerScrollY(),
+      maxScroll: window.__mobuxView.test.readerMaxScroll(),
+      readerH: document.getElementById('reader').clientHeight,
+    };
+  });
+
+  expect(sync.readerH).toBeLessThan(before.readerH - 250);
+  // Reader must be re-pinned to the new bottom in the same task — not
+  // a frame later. maxScroll grew because hostH shrank.
+  expect(sync.maxScroll).toBeGreaterThan(before.maxScroll);
+  expect(sync.scrollY).toBe(sync.maxScroll);
+});
