@@ -943,3 +943,64 @@ test('input bar lifts above on-screen keyboard via visualViewport', async ({ pag
     { timeout: 2000 },
   ).toBe('');
 });
+
+test('content area shrinks under on-screen keyboard so reader text stays visible', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await page.setViewportSize({ width: 380, height: 800 });
+
+  await page.evaluate(() => {
+    const bar = document.getElementById('inputBar');
+    bar.classList.remove('hidden');
+    const vv = window.visualViewport;
+    window.__origVVHeight = vv.height;
+    window.__origVVOffset = vv.offsetTop;
+    Object.defineProperty(vv, 'height', {
+      configurable: true,
+      get: () => (typeof window.__stubVVHeight === 'number' ? window.__stubVVHeight : window.__origVVHeight),
+    });
+    Object.defineProperty(vv, 'offsetTop', {
+      configurable: true,
+      get: () => (typeof window.__stubVVOffset === 'number' ? window.__stubVVOffset : window.__origVVOffset),
+    });
+  });
+
+  const before = await page.evaluate(() => ({
+    terminal: document.getElementById('terminal').clientHeight,
+    bodyHeight: document.body.style.height,
+  }));
+
+  await page.evaluate(() => {
+    window.__stubVVHeight = window.innerHeight - 300;
+    window.__stubVVOffset = 0;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(
+    async () => await page.evaluate(() => document.body.style.height),
+    { timeout: 2000 },
+  ).toMatch(/^\d+(\.\d+)?px$/);
+
+  const after = await page.evaluate(() => ({
+    terminal: document.getElementById('terminal').clientHeight,
+    bodyHeight: document.body.style.height,
+  }));
+
+  // Body shrunk by ~300px, so terminal should be at least ~250px shorter.
+  expect(after.terminal).toBeLessThan(before.terminal - 250);
+
+  // Restoring the viewport should clear the inline height override.
+  await page.evaluate(() => {
+    window.__stubVVHeight = window.innerHeight;
+    window.__stubVVOffset = 0;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(
+    async () => await page.evaluate(() => document.body.style.height),
+    { timeout: 2000 },
+  ).toBe('');
+});
