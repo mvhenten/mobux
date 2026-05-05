@@ -541,6 +541,50 @@ test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => 
   expect(fused.lines).toBeGreaterThanOrEqual(3);
 });
 
+test('terminal forces dark fg on explicit bg when fg is default', async ({ page }) => {
+  // Regression: in the aceterm-backed terminal view, claude-code (and
+  // anything else that paints highlighted blocks like `\x1b[42m text \x1b[0m`)
+  // was rendering with the theme's light-gray default fg on top of bright
+  // palette bgs (lime green, cyan…) — unreadable. The fix: when bg is
+  // explicit and fg is default, fall back to the default *bg* colour as
+  // the fg so contrast inverts on dark themes.
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  // Make sure we're on the terminal (aceterm) view, not reader.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(150);
+
+  // Inject a line with bright-green bg + default fg, then a line with
+  // cyan bg + default fg. These are the two combos visible in the
+  // bug screenshot.
+  await injectRaw(
+    page,
+    '\n\x1b[42mGREEN_BG_DEFAULT_FG\x1b[0m\n' +
+    '\x1b[46mCYAN_BG_DEFAULT_FG\x1b[0m\n',
+  );
+  await page.waitForTimeout(300);
+
+  const styled = await page.evaluate(() => {
+    const spans = Array.from(document.querySelectorAll('.aceterm-line-bg'));
+    return spans
+      .filter((s) => /GREEN_BG_DEFAULT_FG|CYAN_BG_DEFAULT_FG/.test(s.textContent || ''))
+      .map((s) => ({
+        text: s.textContent,
+        color: s.style.color,
+        bg: s.style.backgroundColor,
+      }));
+  });
+  expect(styled.length).toBeGreaterThanOrEqual(2);
+  // Both spans must have an explicitly-set fg colour (not the empty
+  // string that would inherit the theme's light-gray default).
+  for (const s of styled) {
+    expect(s.color).not.toBe('');
+    expect(s.bg).not.toBe('');
+  }
+});
+
 test('reader supports synthetic scrolling when content overflows', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
