@@ -534,9 +534,21 @@
                             );
                     } else {
                         span.style.backgroundColor = Terminal.colors[bgColor];
-                        if (fgColor !== 257)
+                        if (fgColor !== 257) {
                             span.style.color = Terminal.colors[fgColor];
-                        span.style.display = "inline-block" 
+                        } else {
+                            // Default fg on an explicit bg renders the
+                            // theme's light-gray fg against bright
+                            // palette bgs (lime-green, cyan, yellow…)
+                            // — unreadable. Most terminals fall back to
+                            // the *default bg* colour as the fg in this
+                            // case, which inverts contrast on dark
+                            // themes (dark text on bright bg) and
+                            // mirrors what xterm.js was doing for users
+                            // before the aceterm switch.
+                            span.style.color = Terminal.colors[256];
+                        }
+                        span.style.display = "inline-block"
                         span.className = "aceterm-line-bg";
                     }
                 }
