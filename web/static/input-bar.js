@@ -138,12 +138,18 @@ export function createInputBar(term, send) {
       // Shrink .term-body (the body itself) so flex children pick up
       // the new viewport height. .term-body has explicit `height:
       // 100vh`, which overrides `bottom:0` — so we override `height`
-      // directly when the keyboard is up. Reader's ResizeObserver and
-      // the dispatched window 'resize' below take care of relayout.
+      // directly when the keyboard is up.
       document.body.style.height = offset > 0 ? `${vv.height}px` : '';
       if (offset !== lastOffset) {
         lastOffset = offset;
-        resizeTerminal();
+        // Notify reader/terminal synchronously so the reader re-pins
+        // to the bottom in the same task as the body shrink — without
+        // this, ResizeObserver fires a frame later and the user sees
+        // a visible jump (content stuck at top with a gap above the
+        // lifted bar). Reader's _handleResize reads host.clientHeight,
+        // which forces a layout flush, so the synchronous dispatch
+        // sees the new shrunk size.
+        window.dispatchEvent(new Event('resize'));
       }
       return offset;
     };
