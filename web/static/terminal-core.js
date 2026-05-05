@@ -247,15 +247,22 @@ export class TerminalCore extends EventTarget {
 // ── libterm + Ace adapter ─────────────────────────────────────────
 function makeAcetermAdapter(host, sendCb) {
   const initialCols = 120, initialRows = 35;
-  const libterm = Aceterm(initialCols, initialRows, sendCb);
-  // libterm globals live on the Terminal class. Match the xterm-
-  // side defaults: 10k-line scrollback (was 1000) and mobux's
-  // base16-ish palette (was Tango, which made blues/cyans clash
-  // with the reader CSS).
-  const Terminal = libterm.constructor;
+  // libterm globals live on the Terminal CLASS, not the instance —
+  // and `instance.constructor` is `EventEmitter` (libterm overrides
+  // `Terminal.prototype = new EventEmitter()`, which replaces
+  // `prototype.constructor`). Reach the real class via the explicit
+  // `Aceterm.Terminal` pin set by aceterm-globals-entry.js. We must
+  // configure scrollback + palette BEFORE constructing the instance,
+  // otherwise the constructor copies the wrong defaults into curAttr/
+  // defAttr and uses the Tango palette for the rest of the session.
+  const Terminal = Aceterm.Terminal;
   if (Terminal) {
     Terminal.scrollback = 10000;
     if (typeof Terminal.setColors === 'function') {
+      // Match the reader's base16-tomorrow palette (style.css
+      // `--ansi-*`) so the same SGR sequences render the same way in
+      // both views. The default Tango palette is too saturated for a
+      // dark phone screen.
       Terminal.setColors(undefined, undefined, [
         '#1e1e1e', '#cc6666', '#b5bd68', '#f0c674',
         '#81a2be', '#b294bb', '#8abeb7', '#c5c8c6',
@@ -264,6 +271,7 @@ function makeAcetermAdapter(host, sendCb) {
       ]);
     }
   }
+  const libterm = Aceterm(initialCols, initialRows, sendCb);
   // libterm switches `noScrollBack()` to true when the program enables
   // mouseEvents/applicationKeypad (tmux turns mouse events on). That
   // shrinks Ace's session to just the visible region, hiding all

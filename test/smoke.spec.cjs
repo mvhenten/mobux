@@ -585,6 +585,38 @@ test('terminal forces dark fg on explicit bg when fg is default', async ({ page 
   }
 });
 
+test('terminal uses the muted base16 palette, not Tango defaults', async ({ page }) => {
+  // Regression: terminal-core.js sets a base16-tomorrow palette via
+  // `Aceterm.Terminal.setColors(...)` so the terminal view matches
+  // reader-mode and avoids the over-saturated Tango lime/cyan that
+  // makes highlighted blocks painful on a dark phone screen. Reaching
+  // libterm's Terminal class via `instance.constructor` returned
+  // `EventEmitter` (libterm replaces `prototype.constructor`), so the
+  // override silently no-op'd before the explicit `Aceterm.Terminal`
+  // pin landed.
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  const palette = await page.evaluate(() => {
+    const T = window.__Aceterm && window.__Aceterm.Terminal;
+    if (!T || !T.colors) return null;
+    return {
+      base16: T.colors.slice(0, 16),
+      scrollback: T.scrollback,
+    };
+  });
+  expect(palette).toBeTruthy();
+  // Index 2 (green) should be base16's muted olive `#b5bd68`, not
+  // Tango's `#4e9a06`. Index 10 (bright green) should be `#98c379`,
+  // not Tango's `#8ae234`. Index 14 (bright cyan) should be `#56b6c2`,
+  // not Tango's `#34e2e2`.
+  expect(palette.base16[2].toLowerCase()).toBe('#b5bd68');
+  expect(palette.base16[10].toLowerCase()).toBe('#98c379');
+  expect(palette.base16[14].toLowerCase()).toBe('#56b6c2');
+  expect(palette.scrollback).toBe(10000);
+});
+
 test('reader supports synthetic scrolling when content overflows', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
