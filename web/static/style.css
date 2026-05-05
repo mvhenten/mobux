@@ -108,6 +108,17 @@ body {
   padding: 1px 4px;
   border-radius: 3px;
 }
+.settings-select {
+  margin-left: auto;
+  flex: 0 0 auto;
+  background: rgba(255,255,255,0.06);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  min-width: 180px;
+}
 .settings-status {
   margin-top: 12px;
   font-size: 13px;

@@ -816,6 +816,18 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
       <div class="settings-status" id="settingsStatus" hidden>Saved.</div>
     </section>
 
+    <section class="settings-card" id="theme-picker">
+      <h2>Theme</h2>
+      <p class="settings-lede">Sets the editor theme, terminal palette and reader palette together. All bundles are muted, low-contrast — picked for a phone screen at night. Switching applies live to any open terminal tab.</p>
+      <label class="settings-row">
+        <span class="settings-label">
+          <strong>Colour theme</strong>
+          <small>Stored locally as <code>mobux:theme</code>. Per-device.</small>
+        </span>
+        <select id="themeSelect" class="settings-select"></select>
+      </label>
+    </section>
+
     <section class="settings-card" id="shell-integration">
       <h2>Shell integration</h2>
       <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristic detection — works, but guesses at what's a prompt vs. what just happens to end with <code>$</code> or <code>&gt;</code>. Paste the snippet for your shell into the rc file and reload the terminal.</p>
@@ -850,6 +862,7 @@ end</code></pre>
   </main>
 
   <script src="/static/settings.js?v={v}"></script>
+  <script type="module" src="/static/settings-theme.js?v={v}"></script>
 </body>
 </html>
 "##,
@@ -917,7 +930,11 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     let apk_present = std::path::Path::new(INSTALL_APK_PATH).exists();
 
     let acme = ssl::acme_mode_enabled();
-    let app_heading = if acme { "Install the app" } else { "2. Install the app" };
+    let app_heading = if acme {
+        "Install the app"
+    } else {
+        "2. Install the app"
+    };
     let app_section = if apk_present {
         format!(
             r##"<section class="install-card">
@@ -1360,6 +1377,9 @@ fn render_terminal_page(session: &str, v: &str) -> String {
        branch is aceterm-backed, same external API as main). -->
   <script src="/static/vendor/ace.js?v={v}"></script>
   <script src="/static/vendor/theme-tomorrow_night.js?v={v}"></script>
+  <script src="/static/vendor/theme-gruvbox.js?v={v}"></script>
+  <script src="/static/vendor/theme-nord_dark.js?v={v}"></script>
+  <script src="/static/vendor/theme-solarized_dark.js?v={v}"></script>
   <script src="/static/vendor/aceterm.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
