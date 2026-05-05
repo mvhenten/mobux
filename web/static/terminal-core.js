@@ -11,6 +11,8 @@
 // tests are expected to fail until libterm's cell store is mapped
 // onto an xterm-like Cell API.
 
+import { getStoredThemeId, getTheme } from './themes.js';
+
 // `window.__Aceterm` is populated by aceterm.bundle.js (loaded as a
 // classic <script> in render_terminal_page before this module runs).
 const Aceterm = window.__Aceterm;
@@ -260,19 +262,15 @@ function makeAcetermAdapter(host, sendCb) {
   // otherwise the constructor copies the wrong defaults into curAttr/
   // defAttr and uses the Tango palette for the rest of the session.
   const Terminal = Aceterm.Terminal;
+  const theme = getTheme(getStoredThemeId());
   if (Terminal) {
     Terminal.scrollback = 10000;
     if (typeof Terminal.setColors === 'function') {
-      // Match the reader's base16-tomorrow palette (style.css
-      // `--ansi-*`) so the same SGR sequences render the same way in
-      // both views. The default Tango palette is too saturated for a
-      // dark phone screen.
-      Terminal.setColors(undefined, undefined, [
-        '#1e1e1e', '#cc6666', '#b5bd68', '#f0c674',
-        '#81a2be', '#b294bb', '#8abeb7', '#c5c8c6',
-        '#5c6370', '#e06c75', '#98c379', '#e5c07b',
-        '#61afef', '#c678dd', '#56b6c2', '#ffffff',
-      ]);
+      // Match the reader's --ansi-* palette so the same SGR sequences
+      // render the same way in both views. The default Tango palette
+      // is too saturated for a dark phone screen — pull from the
+      // active theme bundle (themes.js).
+      Terminal.setColors(undefined, undefined, theme.palette.slice(0, 16));
     }
   }
   const libterm = Aceterm(initialCols, initialRows, sendCb);
@@ -283,10 +281,10 @@ function makeAcetermAdapter(host, sendCb) {
   // tests). Force it off — for a phone-shaped scrollback-pinned reader
   // we always want the full history available.
   libterm.noScrollBack = function() { return false; };
-  // theme-tomorrow_night.js is loaded as a classic <script> in
-  // render_terminal_page, so the module is already registered with
+  // theme-*.js bundles are loaded as classic <script>s in
+  // render_terminal_page, so each module is already registered with
   // Ace's loader by the time we ask for it here — no XHR.
-  const editor = Aceterm.createEditor(host, 'ace/theme/tomorrow_night');
+  const editor = Aceterm.createEditor(host, theme.aceTheme);
   editor.setSession(libterm.aceSession);
   editor.renderer.setShowGutter(false);
   editor.renderer.setShowPrintMargin(false);

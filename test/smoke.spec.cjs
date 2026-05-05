@@ -1196,3 +1196,64 @@ test('reader re-pins to bottom synchronously when keyboard appears', async ({ pa
   expect(sync.maxScroll).toBeGreaterThan(before.maxScroll);
   expect(sync.scrollY).toBe(sync.maxScroll);
 });
+
+test('theme picker swaps Terminal.colors[2] and #reader --ansi-2 live', async ({ page }) => {
+  // Verify that switching themes (via the same JS path the settings
+  // picker uses) updates BOTH the terminal palette (libterm's class-
+  // level Terminal.colors[2]) and the reader-mode CSS variable
+  // (--ansi-2 on #reader). Index 2 is "green" — every bundle picks a
+  // different shade, so any pair of distinct themes must produce a
+  // different value at index 2.
+  //
+  // Boot the terminal page (so #reader exists and Aceterm is loaded),
+  // then drive applyTheme directly — same code path the settings page
+  // calls on <select> change. No page reload between swaps to prove
+  // the live-swap path actually works.
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  // Default boot: tomorrow-night-soft. Green (index 2) = #b5bd68.
+  const before = await page.evaluate(() => {
+    const T = window.__Aceterm && window.__Aceterm.Terminal;
+    return {
+      term: T && T.colors ? T.colors[2] : null,
+      reader: getComputedStyle(document.getElementById('reader'))
+        .getPropertyValue('--ansi-2').trim(),
+    };
+  });
+  expect(before.term).toBeTruthy();
+  expect(before.term.toLowerCase()).toBe('#b5bd68');
+  expect(before.reader.toLowerCase()).toBe('#b5bd68');
+
+  // Swap to gruvbox-dark-soft (green index 2 = #98971a). Drive the
+  // exact same module the settings picker uses.
+  const after = await page.evaluate(async () => {
+    const mod = await import('/static/themes.js');
+    mod.setStoredThemeId('gruvbox-dark-soft');
+    mod.applyTheme('gruvbox-dark-soft');
+    window.dispatchEvent(new CustomEvent('mobux:theme', { detail: 'gruvbox-dark-soft' }));
+    const T = window.__Aceterm && window.__Aceterm.Terminal;
+    return {
+      term: T && T.colors ? T.colors[2] : null,
+      reader: getComputedStyle(document.getElementById('reader'))
+        .getPropertyValue('--ansi-2').trim(),
+    };
+  });
+  expect(after.term.toLowerCase()).toBe('#98971a');
+  expect(after.reader.toLowerCase()).toBe('#98971a');
+
+  // The terminal session itself must keep working through the swap —
+  // the WebSocket is independent of the colour palette.
+  expect(await page.evaluate(() => window.__mobuxView.test.wsReady())).toBe(true);
+
+  // Restore the default for downstream tests in this file (the suite
+  // re-uses the page across tests; leaving gruvbox would break the
+  // earlier muted-base16 assertion if tests were re-ordered).
+  await page.evaluate(async () => {
+    const mod = await import('/static/themes.js');
+    mod.setStoredThemeId('tomorrow-night-soft');
+    mod.applyTheme('tomorrow-night-soft');
+    window.dispatchEvent(new CustomEvent('mobux:theme', { detail: 'tomorrow-night-soft' }));
+  });
+});

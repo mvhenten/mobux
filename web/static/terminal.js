@@ -2,6 +2,7 @@ import { TerminalCore } from './terminal-core.js';
 import { ReaderView } from './reader-view.js';
 import { createGestureRecognizer } from './touch.js';
 import { createInputBar } from './input-bar.js';
+import { applyTheme, getStoredThemeId } from './themes.js';
 
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
@@ -52,6 +53,22 @@ const quotes = [
 // ── Core ────────────────────────────────────────────────────────────
 const isMobile = window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
+
+// Apply the stored theme to all three layers. terminal-core.js already
+// picked the matching palette + Ace theme at construction; this call
+// pushes the --ansi-* vars onto #reader for tokenized reader output.
+applyTheme(getStoredThemeId(), { editor: core.term._editor });
+
+// Live swap when the settings page (or another tab) changes the theme.
+// `storage` only fires in OTHER documents — same-doc swaps go through
+// `mobux:theme` (dispatched by the picker).
+function onThemeChange() {
+  applyTheme(getStoredThemeId(), { editor: core.term._editor });
+}
+window.addEventListener('storage', (e) => {
+  if (e.key === 'mobux:theme') onThemeChange();
+});
+window.addEventListener('mobux:theme', onThemeChange);
 
 // Enable overlay for touch devices
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
