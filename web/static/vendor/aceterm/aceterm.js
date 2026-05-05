@@ -21,6 +21,28 @@
         return terminal;
     };
     
+    // Pick a readable default-fg colour against an explicit bg by
+    // computing the bg's relative luminance (sRGB / Rec. 709). Any bg
+    // with luminance >= 0.4 gets a dark fg; below that gets a light fg.
+    // 0.4 (rather than the textbook 0.5 mid-point) is tuned for the
+    // base16-tomorrow palette in `terminal-core.js`: green (`#b5bd68`,
+    // 0.47) and cyan (`#8abeb7`, 0.46) — the bright bgs that triggered
+    // the original bug — both fall on the "dark fg" side, while blue
+    // (`#81a2be`, 0.34) and magenta (`#b294bb`, 0.34) stay on the
+    // "light fg" side.
+    Aceterm.contrastFg = function(hex) {
+        if (!hex || hex.charAt(0) !== "#" || hex.length < 7) return "#fff";
+        var parse = function(i) {
+            return parseInt(hex.substr(i, 2), 16) / 255;
+        };
+        var lin = function(c) {
+            return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        };
+        var r = parse(1), g = parse(3), b = parse(5);
+        var L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+        return L >= 0.4 ? "#000" : "#fff";
+    };
+
     Aceterm.createEditor = function(container, theme) {
         // Create Ace editor instance
         var ace = new AceEditor(new VirtualRenderer(container, theme));
@@ -537,16 +559,17 @@
                         if (fgColor !== 257) {
                             span.style.color = Terminal.colors[fgColor];
                         } else {
-                            // Default fg on an explicit bg renders the
-                            // theme's light-gray fg against bright
-                            // palette bgs (lime-green, cyan, yellow…)
-                            // — unreadable. Most terminals fall back to
-                            // the *default bg* colour as the fg in this
-                            // case, which inverts contrast on dark
-                            // themes (dark text on bright bg) and
-                            // mirrors what xterm.js was doing for users
-                            // before the aceterm switch.
-                            span.style.color = Terminal.colors[256];
+                            // Default fg on an explicit bg: pick fg
+                            // based on the bg's relative luminance so
+                            // contrast stays readable for both bright
+                            // bgs (green, cyan, yellow → dark fg) and
+                            // dark bgs (black, blue, magenta → light
+                            // fg). The previous "always dark" rule
+                            // (PR #55) made dark-bg + default-fg cases
+                            // (e.g. `pi.de` output on `\x1b[40m`/
+                            // `\x1b[44m`) render black-on-black.
+                            span.style.color =
+                                Aceterm.contrastFg(Terminal.colors[bgColor]);
                         }
                         span.style.display = "inline-block"
                         span.className = "aceterm-line-bg";

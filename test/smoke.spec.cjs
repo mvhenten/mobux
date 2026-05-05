@@ -541,13 +541,14 @@ test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => 
   expect(fused.lines).toBeGreaterThanOrEqual(3);
 });
 
-test('terminal forces dark fg on explicit bg when fg is default', async ({ page }) => {
-  // Regression: in the aceterm-backed terminal view, claude-code (and
-  // anything else that paints highlighted blocks like `\x1b[42m text \x1b[0m`)
-  // was rendering with the theme's light-gray default fg on top of bright
-  // palette bgs (lime green, cyan…) — unreadable. The fix: when bg is
-  // explicit and fg is default, fall back to the default *bg* colour as
-  // the fg so contrast inverts on dark themes.
+test('terminal picks readable fg by bg luminance when fg is default', async ({ page }) => {
+  // Regression (PR #55 → #6X): claude-code-style highlighted blocks
+  // (`\x1b[42m text \x1b[0m`) were unreadable because the theme's
+  // light-gray default fg landed on bright palette bgs (lime, cyan…).
+  // PR #55 forced fg to dark on every explicit bg, which broke the
+  // OPPOSITE case — dark bgs (`\x1b[40m`/`\x1b[44m`, e.g. pi.de output)
+  // ended up black-on-black. The current fix picks fg from bg's
+  // relative luminance: bright bg → dark fg, dark bg → light fg.
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
@@ -556,33 +557,81 @@ test('terminal forces dark fg on explicit bg when fg is default', async ({ page 
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
   await page.waitForTimeout(150);
 
-  // Inject a line with bright-green bg + default fg, then a line with
-  // cyan bg + default fg. These are the two combos visible in the
-  // bug screenshot.
+  // Bright bgs (green, cyan) → must get a dark fg. Dark bgs (black,
+  // blue) → must get a light fg. Plus a control: explicit bg + explicit
+  // fg should be left alone.
   await injectRaw(
     page,
     '\n\x1b[42mGREEN_BG_DEFAULT_FG\x1b[0m\n' +
-    '\x1b[46mCYAN_BG_DEFAULT_FG\x1b[0m\n',
+    '\x1b[46mCYAN_BG_DEFAULT_FG\x1b[0m\n' +
+    '\x1b[40mBLACK_BG_DEFAULT_FG\x1b[0m\n' +
+    '\x1b[44mBLUE_BG_DEFAULT_FG\x1b[0m\n' +
+    '\x1b[33;44mYELLOW_FG_BLUE_BG\x1b[0m\n',
   );
   await page.waitForTimeout(300);
+
+  const rgb = (s) => {
+    const m = (s || '').match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const lum = (rgbArr) => {
+    if (!rgbArr) return null;
+    const lin = (c) => {
+      const v = c / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * lin(rgbArr[0]) + 0.7152 * lin(rgbArr[1]) + 0.0722 * lin(rgbArr[2]);
+  };
 
   const styled = await page.evaluate(() => {
     const spans = Array.from(document.querySelectorAll('.aceterm-line-bg'));
     return spans
-      .filter((s) => /GREEN_BG_DEFAULT_FG|CYAN_BG_DEFAULT_FG/.test(s.textContent || ''))
+      .filter((s) => /(GREEN|CYAN|BLACK|BLUE|YELLOW)_(BG|FG)/.test(s.textContent || ''))
       .map((s) => ({
         text: s.textContent,
         color: s.style.color,
         bg: s.style.backgroundColor,
       }));
   });
-  expect(styled.length).toBeGreaterThanOrEqual(2);
-  // Both spans must have an explicitly-set fg colour (not the empty
-  // string that would inherit the theme's light-gray default).
-  for (const s of styled) {
+
+  const find = (needle) => styled.find((s) => (s.text || '').includes(needle));
+
+  const green = find('GREEN_BG_DEFAULT_FG');
+  const cyan = find('CYAN_BG_DEFAULT_FG');
+  const black = find('BLACK_BG_DEFAULT_FG');
+  const blue = find('BLUE_BG_DEFAULT_FG');
+  const yel = find('YELLOW_FG_BLUE_BG');
+
+  for (const s of [green, cyan, black, blue, yel]) {
+    expect(s).toBeTruthy();
     expect(s.color).not.toBe('');
     expect(s.bg).not.toBe('');
   }
+
+  // Bright bg → dark fg (luminance contrast > 0.5 between fg and bg).
+  for (const s of [green, cyan]) {
+    const bgL = lum(rgb(s.bg));
+    const fgL = lum(rgb(s.color));
+    expect(bgL).toBeGreaterThan(0.4);
+    expect(fgL).toBeLessThan(0.1);
+  }
+
+  // Dark bg → light fg.
+  for (const s of [black, blue]) {
+    const bgL = lum(rgb(s.bg));
+    const fgL = lum(rgb(s.color));
+    expect(bgL).toBeLessThan(0.4);
+    expect(fgL).toBeGreaterThan(0.5);
+  }
+
+  // Explicit fg + explicit bg: fg must stay yellow-ish, not get
+  // overridden by the contrast picker. Yellow palette is `#f0c674`
+  // — R high, G high, B mid-low.
+  const yfg = rgb(yel.color);
+  expect(yfg).toBeTruthy();
+  expect(yfg[0]).toBeGreaterThan(200);
+  expect(yfg[1]).toBeGreaterThan(150);
+  expect(yfg[2]).toBeLessThan(200);
 });
 
 test('terminal uses the muted base16 palette, not Tango defaults', async ({ page }) => {
