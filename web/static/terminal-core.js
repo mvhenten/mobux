@@ -94,12 +94,17 @@ export class TerminalCore extends EventTarget {
   resize() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const cell = this.cellSize();
-    const bar = document.getElementById('inputBar');
-    const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
-    const kb = this._keyboardOffset();
     const pad = this._horizontalPadding();
-    const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight - kb) / cell.height) - 1);
+    // The input bar is now a flex sibling of `#terminal` — when it is
+    // shown the host clientHeight already excludes its row, so we
+    // don't need to subtract `barHeight` (or the keyboard offset, since
+    // body shrinks to vv.height when the keyboard pops up). Using
+    // host.clientHeight makes us robust to whichever offset shrinks
+    // the host without re-deriving the formula here.
+    const hostW = this.host.clientWidth || (window.innerWidth - pad);
+    const hostH = this.host.clientHeight || window.innerHeight;
+    const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
+    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
@@ -172,12 +177,11 @@ export class TerminalCore extends EventTarget {
   _forceRedraw() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const cell = this.cellSize();
-    const bar = document.getElementById('inputBar');
-    const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
-    const kb = this._keyboardOffset();
     const pad = this._horizontalPadding();
-    const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight - kb) / cell.height) - 1);
+    const hostW = this.host.clientWidth || (window.innerWidth - pad);
+    const hostH = this.host.clientHeight || window.innerHeight;
+    const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
+    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;

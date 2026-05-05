@@ -34,13 +34,16 @@ export function createInputBar(term, send) {
   }
 
   // ── Show/hide bar ─────────────────────────────────────────────────
+  // The bar is now a flex item (see style.css), so `.hidden` toggles
+  // `display: none`. Showing/hiding the bar resizes the flex children
+  // (#terminal / #reader); fire a synchronous resize so terminal-core
+  // and reader-view recompute their bounds in the same task.
   function show() {
     bar.classList.remove('hidden');
     resizeTerminal();
   }
 
   function hide() {
-    bar.style.transform = '';
     bar.classList.add('hidden');
     document.body.style.height = '';
     input.blur();
@@ -52,10 +55,10 @@ export function createInputBar(term, send) {
   }
 
   function resizeTerminal() {
-    // Give the CSS transition a frame to settle
-    requestAnimationFrame(() => {
-      window.dispatchEvent(new Event('resize'));
-    });
+    // Notify synchronously so layout-dependent consumers (terminal-core
+    // resize, reader-view re-pin) read the freshly-shrunk host height
+    // in the same task — no visible jump on the next frame.
+    window.dispatchEvent(new Event('resize'));
   }
 
   // ── Ribbon: send control chars directly to PTY ────────────────────
@@ -117,11 +120,14 @@ export function createInputBar(term, send) {
   }
 
   // ── Track on-screen keyboard via visualViewport ───────────────────
-  // Translate the bar up by the keyboard height so it sits above the
-  // software keyboard (Android Chrome doesn't shrink the layout vp).
-  // Also shrink the layout container (.term-body) to match the visual
-  // viewport so #reader / #terminal don't render content underneath
-  // the lifted bar.
+  // Android Chrome leaves the layout viewport at full height when the
+  // soft keyboard appears — only `visualViewport.height` shrinks. The
+  // bar is now a flex item in `.term-body` (the body element), so we
+  // override body's explicit `height: 100vh` with the visual viewport
+  // height and the bar moves with the body bottom automatically.
+  // Flex children (#terminal / #reader) shrink to the remaining space
+  // above the bar, so xterm and reader content stay visible above the
+  // keyboard with no overlap.
   if (window.visualViewport) {
     const vv = window.visualViewport;
     let lastHeight = vv.height;
@@ -134,11 +140,10 @@ export function createInputBar(term, send) {
         lastOffset = 0;
         return offset;
       }
-      bar.style.transform = offset > 0 ? `translateY(${-offset}px)` : '';
-      // Shrink .term-body (the body itself) so flex children pick up
-      // the new viewport height. .term-body has explicit `height:
-      // 100vh`, which overrides `bottom:0` — so we override `height`
-      // directly when the keyboard is up.
+      // Shrink .term-body (= body) to the visual viewport height so
+      // flex children pick up the new viewport height. .term-body has
+      // explicit `height: 100vh`, which overrides `bottom:0` — so we
+      // override `height` directly when the keyboard is up.
       document.body.style.height = offset > 0 ? `${vv.height}px` : '';
       if (offset !== lastOffset) {
         lastOffset = offset;

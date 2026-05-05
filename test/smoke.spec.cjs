@@ -923,7 +923,7 @@ test('synthetic viewport: bubble fusion under translated inner', async ({ page }
   expect(insideInner).toBe(true);
 });
 
-test('input bar lifts above on-screen keyboard via visualViewport', async ({ page }) => {
+test('input bar sits above on-screen keyboard via visualViewport', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -953,16 +953,21 @@ test('input bar lifts above on-screen keyboard via visualViewport', async ({ pag
     window.visualViewport.dispatchEvent(new Event('resize'));
   });
 
+  // The bar is a flex item: when body shrinks to vv.height, the bar
+  // moves up with body's bottom — no translate needed. Assert that
+  // body's inline height reflects the shrunk viewport.
   await expect.poll(
-    async () => await page.evaluate(() => document.getElementById('inputBar').style.transform),
+    async () => await page.evaluate(() => document.body.style.height),
     { timeout: 2000 },
-  ).toMatch(/translateY\(-\d+(\.\d+)?px\)/);
+  ).toMatch(/^\d+(\.\d+)?px$/);
 
-  const ty = await page.evaluate(() => {
-    const m = document.getElementById('inputBar').style.transform.match(/translateY\((-?[\d.]+)px\)/);
-    return m ? parseFloat(m[1]) : 0;
+  const barBottom = await page.evaluate(() => {
+    const r = document.getElementById('inputBar').getBoundingClientRect();
+    return r.bottom;
   });
-  expect(ty).toBeLessThan(0);
+  // Bar bottom must sit within the visual viewport (i.e., not below
+  // the keyboard). innerHeight - 300 = 500 in the stubbed state.
+  expect(barBottom).toBeLessThanOrEqual(500 + 1);
 
   await page.evaluate(() => {
     window.__stubVVHeight = window.innerHeight;
@@ -971,9 +976,58 @@ test('input bar lifts above on-screen keyboard via visualViewport', async ({ pag
   });
 
   await expect.poll(
-    async () => await page.evaluate(() => document.getElementById('inputBar').style.transform),
+    async () => await page.evaluate(() => document.body.style.height),
     { timeout: 2000 },
   ).toBe('');
+});
+
+test('input bar does not overlap #terminal when shown', async ({ page }) => {
+  // Regression: in terminal mode the `position: fixed` input bar painted
+  // its black background over the bottom rows of #terminal because Ace
+  // rendered into the full host height. Now that the bar is a flex
+  // sibling, #terminal.bottom must equal inputBar.top — no overlap,
+  // both with and without a simulated on-screen keyboard.
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await page.setViewportSize({ width: 380, height: 800 });
+
+  // Show the bar — no keyboard yet.
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
+  await page.waitForTimeout(50);
+
+  const noKb = await page.evaluate(() => {
+    const t = document.getElementById('terminal').getBoundingClientRect();
+    const b = document.getElementById('inputBar').getBoundingClientRect();
+    return { tBottom: t.bottom, bTop: b.top };
+  });
+  expect(Math.abs(noKb.tBottom - noKb.bTop)).toBeLessThanOrEqual(1);
+
+  // Stub visualViewport to simulate keyboard up.
+  await page.evaluate(() => {
+    const vv = window.visualViewport;
+    Object.defineProperty(vv, 'height', {
+      configurable: true,
+      get: () => (typeof window.__stubVVHeight === 'number' ? window.__stubVVHeight : window.innerHeight),
+    });
+    Object.defineProperty(vv, 'offsetTop', {
+      configurable: true,
+      get: () => (typeof window.__stubVVOffset === 'number' ? window.__stubVVOffset : 0),
+    });
+    window.__stubVVHeight = window.innerHeight - 300;
+    window.__stubVVOffset = 0;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+  });
+  await page.waitForTimeout(50);
+
+  const withKb = await page.evaluate(() => {
+    const t = document.getElementById('terminal').getBoundingClientRect();
+    const b = document.getElementById('inputBar').getBoundingClientRect();
+    return { tBottom: t.bottom, bTop: b.top };
+  });
+  expect(Math.abs(withKb.tBottom - withKb.bTop)).toBeLessThanOrEqual(1);
 });
 
 test('content area shrinks under on-screen keyboard so reader text stays visible', async ({ page }) => {
