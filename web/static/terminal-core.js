@@ -1,15 +1,6 @@
-// Aceterm-backed TerminalCore — exposes the same shape as the
-// xterm.js-backed version on `main` so the rest of mobux (gestures,
-// input bar, view toggle, reader, smoke tests) doesn't need to know
-// which renderer is underneath.
-//
-// Spike-only: lives on the `spike-aceterm` branch and is wired in
-// through render_terminal_page on that branch's mobux. The buffer
-// adapter is intentionally minimal — enough for live rendering and
-// the input/scroll/window-switch tests; reader-side cell-detail
-// access (per-glyph fg/bg, `getCell`) is shimmed and several reader
-// tests are expected to fail until libterm's cell store is mapped
-// onto an xterm-like Cell API.
+// Aceterm-backed TerminalCore — wraps libterm + Ace VirtualRenderer
+// behind the small surface the rest of mobux (gestures, input bar,
+// smoke tests) uses.
 
 import { getStoredThemeId, getTheme } from './themes.js';
 
@@ -33,13 +24,10 @@ export class TerminalCore extends EventTarget {
     this.ws = null;
     this.panes = [];
     this.activeIndex = 0;
-    this.oscMarkers = new Map();
-    this.oscDetected = false;
 
     this.term = makeAcetermAdapter(host, (data) => this.send(data));
-    this._wireWriteParsedFanout();
-    this._wireOsc133();
-    // Spike-only debug peephole.
+    // Debug peephole — reach the live libterm/Ace instances from the
+    // devtools console without exposing them through the public API.
     if (typeof window !== 'undefined') {
       window.__lt = this.term._libterm;
       window.__ed = this.term._editor;
@@ -109,12 +97,6 @@ export class TerminalCore extends EventTarget {
     const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-  }
-
-  _keyboardOffset() {
-    const vv = window.visualViewport;
-    if (!vv) return 0;
-    return Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
   }
 
   _horizontalPadding() {
@@ -220,34 +202,6 @@ export class TerminalCore extends EventTarget {
     } catch (_) {}
   }
 
-  _wireWriteParsedFanout() {
-    // libterm emits `afterWrite` after each `write()`. There is no
-    // `refresh` event — `refresh` is a method on Terminal, not an
-    // EventEmitter signal. Use `afterWrite` to fire the
-    // `onWriteParsed` subscribers the reader relies on.
-    if (this.term._libterm && this.term._libterm.on) {
-      this.term._libterm.on('afterWrite', () => {
-        for (const cb of this.term._writeParsedSubs) cb();
-      });
-    }
-  }
-
-  _wireOsc133() {
-    // libterm's patched OSC dispatcher invokes handleOsc133 on every
-    // `OSC 133 ; X ST`. Same shape as the xterm-side handler in
-    // main: A/B mark prompts, record kind by absolute buffer row.
-    this.term._libterm.handleOsc133 = (data) => {
-      const kind = (data || '').charAt(0);
-      if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return;
-      const lt = this.term._libterm;
-      const absY = (lt.ybase || 0) + (lt.y || 0);
-      this.oscMarkers.set(absY, kind);
-      if (!this.oscDetected) {
-        this.oscDetected = true;
-        this.dispatchEvent(new Event('osc-detected'));
-      }
-    };
-  }
 }
 
 // ── libterm + Ace adapter ─────────────────────────────────────────
@@ -266,10 +220,8 @@ function makeAcetermAdapter(host, sendCb) {
   if (Terminal) {
     Terminal.scrollback = 10000;
     if (typeof Terminal.setColors === 'function') {
-      // Match the reader's --ansi-* palette so the same SGR sequences
-      // render the same way in both views. The default Tango palette
-      // is too saturated for a dark phone screen — pull from the
-      // active theme bundle (themes.js).
+      // The default Tango palette is too saturated for a dark phone
+      // screen — pull from the active theme bundle (themes.js).
       Terminal.setColors(undefined, undefined, theme.palette.slice(0, 16));
     }
   }
@@ -278,8 +230,7 @@ function makeAcetermAdapter(host, sendCb) {
   // mouseEvents/applicationKeypad (tmux turns mouse events on). That
   // shrinks Ace's session to just the visible region, hiding all
   // scrollback from the renderer (and from `viewportY` in the smoke
-  // tests). Force it off — for a phone-shaped scrollback-pinned reader
-  // we always want the full history available.
+  // tests). Force it off — we always want the full history available.
   libterm.noScrollBack = function() { return false; };
   // theme-*.js bundles are loaded as classic <script>s in
   // render_terminal_page, so each module is already registered with
@@ -307,25 +258,10 @@ function makeAcetermAdapter(host, sendCb) {
   // scroller/text-layer DOM (it does on resize / theme change).
   editor.renderer.on('afterRender', () => aliasXtermClasses(host));
 
-  const writeParsedSubs = [];
-  const dataSubs = [];
-
-  // OSC 133 stub — libterm's parser doesn't surface OSC 133, so the
-  // map stays empty and the reader's "shell integration not detected"
-  // hint stays visible (accurate for now).
-  const parser = {
-    registerOscHandler(_id, _cb) {
-      return { dispose() {} };
-    },
-  };
-
   return {
     _libterm: libterm,
     _editor: editor,
-    _writeParsedSubs: writeParsedSubs,
-    _dataSubs: dataSubs,
     options: { fontSize: 13 },
-    parser,
 
     get cols() { return libterm.cols; },
     get rows() { return libterm.rows; },
@@ -359,21 +295,6 @@ function makeAcetermAdapter(host, sendCb) {
       r.session.setScrollTop(r.getScrollTop() + n * r.lineHeight);
     },
 
-    onWriteParsed(cb) {
-      writeParsedSubs.push(cb);
-      return { dispose() {
-        const i = writeParsedSubs.indexOf(cb);
-        if (i >= 0) writeParsedSubs.splice(i, 1);
-      } };
-    },
-    onData(cb) {
-      dataSubs.push(cb);
-      return { dispose() {
-        const i = dataSubs.indexOf(cb);
-        if (i >= 0) dataSubs.splice(i, 1);
-      } };
-    },
-
     buffer: {
       get active() {
         return makeBufferAdapter(libterm, editor);
@@ -387,9 +308,6 @@ function makeBufferAdapter(lt, editor) {
     get length() {
       return Math.max(lt.lines ? lt.lines.length : 0, lt.rows + (lt.ybase || 0));
     },
-    get cursorX() { return lt.x || 0; },
-    get cursorY() { return lt.y || 0; },
-    get baseY() { return lt.ybase || 0; },
     // xterm's `viewportY` is "the absolute row index of the topmost
     // VISIBLE row" — tracks the user's scroll position. In aceterm
     // libterm renders into Ace's session whose viewport scrolls
@@ -409,53 +327,14 @@ function makeBufferAdapter(lt, editor) {
   };
 }
 
-// libterm packs each cell as `[attrInt, ch]` where attrInt is:
-//   bits  0..8  bg colour (256 = default)
-//   bits  9..17 fg colour (257 = default)
-//   bit   18    bold
-//   bit   19    underline
-//   bit   20    inverse
-// (no italic, no dim, no truecolour — libterm is palette-only.)
-const LT_BG_DEFAULT = 256;
-const LT_FG_DEFAULT = 257;
-
+// libterm packs each cell as `[attrInt, ch]`. Only the character is
+// surfaced — terminal.js uses translateToString() for URL detection at
+// tap position; nothing in mobux reads per-cell attrs anymore.
 function makeLineAdapter(cells) {
   const text = cells.map((c) => (Array.isArray(c) ? c[1] : (c && c.ch) || '')).join('');
   return {
     isWrapped: false,
     translateToString(_trim) { return text; },
-    getCell(x) {
-      const c = cells[x];
-      const attr = Array.isArray(c) ? c[0] : 0;
-      const ch = Array.isArray(c) ? c[1] : (c && c.ch) || ' ';
-      const bg = attr & 0x1ff;
-      const fg = (attr >> 9) & 0x1ff;
-      const flags = attr >> 18;
-      const isFgDef = fg === LT_FG_DEFAULT;
-      const isBgDef = bg === LT_BG_DEFAULT;
-      return {
-        getChars() { return ch; },
-        getCode() { return ch ? ch.codePointAt(0) || 0 : 0; },
-        // libterm is palette-only; never RGB.
-        isFgRGB() { return false; },
-        isBgRGB() { return false; },
-        isFgPalette() { return !isFgDef; },
-        isBgPalette() { return !isBgDef; },
-        isFgDefault() { return isFgDef; },
-        isBgDefault() { return isBgDef; },
-        getFgColor() { return isFgDef ? -1 : fg; },
-        getBgColor() { return isBgDef ? -1 : bg; },
-        getFgColorMode() { return isFgDef ? 0 : 0x100; },
-        getBgColorMode() { return isBgDef ? 0 : 0x100; },
-        isBold()       { return !!(flags & 1); },
-        isUnderline()  { return !!(flags & 2); },
-        isInverse()    { return !!(flags & 4); },
-        // libterm doesn't track these — surface as off so the
-        // reader doesn't render them differently from the canvas.
-        isItalic()     { return false; },
-        isDim()        { return false; },
-      };
-    },
   };
 }
 

@@ -1,7 +1,6 @@
 // Theme bundles. Each bundle pairs:
 //   1. an Ace editor theme (sets editor bg/fg/gutter)
 //   2. a 16-colour ANSI palette for libterm (Terminal.colors[0..15])
-//   3. a matching reader-mode --ansi-* CSS variable set on #reader.
 //
 // Storage key: localStorage['mobux:theme']. Default: tomorrow-night-soft.
 //
@@ -87,17 +86,6 @@ export function getTheme(id) {
   return BY_ID[id] || BY_ID[DEFAULT_THEME];
 }
 
-// Push the bundle's --ansi-* vars onto #reader so the reader-mode
-// tokenizer (term-tokenizer.js, which emits `var(--ansi-N)`) renders
-// the same SGR codes the same way as the live terminal view.
-export function applyReaderVars(theme) {
-  const reader = document.getElementById('reader');
-  if (!reader) return;
-  for (let i = 0; i < 16; i++) {
-    reader.style.setProperty(`--ansi-${i}`, theme.palette[i]);
-  }
-}
-
 // Push the bundle's palette onto an active libterm Terminal class —
 // the constructor copied Terminal.colors into defAttr at instantiation,
 // but updating Terminal.colors[i] in-place still affects all rendered
@@ -130,11 +118,10 @@ export function applyEditorTheme(theme, editor) {
   return true;
 }
 
-// Apply all three layers. Editor is optional (the settings page has no
+// Apply both layers. Editor is optional (the settings page has no
 // terminal mounted; the terminal page passes its editor in).
 export function applyTheme(id, { editor } = {}) {
   const theme = getTheme(id);
-  applyReaderVars(theme);
   applyTerminalColors(theme);
   if (editor) applyEditorTheme(theme, editor);
   return theme;
