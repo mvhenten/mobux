@@ -1207,18 +1207,20 @@ async fn handle_ws(
     // snippet's tmux DCS-passthrough wrap (\ePtmux;\e<seq>\e\\) to reach
     // the outer terminal. tmux 3.4 defaults this off, and silently drops
     // OSC 133 entirely without it; tmux 3.5+ also honours the option.
-    cmd.args([
-        "-c",
-        &format!(
-            "{tmux} set-option -g mouse on 2>/dev/null; {tmux} set-option -g allow-passthrough on 2>/dev/null; {tmux} set-window-option -g aggressive-resize on 2>/dev/null; {tmux} attach-session -t {session}",
-            tmux = tmux_bin,
-            session = session_name,
-        ),
-    ]);
-    let mut child = pair.slave.spawn_command(cmd)?;
+    let bash_arg = format!(
+        "{tmux} set-option -g mouse on 2>/dev/null; {tmux} set-option -g allow-passthrough on 2>/dev/null; {tmux} set-window-option -g aggressive-resize on 2>/dev/null; {tmux} attach-session -t {session}",
+        tmux = tmux_bin,
+        session = session_name,
+    );
+    if trace {
+        eprintln!("[ws] cmd session={session_name} bash -c {bash_arg:?}");
+    }
+    cmd.args(["-c", &bash_arg]);
+    let child = pair.slave.spawn_command(cmd)?;
     if trace {
         eprintln!("[ws] bash spawned session={session_name} pid={:?}", child.process_id());
     }
+    let child = Arc::new(Mutex::new(child));
 
     let mut reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
@@ -1231,9 +1233,12 @@ async fn handle_ws(
 
     let trace_thread = trace;
     let session_for_thread = session_name.clone();
+    let child_for_thread = child.clone();
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 8192];
         let mut total: usize = 0;
+        let mut hex_dump = String::new();
+        let mut hex_ascii = String::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
@@ -1241,6 +1246,32 @@ async fn handle_ws(
                         eprintln!(
                             "[ws] reader EOF session={session_for_thread} total={total}"
                         );
+                        if !hex_dump.is_empty() {
+                            eprintln!(
+                                "[ws] reader first256-hex   session={session_for_thread} {hex_dump}"
+                            );
+                            eprintln!(
+                                "[ws] reader first256-ascii session={session_for_thread} {hex_ascii:?}"
+                            );
+                        }
+                        if let Ok(mut c) = child_for_thread.lock() {
+                            match c.try_wait() {
+                                Ok(Some(status)) => eprintln!(
+                                    "[ws] child exited (post-EOF) session={session_for_thread} status={status:?}"
+                                ),
+                                Ok(None) => match c.wait() {
+                                    Ok(status) => eprintln!(
+                                        "[ws] child wait (post-EOF) session={session_for_thread} status={status:?}"
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "[ws] child wait err session={session_for_thread} err={e}"
+                                    ),
+                                },
+                                Err(e) => eprintln!(
+                                    "[ws] child try_wait err session={session_for_thread} err={e}"
+                                ),
+                            }
+                        }
                     }
                     break;
                 }
@@ -1251,11 +1282,43 @@ async fn handle_ws(
                             "[ws] reader chunk session={session_for_thread} n={n} total={total}"
                         );
                     }
+                    if trace_thread && hex_dump.len() < 512 {
+                        for &b in &buf[..n] {
+                            if hex_dump.len() >= 512 { break; }
+                            hex_dump.push_str(&format!("{:02x}", b));
+                            hex_ascii.push(if (0x20..=0x7e).contains(&b) {
+                                b as char
+                            } else {
+                                '.'
+                            });
+                        }
+                    }
                     if tx.send(buf[..n].to_vec()).is_err() {
                         if trace_thread {
                             eprintln!(
-                                "[ws] reader tx closed session={session_for_thread}"
+                                "[ws] reader tx closed session={session_for_thread} total={total}"
                             );
+                            if !hex_dump.is_empty() {
+                                eprintln!(
+                                    "[ws] reader first256-hex   session={session_for_thread} {hex_dump}"
+                                );
+                                eprintln!(
+                                    "[ws] reader first256-ascii session={session_for_thread} {hex_ascii:?}"
+                                );
+                            }
+                            if let Ok(mut c) = child_for_thread.lock() {
+                                match c.try_wait() {
+                                    Ok(Some(status)) => eprintln!(
+                                        "[ws] child exited (post-tx-closed) session={session_for_thread} status={status:?}"
+                                    ),
+                                    Ok(None) => eprintln!(
+                                        "[ws] child still running (post-tx-closed) session={session_for_thread}"
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "[ws] child try_wait err session={session_for_thread} err={e}"
+                                    ),
+                                }
+                            }
                         }
                         break;
                     }
@@ -1338,8 +1401,10 @@ async fn handle_ws(
         }
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Ok(mut c) = child.lock() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
     Ok(())
 }
 
