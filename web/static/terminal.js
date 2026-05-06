@@ -1,10 +1,12 @@
 import { TerminalCore } from './terminal-core.js';
+import { ReaderView } from './reader-view.js';
 import { createGestureRecognizer } from './touch.js';
 import { createInputBar } from './input-bar.js';
 import { applyTheme, getStoredThemeId } from './themes.js';
 
 const session = window.MOBUX_SESSION;
 const termEl = document.getElementById("terminal");
+const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");
 const loadquote = document.getElementById("loadquote");
 const paneIndicator = document.getElementById("paneIndicator");
@@ -19,7 +21,7 @@ const quotes = [
   ["The Analytical Engine weaves algebraical patterns just as the Jacquard loom weaves flowers and leaves.", "Ada Lovelace"],
   ["We can only see a short distance ahead, but we can see plenty there that needs to be done.", "Alan Turing"],
   ["Those who can imagine anything, can create the impossible.", "Alan Turing"],
-  ["The most dangerous phrase in the language is: we’ve always done it this way.", "Grace Hopper"],
+  ["The most dangerous phrase in the language is: we\u2019ve always done it this way.", "Grace Hopper"],
   ["The best way to predict the future is to invent it.", "Alan Kay"],
   ["Premature optimization is the root of all evil.", "Donald Knuth"],
   ["Talk is cheap. Show me the code.", "Linus Torvalds"],
@@ -45,7 +47,7 @@ const quotes = [
 {
   const [text, author] = quotes[Math.floor(Math.random() * quotes.length)];
   document.getElementById("quote").textContent = text;
-  document.getElementById("qauthor").textContent = "— " + author;
+  document.getElementById("qauthor").textContent = "\u2014 " + author;
 }
 
 // ── External links ──────────────────────────────────────────────────
@@ -78,7 +80,9 @@ window.__mobuxOpenExternal = openExternal;
 const isMobile = window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
 
-// Apply the stored theme (Ace editor + libterm palette).
+// Apply the stored theme to all three layers. terminal-core.js already
+// picked the matching palette + Ace theme at construction; this call
+// pushes the --ansi-* vars onto #reader for tokenized reader output.
 applyTheme(getStoredThemeId(), { editor: core.term._editor });
 
 // Live swap when the settings page (or another tab) changes the theme.
@@ -107,7 +111,11 @@ function updatePaneUI() {
     paneIndicator.textContent = `${current ? current.title : "?"} (${activeIndex + 1}/${panes.length})`;
   }
 }
-core.addEventListener('panes', updatePaneUI);
+core.addEventListener('panes', () => {
+  updatePaneUI();
+  pruneViewPrefs();
+  applyStoredViewForActiveWindow();
+});
 
 // ── Command pick list ───────────────────────────────────────────────
 function showCmdList() {
@@ -200,6 +208,41 @@ createGestureRecognizer(overlay, {
   onLongPress: showCmdList,
 });
 
+// ReaderView uses fully synthetic scroll: native overflow scrolling
+// on mobile WebViews has been unreliable (engaged-only-after-fresh-touch
+// on iOS, locked-state on Android with large scrollbacks). We feed the
+// gesture recogniser's onScroll/fling output straight into reader's
+// translateY transform.
+let readerGestures = null;
+function mountReaderGestures() {
+  if (readerGestures) return;
+  readerGestures = createGestureRecognizer(readerEl, {
+    onReconnect: () => core.reconnect(),
+    onLongPress: showCmdList,
+    onHSwipe: (dir) => core.switchWindow(dir),
+    onTap: () => {},
+    // Double-tap in reader mode is for typing, but the reader has no
+    // cursor / no live editing affordance — opening the keyboard
+    // there is confusing. Drop back to xterm first, then show the
+    // input bar so the keystrokes have somewhere to land.
+    onDoubleTap: () => { swapView('xterm'); if (inputBar) inputBar.show(); },
+    onScroll: (dy) => reader.scrollBy(dy),
+    onTwoPullMove(pull, vh) {
+      if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
+      else if (pull > vh * 0.03) paneIndicator.textContent = '↓ Pull to reload...';
+    },
+    onTwoPullEnd(pull, vh) {
+      if (pull > vh * 0.08) location.reload(true);
+      else updatePaneUI();
+    },
+  }, { passiveScroll: false });
+}
+function unmountReaderGestures() {
+  if (!readerGestures) return;
+  readerGestures.destroy();
+  readerGestures = null;
+}
+
 // ── Reveal on first output ──────────────────────────────────────────
 // Fire on the first `data` event, not on settle. The previous
 // implementation reset an 800 ms timer per event, which never
@@ -224,11 +267,107 @@ if (isMobile) {
   inputBar = createInputBar(core.term, (d) => core.send(d));
 }
 
-// ── Test/debug peephole ─────────────────────────────────────────────
-// Smoke tests reach in via window.__mobuxView.test.* to inject buffer
-// content, drive scrolling, and check WS state without depending on a
-// real PTY round-trip. Kept minimal — terminal is the only view now.
+// ── View swap (xterm <-> reader) ────────────────────────────────────
+const reader = new ReaderView({ host: readerEl, core, overlay });
+let currentView = 'xterm';
+
+const VIEW_DEFAULT_KEY = 'mobux.view.default';
+const viewPrefKey = (windowId) => `mobux.view.${session}.${windowId}`;
+
+function activeWindowId() {
+  const p = core.panes[core.activeIndex];
+  return p?.id || null;
+}
+
+function storedDefaultView() {
+  try { return localStorage.getItem(VIEW_DEFAULT_KEY) || 'xterm'; }
+  catch (_) { return 'xterm'; }
+}
+
+function storedViewFor(windowId) {
+  if (!windowId) return null;
+  try { return localStorage.getItem(viewPrefKey(windowId)); }
+  catch (_) { return null; }
+}
+
+function updateToggleLabel() {
+  const btn = document.getElementById('viewToggleBtn');
+  if (!btn) return;
+  if (currentView === 'reader') {
+    btn.textContent = '▣';
+    btn.title = 'Switch to terminal view';
+  } else {
+    btn.textContent = '📖';
+    btn.title = 'Switch to reader view';
+  }
+}
+
+function applyView(mode, { persist = true } = {}) {
+  if (mode !== 'xterm' && mode !== 'reader') return;
+  if (mode === currentView) { updateToggleLabel(); return; }
+  if (mode === 'reader') {
+    termEl.classList.add('hidden');
+    // Reader has its own gesture recogniser on #reader. Disable the
+    // xterm overlay so it doesn't sit on top and eat every touch.
+    overlay.style.pointerEvents = 'none';
+    reader.mount();
+    mountReaderGestures();
+  } else {
+    unmountReaderGestures();
+    reader.unmount();
+    termEl.classList.remove('hidden');
+    if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+      overlay.style.pointerEvents = 'auto';
+    }
+    setTimeout(() => core.resize(), 0);
+  }
+  currentView = mode;
+  if (persist) {
+    try {
+      localStorage.setItem(VIEW_DEFAULT_KEY, mode);
+      const wid = activeWindowId();
+      if (wid) localStorage.setItem(viewPrefKey(wid), mode);
+    } catch (_) {}
+  }
+  updateToggleLabel();
+  window.dispatchEvent(new CustomEvent('mobux:viewchange', { detail: mode }));
+}
+
+function swapView(mode) { applyView(mode, { persist: true }); }
+
+// Ribbon view-toggle button (mobile input bar).
+const viewToggleBtn = document.getElementById('viewToggleBtn');
+if (viewToggleBtn) {
+  viewToggleBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  viewToggleBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    swapView(currentView === 'xterm' ? 'reader' : 'xterm');
+  });
+}
+
+function applyStoredViewForActiveWindow() {
+  const wid = activeWindowId();
+  const stored = storedViewFor(wid);
+  const mode = stored || storedDefaultView();
+  applyView(mode, { persist: false });
+}
+
+function pruneViewPrefs() {
+  const live = new Set(core.panes.map((p) => p.id).filter(Boolean));
+  const prefix = `mobux.view.${session}.`;
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(prefix) && !live.has(k.slice(prefix.length))) {
+        localStorage.removeItem(k);
+      }
+    }
+  } catch (_) {}
+}
+
 window.__mobuxView = {
+  swap: swapView,
+  get current() { return currentView; },
   send: (d) => core.send(d),
   test: {
     inject: (str) => new Promise((resolve) =>
@@ -243,9 +382,26 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
+    readerScrollY: () => reader.scrollY,
+    readerMaxScroll: () => reader.maxScroll,
+    readerInnerHeight: () => reader.innerHeight,
+    readerScrollBy: (dy) => reader.scrollBy(dy),
+    readerStickToBottom: () => reader.stickToBottom(),
     switchWindow: (dir) => core.switchWindow(dir),
+    statusBarOffsetHeight: () => document.querySelector('.reader-statusbar')?.offsetHeight ?? 0,
+    statusBarFilled: () => document.querySelector('.reader-statusbar')?.classList.contains('reader-statusbar--filled') ?? false,
   },
 };
+
+// Apply stored default at boot so the user lands in their preferred
+// view even before the first /panes refresh resolves. Per-window
+// override (if any) is applied later in the panes listener.
+const bootDefault = storedDefaultView();
+if (bootDefault === 'reader') {
+  setTimeout(() => applyView('reader', { persist: false }), 0);
+}
+
+updateToggleLabel();
 
 // ── Boot ────────────────────────────────────────────────────────────
 (async () => {

@@ -279,6 +279,85 @@ test('tapping a URL opens via anchor click (TWA Custom Tabs path), not window.op
   expect(result.windowOpenCalled).toBe(false);
 });
 
+test('reader view renders buffer text', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  // Wait for WS attach + redraw to settle so it doesn't clobber our inject.
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.test.inject('MOBUX_READER_MARKER_42\n'));
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+
+  await expect.poll(
+    async () => (await page.locator('#reader').textContent()) || '',
+    { timeout: 3000 }
+  ).toContain('MOBUX_READER_MARKER_42');
+
+  await expect(page.locator('#reader')).toBeVisible();
+  await expect(page.locator('#terminal')).toBeHidden();
+
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(100);
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#reader')).toBeHidden();
+});
+
+test('reader view live-updates on new output', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await page.evaluate(() => window.__mobuxView.test.inject('MOBUX_LIVE_PROBE_99\n'));
+
+  await expect.poll(
+    async () => (await page.locator('#reader').textContent()) || '',
+    { timeout: 3000 }
+  ).toContain('MOBUX_LIVE_PROBE_99');
+
+  // Cleanup
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+});
+
+test('long-press menu toggles reader view', async ({ page }) => {
+  // Start clean: no stored view preference
+  await page.addInitScript(() => {
+    try { localStorage.clear(); } catch (_) {}
+  });
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => {
+    const vp = document.querySelector('.xterm-viewport');
+    return vp && vp.scrollHeight > 100;
+  }, { timeout: 5000 });
+
+  // Initial state: xterm visible, ribbon toggle shows reader icon
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
+
+  // Reveal the input bar so the ribbon view-toggle is in the viewport.
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
+
+  await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
+  await page.locator("#viewToggleBtn").click({ force: true });
+
+  // Reader is now active, icon flips
+  await expect(page.locator('#reader')).toBeVisible();
+  await expect(page.locator('#terminal')).toBeHidden();
+  await expect(page.locator('#viewToggleBtn')).toHaveText('▣');
+
+  await page.locator("#viewToggleBtn").click({ force: true });
+  await expect(page.locator('#terminal')).toBeVisible();
+  await expect(page.locator('#reader')).toBeHidden();
+  await expect(page.locator('#viewToggleBtn')).toHaveText('📖');
+});
+
 test('panes API returns window id', async ({ page }) => {
   const panes = await (await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)).json();
   expect(panes.length).toBeGreaterThan(0);
@@ -287,10 +366,233 @@ test('panes API returns window id', async ({ page }) => {
     expect(typeof p.index).toBe('string');
   }
 });
-// Helper used by the colour/luminance terminal tests below.
+// ── Reader-view touch behaviour ─────────────────────────────────────
+// These tests guard against the regression where the xterm touch
+// overlay sat over #reader and ate every touch — making scroll, swipe,
+// and (on real phones) the long-press menu unreachable.
+
+async function fireTouch(page, selector, type, x, y) {
+  await page.evaluate(({ selector, type, x, y }) => {
+    const el = document.querySelector(selector);
+    const t = new Touch({ identifier: 1, target: el, clientX: x, clientY: y, pageX: x, pageY: y });
+    el.dispatchEvent(new TouchEvent(type, {
+      touches: type === 'touchend' ? [] : [t],
+      changedTouches: [t],
+      bubbles: true, cancelable: true,
+    }));
+  }, { selector, type, x, y });
+}
+
+test('reader view disables xterm touch overlay', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(200);
+
+  const overlayPE = await page.evaluate(() =>
+    getComputedStyle(document.getElementById('touchOverlay')).pointerEvents
+  );
+  expect(overlayPE).toBe('none');
+
+  // Flipping back must restore overlay so xterm gestures keep working.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(150);
+  const overlayPEAfter = await page.evaluate(() =>
+    getComputedStyle(document.getElementById('touchOverlay')).pointerEvents
+  );
+  expect(overlayPEAfter).toBe('auto');
+});
+
+test('reader view toggle button in input ribbon flips back to xterm', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.test.injectLines(120, 'rl'));
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(250);
+
+  await page.evaluate(() => document.getElementById('inputBar').classList.remove('hidden'));
+  await page.locator('#viewToggleBtn').scrollIntoViewIfNeeded();
+  await page.locator("#viewToggleBtn").click({ force: true });
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.current),
+    { timeout: 1500 }
+  ).toBe('xterm');
+});
+
+// ── Tokenizer / colour rendering ────────────────────────────────
+// Inject ANSI sequences and assert the reader emits the right block
+// types with the right colours, so we can refactor the tokenizer
+// without silently regressing colour or block detection.
+
+const RED  = '\x1b[31m';
+const GREEN = '\x1b[32m';
+const BOLD = '\x1b[1m';
+const RESET = '\x1b[0m';
+
 async function injectRaw(page, str) {
   await page.evaluate((s) => window.__mobuxView.test.inject(s), str);
 }
+
+async function blockSummary(page) {
+  return await page.evaluate(() => {
+    const blocks = document.querySelectorAll('#reader .rb');
+    return Array.from(blocks).map((b) => ({
+      classes: Array.from(b.classList).filter((c) => c !== 'rb'),
+      text: (b.textContent || '').trim().slice(0, 80),
+    }));
+  });
+}
+
+test('reader colours preserved (red + green spans)', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+  await injectRaw(page, `${RED}- removed${RESET}\n${GREEN}+ added${RESET}\n`);
+  await page.waitForTimeout(200);
+
+  const colours = await page.evaluate(() => {
+    const spans = document.querySelectorAll('#reader span');
+    return Array.from(spans)
+      .map((s) => ({ t: s.textContent, c: s.style.color }))
+      .filter((s) => s.t && s.c);
+  });
+  const reds = colours.filter((c) => /var\(--ansi-1\)|rgb\(204|cc6666/.test(c.c));
+  const greens = colours.filter((c) => /var\(--ansi-2\)|b5bd68/.test(c.c));
+  expect(reds.length).toBeGreaterThan(0);
+  expect(greens.length).toBeGreaterThan(0);
+  expect(reds.some((r) => r.t.includes('removed'))).toBe(true);
+  expect(greens.some((g) => g.t.includes('added'))).toBe(true);
+});
+
+test('reader detects prompt, header, rule, code blocks', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  // Clear prior content visually then inject a structured snippet.
+  await injectRaw(page,
+    [
+      '~/dev (main) $',
+      '[Context]',
+      '\u2500'.repeat(40),
+      '```',
+      '  fn hello() {}',
+      '```',
+      'plain prose line.',
+    ].join('\n') + '\n');
+  await page.waitForTimeout(250);
+
+  const summary = await blockSummary(page);
+  const types = summary.map((b) => b.classes.join(' '));
+  expect(types.some((t) => t.includes('rb-prompt'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-header'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-rule'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-code'))).toBe(true);
+  expect(types.some((t) => t.includes('rb-text'))).toBe(true);
+
+  // Code block must contain the fenced content.
+  const codeText = await page.locator('#reader .rb-code').textContent();
+  expect(codeText).toContain('fn hello()');
+  // Triple-backtick fences themselves must NOT appear in output.
+  expect(codeText).not.toContain('```');
+});
+
+test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  // The text on the marked line ends with no recognised prompt sigil
+  // and would otherwise classify as 'text'. With the OSC 133 ; A
+  // marker emitted right before it, the tokenizer must classify it
+  // as a prompt.
+  await injectRaw(page, '\x1b]133;A\x07my-shell-prompt-no-sigil\nrun output line\n');
+  await page.waitForTimeout(250);
+
+  const summary = await blockSummary(page);
+  const promptHit = summary.find(
+    (b) => b.classes.includes('rb-prompt') && b.text.includes('my-shell-prompt-no-sigil'),
+  );
+  expect(promptHit).toBeTruthy();
+
+  // After detection, the "shell integration not detected" hint
+  // should be hidden.
+  const hintHidden = await page.evaluate(() => {
+    const el = document.querySelector('.reader-osc-hint');
+    return !el || el.hidden;
+  });
+  expect(hintHidden).toBe(true);
+});
+
+test('reader strips trailing default-attr whitespace from lines', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await injectRaw(page, 'TRAILMARK content                                  \n');
+  await page.waitForTimeout(200);
+  // No rendered .rb-line should have trailing whitespace — the
+  // tokenizer collapses default-attr trailing space.
+  const trailers = await page.evaluate(() => {
+    const lines = Array.from(document.querySelectorAll('#reader .rb-line'));
+    return lines
+      .map((l) => l.textContent || '')
+      .filter((t) => t.length > 0 && /[ \t]$/.test(t));
+  });
+  expect(trailers).toEqual([]);
+});
+
+test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const BLUE_BG = '\x1b[44m';
+  const RESET2 = '\x1b[0m';
+  await injectRaw(
+    page,
+    // Leading newline pushes past any pending shell prompt so the
+    // first bubble line isn't shared with the prompt run.
+    `\n${BLUE_BG}bubble line one${RESET2}\n` +
+    `${BLUE_BG}bubble line two${RESET2}\n` +
+    `${BLUE_BG}bubble line three${RESET2}\n` +
+    `plain trailing line\n`,
+  );
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('#reader .rb-bubble'))
+      .some((b) => (b.querySelectorAll('.rb-bubble-line').length >= 3)),
+    { timeout: 3000 },
+  );
+
+  const bubbles = await page.evaluate(() => {
+    const els = document.querySelectorAll('#reader .rb-bubble');
+    return Array.from(els).map((b) => ({
+      lines: b.querySelectorAll('.rb-bubble-line').length,
+      text: (b.textContent || '').trim(),
+    }));
+  });
+  const fused = bubbles.find((b) => b.text.includes('bubble line one') && b.text.includes('bubble line three'));
+  expect(fused).toBeTruthy();
+  expect(fused.lines).toBeGreaterThanOrEqual(3);
+});
 
 test('terminal picks readable fg by bg luminance when fg is default', async ({ page }) => {
   // Regression (PR #55 → #6X): claude-code-style highlighted blocks
@@ -303,6 +605,10 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
+
+  // Make sure we're on the terminal (aceterm) view, not reader.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(150);
 
   // Bright bgs (green, cyan) → must get a dark fg. Dark bgs (black,
   // blue) → must get a light fg. Plus a control: explicit bg + explicit
@@ -383,12 +689,13 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
 
 test('terminal uses the muted base16 palette, not Tango defaults', async ({ page }) => {
   // Regression: terminal-core.js sets a base16-tomorrow palette via
-  // `Aceterm.Terminal.setColors(...)` so the terminal avoids the
-  // over-saturated Tango lime/cyan that makes highlighted blocks
-  // painful on a dark phone screen. Reaching libterm's Terminal class
-  // via `instance.constructor` returned `EventEmitter` (libterm
-  // replaces `prototype.constructor`), so the override silently
-  // no-op'd before the explicit `Aceterm.Terminal` pin landed.
+  // `Aceterm.Terminal.setColors(...)` so the terminal view matches
+  // reader-mode and avoids the over-saturated Tango lime/cyan that
+  // makes highlighted blocks painful on a dark phone screen. Reaching
+  // libterm's Terminal class via `instance.constructor` returned
+  // `EventEmitter` (libterm replaces `prototype.constructor`), so the
+  // override silently no-op'd before the explicit `Aceterm.Terminal`
+  // pin landed.
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
@@ -410,6 +717,312 @@ test('terminal uses the muted base16 palette, not Tango defaults', async ({ page
   expect(palette.base16[10].toLowerCase()).toBe('#98c379');
   expect(palette.base16[14].toLowerCase()).toBe('#56b6c2');
   expect(palette.scrollback).toBe(10000);
+});
+
+test('reader supports synthetic scrolling when content overflows', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const big = Array.from({ length: 200 }, (_, i) => `line ${i} content`).join('\n');
+  await injectRaw(page, big + '\n');
+  await page.waitForTimeout(300);
+
+  const max = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(max).toBeGreaterThan(0);
+
+  // Drive scroll synthetically and verify the inner translates.
+  const moved = await page.evaluate(() => {
+    window.__mobuxView.test.readerScrollBy(-1e6);
+    const top = window.__mobuxView.test.readerScrollY();
+    window.__mobuxView.test.readerScrollBy(500);
+    return { top, mid: window.__mobuxView.test.readerScrollY() };
+  });
+  expect(moved.top).toBe(0);
+  expect(moved.mid).toBeGreaterThan(0);
+});
+
+test.skip('reader status bar stays filled after a tmux window switch', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.test.bufferLength()),
+    { timeout: 5000 },
+  ).toBeGreaterThan(1);
+
+  await expect.poll(
+    async () => await page.evaluate(() => ({
+      sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+      filled: window.__mobuxView.test.statusBarFilled(),
+    })),
+    { timeout: 8000 },
+  ).toMatchObject({ filled: true });
+
+  await page.evaluate(() => window.__mobuxView.test.switchWindow('next'));
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => window.__mobuxView.test.switchWindow('prev'));
+
+  await expect.poll(
+    async () => await page.evaluate(() => ({
+      sbH: window.__mobuxView.test.statusBarOffsetHeight(),
+      filled: window.__mobuxView.test.statusBarFilled(),
+    })),
+    { timeout: 8000 },
+  ).toMatchObject({ filled: true });
+});
+
+test('view preference persists per window', async ({ page }) => {
+  const session = SESSION;
+  const panes = await (await page.request.get(`${BASE}/api/sessions/${session}/panes`)).json();
+  const activeId = panes.find(p => p.active).id;
+
+  await page.goto(`${BASE}/s/${session}`);
+  await page.evaluate(() => { try { localStorage.clear(); } catch (_) {} });
+  await page.reload();
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // Flip to reader via the API
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const stored = await page.evaluate(({ session, id }) => ({
+    perWindow: localStorage.getItem(`mobux.view.${session}.${id}`),
+    default: localStorage.getItem('mobux.view.default'),
+  }), { session, id: activeId });
+  expect(stored.perWindow).toBe('reader');
+  expect(stored.default).toBe('reader');
+
+  // Reload — should land in reader for this window
+  await page.reload();
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await expect.poll(
+    async () => await page.evaluate(() => window.__mobuxView.current),
+    { timeout: 3000 }
+  ).toBe('reader');
+});
+
+// ── Synthetic viewport (reader) ─────────────────────────────────────
+// Direct coverage of the translate3d-based scroller in reader-view.js.
+// All tests reset state via swap('xterm') / swap('reader') so they're
+// independent and can run in any order.
+
+async function bootReader(page) {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+  // Make sure we start from a clean reader mount.
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(50);
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+}
+
+async function fillReader(page, n = 300, prefix = 'svline') {
+  await page.evaluate((args) => window.__mobuxView.test.injectLines(args.n, args.prefix), { n, prefix });
+  await page.waitForFunction(
+    () => window.__mobuxView.test.readerMaxScroll() > 0,
+    { timeout: 3000 },
+  );
+}
+
+function readTransformY(page) {
+  return page.evaluate(() => {
+    const el = document.querySelector('#reader .reader-inner');
+    if (!el) return null;
+    const t = el.style.transform || '';
+    const m = t.match(/translate3d\(\s*0(?:px)?\s*,\s*(-?[\d.]+)px/);
+    return m ? parseFloat(m[1]) : null;
+  });
+}
+
+test('synthetic viewport: translate3d transform reflects scrollY', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page);
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  expect(await readTransformY(page)).toBe(0);
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(250));
+  const y = await readTransformY(page);
+  const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(sy).toBeGreaterThan(0);
+  expect(y).toBeLessThan(0);
+  expect(Math.round(-y)).toBe(Math.round(sy));
+});
+
+test('synthetic viewport: clamps at 0', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page);
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(sy).toBe(0);
+});
+
+test('synthetic viewport: clamps at max with overflowing content', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page);
+
+  const { sy, max } = await page.evaluate(() => {
+    window.__mobuxView.test.readerScrollBy(9e9);
+    return {
+      sy: window.__mobuxView.test.readerScrollY(),
+      max: window.__mobuxView.test.readerMaxScroll(),
+    };
+  });
+  expect(max).toBeGreaterThan(0);
+  expect(sy).toBe(max);
+});
+
+test('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page, 200, 'sticky');
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(9e9));
+  const before = await page.evaluate(() => ({
+    sy: window.__mobuxView.test.readerScrollY(),
+    max: window.__mobuxView.test.readerMaxScroll(),
+  }));
+  expect(before.sy).toBe(before.max);
+
+  await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'sticky2'));
+  await page.waitForFunction((prev) => {
+    const m = window.__mobuxView.test.readerMaxScroll();
+    return m > prev;
+  }, before.max, { timeout: 3000 });
+
+  const after = await page.evaluate(() => ({
+    sy: window.__mobuxView.test.readerScrollY(),
+    max: window.__mobuxView.test.readerMaxScroll(),
+  }));
+  expect(after.max).toBeGreaterThan(before.max);
+  expect(after.sy).toBe(after.max);
+});
+
+test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page, 200, 'noscroll');
+
+  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  const before = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(before).toBe(0);
+
+  await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'tail'));
+  // Wait for the throttled render to flush (RENDER_THROTTLE_MS = 50ms).
+  await page.waitForTimeout(250);
+
+  const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
+  expect(sy).toBeGreaterThanOrEqual(0);
+  expect(sy).toBeLessThanOrEqual(5);
+});
+
+test('synthetic viewport: resize changes maxScroll', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 800 });
+  await bootReader(page);
+  await fillReader(page, 300, 'resz');
+
+  const tall = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+
+  await page.setViewportSize({ width: 400, height: 400 });
+  await page.waitForFunction(
+    (prev) => window.__mobuxView.test.readerMaxScroll() > prev,
+    tall,
+    { timeout: 3000 },
+  );
+  const shortMax = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(shortMax).toBeGreaterThan(tall);
+
+  await page.setViewportSize({ width: 400, height: 1000 });
+  await page.waitForFunction(
+    (prev) => window.__mobuxView.test.readerMaxScroll() < prev,
+    shortMax,
+    { timeout: 3000 },
+  );
+  const tallerMax = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(tallerMax).toBeLessThan(shortMax);
+});
+
+test('synthetic viewport: mount/unmount has no duplicate inner', async ({ page }) => {
+  await bootReader(page);
+  await fillReader(page, 150, 'mu');
+
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(() => window.__mobuxView.swap('xterm'));
+    await page.waitForTimeout(80);
+    await page.evaluate(() => window.__mobuxView.swap('reader'));
+    await page.waitForTimeout(150);
+  }
+
+  const innerCount = await page.locator('#reader .reader-inner').count();
+  expect(innerCount).toBe(1);
+
+  // After remount, scrollY must be valid (>= 0 and <= max).
+  const { sy, max } = await page.evaluate(() => ({
+    sy: window.__mobuxView.test.readerScrollY(),
+    max: window.__mobuxView.test.readerMaxScroll(),
+  }));
+  expect(sy).toBeGreaterThanOrEqual(0);
+  expect(sy).toBeLessThanOrEqual(max);
+});
+
+test('synthetic viewport: history smoke renders blocks and overflows', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.__mobuxView.swap('xterm'));
+  await page.waitForTimeout(50);
+
+  // Inject BEFORE swapping to reader so the first render sees history.
+  await page.evaluate(() => window.__mobuxView.test.injectLines(200, 'hist'));
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+
+  await page.waitForFunction(
+    () => document.querySelectorAll('#reader .rb-line').length >= 100
+      && window.__mobuxView.test.readerMaxScroll() > 0,
+    { timeout: 5000 },
+  );
+
+  const max = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
+  expect(max).toBeGreaterThan(0);
+  // Text lines fuse into rb-text blocks; count individual rendered
+  // lines (.rb-line) rather than block containers.
+  const lineCount = await page.locator('#reader .rb-line').count();
+  expect(lineCount).toBeGreaterThanOrEqual(100);
+});
+
+test('synthetic viewport: bubble fusion under translated inner', async ({ page }) => {
+  await bootReader(page);
+
+  const BLUE_BG = '\x1b[44m';
+  const RESET2 = '\x1b[0m';
+  await page.evaluate((args) => window.__mobuxView.test.inject(args.s), {
+    s: `\n${BLUE_BG}sv bubble one${RESET2}\n` +
+       `${BLUE_BG}sv bubble two${RESET2}\n` +
+       `${BLUE_BG}sv bubble three${RESET2}\n`,
+  });
+
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('#reader .rb-bubble'))
+      .some((b) => b.querySelectorAll('.rb-bubble-line').length >= 3),
+    { timeout: 3000 },
+  );
+
+  // Confirm the inner is the translated container (so fusion happens
+  // inside the synthetic viewport, not some bare DOM).
+  const insideInner = await page.evaluate(() => {
+    const inner = document.querySelector('#reader .reader-inner');
+    const b = document.querySelector('#reader .rb-bubble');
+    return !!(inner && b && inner.contains(b));
+  });
+  expect(insideInner).toBe(true);
 });
 
 test('input bar sits above on-screen keyboard via visualViewport', async ({ page }) => {
@@ -519,7 +1132,7 @@ test('input bar does not overlap #terminal when shown', async ({ page }) => {
   expect(Math.abs(withKb.tBottom - withKb.bTop)).toBeLessThanOrEqual(1);
 });
 
-test('content area shrinks under on-screen keyboard so terminal stays visible', async ({ page }) => {
+test('content area shrinks under on-screen keyboard so reader text stays visible', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -580,12 +1193,75 @@ test('content area shrinks under on-screen keyboard so terminal stays visible', 
   ).toBe('');
 });
 
+test('reader re-pins to bottom synchronously when keyboard appears', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
 
-test('theme picker swaps Terminal.colors[2] live', async ({ page }) => {
-  // Switching themes (via the same JS path the settings picker uses)
-  // must update the live libterm palette (Terminal.colors[2]). Index 2
-  // is "green" — every bundle picks a different shade, so any pair of
-  // distinct themes must produce a different value at index 2.
+  await page.setViewportSize({ width: 380, height: 800 });
+  await page.evaluate(() => window.__mobuxView.test.injectLines(50, 'line'));
+  await page.waitForTimeout(200);
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__mobuxView.test.readerStickToBottom());
+  await page.waitForTimeout(100);
+
+  await page.evaluate(() => {
+    const bar = document.getElementById('inputBar');
+    bar.classList.remove('hidden');
+    const vv = window.visualViewport;
+    Object.defineProperty(vv, 'height', {
+      configurable: true,
+      get: () => (typeof window.__stubVVHeight === 'number' ? window.__stubVVHeight : window.innerHeight),
+    });
+    Object.defineProperty(vv, 'offsetTop', {
+      configurable: true,
+      get: () => (typeof window.__stubVVOffset === 'number' ? window.__stubVVOffset : 0),
+    });
+  });
+
+  const before = await page.evaluate(() => ({
+    scrollY: window.__mobuxView.test.readerScrollY(),
+    maxScroll: window.__mobuxView.test.readerMaxScroll(),
+    readerH: document.getElementById('reader').clientHeight,
+  }));
+  expect(before.scrollY).toBe(before.maxScroll);
+  expect(before.scrollY).toBeGreaterThan(0);
+
+  // Dispatch keyboard appearance and read state in the SAME task.
+  // Without a synchronous re-pin from input-bar, scrollY stays at the
+  // pre-keyboard maxScroll while readerH has shrunk — a visible gap
+  // appears between the content bottom and the lifted input bar.
+  const sync = await page.evaluate(() => {
+    window.__stubVVHeight = window.innerHeight - 300;
+    window.visualViewport.dispatchEvent(new Event('resize'));
+    return {
+      scrollY: window.__mobuxView.test.readerScrollY(),
+      maxScroll: window.__mobuxView.test.readerMaxScroll(),
+      readerH: document.getElementById('reader').clientHeight,
+    };
+  });
+
+  expect(sync.readerH).toBeLessThan(before.readerH - 250);
+  // Reader must be re-pinned to the new bottom in the same task — not
+  // a frame later. maxScroll grew because hostH shrank.
+  expect(sync.maxScroll).toBeGreaterThan(before.maxScroll);
+  expect(sync.scrollY).toBe(sync.maxScroll);
+});
+
+test('theme picker swaps Terminal.colors[2] and #reader --ansi-2 live', async ({ page }) => {
+  // Verify that switching themes (via the same JS path the settings
+  // picker uses) updates BOTH the terminal palette (libterm's class-
+  // level Terminal.colors[2]) and the reader-mode CSS variable
+  // (--ansi-2 on #reader). Index 2 is "green" — every bundle picks a
+  // different shade, so any pair of distinct themes must produce a
+  // different value at index 2.
+  //
+  // Boot the terminal page (so #reader exists and Aceterm is loaded),
+  // then drive applyTheme directly — same code path the settings page
+  // calls on <select> change. No page reload between swaps to prove
+  // the live-swap path actually works.
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
@@ -593,27 +1269,40 @@ test('theme picker swaps Terminal.colors[2] live', async ({ page }) => {
   // Default boot: tomorrow-night-soft. Green (index 2) = #b5bd68.
   const before = await page.evaluate(() => {
     const T = window.__Aceterm && window.__Aceterm.Terminal;
-    return T && T.colors ? T.colors[2] : null;
+    return {
+      term: T && T.colors ? T.colors[2] : null,
+      reader: getComputedStyle(document.getElementById('reader'))
+        .getPropertyValue('--ansi-2').trim(),
+    };
   });
-  expect(before).toBeTruthy();
-  expect(before.toLowerCase()).toBe('#b5bd68');
+  expect(before.term).toBeTruthy();
+  expect(before.term.toLowerCase()).toBe('#b5bd68');
+  expect(before.reader.toLowerCase()).toBe('#b5bd68');
 
-  // Swap to gruvbox-dark-soft (green index 2 = #98971a).
+  // Swap to gruvbox-dark-soft (green index 2 = #98971a). Drive the
+  // exact same module the settings picker uses.
   const after = await page.evaluate(async () => {
     const mod = await import('/static/themes.js');
     mod.setStoredThemeId('gruvbox-dark-soft');
     mod.applyTheme('gruvbox-dark-soft');
     window.dispatchEvent(new CustomEvent('mobux:theme', { detail: 'gruvbox-dark-soft' }));
     const T = window.__Aceterm && window.__Aceterm.Terminal;
-    return T && T.colors ? T.colors[2] : null;
+    return {
+      term: T && T.colors ? T.colors[2] : null,
+      reader: getComputedStyle(document.getElementById('reader'))
+        .getPropertyValue('--ansi-2').trim(),
+    };
   });
-  expect(after.toLowerCase()).toBe('#98971a');
+  expect(after.term.toLowerCase()).toBe('#98971a');
+  expect(after.reader.toLowerCase()).toBe('#98971a');
 
   // The terminal session itself must keep working through the swap —
   // the WebSocket is independent of the colour palette.
   expect(await page.evaluate(() => window.__mobuxView.test.wsReady())).toBe(true);
 
-  // Restore the default for downstream tests.
+  // Restore the default for downstream tests in this file (the suite
+  // re-uses the page across tests; leaving gruvbox would break the
+  // earlier muted-base16 assertion if tests were re-ordered).
   await page.evaluate(async () => {
     const mod = await import('/static/themes.js');
     mod.setStoredThemeId('tomorrow-night-soft');
