@@ -549,27 +549,6 @@ test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
 // fires. Skips when the test server can't reach `tmux send-keys`
 // (podman target leaves TMUX_CMD unset for those tests).
 test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ page }) => {
-  // Generous outer timeout so the test has room for setup + the
-  // streaming diagnostic poll.
-  test.setTimeout(60000);
-
-  // Stream every browser console message into the test runner's
-  // stdout so the in-page diagnostic ticks (logged from a
-  // setInterval inside the page) are captured by playwright's
-  // reporter even if the page later closes. Critically: this is
-  // installed BEFORE goto() so we don't miss early messages.
-  const consoleLines = [];
-  page.on('console', (msg) => {
-    const t = msg.text();
-    consoleLines.push(t);
-    // eslint-disable-next-line no-console
-    console.log('[browser]', t);
-  });
-  page.on('pageerror', (err) => {
-    // eslint-disable-next-line no-console
-    console.log('[pageerror]', err.message);
-  });
-
   // Dedicated session so the existing pre-seeded `SESSION` keeps its
   // PS1 untouched and other tests' assertions don't race with our
   // injected output.
@@ -582,12 +561,6 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
   tmux(`send-keys -t ${PT_SESSION} "clear" Enter`);
   execSync('sleep 0.3');
 
-  // Bytes the printf below emits, in hex. Used by the streaming
-  // diagnostic to disambiguate "bytes never arrived" from "bytes
-  // arrived but the OSC dispatcher did not fire".
-  const WRAPPED_HEX_OSC133A = '1b5d3133333b41'; // ESC ] 1 3 3 ; A
-  const CANARY = 'OSC133CANARY';
-
   try {
     await page.goto(`${BASE}/s/${PT_SESSION}`);
     await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -595,14 +568,13 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
       timeout: 5000,
     });
 
-    // Install the WS-rx tap as early as possible after the WS opens
-    // so we don't miss anything.
-    await page.evaluate(() => window.__mobuxView.test.startWsRxTap());
-
-    // First: assert mobux's handle_ws actually ran `set-option -g
-    // allow-passthrough on` on this server. The bash subprocess that
+    // Poll until mobux's handle_ws has run `set-option -g
+    // allow-passthrough on` on the server. The bash subprocess that
     // spawns the attach is async so the option may not be on the
-    // instant the WS upgrade completes — poll until we observe it.
+    // instant the WS upgrade completes — polling here doubles as
+    // (a) verification that mobux's role of setting the option ran,
+    // and (b) a deterministic gate against the printf below firing
+    // its bytes through tmux while passthrough is still off.
     let allowPassthroughOn = false;
     for (let i = 0; i < 50; i++) {
       const v = execSync(`${TMUX_CMD} show-option -gv allow-passthrough 2>/dev/null || true`)
@@ -612,128 +584,30 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
     }
     expect(allowPassthroughOn).toBe(true);
 
-    // Sanity-check the precondition: oscDetected must be false at the
-    // start of the test (no OSC 133 has flowed yet on this fresh page).
+    // Precondition: oscDetected is false on a fresh page (no OSC 133
+    // has flowed yet).
     const before = await page.evaluate(() => window.__mobuxView.test.oscDetected());
     expect(before).toBe(false);
 
-    // Drive the bash inside the pane to emit the wrapped sequence
-    // followed by a printable canary. Format string layers:
+    // Drive the bash inside the pane to emit the wrapped sequence.
+    // Format string layers:
     //   JS literal -> sh -c double-quote (folds `\\` -> `\`)
     //   -> tmux send-keys arg -> bash readline buffer
     //   -> bash printf format string (single-quoted preserves `\`)
     //   -> printf escape interpretation (`\e`->ESC, `\a`->BEL,
     //      `\\`->`\`, unknown `\X` preserved as `\X`).
     // Net bytes printf emits:
-    //   ESC P t m u x ; ESC ESC ] 1 3 3 ; A BEL ESC `\` OSC133CANARY LF
-    // i.e. the v2 snippet's PS1 wrap exactly, plus a trailing canary
-    // string that — because it is OUTSIDE the DCS envelope — must
-    // appear verbatim in the pane's stdout regardless of whether
-    // tmux honoured allow-passthrough.
-    const wrapped =
-      `printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\${CANARY}\\n'`;
+    //   ESC P t m u x ; ESC ESC ] 1 3 3 ; A BEL ESC `\` LF
+    // i.e. the v2 snippet's PS1 wrap exactly. tmux strips the DCS
+    // envelope and forwards the inner OSC 133;A to mobux's pty,
+    // which feeds it to libterm's parser, which sets oscDetected.
+    const wrapped = "printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\\\n'";
     tmux(`send-keys -t ${PT_SESSION} "${wrapped}" Enter`);
 
-    // Streaming diagnostic poll. Run a setInterval inside the page
-    // that every 250ms logs `[osc-tick] N osc=<bool> rx=<len> tail=<hex>
-    // canary=<bool>` to the browser console. Playwright's
-    // page.on('console') handler above forwards every line to the
-    // runner's stdout, so we get a continuous trace right up to the
-    // moment the wait either succeeds or times out — useful even if
-    // the page is later closed during teardown.
-    await page.evaluate(({ canary, oscHex }) => {
-      window.__oscTick = 0;
-      window.__oscDeadlineHandle = setInterval(() => {
-        const t = window.__mobuxView.test;
-        const rx = t.wsRxHex();
-        const buf = t.bufferDump(5);
-        const canaryInBuf = buf.some((l) => l.includes(canary)) ? 'Y' : 'N';
-        const oscInRx = rx.includes(oscHex) ? 'Y' : 'N';
-        const tail = rx.slice(-120);
-        // eslint-disable-next-line no-console
-        console.log(
-          `[osc-tick] n=${++window.__oscTick} ` +
-          `osc=${t.oscDetected() ? 'Y' : 'N'} ` +
-          `rxLen=${rx.length / 2} ` +
-          `oscBytesInRx=${oscInRx} ` +
-          `canaryInBuf=${canaryInBuf} ` +
-          `tail=...${tail}`,
-        );
-      }, 250);
-    }, { canary: CANARY, oscHex: WRAPPED_HEX_OSC133A });
-
-    // Wait up to 6 seconds for oscDetected to flip. If it doesn't,
-    // the streamed ticks above already tell us why.
-    let timedOut = false;
-    try {
-      await page.waitForFunction(
-        () => window.__mobuxView.test.oscDetected() === true,
-        { timeout: 6000 },
-      );
-    } catch (_) {
-      timedOut = true;
-    }
-
-    // Stop the streaming poll. Wrap in try/catch so a closed page
-    // doesn't mask the real assertion below.
-    try {
-      await page.evaluate(() => clearInterval(window.__oscDeadlineHandle));
-    } catch (_) { /* ignore */ }
-
-    if (timedOut) {
-      // One last sync snapshot from the host side — even if the
-      // browser is dying, tmux + mobux logs are still reachable.
-      const tmuxVersion = (() => {
-        try { return execSync(`${TMUX_CMD} -V`).toString().trim(); }
-        catch (_) { return '?'; }
-      })();
-      const tmuxAllowPassthroughNow = (() => {
-        try {
-          return execSync(
-            `${TMUX_CMD} show-option -gv allow-passthrough 2>/dev/null || true`,
-          ).toString().trim();
-        } catch (_) { return '?'; }
-      })();
-      const tmuxPaneText = (() => {
-        try { return execSync(`${TMUX_CMD} capture-pane -p -t ${PT_SESSION}`).toString(); }
-        catch (e) { return `(capture-pane failed: ${e.message})`; }
-      })();
-      const mobuxTail = (() => {
-        try {
-          return execSync('tail -200 /tmp/mobux-smoke/mobux.log 2>&1').toString();
-        } catch (e) { return `(tail failed: ${e.message})`; }
-      })();
-      const tmuxSessions = (() => {
-        try {
-          return execSync(
-            `${TMUX_CMD} list-sessions -F '#{session_name} attached=#{?session_attached,Y,N} created=#{session_created} windows=#{session_windows}' 2>&1`,
-          ).toString();
-        } catch (e) { return `(list-sessions failed: ${e.message})`; }
-      })();
-      const tmuxClients = (() => {
-        try {
-          return execSync(
-            `${TMUX_CMD} list-clients -F '#{client_name} session=#{client_session} tty=#{client_tty}' 2>&1`,
-          ).toString();
-        } catch (e) { return `(list-clients failed: ${e.message})`; }
-      })();
-      // eslint-disable-next-line no-console
-      console.log(
-        '[osc133-pt host-side diag]\n' +
-        `  ${tmuxVersion}\n` +
-        `  tmux allow-passthrough now: ${tmuxAllowPassthroughNow}\n` +
-        `  tmux list-sessions:\n${tmuxSessions.split('\n').map((l) => '    ' + l).join('\n')}\n` +
-        `  tmux list-clients:\n${tmuxClients.split('\n').map((l) => '    ' + l).join('\n')}\n` +
-        `  tmux capture-pane (-t ${PT_SESSION}):\n${tmuxPaneText.split('\n').map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
-        `  mobux.log (tail -200):\n${mobuxTail.split('\n').map((l) => '    ' + l).join('\n')}`,
-      );
-      throw new Error(
-        'oscDetected stayed false after wrapped OSC 133 send. ' +
-        'See [osc-tick] lines above for per-poll state and ' +
-        '[osc133-pt host-side diag] for tmux/mobux state.',
-      );
-    }
-
+    await page.waitForFunction(
+      () => window.__mobuxView.test.oscDetected() === true,
+      { timeout: 8000 },
+    );
     const after = await page.evaluate(() => window.__mobuxView.test.oscDetected());
     expect(after).toBe(true);
 
