@@ -226,6 +226,59 @@ test('URLs in terminal output are tappable', async ({ page }) => {
   expect(detected).toContain('https://example.com');
 });
 
+test('tapping a URL opens via anchor click (TWA Custom Tabs path), not window.open', async ({ page }) => {
+  // In a TWA shell, `window.open(url, '_blank')` keeps navigation
+  // inside the underlying Chrome (visually still "in mobux"). A
+  // synthesised <a target="_blank" rel="noopener noreferrer"> click
+  // is the documented escape hatch that triggers Chrome Custom Tabs
+  // for out-of-scope URLs. Verify our handler uses the anchor path.
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxOpenExternal === 'function', { timeout: 5000 });
+
+  const result = await page.evaluate(async () => {
+    const url = 'https://example.com/twa-link-test';
+
+    // Stub out the actual navigation: capture anchor clicks (the
+    // browser would follow `target="_blank"` and pop a tab/Custom
+    // Tab; we just need to assert the handler's mechanism).
+    let anchorTarget = null;
+    let anchorRel = null;
+    let anchorHref = null;
+    let windowOpenCalled = false;
+
+    const origWindowOpen = window.open;
+    window.open = (...args) => { windowOpenCalled = true; return null; };
+
+    const onClick = (e) => {
+      const a = e.target.closest('a');
+      if (!a) return;
+      anchorTarget = a.target;
+      anchorRel = a.rel;
+      anchorHref = a.href;
+      e.preventDefault();
+    };
+    document.addEventListener('click', onClick, true);
+
+    try {
+      // Call the helper directly — same path the tap handler takes
+      // once a URL is matched. Exposed on window for tests.
+      window.__mobuxOpenExternal(url);
+    } finally {
+      document.removeEventListener('click', onClick, true);
+      window.open = origWindowOpen;
+    }
+
+    return { anchorTarget, anchorRel, anchorHref, windowOpenCalled };
+  });
+
+  expect(result.anchorHref).toBe('https://example.com/twa-link-test');
+  expect(result.anchorTarget).toBe('_blank');
+  expect(result.anchorRel).toContain('noopener');
+  expect(result.anchorRel).toContain('noreferrer');
+  expect(result.windowOpenCalled).toBe(false);
+});
+
 test('reader view renders buffer text', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 
