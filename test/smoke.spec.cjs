@@ -700,23 +700,32 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
       })();
       const mobuxTail = (() => {
         try {
-          const fs = require('fs');
-          const p = '/tmp/mobux-smoke/mobux.log';
-          if (!fs.existsSync(p)) return '(no log)';
-          // Filter to [ws] trace lines + errors so the dump fits in
-          // CI logs but covers every session lifecycle mobux emitted.
-          const all = fs.readFileSync(p, 'utf8').split('\n');
-          const filtered = all.filter((l) => /\[ws\]|error|ERROR/i.test(l));
-          return filtered.slice(-80).join('\n');
-        } catch (e) { return `(read failed: ${e.message})`; }
+          return execSync('tail -200 /tmp/mobux-smoke/mobux.log 2>&1').toString();
+        } catch (e) { return `(tail failed: ${e.message})`; }
+      })();
+      const tmuxSessions = (() => {
+        try {
+          return execSync(
+            `${TMUX_CMD} list-sessions -F '#{session_name} attached=#{?session_attached,Y,N} created=#{session_created} windows=#{session_windows}' 2>&1`,
+          ).toString();
+        } catch (e) { return `(list-sessions failed: ${e.message})`; }
+      })();
+      const tmuxClients = (() => {
+        try {
+          return execSync(
+            `${TMUX_CMD} list-clients -F '#{client_name} session=#{client_session} tty=#{client_tty}' 2>&1`,
+          ).toString();
+        } catch (e) { return `(list-clients failed: ${e.message})`; }
       })();
       // eslint-disable-next-line no-console
       console.log(
         '[osc133-pt host-side diag]\n' +
         `  ${tmuxVersion}\n` +
         `  tmux allow-passthrough now: ${tmuxAllowPassthroughNow}\n` +
-        `  tmux capture-pane:\n${tmuxPaneText.split('\n').map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
-        `  mobux.log tail:\n${mobuxTail.split('\n').map((l) => '    ' + l).join('\n')}`,
+        `  tmux list-sessions:\n${tmuxSessions.split('\n').map((l) => '    ' + l).join('\n')}\n` +
+        `  tmux list-clients:\n${tmuxClients.split('\n').map((l) => '    ' + l).join('\n')}\n` +
+        `  tmux capture-pane (-t ${PT_SESSION}):\n${tmuxPaneText.split('\n').map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
+        `  mobux.log (tail -200):\n${mobuxTail.split('\n').map((l) => '    ' + l).join('\n')}`,
       );
       throw new Error(
         'oscDetected stayed false after wrapped OSC 133 send. ' +
