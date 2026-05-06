@@ -35,9 +35,9 @@ export function createInputBar(term, send) {
 
   // ── Show/hide bar ─────────────────────────────────────────────────
   // The bar is now a flex item (see style.css), so `.hidden` toggles
-  // `display: none`. Showing/hiding the bar resizes #terminal; fire a
-  // synchronous resize so terminal-core recomputes its bounds in the
-  // same task.
+  // `display: none`. Showing/hiding the bar resizes the flex children
+  // (#terminal / #reader); fire a synchronous resize so terminal-core
+  // and reader-view recompute their bounds in the same task.
   function show() {
     bar.classList.remove('hidden');
     resizeTerminal();
@@ -55,9 +55,9 @@ export function createInputBar(term, send) {
   }
 
   function resizeTerminal() {
-    // Notify synchronously so terminal-core's resize reads the
-    // freshly-shrunk host height in the same task — no visible jump
-    // on the next frame.
+    // Notify synchronously so layout-dependent consumers (terminal-core
+    // resize, reader-view re-pin) read the freshly-shrunk host height
+    // in the same task — no visible jump on the next frame.
     window.dispatchEvent(new Event('resize'));
   }
 
@@ -125,8 +125,9 @@ export function createInputBar(term, send) {
   // bar is now a flex item in `.term-body` (the body element), so we
   // override body's explicit `height: 100vh` with the visual viewport
   // height and the bar moves with the body bottom automatically.
-  // #terminal shrinks to the remaining space above the bar, so the
-  // terminal stays visible above the keyboard with no overlap.
+  // Flex children (#terminal / #reader) shrink to the remaining space
+  // above the bar, so xterm and reader content stay visible above the
+  // keyboard with no overlap.
   if (window.visualViewport) {
     const vv = window.visualViewport;
     let lastHeight = vv.height;
@@ -146,9 +147,13 @@ export function createInputBar(term, send) {
       document.body.style.height = offset > 0 ? `${vv.height}px` : '';
       if (offset !== lastOffset) {
         lastOffset = offset;
-        // Notify the terminal synchronously so it resizes in the same
-        // task as the body shrink — without this, ResizeObserver fires
-        // a frame later and the user sees a visible jump.
+        // Notify reader/terminal synchronously so the reader re-pins
+        // to the bottom in the same task as the body shrink — without
+        // this, ResizeObserver fires a frame later and the user sees
+        // a visible jump (content stuck at top with a gap above the
+        // lifted bar). Reader's _handleResize reads host.clientHeight,
+        // which forces a layout flush, so the synchronous dispatch
+        // sees the new shrunk size.
         window.dispatchEvent(new Event('resize'));
       }
       return offset;
