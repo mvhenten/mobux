@@ -382,6 +382,7 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
+    oscDetected: () => !!core.oscDetected,
     readerScrollY: () => reader.scrollY,
     readerMaxScroll: () => reader.maxScroll,
     readerInnerHeight: () => reader.innerHeight,
