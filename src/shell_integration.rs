@@ -8,7 +8,18 @@ use serde::{Deserialize, Serialize};
 
 pub const FENCE_OPEN: &str = "# >>> mobux OSC 133 (managed) >>>";
 pub const FENCE_CLOSE: &str = "# <<< mobux OSC 133 (managed) <<<";
-pub const CURRENT_VERSION: u32 = 1;
+// v2: wrap OSC 133 emissions in tmux's DCS passthrough envelope when
+// `$TMUX` is set, otherwise emit them bare. tmux 3.4 (and earlier)
+// drops unknown OSC sequences before forwarding them to the outer
+// terminal, so the v1 bare-emission snippets never reached mobux's
+// libterm parser when running under tmux. v2 is forward-compatible
+// with tmux 3.5+ (which forwards OSC 133 natively) — the wrapped form
+// also works there because tmux unwraps the DCS envelope and emits
+// the inner sequence verbatim. Mobux additionally sets
+// `allow-passthrough on` on the server when attaching (see
+// handle_ws in main.rs); without that, tmux would silently discard
+// the wrapped sequence.
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,20 +47,47 @@ impl Shell {
     }
 }
 
-pub const BASH_SNIPPET: &str = "PS0='\\e]133;C\\a'
-PS1='\\[\\e]133;D;$?\\a\\e]133;A\\a\\]'\"$PS1\"'\\[\\e]133;B\\a\\]'";
+// Bash snippet. When running inside tmux (`$TMUX` is set), OSC 133
+// sequences are wrapped in tmux's DCS passthrough envelope
+// (`\ePtmux;\e<original>\e\\`, with embedded `\e` doubled), so tmux
+// forwards the inner sequence to the outer terminal instead of
+// dropping it. Outside tmux, the bare form is emitted.
+pub const BASH_SNIPPET: &str = "if [ -n \"$TMUX\" ]; then
+    PS0='\\ePtmux;\\e\\e]133;C\\a\\e\\\\'
+    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e]133;A\\a\\e\\\\\\]'\"$PS1\"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'
+else
+    PS0='\\e]133;C\\a'
+    PS1='\\[\\e]133;D;$?\\a\\e]133;A\\a\\]'\"$PS1\"'\\[\\e]133;B\\a\\]'
+fi";
 
-pub const ZSH_SNIPPET: &str = "preexec() { print -Pn '\\e]133;C\\a' }
-precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }";
+pub const ZSH_SNIPPET: &str = "if [ -n \"$TMUX\" ]; then
+    preexec() { print -Pn '\\ePtmux;\\e\\e]133;C\\a\\e\\\\' }
+    precmd()  { print -Pn '\\ePtmux;\\e\\e]133;D;'$?'\\a\\e]133;A\\a\\e\\\\' }
+else
+    preexec() { print -Pn '\\e]133;C\\a' }
+    precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }
+fi";
 
-pub const FISH_SNIPPET: &str = "function __mobux_osc133_preexec --on-event fish_preexec
-    printf '\\e]133;C\\a'
-end
-function __mobux_osc133_postexec --on-event fish_postexec
-    printf '\\e]133;D;%s\\a' $status
-end
-function __mobux_osc133_prompt --on-event fish_prompt
-    printf '\\e]133;A\\a'
+pub const FISH_SNIPPET: &str = "if test -n \"$TMUX\"
+    function __mobux_osc133_preexec --on-event fish_preexec
+        printf '\\ePtmux;\\e\\e]133;C\\a\\e\\\\'
+    end
+    function __mobux_osc133_postexec --on-event fish_postexec
+        printf '\\ePtmux;\\e\\e]133;D;%s\\a\\e\\\\' $status
+    end
+    function __mobux_osc133_prompt --on-event fish_prompt
+        printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\'
+    end
+else
+    function __mobux_osc133_preexec --on-event fish_preexec
+        printf '\\e]133;C\\a'
+    end
+    function __mobux_osc133_postexec --on-event fish_postexec
+        printf '\\e]133;D;%s\\a' $status
+    end
+    function __mobux_osc133_prompt --on-event fish_prompt
+        printf '\\e]133;A\\a'
+    end
 end";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,7 +381,7 @@ mod tests {
         assert!(c.contains("before\n"));
         assert!(c.contains("after\n"));
         assert!(!c.contains("old-snippet"));
-        assert!(c.contains("# version: 1"));
+        assert!(c.contains(&format!("# version: {CURRENT_VERSION}")));
         assert!(c.contains("PS0="));
         assert_eq!(c.matches(FENCE_OPEN).count(), 1);
     }
@@ -371,6 +409,63 @@ mod tests {
         assert_eq!(c, "nothing here\n");
     }
 
+    /// v2 regression: every snippet must branch on `$TMUX` and emit the
+    /// DCS-passthrough wrap (`\ePtmux;\e<seq>\e\\`) for the in-tmux
+    /// branch. tmux 3.4's default `allow-passthrough off` drops bare
+    /// OSC 133 entirely, so without the wrap the reader's heuristics
+    /// hint never auto-dismisses.
+    #[test]
+    fn snippets_wrap_osc133_when_inside_tmux() {
+        // bash + zsh use POSIX `[ -n "$TMUX" ]`; fish uses `test -n "$TMUX"`.
+        assert!(BASH_SNIPPET.contains("[ -n \"$TMUX\" ]"));
+        assert!(ZSH_SNIPPET.contains("[ -n \"$TMUX\" ]"));
+        assert!(FISH_SNIPPET.contains("test -n \"$TMUX\""));
+
+        // The DCS envelope opens `\ePtmux;` and closes with `\e\\` (ST).
+        // Inside, the original ESC must be doubled to `\e\e` so tmux
+        // emits one ESC byte to the outer terminal.
+        for snippet in [BASH_SNIPPET, ZSH_SNIPPET, FISH_SNIPPET] {
+            assert!(
+                snippet.contains("\\ePtmux;\\e\\e]133;"),
+                "missing tmux DCS-passthrough wrap in snippet:\n{snippet}"
+            );
+            assert!(
+                snippet.contains("\\a\\e\\\\"),
+                "missing DCS terminator (\\e\\\\) in snippet:\n{snippet}"
+            );
+        }
+
+        // The bare-emission branch must still exist for the no-tmux case.
+        for snippet in [BASH_SNIPPET, ZSH_SNIPPET, FISH_SNIPPET] {
+            assert!(
+                snippet.contains("'\\e]133;"),
+                "missing bare OSC 133 (no-tmux) branch in snippet:\n{snippet}"
+            );
+        }
+    }
+
+    /// CURRENT_VERSION must bump to 2 when the snippets switch to the
+    /// tmux-wrapping form, otherwise existing v1 installs would be
+    /// reported as "installed" and never re-installed.
+    #[test]
+    fn current_version_is_v2_for_tmux_wrap_snippets() {
+        assert_eq!(CURRENT_VERSION, 2);
+    }
+
+    #[test]
+    fn v1_install_is_reported_as_outdated() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tmp_home();
+        let rc = home.path().join(".bashrc");
+        let v1 = format!(
+            "{}\n# version: 1\n# old v1 snippet\n{}\n",
+            FENCE_OPEN, FENCE_CLOSE
+        );
+        fs::write(&rc, &v1).unwrap();
+        let st = shell_state(home.path(), Shell::Bash);
+        assert!(matches!(st, ShellState::Outdated { version: 1 }), "got {st:?}");
+    }
+
     #[test]
     fn status_reports_states() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -385,7 +480,7 @@ mod tests {
         let bash = shell_state(home.path(), Shell::Bash);
         let zsh = shell_state(home.path(), Shell::Zsh);
         let fish = shell_state(home.path(), Shell::Fish);
-        assert!(matches!(bash, ShellState::Installed { version: 1 }));
+        assert!(matches!(bash, ShellState::Installed { version: v } if v == CURRENT_VERSION));
         assert!(matches!(zsh, ShellState::NotInstalled));
         assert!(matches!(fish, ShellState::NotPresent));
     }

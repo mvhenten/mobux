@@ -536,6 +536,77 @@ test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
   expect(hintHidden).toBe(true);
 });
 
+// End-to-end regression for tmux 3.4's `allow-passthrough off` default,
+// which silently drops bare OSC 133 sequences before they reach the
+// outer terminal. Drives a real tmux pane via send-keys, has bash
+// `printf` an OSC 133 ; A marker wrapped in tmux's DCS passthrough
+// envelope (\ePtmux;\e<seq>\e\\), and verifies the marker actually
+// arrives at libterm — proving:
+//   1. mobux's handle_ws sets `allow-passthrough on` on the server, and
+//   2. the wrap form chosen by the v2 shell snippet survives tmux's
+//      output filter and is parsed by libterm's OSC dispatcher.
+// If either layer regresses, oscDetected stays false and the assertion
+// fires. Skips when the test server can't reach `tmux send-keys`
+// (podman target leaves TMUX_CMD unset for those tests).
+test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ page }) => {
+  // Dedicated session so the existing pre-seeded `SESSION` keeps its
+  // PS1 untouched and other tests' assertions don't race with our
+  // injected output.
+  const PT_SESSION = `${SESSION}-osc133-pt`;
+  try { tmux(`kill-session -t ${PT_SESSION}`); } catch (_) {}
+  tmux(`new-session -d -s ${PT_SESSION} ${SHELL_ENV} "bash --norc --noprofile"`);
+  // Quiet PS1 — anything emitting OSC 133 from the prompt itself
+  // would muddy "did the parser see this exact byte sequence?"
+  tmux(`send-keys -t ${PT_SESSION} "PS1=':: '" Enter`);
+  tmux(`send-keys -t ${PT_SESSION} "clear" Enter`);
+  execSync('sleep 0.3');
+
+  try {
+    await page.goto(`${BASE}/s/${PT_SESSION}`);
+    await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+    // Wait for the WS to be live and (critically) for handle_ws to have
+    // sent `set-option -g allow-passthrough on` to the tmux server.
+    await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, {
+      timeout: 5000,
+    });
+    await page.waitForTimeout(500);
+
+    // Sanity-check the precondition before the assertion: oscDetected
+    // must be false at the start of the test (no OSC 133 has flowed
+    // yet on this fresh session).
+    const before = await page.evaluate(() => window.__mobuxView.test.oscDetected());
+    expect(before).toBe(false);
+
+    // Bash `printf` interprets `\e`/`\a`/`\\` exactly like the v2
+    // bash snippet's PS1 wrap. send-keys' literal string is a single
+    // shell argument, so we double-quote it and escape `$` to keep
+    // bash from glob-expanding `;A` etc.
+    const wrapped = "printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\hello\\n'";
+    tmux(`send-keys -t ${PT_SESSION} "${wrapped}" Enter`);
+
+    // Poll until the OSC marker is observed or the deadline fires.
+    // `oscDetected` flips inside libterm's OSC dispatch so this is
+    // the smallest end-to-end signal that the wrap survived tmux.
+    await page.waitForFunction(() => window.__mobuxView.test.oscDetected() === true, {
+      timeout: 5000,
+    });
+
+    const after = await page.evaluate(() => window.__mobuxView.test.oscDetected());
+    expect(after).toBe(true);
+
+    // And the reader hint must hide as a consequence.
+    await page.evaluate(() => window.__mobuxView.swap('reader'));
+    await page.waitForTimeout(200);
+    const hintHidden = await page.evaluate(() => {
+      const el = document.querySelector('.reader-osc-hint');
+      return !el || el.hidden;
+    });
+    expect(hintHidden).toBe(true);
+  } finally {
+    try { tmux(`kill-session -t ${PT_SESSION}`); } catch (_) {}
+  }
+});
+
 test('reader strips trailing default-attr whitespace from lines', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -1344,12 +1415,21 @@ test('shell integration: status, install, and uninstall round-trip', async ({ pa
   expect(installRes.ok()).toBeTruthy();
   const afterInstall = await installRes.json();
   expect(afterInstall.bash.state).toBe('installed');
-  expect(afterInstall.bash.version).toBe(1);
+  // Version must be reported as a positive integer; the concrete value
+  // is governed by `CURRENT_VERSION` in `src/shell_integration.rs` and
+  // is allowed to bump as the snippet evolves.
+  expect(typeof afterInstall.bash.version).toBe('number');
+  expect(afterInstall.bash.version).toBeGreaterThanOrEqual(1);
 
   const rcContent = fs.readFileSync(rcPath, 'utf8');
   expect(rcContent).toContain(FENCE_OPEN);
   expect(rcContent).toContain(FENCE_CLOSE);
   expect(rcContent).toContain('PS0=');
+  // v2+: the snippet must wrap OSC 133 inside tmux's DCS passthrough
+  // envelope. Asserting on the `\ePtmux;` prefix is the cheapest way
+  // to catch a regression to the bare-OSC v1 form, which tmux 3.4
+  // silently drops.
+  expect(rcContent).toContain('\\ePtmux;');
 
   const uninstallRes = await page.request.post(`${BASE}/api/shell-integration/uninstall`, {
     data: { shell: 'bash' },

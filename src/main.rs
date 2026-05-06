@@ -867,7 +867,7 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
 
     <section class="settings-card" id="shell-integration">
       <h2>Shell integration</h2>
-      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristics. Click install — mobux appends a managed, fenced block to your rc file and keeps a timestamped backup. Nothing outside the fence is touched.</p>
+      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristics. Click install — mobux appends a managed, fenced block to your rc file and keeps a timestamped backup. Nothing outside the fence is touched. The snippet detects <code>$TMUX</code> and wraps OSC 133 in tmux's DCS passthrough envelope so tmux 3.4's default <code>allow-passthrough off</code> doesn't drop the marker; mobux turns the option on for sessions it attaches.</p>
 
       <div class="shell-card" data-shell="bash">
         <div class="shell-card-head">
@@ -880,8 +880,13 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
         </div>
         <details class="settings-detail">
           <summary>Show snippet</summary>
-<pre class="settings-snippet"><code>PS0='\e]133;C\a'
-PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'</code></pre>
+<pre class="settings-snippet"><code>if [ -n "$TMUX" ]; then
+    PS0='\ePtmux;\e\e]133;C\a\e\\'
+    PS1='\[\ePtmux;\e\e]133;D;$?\a\e]133;A\a\e\\\]'"$PS1"'\[\ePtmux;\e\e]133;B\a\e\\\]'
+else
+    PS0='\e]133;C\a'
+    PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
+fi</code></pre>
         </details>
       </div>
 
@@ -896,8 +901,13 @@ PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'</code></pre>
         </div>
         <details class="settings-detail">
           <summary>Show snippet</summary>
-<pre class="settings-snippet"><code>preexec() {{ print -Pn '\e]133;C\a' }}
-precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}</code></pre>
+<pre class="settings-snippet"><code>if [ -n "$TMUX" ]; then
+    preexec() {{ print -Pn '\ePtmux;\e\e]133;C\a\e\\' }}
+    precmd()  {{ print -Pn '\ePtmux;\e\e]133;D;'$?'\a\e]133;A\a\e\\' }}
+else
+    preexec() {{ print -Pn '\e]133;C\a' }}
+    precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}
+fi</code></pre>
         </details>
       </div>
 
@@ -912,14 +922,26 @@ precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}</code></pre>
         </div>
         <details class="settings-detail">
           <summary>Show snippet</summary>
-<pre class="settings-snippet"><code>function __mobux_osc133_preexec --on-event fish_preexec
-    printf '\e]133;C\a'
-end
-function __mobux_osc133_postexec --on-event fish_postexec
-    printf '\e]133;D;%s\a' $status
-end
-function __mobux_osc133_prompt --on-event fish_prompt
-    printf '\e]133;A\a'
+<pre class="settings-snippet"><code>if test -n "$TMUX"
+    function __mobux_osc133_preexec --on-event fish_preexec
+        printf '\ePtmux;\e\e]133;C\a\e\\'
+    end
+    function __mobux_osc133_postexec --on-event fish_postexec
+        printf '\ePtmux;\e\e]133;D;%s\a\e\\' $status
+    end
+    function __mobux_osc133_prompt --on-event fish_prompt
+        printf '\ePtmux;\e\e]133;A\a\e\\'
+    end
+else
+    function __mobux_osc133_preexec --on-event fish_preexec
+        printf '\e]133;C\a'
+    end
+    function __mobux_osc133_postexec --on-event fish_postexec
+        printf '\e]133;D;%s\a' $status
+    end
+    function __mobux_osc133_prompt --on-event fish_prompt
+        printf '\e]133;A\a'
+    end
 end</code></pre>
         </details>
       </div>
@@ -1174,10 +1196,14 @@ async fn handle_ws(
         Ok(s) if !s.is_empty() => format!("tmux -L {}", s),
         _ => "tmux".to_string(),
     };
+    // `allow-passthrough on` is required for the OSC 133 shell-integration
+    // snippet's tmux DCS-passthrough wrap (\ePtmux;\e<seq>\e\\) to reach
+    // the outer terminal. tmux 3.4 defaults this off, and silently drops
+    // OSC 133 entirely without it; tmux 3.5+ also honours the option.
     cmd.args([
         "-c",
         &format!(
-            "{tmux} set-option -g mouse on 2>/dev/null; {tmux} set-window-option -g aggressive-resize on 2>/dev/null; {tmux} attach-session -t {session}",
+            "{tmux} set-option -g mouse on 2>/dev/null; {tmux} set-option -g allow-passthrough on 2>/dev/null; {tmux} set-window-option -g aggressive-resize on 2>/dev/null; {tmux} attach-session -t {session}",
             tmux = tmux_bin,
             session = session_name,
         ),
