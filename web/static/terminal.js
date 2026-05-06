@@ -383,6 +383,42 @@ window.__mobuxView = {
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
     oscDetected: () => !!core.oscDetected,
+    // Diagnostic helpers for the OSC 133 tmux-passthrough regression
+    // test. `startWsRxTap()` installs a `data` listener on the core
+    // that appends every chunk's bytes to `window.__mobuxRxLog` as a
+    // hex string; `wsRxHex()` returns the accumulated log. Lets the
+    // test distinguish "bytes never arrived from mobux" from "bytes
+    // arrived but libterm did not classify them as OSC 133".
+    startWsRxTap: () => {
+      if (window.__mobuxRxTapInstalled) return;
+      window.__mobuxRxTapInstalled = true;
+      window.__mobuxRxLog = '';
+      core.addEventListener('data', (ev) => {
+        const d = ev.detail;
+        let bytes;
+        if (typeof d === 'string') bytes = new TextEncoder().encode(d);
+        else if (d instanceof Uint8Array) bytes = d;
+        else return;
+        let h = '';
+        for (const b of bytes) h += b.toString(16).padStart(2, '0');
+        window.__mobuxRxLog += h;
+      });
+    },
+    wsRxHex: () => window.__mobuxRxLog || '',
+    bufferDump: (lines = 10) => {
+      const buf = core.getActiveBuffer();
+      const out = [];
+      const start = Math.max(0, buf.length - lines);
+      for (let y = start; y < buf.length; y++) {
+        const line = buf.getLine(y);
+        if (!line) { out.push(''); continue; }
+        const t = typeof line.translateToString === 'function'
+          ? line.translateToString(true)
+          : '';
+        out.push(t);
+      }
+      return out;
+    },
     readerScrollY: () => reader.scrollY,
     readerMaxScroll: () => reader.maxScroll,
     readerInnerHeight: () => reader.innerHeight,

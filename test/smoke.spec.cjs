@@ -561,6 +561,14 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
   tmux(`send-keys -t ${PT_SESSION} "clear" Enter`);
   execSync('sleep 0.3');
 
+  // Bytes the printf below emits, in hex. Used by the diagnostic
+  // path to disambiguate "bytes never arrived" (no `1b5d3133333b41`
+  // in the WS rx tap and no `OSC133CANARY` in the buffer) from
+  // "bytes arrived but the OSC dispatcher did not fire" (canary in
+  // the buffer but oscDetected stays false).
+  const WRAPPED_HEX_OSC133A = '1b5d3133333b41'; // ESC ] 1 3 3 ; A
+  const CANARY = 'OSC133CANARY';
+
   try {
     await page.goto(`${BASE}/s/${PT_SESSION}`);
     await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -568,13 +576,15 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
       timeout: 5000,
     });
 
+    // Install the WS-rx tap as early as possible after the WS opens
+    // so we don't miss anything. Diagnostic only — never asserted on
+    // the happy path.
+    await page.evaluate(() => window.__mobuxView.test.startWsRxTap());
+
     // First: assert mobux's handle_ws actually ran `set-option -g
     // allow-passthrough on` on this server. The bash subprocess that
     // spawns the attach is async so the option may not be on the
     // instant the WS upgrade completes — poll until we observe it.
-    // This both verifies mobux's role AND removes the race that
-    // occasionally has the printf below execute before allow-passthrough
-    // flips on (CI reproducer).
     let allowPassthroughOn = false;
     for (let i = 0; i < 50; i++) {
       const v = execSync(`${TMUX_CMD} show-option -gv allow-passthrough 2>/dev/null || true`)
@@ -584,35 +594,92 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
     }
     expect(allowPassthroughOn).toBe(true);
 
-    // Sanity-check the precondition before the assertion: oscDetected
-    // must be false at the start of the test (no OSC 133 has flowed
-    // yet on this fresh session).
+    // Sanity-check the precondition: oscDetected must be false at the
+    // start of the test (no OSC 133 has flowed yet on this fresh page).
     const before = await page.evaluate(() => window.__mobuxView.test.oscDetected());
     expect(before).toBe(false);
 
-    // Drive the bash inside the pane to emit the wrapped sequence.
-    // The path is: JS string -> sh -c double-quoted arg (folds `\\` ->
-    // `\`) -> tmux send-keys literal -> bash readline buffer -> bash
-    // printf format (single-quoted preserves backslashes verbatim) ->
-    // printf escapes (`\e`->ESC, `\a`->BEL, unknown `\X` is preserved
-    // as `\X`). After all the layers we want printf to emit the bytes:
-    //   ESC P t m u x ; ESC ESC ] 1 3 3 ; A BEL ESC `\` sentinel LF
-    // i.e. the v2 snippet's PS1 wrap exactly. The unknown-escape
-    // preservation rule is what lets `\e\\sentinel` produce ESC + `\`
-    // + `sentinel` (the trailing `\` is the ST terminator that pairs
-    // with the leading ESC to form `\e\\`, the DCS stop sequence).
-    const wrapped = "printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\sentinel\\n'";
+    // Drive the bash inside the pane to emit the wrapped sequence
+    // followed by a printable canary. Format string layers:
+    //   JS literal -> sh -c double-quote (folds `\\` -> `\`)
+    //   -> tmux send-keys arg -> bash readline buffer
+    //   -> bash printf format string (single-quoted preserves `\`)
+    //   -> printf escape interpretation (`\e`->ESC, `\a`->BEL,
+    //      `\\`->`\`, unknown `\X` preserved as `\X`).
+    // Net bytes printf emits:
+    //   ESC P t m u x ; ESC ESC ] 1 3 3 ; A BEL ESC `\` OSC133CANARY LF
+    // i.e. the v2 snippet's PS1 wrap exactly, plus a trailing canary
+    // string that — because it is OUTSIDE the DCS envelope — must
+    // appear verbatim in the pane's stdout regardless of whether
+    // tmux honoured allow-passthrough.
+    const wrapped =
+      `printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\${CANARY}\\n'`;
     tmux(`send-keys -t ${PT_SESSION} "${wrapped}" Enter`);
 
-    // Poll until the OSC marker is observed or the deadline fires.
-    // `oscDetected` flips inside libterm's OSC dispatch so this is
-    // the smallest end-to-end signal that the wrap survived tmux.
-    // If this times out, the regression is real: tmux's allow-
-    // passthrough is off, the snippet is not wrapping, or libterm
-    // is not parsing OSC 133.
-    await page.waitForFunction(() => window.__mobuxView.test.oscDetected() === true, {
-      timeout: 8000,
-    });
+    // Poll for oscDetected. If this times out, the diagnostic block
+    // below runs and tells us which layer dropped the bytes.
+    let timedOut = false;
+    try {
+      await page.waitForFunction(
+        () => window.__mobuxView.test.oscDetected() === true,
+        { timeout: 8000 },
+      );
+    } catch (_) {
+      timedOut = true;
+    }
+
+    if (timedOut) {
+      const rxHex = await page.evaluate(() => window.__mobuxView.test.wsRxHex());
+      const buffer = await page.evaluate(() => window.__mobuxView.test.bufferDump(20));
+      const tmuxPaneText = (() => {
+        try {
+          return execSync(`${TMUX_CMD} capture-pane -p -t ${PT_SESSION}`)
+            .toString();
+        } catch (e) {
+          return `(capture-pane failed: ${e.message})`;
+        }
+      })();
+      const tmuxAllowPassthroughNow = (() => {
+        try {
+          return execSync(
+            `${TMUX_CMD} show-option -gv allow-passthrough 2>/dev/null || true`,
+          ).toString().trim();
+        } catch (_) { return '?'; }
+      })();
+      const tmuxVersion = (() => {
+        try { return execSync(`${TMUX_CMD} -V`).toString().trim(); }
+        catch (_) { return '?'; }
+      })();
+      const mobuxTail = (() => {
+        try {
+          const fs = require('fs');
+          const path = '/tmp/mobux-smoke/mobux.log';
+          if (!fs.existsSync(path)) return '(no log)';
+          const data = fs.readFileSync(path, 'utf8');
+          return data.split('\n').slice(-30).join('\n');
+        } catch (e) { return `(read failed: ${e.message})`; }
+      })();
+      const oscBytesPresent = rxHex.includes(WRAPPED_HEX_OSC133A);
+      const canaryInBuffer = buffer.some((l) => l.includes(CANARY));
+      // eslint-disable-next-line no-console
+      console.log(
+        '[osc133-pt diag]\n' +
+        `  ${tmuxVersion}\n` +
+        `  tmux allow-passthrough now: ${tmuxAllowPassthroughNow}\n` +
+        `  ws rx bytes total: ${rxHex.length / 2}\n` +
+        `  ws rx (hex, last 240 chars): ...${rxHex.slice(-240)}\n` +
+        `  ws rx contains 1b5d3133333b41 (ESC]133;A): ${oscBytesPresent}\n` +
+        `  canary "${CANARY}" in libterm buffer: ${canaryInBuffer}\n` +
+        `  libterm buffer (last 20 lines):\n${buffer.map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
+        `  tmux capture-pane:\n${tmuxPaneText.split('\n').map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
+        `  mobux.log tail:\n${mobuxTail.split('\n').map((l) => '    ' + l).join('\n')}`,
+      );
+      throw new Error(
+        'oscDetected stayed false after wrapped OSC 133 send. ' +
+        `passthrough=${tmuxAllowPassthroughNow}, ` +
+        `oscBytesInWs=${oscBytesPresent}, canaryInBuffer=${canaryInBuffer}`,
+      );
+    }
 
     const after = await page.evaluate(() => window.__mobuxView.test.oscDetected());
     expect(after).toBe(true);
