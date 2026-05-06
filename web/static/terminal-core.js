@@ -11,10 +11,19 @@
 // tests are expected to fail until libterm's cell store is mapped
 // onto an xterm-like Cell API.
 
+// @ts-check
+
 import { getStoredThemeId, getTheme } from './themes.js';
+
+/** @typedef {import('@kattebak/sterk').Terminal} SterkTerminal */
+/** @typedef {import('@kattebak/sterk').Buffer} SterkBuffer */
+/** @typedef {import('@kattebak/sterk').BufferLine} SterkBufferLine */
+/** @typedef {import('@kattebak/sterk').BufferCell} SterkBufferCell */
+/** @typedef {import('@kattebak/sterk').Disposable} SterkDisposable */
 
 // `window.__Aceterm` is populated by aceterm.bundle.js (loaded as a
 // classic <script> in render_terminal_page before this module runs).
+// @ts-expect-error - Aceterm is injected by vendor bundle script
 const Aceterm = window.__Aceterm;
 if (!Aceterm) {
   throw new Error('aceterm bundle not loaded — check vendor/aceterm.bundle.js script tag');
@@ -24,29 +33,45 @@ const WINDOW_SWITCH_CMDS = new Set([
   'next-window', 'prev-window', 'new-window', 'kill-window',
 ]);
 
+/**
+ * TerminalCore wraps the aceterm adapter and adds mobux-specific functionality
+ * (WebSocket lifecycle, panes/windows, OSC 133 tracking).
+ * 
+ * The wrapped `term` property should conform to sterk's Terminal interface,
+ * but currently has several mobux-specific extensions.
+ */
 export class TerminalCore extends EventTarget {
+  /**
+   * @param {{session: string, host: HTMLElement}} options
+   */
   constructor({ session, host }) {
     super();
     this.session = session;
     this.host = host;
 
     this.ws = null;
+    /** @type {Array<{id: string, title: string, active: boolean}>} */
     this.panes = [];
     this.activeIndex = 0;
     this.oscMarkers = new Map();
     this.oscDetected = false;
 
+    // FIXME(sterk): term should be SterkTerminal, but has mobux-specific extensions
+    // (_libterm, _editor, _writeParsedSubs, _dataSubs)
     this.term = makeAcetermAdapter(host, (data) => this.send(data));
     this._wireWriteParsedFanout();
     this._wireOsc133();
     // Spike-only debug peephole.
     if (typeof window !== 'undefined') {
+      // @ts-expect-error - debug globals
       window.__lt = this.term._libterm;
+      // @ts-expect-error - debug globals
       window.__ed = this.term._editor;
     }
   }
 
   // ── WebSocket lifecycle ───────────────────────────────────────────
+  // FIXME(sterk): WebSocket lifecycle is mobux-specific, not in sterk contract
   connect() {
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.ws = new WebSocket(
@@ -61,20 +86,22 @@ export class TerminalCore extends EventTarget {
     this.ws.onmessage = async (ev) => {
       let bytes;
       if (typeof ev.data === 'string') {
-        this.term.write(ev.data);
+        if (this.term.write) this.term.write(ev.data);
         bytes = ev.data;
       } else if (ev.data instanceof ArrayBuffer) {
         const u8 = new Uint8Array(ev.data);
         const text = new TextDecoder('utf-8', { fatal: false }).decode(u8);
-        this.term.write(text);
+        if (this.term.write) this.term.write(text);
         bytes = u8;
       } else if (ev.data instanceof Blob) {
         const u8 = new Uint8Array(await ev.data.arrayBuffer());
         const text = new TextDecoder('utf-8', { fatal: false }).decode(u8);
-        this.term.write(text);
+        if (this.term.write) this.term.write(text);
         bytes = u8;
       }
-      this.dispatchEvent(new CustomEvent('data', { detail: bytes }));
+      if (bytes !== undefined) {
+        this.dispatchEvent(new CustomEvent('data', { detail: bytes }));
+      }
     };
     this.ws.onclose = () => {};
     this.ws.onerror = () => {};
@@ -86,6 +113,11 @@ export class TerminalCore extends EventTarget {
     this.connect();
   }
 
+  /**
+   * FIXME(sterk): send() is mobux-specific, not in sterk contract.
+   * sterk Terminal receives input via onData callbacks, doesn't expose send().
+   * @param {string | ArrayBuffer} data
+   */
   send(data) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(data);
@@ -107,7 +139,7 @@ export class TerminalCore extends EventTarget {
     const hostH = this.host.clientHeight || window.innerHeight;
     const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
     const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
-    this.term.resize(cols, rows);
+    if (this.term.resize) this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
 
@@ -135,12 +167,32 @@ export class TerminalCore extends EventTarget {
   }
 
   // ── Buffer / scroll passthroughs ──────────────────────────────────
-  getActiveBuffer() { return this.term.buffer.active; }
-  scrollLines(n)    { this.term.scrollLines(n); }
-  scrollToBottom()  { this.term.scrollToBottom(); }
-  clear()           { this.term.clear(); }
+  /**
+   * @returns {SterkBuffer}
+   */
+  getActiveBuffer() { 
+    if (!this.term.buffer) throw new Error('term.buffer not available');
+    return this.term.buffer.active; 
+  }
+  /**
+   * @param {number} n
+   */
+  scrollLines(n)    { 
+    if (this.term.scrollLines) this.term.scrollLines(n);
+  }
+  scrollToBottom()  { 
+    if (this.term.scrollToBottom) this.term.scrollToBottom();
+  }
+  clear()           { 
+    if (this.term.clear) this.term.clear();
+  }
 
+  /**
+   * FIXME(sterk): setFontSize is mobux-specific. sterk uses term.options.fontSize.
+   * @param {number} px
+   */
   setFontSize(px) {
+    if (!this.term.options) return;
     if (px !== this.term.options.fontSize) {
       this.term.options.fontSize = px;
       const ed = this.term._editor;
@@ -148,7 +200,13 @@ export class TerminalCore extends EventTarget {
       this.resize();
     }
   }
-  getFontSize() { return this.term.options.fontSize; }
+  /**
+   * FIXME(sterk): getFontSize is mobux-specific. sterk exposes term.options.fontSize directly.
+   */
+  getFontSize() { 
+    if (!this.term.options) return 13;
+    return this.term.options.fontSize; 
+  }
 
   // ── Panes (= tmux windows) ────────────────────────────────────────
   async refreshPanes() {
@@ -164,6 +222,10 @@ export class TerminalCore extends EventTarget {
     } catch (_) {}
   }
 
+  /**
+   * FIXME(sterk): switchWindow is tmux-specific, not in sterk contract.
+   * @param {'next' | 'prev'} direction
+   */
   switchWindow(direction) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.send(direction === 'next' ? '\x02n' : '\x02p');
@@ -172,7 +234,7 @@ export class TerminalCore extends EventTarget {
     setTimeout(async () => {
       await this.refreshPanes();
       await this.reloadHistory();
-      this._forceRedraw();
+      if (this._forceRedraw) this._forceRedraw();
     }, 300);
   }
 
@@ -184,14 +246,18 @@ export class TerminalCore extends EventTarget {
     const hostH = this.host.clientHeight || window.innerHeight;
     const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
     const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
-    this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
+    if (this.ws) this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      this.term.resize(cols, rows);
+      if (this.term.resize) this.term.resize(cols, rows);
       this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
     }, 50);
   }
 
+  /**
+   * FIXME(sterk): runTmuxCmd is tmux-specific, not in sterk contract.
+   * @param {string} command
+   */
   async runTmuxCmd(command) {
     try {
       await fetch(`/api/sessions/${encodeURIComponent(this.session)}/command`, {
@@ -204,7 +270,10 @@ export class TerminalCore extends EventTarget {
       this.clear();
       this.scrollToBottom();
     }
-    setTimeout(() => { this.refreshPanes(); this.reloadHistory(); }, 300);
+    setTimeout(() => { 
+      if (this.refreshPanes) this.refreshPanes(); 
+      if (this.reloadHistory) this.reloadHistory(); 
+    }, 300);
   }
 
   async reloadHistory() {
@@ -213,7 +282,7 @@ export class TerminalCore extends EventTarget {
       if (!res.ok) return;
       const history = await res.text();
       if (history.trim()) {
-        this.term.write(history.replace(/\n/g, '\r\n'));
+        if (this.term.write) this.term.write(history.replace(/\n/g, '\r\n'));
         this.scrollToBottom();
         this.dispatchEvent(new CustomEvent('history', { detail: history }));
       }
@@ -236,7 +305,8 @@ export class TerminalCore extends EventTarget {
     // libterm's patched OSC dispatcher invokes handleOsc133 on every
     // `OSC 133 ; X ST`. Same shape as the xterm-side handler in
     // main: A/B mark prompts, record kind by absolute buffer row.
-    this.term._libterm.handleOsc133 = (data) => {
+    // FIXME(sterk): This should use term.parser.registerOscHandler(133, ...)
+    this.term._libterm.handleOsc133 = (/** @type {string} */ data) => {
       const kind = (data || '').charAt(0);
       if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return;
       const lt = this.term._libterm;
@@ -251,6 +321,21 @@ export class TerminalCore extends EventTarget {
 }
 
 // ── libterm + Ace adapter ─────────────────────────────────────────
+/**
+ * Creates an adapter that wraps aceterm/libterm to match sterk's Terminal interface.
+ * 
+ * Returns an object that mostly conforms to SterkTerminal, with some mobux-specific
+ * extensions (_libterm, _editor, _writeParsedSubs, _dataSubs).
+ * 
+ * @param {HTMLElement} host
+ * @param {(data: string) => void} sendCb
+ * @returns {Partial<SterkTerminal> & {
+ *   _libterm: any,
+ *   _editor: any,
+ *   _writeParsedSubs: Array<() => void>,
+ *   _dataSubs: Array<(data: string) => void>
+ * }}
+ */
 function makeAcetermAdapter(host, sendCb) {
   const initialCols = 120, initialRows = 35;
   // libterm globals live on the Terminal CLASS, not the instance —
@@ -307,14 +392,20 @@ function makeAcetermAdapter(host, sendCb) {
   // scroller/text-layer DOM (it does on resize / theme change).
   editor.renderer.on('afterRender', () => aliasXtermClasses(host));
 
+  /** @type {Array<() => void>} */
   const writeParsedSubs = [];
+  /** @type {Array<(data: string) => void>} */
   const dataSubs = [];
 
   // OSC 133 stub — libterm's parser doesn't surface OSC 133, so the
   // map stays empty and the reader's "shell integration not detected"
   // hint stays visible (accurate for now).
+  /**
+   * FIXME(sterk): This is a stub. Real implementation needed.
+   * @type {import('@kattebak/sterk').Parser}
+   */
   const parser = {
-    registerOscHandler(_id, _cb) {
+    registerOscHandler(/** @type {number} */ _id, /** @type {import('@kattebak/sterk').OscHandler} */ _cb) {
       return { dispose() {} };
     },
   };
@@ -330,12 +421,20 @@ function makeAcetermAdapter(host, sendCb) {
     get cols() { return libterm.cols; },
     get rows() { return libterm.rows; },
 
+    /**
+     * @param {string | Uint8Array} data
+     * @param {(() => void)=} cb
+     */
     write(data, cb) {
       libterm.write(typeof data === 'string'
         ? data
         : new TextDecoder().decode(data));
       if (typeof cb === 'function') queueMicrotask(cb);
     },
+    /**
+     * @param {number} cols
+     * @param {number} rows
+     */
     resize(cols, rows) { libterm.resize(cols, rows); },
     clear() { libterm.clear && libterm.clear(); },
     scrollToBottom() {
@@ -354,11 +453,18 @@ function makeAcetermAdapter(host, sendCb) {
         editor.session.setScrollTop(maxScroll);
       } catch (_) {}
     },
+    /**
+     * @param {number} n
+     */
     scrollLines(n) {
       const r = editor.renderer;
       r.session.setScrollTop(r.getScrollTop() + n * r.lineHeight);
     },
 
+    /**
+     * @param {() => void} cb
+     * @returns {SterkDisposable}
+     */
     onWriteParsed(cb) {
       writeParsedSubs.push(cb);
       return { dispose() {
@@ -366,6 +472,10 @@ function makeAcetermAdapter(host, sendCb) {
         if (i >= 0) writeParsedSubs.splice(i, 1);
       } };
     },
+    /**
+     * @param {(data: string) => void} cb
+     * @returns {SterkDisposable}
+     */
     onData(cb) {
       dataSubs.push(cb);
       return { dispose() {
@@ -382,6 +492,12 @@ function makeAcetermAdapter(host, sendCb) {
   };
 }
 
+/**
+ * Creates a buffer adapter that conforms to sterk's Buffer interface.
+ * @param {any} lt - libterm instance
+ * @param {any} editor - Ace editor instance
+ * @returns {SterkBuffer}
+ */
 function makeBufferAdapter(lt, editor) {
   return {
     get length() {
@@ -402,6 +518,10 @@ function makeBufferAdapter(lt, editor) {
       }
       return lt.ybase || 0;
     },
+    /**
+     * @param {number} y
+     * @returns {SterkBufferLine | null}
+     */
     getLine(y) {
       if (!lt.lines || !lt.lines[y]) return null;
       return makeLineAdapter(lt.lines[y]);
@@ -419,11 +539,23 @@ function makeBufferAdapter(lt, editor) {
 const LT_BG_DEFAULT = 256;
 const LT_FG_DEFAULT = 257;
 
+/**
+ * Creates a line adapter that conforms to sterk's BufferLine interface.
+ * @param {any[]} cells - libterm cell array
+ * @returns {SterkBufferLine}
+ */
 function makeLineAdapter(cells) {
   const text = cells.map((c) => (Array.isArray(c) ? c[1] : (c && c.ch) || '')).join('');
   return {
     isWrapped: false,
+    /**
+     * @param {boolean=} _trim
+     */
     translateToString(_trim) { return text; },
+    /**
+     * @param {number} x
+     * @returns {SterkBufferCell}
+     */
     getCell(x) {
       const c = cells[x];
       const attr = Array.isArray(c) ? c[0] : 0;
@@ -459,6 +591,9 @@ function makeLineAdapter(cells) {
   };
 }
 
+/**
+ * @param {HTMLElement} host
+ */
 function aliasXtermClasses(host) {
   try {
     // .ace_scroller hosts the rendered text grid and is the scrolling
@@ -480,20 +615,26 @@ function aliasXtermClasses(host) {
 // of moving the viewport. Pre-empt every touch event on the editor
 // container, translate vertical drag into renderer scroll, and
 // stopPropagation so Ace never sees it.
+/**
+ * @param {any} editor
+ * @param {HTMLElement} host
+ */
 function attachTouchScroll(editor, host) {
+  /** @type {number | null} */
   let lastY = null;
+  /** @type {number | null} */
   let activeId = null;
 
-  const onStart = (e) => {
+  const onStart = (/** @type {TouchEvent} */ e) => {
     if (e.touches.length !== 1) { activeId = null; return; }
     activeId = e.touches[0].identifier;
     lastY = e.touches[0].clientY;
   };
-  const onMove = (e) => {
+  const onMove = (/** @type {TouchEvent} */ e) => {
     if (activeId == null) return;
     let t = null;
     for (const tt of e.touches) if (tt.identifier === activeId) { t = tt; break; }
-    if (!t) return;
+    if (!t || lastY === null) return;
     const dy = lastY - t.clientY;
     lastY = t.clientY;
     if (Math.abs(dy) > 0) {

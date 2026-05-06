@@ -9,7 +9,9 @@
   "scripts": {
     "build": "node web/build.js",
     "postinstall": "node web/build.js",
-    "test": "npx playwright test"
+    "test": "npx playwright test",
+    "typecheck:web": "tsc -p tsconfig.web.json",
+    "check": "npm run typecheck:web && npm run test"
   },
   "repository": {
     "type": "git",
@@ -24,7 +26,9 @@
   },
   "homepage": "https://github.com/mvhenten/mobux#readme",
   "devDependencies": {
-    "@playwright/test": "^1.59.1"
+    "@kattebak/sterk": "file:../sterk-feat-api-contract",
+    "@playwright/test": "^1.59.1",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
     "@xterm/addon-web-links": "^0.12.0",
