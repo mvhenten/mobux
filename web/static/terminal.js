@@ -50,6 +50,32 @@ const quotes = [
   document.getElementById("qauthor").textContent = "\u2014 " + author;
 }
 
+// ── External links ──────────────────────────────────────────────────
+// In a TWA (Trusted Web Activity, package id `io.github.mvhenten.mobux`),
+// `window.open(url, '_blank')` from JS keeps the navigation inside the
+// underlying Chrome that powers the TWA — visually it still looks like
+// the user is "in mobux". Clicking a synthesised anchor with
+// `target="_blank" rel="noopener noreferrer"` triggers Chrome Custom
+// Tabs handoff for out-of-scope URLs (i.e. anything not on the trusted
+// origin), which is the documented escape hatch.
+//
+// On the desktop / regular browser this is identical to a normal
+// new-tab open.
+function openExternal(url) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  // Anchor must be in the DOM for the synthetic click to navigate
+  // reliably across browsers.
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+// Expose for smoke tests (mirrors `window.__mobuxView` etc.).
+window.__mobuxOpenExternal = openExternal;
+
 // ── Core ────────────────────────────────────────────────────────────
 const isMobile = window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
@@ -156,7 +182,7 @@ createGestureRecognizer(overlay, {
     let match;
     while ((match = urlRe.exec(text)) !== null) {
       if (col >= match.index && col < match.index + match[0].length) {
-        window.open(match[0], '_blank', 'noopener');
+        openExternal(match[0]);
         return;
       }
     }
