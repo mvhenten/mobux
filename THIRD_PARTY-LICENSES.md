@@ -53,7 +53,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **License**: Cloud9 SDK Non-Commercial License Agreement  
 **Upstream**: https://github.com/c9/core (`plugins/c9.ide.terminal/aceterm/`)
 
-**⚠️ License Incompatibility Notice**: These files are vendored from the now-discontinued AWS Cloud9 SDK (c9/core). Their license is non-commercial and **incompatible with mobux's MIT license**. These files are scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk) — see issue [ISSUE-URL-PLACEHOLDER] for migration tracking.
+**⚠️ License Incompatibility Notice**: These files are vendored from the now-discontinued AWS Cloud9 SDK (c9/core). Their license is non-commercial and **incompatible with mobux's MIT license**. These files are scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk) — see issue [#68](https://github.com/mvhenten/mobux/issues/68) for migration tracking.
 
 ```
 CLOUD9 SOFTWARE DEVELOPMENT KIT NON-COMMERCIAL LICENSE AGREEMENT
@@ -336,7 +336,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-**⚠️ License Incompatibility Notice**: As with the other c9/aceterm files, this is scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk) — see issue [ISSUE-URL-PLACEHOLDER].
+**⚠️ License Incompatibility Notice**: As with the other c9/aceterm files, this is scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk) — see issue [#68](https://github.com/mvhenten/mobux/issues/68).
 
 ---
 
@@ -357,4 +357,4 @@ disclaims all warranties with regard to this software.
 
 **Note**: The wcwidth.js npm package (https://npmjs.org/package/wcwidth.js) does not include a formal LICENSE file. The implementation in wc.js includes the full attribution and permission statement from Markus Kuhn's original work, which is effectively public domain.
 
-**⚠️ License Notice**: While this file's license is permissive and compatible with MIT, it is part of the vendored c9/aceterm stack and will be replaced along with the other aceterm files by [@kattebak/sterk](https://github.com/kattebak/sterk) — see issue [ISSUE-URL-PLACEHOLDER].
+**⚠️ License Notice**: While this file's license is permissive and compatible with MIT, it is part of the vendored c9/aceterm stack and will be replaced along with the other aceterm files by [@kattebak/sterk](https://github.com/kattebak/sterk) — see issue [#68](https://github.com/mvhenten/mobux/issues/68).
