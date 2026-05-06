@@ -549,12 +549,26 @@ test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
 // fires. Skips when the test server can't reach `tmux send-keys`
 // (podman target leaves TMUX_CMD unset for those tests).
 test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ page }) => {
-  // Generous outer timeout so the diagnostic dump after a
-  // waitForFunction failure has time to gather state before
-  // playwright tears the page down. The default 30s was too tight
-  // on CI: setup + slow polling + 8s wait could exhaust it before
-  // the diagnostic page.evaluate calls.
-  test.setTimeout(90000);
+  // Generous outer timeout so the test has room for setup + the
+  // streaming diagnostic poll.
+  test.setTimeout(60000);
+
+  // Stream every browser console message into the test runner's
+  // stdout so the in-page diagnostic ticks (logged from a
+  // setInterval inside the page) are captured by playwright's
+  // reporter even if the page later closes. Critically: this is
+  // installed BEFORE goto() so we don't miss early messages.
+  const consoleLines = [];
+  page.on('console', (msg) => {
+    const t = msg.text();
+    consoleLines.push(t);
+    // eslint-disable-next-line no-console
+    console.log('[browser]', t);
+  });
+  page.on('pageerror', (err) => {
+    // eslint-disable-next-line no-console
+    console.log('[pageerror]', err.message);
+  });
 
   // Dedicated session so the existing pre-seeded `SESSION` keeps its
   // PS1 untouched and other tests' assertions don't race with our
@@ -568,11 +582,9 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
   tmux(`send-keys -t ${PT_SESSION} "clear" Enter`);
   execSync('sleep 0.3');
 
-  // Bytes the printf below emits, in hex. Used by the diagnostic
-  // path to disambiguate "bytes never arrived" (no `1b5d3133333b41`
-  // in the WS rx tap and no `OSC133CANARY` in the buffer) from
-  // "bytes arrived but the OSC dispatcher did not fire" (canary in
-  // the buffer but oscDetected stays false).
+  // Bytes the printf below emits, in hex. Used by the streaming
+  // diagnostic to disambiguate "bytes never arrived" from "bytes
+  // arrived but the OSC dispatcher did not fire".
   const WRAPPED_HEX_OSC133A = '1b5d3133333b41'; // ESC ] 1 3 3 ; A
   const CANARY = 'OSC133CANARY';
 
@@ -584,8 +596,7 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
     });
 
     // Install the WS-rx tap as early as possible after the WS opens
-    // so we don't miss anything. Diagnostic only — never asserted on
-    // the happy path.
+    // so we don't miss anything.
     await page.evaluate(() => window.__mobuxView.test.startWsRxTap());
 
     // First: assert mobux's handle_ws actually ran `set-option -g
@@ -623,35 +634,58 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
       `printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\${CANARY}\\n'`;
     tmux(`send-keys -t ${PT_SESSION} "${wrapped}" Enter`);
 
-    // Give the bytes a moment to traverse the pane -> tmux -> mobux
-    // PTY -> WS -> browser pipeline before we begin polling. This
-    // small fixed wait also serves as a baseline for the diagnostic
-    // capture below: if oscDetected stays false after both the wait
-    // AND the longer polling window, we know it's not a tiny race.
-    await page.waitForTimeout(500);
+    // Streaming diagnostic poll. Run a setInterval inside the page
+    // that every 250ms logs `[osc-tick] N osc=<bool> rx=<len> tail=<hex>
+    // canary=<bool>` to the browser console. Playwright's
+    // page.on('console') handler above forwards every line to the
+    // runner's stdout, so we get a continuous trace right up to the
+    // moment the wait either succeeds or times out — useful even if
+    // the page is later closed during teardown.
+    await page.evaluate(({ canary, oscHex }) => {
+      window.__oscTick = 0;
+      window.__oscDeadlineHandle = setInterval(() => {
+        const t = window.__mobuxView.test;
+        const rx = t.wsRxHex();
+        const buf = t.bufferDump(5);
+        const canaryInBuf = buf.some((l) => l.includes(canary)) ? 'Y' : 'N';
+        const oscInRx = rx.includes(oscHex) ? 'Y' : 'N';
+        const tail = rx.slice(-120);
+        // eslint-disable-next-line no-console
+        console.log(
+          `[osc-tick] n=${++window.__oscTick} ` +
+          `osc=${t.oscDetected() ? 'Y' : 'N'} ` +
+          `rxLen=${rx.length / 2} ` +
+          `oscBytesInRx=${oscInRx} ` +
+          `canaryInBuf=${canaryInBuf} ` +
+          `tail=...${tail}`,
+        );
+      }, 250);
+    }, { canary: CANARY, oscHex: WRAPPED_HEX_OSC133A });
 
-    // Poll for oscDetected. If this times out, the diagnostic block
-    // below runs and tells us which layer dropped the bytes.
+    // Wait up to 6 seconds for oscDetected to flip. If it doesn't,
+    // the streamed ticks above already tell us why.
     let timedOut = false;
     try {
       await page.waitForFunction(
         () => window.__mobuxView.test.oscDetected() === true,
-        { timeout: 5000 },
+        { timeout: 6000 },
       );
     } catch (_) {
       timedOut = true;
     }
 
+    // Stop the streaming poll. Wrap in try/catch so a closed page
+    // doesn't mask the real assertion below.
+    try {
+      await page.evaluate(() => clearInterval(window.__oscDeadlineHandle));
+    } catch (_) { /* ignore */ }
+
     if (timedOut) {
-      const rxHex = await page.evaluate(() => window.__mobuxView.test.wsRxHex());
-      const buffer = await page.evaluate(() => window.__mobuxView.test.bufferDump(20));
-      const tmuxPaneText = (() => {
-        try {
-          return execSync(`${TMUX_CMD} capture-pane -p -t ${PT_SESSION}`)
-            .toString();
-        } catch (e) {
-          return `(capture-pane failed: ${e.message})`;
-        }
+      // One last sync snapshot from the host side — even if the
+      // browser is dying, tmux + mobux logs are still reachable.
+      const tmuxVersion = (() => {
+        try { return execSync(`${TMUX_CMD} -V`).toString().trim(); }
+        catch (_) { return '?'; }
       })();
       const tmuxAllowPassthroughNow = (() => {
         try {
@@ -660,38 +694,30 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
           ).toString().trim();
         } catch (_) { return '?'; }
       })();
-      const tmuxVersion = (() => {
-        try { return execSync(`${TMUX_CMD} -V`).toString().trim(); }
-        catch (_) { return '?'; }
+      const tmuxPaneText = (() => {
+        try { return execSync(`${TMUX_CMD} capture-pane -p -t ${PT_SESSION}`).toString(); }
+        catch (e) { return `(capture-pane failed: ${e.message})`; }
       })();
       const mobuxTail = (() => {
         try {
           const fs = require('fs');
-          const path = '/tmp/mobux-smoke/mobux.log';
-          if (!fs.existsSync(path)) return '(no log)';
-          const data = fs.readFileSync(path, 'utf8');
-          return data.split('\n').slice(-30).join('\n');
+          const p = '/tmp/mobux-smoke/mobux.log';
+          if (!fs.existsSync(p)) return '(no log)';
+          return fs.readFileSync(p, 'utf8').split('\n').slice(-40).join('\n');
         } catch (e) { return `(read failed: ${e.message})`; }
       })();
-      const oscBytesPresent = rxHex.includes(WRAPPED_HEX_OSC133A);
-      const canaryInBuffer = buffer.some((l) => l.includes(CANARY));
       // eslint-disable-next-line no-console
       console.log(
-        '[osc133-pt diag]\n' +
+        '[osc133-pt host-side diag]\n' +
         `  ${tmuxVersion}\n` +
         `  tmux allow-passthrough now: ${tmuxAllowPassthroughNow}\n` +
-        `  ws rx bytes total: ${rxHex.length / 2}\n` +
-        `  ws rx (hex, last 240 chars): ...${rxHex.slice(-240)}\n` +
-        `  ws rx contains 1b5d3133333b41 (ESC]133;A): ${oscBytesPresent}\n` +
-        `  canary "${CANARY}" in libterm buffer: ${canaryInBuffer}\n` +
-        `  libterm buffer (last 20 lines):\n${buffer.map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
         `  tmux capture-pane:\n${tmuxPaneText.split('\n').map((l) => '    ' + JSON.stringify(l)).join('\n')}\n` +
         `  mobux.log tail:\n${mobuxTail.split('\n').map((l) => '    ' + l).join('\n')}`,
       );
       throw new Error(
         'oscDetected stayed false after wrapped OSC 133 send. ' +
-        `passthrough=${tmuxAllowPassthroughNow}, ` +
-        `oscBytesInWs=${oscBytesPresent}, canaryInBuffer=${canaryInBuffer}`,
+        'See [osc-tick] lines above for per-poll state and ' +
+        '[osc133-pt host-side diag] for tmux/mobux state.',
       );
     }
 
