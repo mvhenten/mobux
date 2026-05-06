@@ -703,7 +703,11 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
           const fs = require('fs');
           const p = '/tmp/mobux-smoke/mobux.log';
           if (!fs.existsSync(p)) return '(no log)';
-          return fs.readFileSync(p, 'utf8').split('\n').slice(-40).join('\n');
+          // Filter to [ws] trace lines + errors so the dump fits in
+          // CI logs but covers every session lifecycle mobux emitted.
+          const all = fs.readFileSync(p, 'utf8').split('\n');
+          const filtered = all.filter((l) => /\[ws\]|error|ERROR/i.test(l));
+          return filtered.slice(-80).join('\n');
         } catch (e) { return `(read failed: ${e.message})`; }
       })();
       // eslint-disable-next-line no-console

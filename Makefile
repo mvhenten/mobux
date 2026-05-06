@@ -71,7 +71,7 @@ smoke-start: build
 	@mkdir -p /tmp/mobux-smoke/home
 	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
 		HOME=/tmp/mobux-smoke/home HISTFILE=/dev/null \
-		MOBUX_TMUX_SOCKET=mobux-test \
+		MOBUX_TMUX_SOCKET=mobux-test MOBUX_TRACE_WS=1 \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \

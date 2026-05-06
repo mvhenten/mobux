@@ -1183,6 +1183,10 @@ async fn handle_ws(
     session_name: String,
     db: Arc<db::Db>,
 ) -> Result<()> {
+    let trace = std::env::var("MOBUX_TRACE_WS").is_ok();
+    if trace {
+        eprintln!("[ws] handle_ws begin session={session_name}");
+    }
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -1190,6 +1194,9 @@ async fn handle_ws(
         pixel_width: 0,
         pixel_height: 0,
     })?;
+    if trace {
+        eprintln!("[ws] pty opened session={session_name}");
+    }
 
     let mut cmd = CommandBuilder::new("bash");
     let tmux_bin = match std::env::var("MOBUX_TMUX_SOCKET") {
@@ -1209,6 +1216,9 @@ async fn handle_ws(
         ),
     ]);
     let mut child = pair.slave.spawn_command(cmd)?;
+    if trace {
+        eprintln!("[ws] bash spawned session={session_name} pid={:?}", child.process_id());
+    }
 
     let mut reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
@@ -1219,17 +1229,45 @@ async fn handle_ws(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
+    let trace_thread = trace;
+    let session_for_thread = session_name.clone();
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 8192];
+        let mut total: usize = 0;
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    if trace_thread {
+                        eprintln!(
+                            "[ws] reader EOF session={session_for_thread} total={total}"
+                        );
+                    }
+                    break;
+                }
                 Ok(n) => {
+                    total += n;
+                    if trace_thread && total <= 4096 {
+                        eprintln!(
+                            "[ws] reader chunk session={session_for_thread} n={n} total={total}"
+                        );
+                    }
                     if tx.send(buf[..n].to_vec()).is_err() {
+                        if trace_thread {
+                            eprintln!(
+                                "[ws] reader tx closed session={session_for_thread}"
+                            );
+                        }
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    if trace_thread {
+                        eprintln!(
+                            "[ws] reader err session={session_for_thread} err={e}"
+                        );
+                    }
+                    break;
+                }
             }
         }
     });
@@ -1252,10 +1290,18 @@ async fn handle_ws(
                         }
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
+                            if trace {
+                                eprintln!("[ws] ws_sender closed session={session_name}");
+                            }
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        if trace {
+                            eprintln!("[ws] rx closed session={session_name}");
+                        }
+                        break;
+                    }
                 }
             }
             maybe_in = ws_receiver.next() => {
