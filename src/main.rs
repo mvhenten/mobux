@@ -818,7 +818,7 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
 
     <section class="settings-card" id="theme-picker">
       <h2>Theme</h2>
-      <p class="settings-lede">Sets the editor theme, terminal palette and reader palette together. All bundles are muted, low-contrast — picked for a phone screen at night. Switching applies live to any open terminal tab.</p>
+      <p class="settings-lede">Sets the editor theme and terminal palette together. All bundles are muted, low-contrast — picked for a phone screen at night. Switching applies live to any open terminal tab.</p>
       <label class="settings-row">
         <span class="settings-label">
           <strong>Colour theme</strong>
@@ -830,7 +830,7 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
 
     <section class="settings-card" id="shell-integration">
       <h2>Shell integration</h2>
-      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristic detection — works, but guesses at what's a prompt vs. what just happens to end with <code>$</code> or <code>&gt;</code>. Paste the snippet for your shell into the rc file and reload the terminal.</p>
+      <p class="settings-lede">Program-exit push notifications need <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133;D</a> (FinalTerm) markers from your shell so mobux can tell when a long-running command finishes. Paste the snippet for your shell into the rc file and reload.</p>
 
       <details class="settings-detail" open>
         <summary>bash <code>~/.bashrc</code></summary>
@@ -857,7 +857,7 @@ function __mobux_osc133_prompt --on-event fish_prompt
 end</code></pre>
       </details>
 
-      <p class="settings-foot">After reloading the shell, switch to a session and watch any prompt: the &quot;Shell integration not detected&quot; hint in the reader view should disappear, and prompts should highlight cleanly even when they don't end with a recognised sigil.</p>
+      <p class="settings-foot">After reloading the shell, run a command that exits non-zero (e.g. <code>false</code>): with the &quot;Program exit&quot; notification enabled above, mobux pushes a notification on the next exit.</p>
     </section>
   </main>
 
@@ -1315,7 +1315,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 </head>
 <body class="term-body">
   <div id="terminal"></div>
-  <div id="reader" class="hidden"></div>
   <div id="loadquote"><q id="quote"></q><br><cite id="qauthor"></cite></div>
   <div id="touchOverlay"></div>
   <div id="paneIndicator"></div>
@@ -1342,7 +1341,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
-      <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
       <button id="uploadBtn">📷</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
@@ -1371,10 +1369,10 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     window.MOBUX_SESSION = {session_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
-  <!-- Spike: aceterm renderer (libterm + Ace VirtualRenderer).
+  <!-- aceterm renderer (libterm + Ace VirtualRenderer).
        ace.js + aceterm.bundle.js pin window.__Aceterm; terminal.js
-       imports the spike's TerminalCore (terminal-core.js on this
-       branch is aceterm-backed, same external API as main). -->
+       imports TerminalCore which wraps libterm into a small surface
+       for gestures, the input bar, and the smoke tests. -->
   <script src="/static/vendor/ace.js?v={v}"></script>
   <script src="/static/vendor/theme-tomorrow_night.js?v={v}"></script>
   <script src="/static/vendor/theme-gruvbox.js?v={v}"></script>
