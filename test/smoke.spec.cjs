@@ -564,12 +564,25 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
   try {
     await page.goto(`${BASE}/s/${PT_SESSION}`);
     await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
-    // Wait for the WS to be live and (critically) for handle_ws to have
-    // sent `set-option -g allow-passthrough on` to the tmux server.
     await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, {
       timeout: 5000,
     });
-    await page.waitForTimeout(500);
+
+    // First: assert mobux's handle_ws actually ran `set-option -g
+    // allow-passthrough on` on this server. The bash subprocess that
+    // spawns the attach is async so the option may not be on the
+    // instant the WS upgrade completes — poll until we observe it.
+    // This both verifies mobux's role AND removes the race that
+    // occasionally has the printf below execute before allow-passthrough
+    // flips on (CI reproducer).
+    let allowPassthroughOn = false;
+    for (let i = 0; i < 50; i++) {
+      const v = execSync(`${TMUX_CMD} show-option -gv allow-passthrough 2>/dev/null || true`)
+        .toString().trim();
+      if (v === 'on') { allowPassthroughOn = true; break; }
+      execSync('sleep 0.1');
+    }
+    expect(allowPassthroughOn).toBe(true);
 
     // Sanity-check the precondition before the assertion: oscDetected
     // must be false at the start of the test (no OSC 133 has flowed
@@ -577,18 +590,28 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
     const before = await page.evaluate(() => window.__mobuxView.test.oscDetected());
     expect(before).toBe(false);
 
-    // Bash `printf` interprets `\e`/`\a`/`\\` exactly like the v2
-    // bash snippet's PS1 wrap. send-keys' literal string is a single
-    // shell argument, so we double-quote it and escape `$` to keep
-    // bash from glob-expanding `;A` etc.
-    const wrapped = "printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\hello\\n'";
+    // Drive the bash inside the pane to emit the wrapped sequence.
+    // The path is: JS string -> sh -c double-quoted arg (folds `\\` ->
+    // `\`) -> tmux send-keys literal -> bash readline buffer -> bash
+    // printf format (single-quoted preserves backslashes verbatim) ->
+    // printf escapes (`\e`->ESC, `\a`->BEL, unknown `\X` is preserved
+    // as `\X`). After all the layers we want printf to emit the bytes:
+    //   ESC P t m u x ; ESC ESC ] 1 3 3 ; A BEL ESC `\` sentinel LF
+    // i.e. the v2 snippet's PS1 wrap exactly. The unknown-escape
+    // preservation rule is what lets `\e\\sentinel` produce ESC + `\`
+    // + `sentinel` (the trailing `\` is the ST terminator that pairs
+    // with the leading ESC to form `\e\\`, the DCS stop sequence).
+    const wrapped = "printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\sentinel\\n'";
     tmux(`send-keys -t ${PT_SESSION} "${wrapped}" Enter`);
 
     // Poll until the OSC marker is observed or the deadline fires.
     // `oscDetected` flips inside libterm's OSC dispatch so this is
     // the smallest end-to-end signal that the wrap survived tmux.
+    // If this times out, the regression is real: tmux's allow-
+    // passthrough is off, the snippet is not wrapping, or libterm
+    // is not parsing OSC 133.
     await page.waitForFunction(() => window.__mobuxView.test.oscDetected() === true, {
-      timeout: 5000,
+      timeout: 8000,
     });
 
     const after = await page.evaluate(() => window.__mobuxView.test.oscDetected());
