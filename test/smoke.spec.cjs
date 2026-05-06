@@ -549,6 +549,13 @@ test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
 // fires. Skips when the test server can't reach `tmux send-keys`
 // (podman target leaves TMUX_CMD unset for those tests).
 test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ page }) => {
+  // Generous outer timeout so the diagnostic dump after a
+  // waitForFunction failure has time to gather state before
+  // playwright tears the page down. The default 30s was too tight
+  // on CI: setup + slow polling + 8s wait could exhaust it before
+  // the diagnostic page.evaluate calls.
+  test.setTimeout(90000);
+
   // Dedicated session so the existing pre-seeded `SESSION` keeps its
   // PS1 untouched and other tests' assertions don't race with our
   // injected output.
@@ -616,13 +623,20 @@ test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ pag
       `printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\${CANARY}\\n'`;
     tmux(`send-keys -t ${PT_SESSION} "${wrapped}" Enter`);
 
+    // Give the bytes a moment to traverse the pane -> tmux -> mobux
+    // PTY -> WS -> browser pipeline before we begin polling. This
+    // small fixed wait also serves as a baseline for the diagnostic
+    // capture below: if oscDetected stays false after both the wait
+    // AND the longer polling window, we know it's not a tiny race.
+    await page.waitForTimeout(500);
+
     // Poll for oscDetected. If this times out, the diagnostic block
     // below runs and tells us which layer dropped the bytes.
     let timedOut = false;
     try {
       await page.waitForFunction(
         () => window.__mobuxView.test.oscDetected() === true,
-        { timeout: 8000 },
+        { timeout: 5000 },
       );
     } catch (_) {
       timedOut = true;
