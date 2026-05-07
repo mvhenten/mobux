@@ -58,11 +58,19 @@ test('sessions API works', async ({ page }) => {
 test('terminal renders and connects', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  // Wait for WebSocket to connect and initial content to render
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 5000 });
+  
+  // Wait a bit for first data to arrive and loading screen to clear
+  await page.waitForTimeout(500);
+
+  // Check for terminal visibility - use .sterk-viewport which sterk creates
+  await expect(page.locator('.sterk-viewport')).toBeVisible({ timeout: 5000 });
   await expect(page.locator('#touchOverlay')).toBeAttached();
 
   await page.waitForFunction(() => {
-    const vp = document.querySelector('.xterm-viewport');
+    const vp = document.querySelector('.ace_scroller');
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
 });
@@ -73,14 +81,13 @@ test('scroll works via touch gesture', async ({ page }) => {
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   // Wait for WS attach + redraw to settle so it doesn't clobber our inject.
   await page.waitForTimeout(800);
-  // Inject 300 lines directly into xterm so we have guaranteed scrollback
+  // Inject 300 lines directly into the terminal so we have guaranteed scrollback
   // independent of session redraw timing.
   await page.evaluate(() => window.__mobuxView.test.injectLines(300, 'scrollseed'));
   await page.waitForTimeout(200);
 
-  // Park at the bottom; xterm tracks scroll position via viewportY in
-  // its buffer (not via the .xterm-viewport DOM scrollTop, which is
-  // virtualized in xterm.js v5+).
+  // Park at the bottom; the terminal tracks scroll position via viewportY in
+  // its buffer (not via the DOM scrollTop).
   await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
   // Let any in-flight WS bytes finish; sticky-bottom keeps viewportY
   // pinned to (bufferLen - rows) until we touch.
@@ -181,14 +188,14 @@ test('URLs in terminal output are tappable', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 
   await page.waitForFunction(() => {
-    const vp = document.querySelector('.xterm-viewport');
+    const vp = document.querySelector('.ace_scroller');
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
 
   await page.waitForTimeout(500);
 
   // Clear any prior test pollution so the URL line stays in the visible viewport.
-  await page.evaluate(() => document.querySelector('.xterm-helper-textarea').focus());
+  await page.evaluate(() => document.querySelector('.ace_text-input').focus());
   await page.keyboard.type('clear');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(300);
@@ -200,7 +207,7 @@ test('URLs in terminal output are tappable', async ({ page }) => {
 
   // Verify URL appears in terminal text
   const hasUrl = await page.evaluate(() => {
-    const rows = document.querySelector('.xterm-rows');
+    const rows = document.querySelector('.ace_text-layer');
     return rows?.textContent?.includes('https://example.com') ?? false;
   });
   expect(hasUrl).toBe(true);
@@ -208,7 +215,7 @@ test('URLs in terminal output are tappable', async ({ page }) => {
   // Verify our tap-to-link detection works by simulating the logic
   const detected = await page.evaluate(() => {
     const termEl = document.getElementById('terminal');
-    const rows = termEl?.querySelector('.xterm-rows');
+    const rows = termEl?.querySelector('.ace_text-layer');
     if (!rows) return false;
 
     // Find a row containing the URL
@@ -233,7 +240,7 @@ test('tapping a URL opens via anchor click (TWA Custom Tabs path), not window.op
   // is the documented escape hatch that triggers Chrome Custom Tabs
   // for out-of-scope URLs. Verify our handler uses the anchor path.
   await page.goto(`${BASE}/s/${SESSION}`);
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxOpenExternal === 'function', { timeout: 5000 });
 
   const result = await page.evaluate(async () => {
@@ -282,7 +289,7 @@ test('tapping a URL opens via anchor click (TWA Custom Tabs path), not window.op
 test('reader view renders buffer text', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   // Wait for WS attach + redraw to settle so it doesn't clobber our inject.
   await page.waitForTimeout(800);
@@ -307,7 +314,7 @@ test('reader view renders buffer text', async ({ page }) => {
 test('reader view live-updates on new output', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
 
@@ -331,9 +338,9 @@ test('long-press menu toggles reader view', async ({ page }) => {
     try { localStorage.clear(); } catch (_) {}
   });
   await page.goto(`${BASE}/s/${SESSION}`);
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => {
-    const vp = document.querySelector('.xterm-viewport');
+    const vp = document.querySelector('.ace_scroller');
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
 
@@ -367,7 +374,7 @@ test('panes API returns window id', async ({ page }) => {
   }
 });
 // ── Reader-view touch behaviour ─────────────────────────────────────
-// These tests guard against the regression where the xterm touch
+// These tests guard against the regression where the terminal touch
 // overlay sat over #reader and ate every touch — making scroll, swipe,
 // and (on real phones) the long-press menu unreachable.
 
@@ -383,7 +390,7 @@ async function fireTouch(page, selector, type, x, y) {
   }, { selector, type, x, y });
 }
 
-test('reader view disables xterm touch overlay', async ({ page }) => {
+test('reader view disables terminal touch overlay', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
@@ -396,7 +403,7 @@ test('reader view disables xterm touch overlay', async ({ page }) => {
   );
   expect(overlayPE).toBe('none');
 
-  // Flipping back must restore overlay so xterm gestures keep working.
+  // Flipping back must restore overlay so terminal gestures keep working.
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
   await page.waitForTimeout(150);
   const overlayPEAfter = await page.evaluate(() =>
@@ -758,7 +765,15 @@ test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => 
 });
 
 test('terminal picks readable fg by bg luminance when fg is default', async ({ page }) => {
-  // Regression (PR #55 → #6X): claude-code-style highlighted blocks
+  // TODO(sterk): This test requires SGR (color/style) rendering in Ace.
+  // Sterk's ace_renderer.ts currently returns plain text from renderLine().
+  // Need to:
+  //   1. Parse SGR attributes from buffer cells
+  //   2. Render styled <span> elements in Ace's document
+  //   3. Apply inline color/bg styles or Ace token classes
+  // Until then, this test will fail because no styled spans exist.
+  //
+  // Original intent (PR #55 → #6X): claude-code-style highlighted blocks
   // (`\x1b[42m text \x1b[0m`) were unreadable because the theme's
   // light-gray default fg landed on bright palette bgs (lime, cyan…).
   // PR #55 forced fg to dark on every explicit bg, which broke the
@@ -769,7 +784,7 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
 
-  // Make sure we're on the terminal (aceterm) view, not reader.
+  // Make sure we're on the terminal view, not reader.
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
   await page.waitForTimeout(150);
 
@@ -800,14 +815,26 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   };
 
   const styled = await page.evaluate(() => {
-    const spans = Array.from(document.querySelectorAll('.aceterm-line-bg'));
-    return spans
-      .filter((s) => /(GREEN|CYAN|BLACK|BLUE|YELLOW)_(BG|FG)/.test(s.textContent || ''))
-      .map((s) => ({
-        text: s.textContent,
-        color: s.style.color,
-        bg: s.style.backgroundColor,
-      }));
+    // Ace renders text in .ace_line elements with styled spans inside
+    const lines = Array.from(document.querySelectorAll('.ace_line'));
+    const styledSpans = [];
+    for (const line of lines) {
+      const text = line.textContent || '';
+      if (/(GREEN|CYAN|BLACK|BLUE|YELLOW)_(BG|FG)/.test(text)) {
+        // Find spans with inline styles in this line
+        const spans = line.querySelectorAll('span[style]');
+        for (const span of spans) {
+          if (span.style.backgroundColor || span.style.color) {
+            styledSpans.push({
+              text: span.textContent,
+              color: span.style.color,
+              bg: span.style.backgroundColor,
+            });
+          }
+        }
+      }
+    }
+    return styledSpans;
   });
 
   const find = (needle) => styled.find((s) => (s.text || '').includes(needle));
@@ -851,24 +878,19 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
 });
 
 test('terminal uses the muted base16 palette, not Tango defaults', async ({ page }) => {
-  // Regression: terminal-core.js sets a base16-tomorrow palette via
-  // `Aceterm.Terminal.setColors(...)` so the terminal view matches
-  // reader-mode and avoids the over-saturated Tango lime/cyan that
-  // makes highlighted blocks painful on a dark phone screen. Reaching
-  // libterm's Terminal class via `instance.constructor` returned
-  // `EventEmitter` (libterm replaces `prototype.constructor`), so the
-  // override silently no-op'd before the explicit `Aceterm.Terminal`
-  // pin landed.
+  // Regression: terminal-core.js sets a base16-tomorrow palette so the
+  // terminal view matches reader-mode and avoids the over-saturated Tango
+  // lime/cyan that makes highlighted blocks painful on a dark phone screen.
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(800);
 
   const palette = await page.evaluate(() => {
-    const T = window.__Aceterm && window.__Aceterm.Terminal;
-    if (!T || !T.colors) return null;
+    const sterk = window.__sterk;
+    if (!sterk || !sterk.options || !sterk.options.theme) return null;
     return {
-      base16: T.colors.slice(0, 16),
-      scrollback: T.scrollback,
+      base16: sterk.options.theme.palette || [],
+      scrollback: sterk.options.scrollback,
     };
   });
   expect(palette).toBeTruthy();
@@ -876,9 +898,9 @@ test('terminal uses the muted base16 palette, not Tango defaults', async ({ page
   // Tango's `#4e9a06`. Index 10 (bright green) should be `#98c379`,
   // not Tango's `#8ae234`. Index 14 (bright cyan) should be `#56b6c2`,
   // not Tango's `#34e2e2`.
-  expect(palette.base16[2].toLowerCase()).toBe('#b5bd68');
-  expect(palette.base16[10].toLowerCase()).toBe('#98c379');
-  expect(palette.base16[14].toLowerCase()).toBe('#56b6c2');
+  expect(palette.base16[2]?.toLowerCase()).toBe('#b5bd68');
+  expect(palette.base16[10]?.toLowerCase()).toBe('#98c379');
+  expect(palette.base16[14]?.toLowerCase()).toBe('#56b6c2');
   expect(palette.scrollback).toBe(10000);
 });
 
@@ -949,7 +971,8 @@ test('view preference persists per window', async ({ page }) => {
   await page.goto(`${BASE}/s/${session}`);
   await page.evaluate(() => { try { localStorage.clear(); } catch (_) {} });
   await page.reload();
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 5000 });
   await page.waitForTimeout(500);
 
   // Flip to reader via the API
@@ -1190,7 +1213,7 @@ test('synthetic viewport: bubble fusion under translated inner', async ({ page }
 
 test('input bar sits above on-screen keyboard via visualViewport', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(500);
 
@@ -1253,7 +1276,7 @@ test('input bar does not overlap #terminal when shown', async ({ page }) => {
   // sibling, #terminal.bottom must equal inputBar.top — no overlap,
   // both with and without a simulated on-screen keyboard.
   await page.goto(`${BASE}/s/${SESSION}`);
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(500);
 
@@ -1297,7 +1320,7 @@ test('input bar does not overlap #terminal when shown', async ({ page }) => {
 
 test('content area shrinks under on-screen keyboard so reader text stays visible', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(500);
 
@@ -1358,7 +1381,7 @@ test('content area shrinks under on-screen keyboard so reader text stays visible
 
 test('reader re-pins to bottom synchronously when keyboard appears', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
-  await expect(page.locator('.xterm-screen')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForTimeout(500);
 
@@ -1415,13 +1438,12 @@ test('reader re-pins to bottom synchronously when keyboard appears', async ({ pa
 
 test('theme picker swaps Terminal.colors[2] and #reader --ansi-2 live', async ({ page }) => {
   // Verify that switching themes (via the same JS path the settings
-  // picker uses) updates BOTH the terminal palette (libterm's class-
-  // level Terminal.colors[2]) and the reader-mode CSS variable
-  // (--ansi-2 on #reader). Index 2 is "green" — every bundle picks a
-  // different shade, so any pair of distinct themes must produce a
+  // picker uses) updates BOTH the terminal palette and the reader-mode
+  // CSS variable (--ansi-2 on #reader). Index 2 is "green" — every bundle
+  // picks a different shade, so any pair of distinct themes must produce a
   // different value at index 2.
   //
-  // Boot the terminal page (so #reader exists and Aceterm is loaded),
+  // Boot the terminal page (so #reader exists and sterk is loaded),
   // then drive applyTheme directly — same code path the settings page
   // calls on <select> change. No page reload between swaps to prove
   // the live-swap path actually works.
@@ -1431,9 +1453,9 @@ test('theme picker swaps Terminal.colors[2] and #reader --ansi-2 live', async ({
 
   // Default boot: tomorrow-night-soft. Green (index 2) = #b5bd68.
   const before = await page.evaluate(() => {
-    const T = window.__Aceterm && window.__Aceterm.Terminal;
+    const sterk = window.__sterk;
     return {
-      term: T && T.colors ? T.colors[2] : null,
+      term: sterk?.options?.theme?.palette?.[2] || null,
       reader: getComputedStyle(document.getElementById('reader'))
         .getPropertyValue('--ansi-2').trim(),
     };
@@ -1449,9 +1471,9 @@ test('theme picker swaps Terminal.colors[2] and #reader --ansi-2 live', async ({
     mod.setStoredThemeId('gruvbox-dark-soft');
     mod.applyTheme('gruvbox-dark-soft');
     window.dispatchEvent(new CustomEvent('mobux:theme', { detail: 'gruvbox-dark-soft' }));
-    const T = window.__Aceterm && window.__Aceterm.Terminal;
+    const sterk = window.__sterk;
     return {
-      term: T && T.colors ? T.colors[2] : null,
+      term: sterk?.options?.theme?.palette?.[2] || null,
       reader: getComputedStyle(document.getElementById('reader'))
         .getPropertyValue('--ansi-2').trim(),
     };
