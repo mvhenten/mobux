@@ -106,7 +106,7 @@ export class TerminalCore extends EventTarget {
     const hostW = this.host.clientWidth || (window.innerWidth - pad);
     const hostH = this.host.clientHeight || window.innerHeight;
     const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
-    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
+    const rows = Math.max(10, Math.floor(hostH / cell.height));
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
@@ -183,7 +183,7 @@ export class TerminalCore extends EventTarget {
     const hostW = this.host.clientWidth || (window.innerWidth - pad);
     const hostH = this.host.clientHeight || window.innerHeight;
     const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
-    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
+    const rows = Math.max(10, Math.floor(hostH / cell.height));
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
