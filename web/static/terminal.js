@@ -83,13 +83,14 @@ const core = new TerminalCore({ session, host: termEl });
 // Apply the stored theme to all three layers. terminal-core.js already
 // picked the matching palette + Ace theme at construction; this call
 // pushes the --ansi-* vars onto #reader for tokenized reader output.
-applyTheme(getStoredThemeId(), { editor: core.term._editor });
+const getEditor = () => core.term._sterk?.renderer?.getEditor?.();
+applyTheme(getStoredThemeId(), { editor: getEditor() });
 
 // Live swap when the settings page (or another tab) changes the theme.
 // `storage` only fires in OTHER documents — same-doc swaps go through
 // `mobux:theme` (dispatched by the picker).
 function onThemeChange() {
-  applyTheme(getStoredThemeId(), { editor: core.term._editor });
+  applyTheme(getStoredThemeId(), { editor: getEditor() });
 }
 window.addEventListener('storage', (e) => {
   if (e.key === 'mobux:theme') onThemeChange();
