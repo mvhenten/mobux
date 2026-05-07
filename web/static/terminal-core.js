@@ -101,6 +101,13 @@ export class TerminalCore extends EventTarget {
     const hostH = this.host.clientHeight || window.innerHeight;
     const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
     const rows = Math.max(10, Math.floor(hostH / cell.height));
+    
+    // Update .sterk-viewport height to match host
+    const viewport = this.host.querySelector('.sterk-viewport');
+    if (viewport && hostH > 0) {
+      viewport.style.height = `${hostH}px`;
+    }
+    
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
@@ -279,12 +286,37 @@ function makeSterkAdapter(host, sendCb) {
     throw err;
   }
 
+  // Force Ace to recalculate layout after DOM attachment.
+  // Ace's editor needs explicit pixel height to render properly.
+  // TODO: file sterk issue to call editor.resize() in AceRenderer.open()
+  if (sterk.renderer && sterk.renderer.getEditor) {
+    const editor = sterk.renderer.getEditor();
+    const viewport = host.querySelector('.sterk-viewport');
+    
+    if (editor && viewport && editor.resize) {
+      // Wait for DOM layout to settle
+      requestAnimationFrame(() => {
+        // Set explicit pixel height from parent
+        const hostHeight = host.clientHeight;
+        if (hostHeight > 0) {
+          viewport.style.height = `${hostHeight}px`;
+          editor.resize(true);
+        } else {
+          // Host not laid out yet; retry after another frame
+          requestAnimationFrame(() => {
+            const h = host.clientHeight;
+            if (h > 0) {
+              viewport.style.height = `${h}px`;
+              editor.resize(true);
+            }
+          });
+        }
+      });
+    }
+  }
+
   // Wire up input
   sterk.onData(sendCb);
-
-  // The smoke suite (and CSS selectors) reach for xterm.js's class names.
-  // Sterk uses Ace under the hood, so we alias Ace's classes after the DOM is ready.
-  setTimeout(() => aliasXtermClasses(host), 100);
 
   const writeParsedSubs = [];
 
@@ -382,37 +414,4 @@ function makeSterkCellAdapter(cell) {
   };
 }
 
-function aliasXtermClasses(host) {
-  // Retry a few times since Ace might not have created the DOM yet.
-  let attempts = 0;
-  const maxAttempts = 10;
-  
-  const tryAlias = () => {
-    try {
-      // .ace_scroller hosts the rendered text grid and is the scrolling
-      // viewport — same role as xterm's .xterm-viewport / .xterm-screen.
-      const scroller = host.querySelector('.ace_scroller');
-      if (scroller) {
-        scroller.classList.add('xterm-viewport', 'xterm-screen');
-        // Ace might set visibility: hidden initially; force visible for tests
-        scroller.style.visibility = 'visible';
-        const text = host.querySelector('.ace_text-layer');
-        if (text) text.classList.add('xterm-rows');
-        // Ace's hidden textarea is the one that actually receives
-        // keystrokes — alias to xterm's helper-textarea so the smoke
-        // suite can `.focus()` it the same way.
-        const ta = host.querySelector('.ace_text-input');
-        if (ta) ta.classList.add('xterm-helper-textarea');
-        return true; // Success
-      }
-    } catch (_) {}
-    
-    // Retry if elements not found yet and we haven't exceeded max attempts
-    if (++attempts < maxAttempts) {
-      setTimeout(tryAlias, 50);
-    }
-    return false;
-  };
-  
-  tryAlias();
-}
+
