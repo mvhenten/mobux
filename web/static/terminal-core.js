@@ -1,23 +1,24 @@
-// Aceterm-backed TerminalCore — exposes the same shape as the
-// xterm.js-backed version on `main` so the rest of mobux (gestures,
-// input bar, view toggle, reader, smoke tests) doesn't need to know
-// which renderer is underneath.
+// Sterk-backed TerminalCore — terminal façade for mobux.
 //
-// Spike-only: lives on the `spike-aceterm` branch and is wired in
-// through render_terminal_page on that branch's mobux. The buffer
-// adapter is intentionally minimal — enough for live rendering and
-// the input/scroll/window-switch tests; reader-side cell-detail
-// access (per-glyph fg/bg, `getCell`) is shimmed and several reader
-// tests are expected to fail until libterm's cell store is mapped
-// onto an xterm-like Cell API.
+// Wraps @kattebak/sterk (loaded via sterk.bundle.js), owns the WebSocket,
+// OSC 133 handling, tmux pane tracking, etc.
+//
+// Public surface (consumed by terminal.js, reader-view.js):
+// - write(data), resize(cols, rows), clear(), scrollLines(n), scrollToBottom()
+// - getActiveBuffer() → buffer adapter for reader-view
+// - setFontSize(px), getFontSize()
+// - cellSize() → {width, height}
+// - refreshPanes(), switchWindow(dir), runTmuxCmd(cmd), reloadHistory()
+// - connect(), reconnect(), send(data)
+// - Events: 'open', 'data', 'panes', 'history', 'osc-detected'
 
 import { getStoredThemeId, getTheme } from './themes.js';
 
-// `window.__Aceterm` is populated by aceterm.bundle.js (loaded as a
-// classic <script> in render_terminal_page before this module runs).
-const Aceterm = window.__Aceterm;
-if (!Aceterm) {
-  throw new Error('aceterm bundle not loaded — check vendor/aceterm.bundle.js script tag');
+// `window.Sterk` is populated by sterk.bundle.js (loaded as a classic
+// <script> in render_terminal_page before this module runs).
+const Sterk = window.Sterk;
+if (!Sterk || !Sterk.createTerminal) {
+  throw new Error('sterk bundle not loaded — check vendor/sterk.bundle.js script tag');
 }
 
 const WINDOW_SWITCH_CMDS = new Set([
@@ -36,13 +37,12 @@ export class TerminalCore extends EventTarget {
     this.oscMarkers = new Map();
     this.oscDetected = false;
 
-    this.term = makeAcetermAdapter(host, (data) => this.send(data));
+    this.term = makeSterkAdapter(host, (data) => this.send(data));
     this._wireWriteParsedFanout();
     this._wireOsc133();
-    // Spike-only debug peephole.
+    // Debug peephole for tests.
     if (typeof window !== 'undefined') {
-      window.__lt = this.term._libterm;
-      window.__ed = this.term._editor;
+      window.__sterk = this.term;
     }
   }
 
@@ -97,12 +97,6 @@ export class TerminalCore extends EventTarget {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const cell = this.cellSize();
     const pad = this._horizontalPadding();
-    // The input bar is now a flex sibling of `#terminal` — when it is
-    // shown the host clientHeight already excludes its row, so we
-    // don't need to subtract `barHeight` (or the keyboard offset, since
-    // body shrinks to vv.height when the keyboard pops up). Using
-    // host.clientHeight makes us robust to whichever offset shrinks
-    // the host without re-deriving the formula here.
     const hostW = this.host.clientWidth || (window.innerWidth - pad);
     const hostH = this.host.clientHeight || window.innerHeight;
     const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
@@ -127,9 +121,11 @@ export class TerminalCore extends EventTarget {
   }
 
   cellSize() {
-    const r = this.term._editor && this.term._editor.renderer;
-    if (r && r.characterWidth && r.lineHeight) {
-      return { width: r.characterWidth, height: r.lineHeight };
+    const metrics = this.term._sterk && this.term._sterk.getCellMetrics
+      ? this.term._sterk.getCellMetrics()
+      : null;
+    if (metrics) {
+      return { width: metrics.width, height: metrics.height };
     }
     return { width: 9, height: 18 };
   }
@@ -143,8 +139,6 @@ export class TerminalCore extends EventTarget {
   setFontSize(px) {
     if (px !== this.term.options.fontSize) {
       this.term.options.fontSize = px;
-      const ed = this.term._editor;
-      if (ed) ed.setFontSize(px);
       this.resize();
     }
   }
@@ -221,142 +215,102 @@ export class TerminalCore extends EventTarget {
   }
 
   _wireWriteParsedFanout() {
-    // libterm emits `afterWrite` after each `write()`. There is no
-    // `refresh` event — `refresh` is a method on Terminal, not an
-    // EventEmitter signal. Use `afterWrite` to fire the
-    // `onWriteParsed` subscribers the reader relies on.
-    if (this.term._libterm && this.term._libterm.on) {
-      this.term._libterm.on('afterWrite', () => {
+    // Sterk's onWriteParsed fires after each write(). We subscribe once
+    // here and fan out to all _writeParsedSubs subscribers (the reader
+    // relies on this).
+    if (this.term._sterk && this.term._sterk.onWriteParsed) {
+      this.term._sterk.onWriteParsed(() => {
         for (const cb of this.term._writeParsedSubs) cb();
       });
     }
   }
 
   _wireOsc133() {
-    // libterm's patched OSC dispatcher invokes handleOsc133 on every
-    // `OSC 133 ; X ST`. Same shape as the xterm-side handler in
-    // main: A/B mark prompts, record kind by absolute buffer row.
-    this.term._libterm.handleOsc133 = (data) => {
-      const kind = (data || '').charAt(0);
-      if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return;
-      const lt = this.term._libterm;
-      const absY = (lt.ybase || 0) + (lt.y || 0);
-      this.oscMarkers.set(absY, kind);
-      if (!this.oscDetected) {
-        this.oscDetected = true;
-        this.dispatchEvent(new Event('osc-detected'));
-      }
-    };
+    // Sterk's parser.registerOscHandler(133, handler) lets us hook OSC
+    // 133 sequences. A/B mark prompts, record kind by absolute buffer row.
+    if (this.term._sterk && this.term._sterk.parser) {
+      this.term._sterk.parser.registerOscHandler(133, (data) => {
+        const kind = (data || '').charAt(0);
+        if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return false;
+        const buf = this.term._sterk.buffer.active;
+        const absY = (buf.baseY || 0) + (buf.cursorY || 0);
+        this.oscMarkers.set(absY, kind);
+        if (!this.oscDetected) {
+          this.oscDetected = true;
+          this.dispatchEvent(new Event('osc-detected'));
+        }
+        return false; // Allow other handlers
+      });
+    }
   }
 }
 
-// ── libterm + Ace adapter ─────────────────────────────────────────
-function makeAcetermAdapter(host, sendCb) {
-  const initialCols = 120, initialRows = 35;
-  // libterm globals live on the Terminal CLASS, not the instance —
-  // and `instance.constructor` is `EventEmitter` (libterm overrides
-  // `Terminal.prototype = new EventEmitter()`, which replaces
-  // `prototype.constructor`). Reach the real class via the explicit
-  // `Aceterm.Terminal` pin set by aceterm-globals-entry.js. We must
-  // configure scrollback + palette BEFORE constructing the instance,
-  // otherwise the constructor copies the wrong defaults into curAttr/
-  // defAttr and uses the Tango palette for the rest of the session.
-  const Terminal = Aceterm.Terminal;
+// ── Sterk adapter ────────────────────────────────────────────────────
+function makeSterkAdapter(host, sendCb) {
   const theme = getTheme(getStoredThemeId());
-  if (Terminal) {
-    Terminal.scrollback = 10000;
-    if (typeof Terminal.setColors === 'function') {
-      // Match the reader's --ansi-* palette so the same SGR sequences
-      // render the same way in both views. The default Tango palette
-      // is too saturated for a dark phone screen — pull from the
-      // active theme bundle (themes.js).
-      Terminal.setColors(undefined, undefined, theme.palette.slice(0, 16));
-    }
+  
+  // Create sterk terminal with theme and scrollback
+  let sterk;
+  try {
+    sterk = Sterk.createTerminal({
+      cols: 120,
+      rows: 35,
+      scrollback: 10000,
+      fontSize: 13,
+      fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
+      theme: {
+        foreground: theme.foreground,
+        background: theme.background,
+        palette: theme.palette,
+      },
+    });
+  } catch (err) {
+    console.error('[sterk] createTerminal failed:', err);
+    window.__sterkError = err;
+    throw err;
   }
-  const libterm = Aceterm(initialCols, initialRows, sendCb);
-  // libterm switches `noScrollBack()` to true when the program enables
-  // mouseEvents/applicationKeypad (tmux turns mouse events on). That
-  // shrinks Ace's session to just the visible region, hiding all
-  // scrollback from the renderer (and from `viewportY` in the smoke
-  // tests). Force it off — for a phone-shaped scrollback-pinned reader
-  // we always want the full history available.
-  libterm.noScrollBack = function() { return false; };
-  // theme-*.js bundles are loaded as classic <script>s in
-  // render_terminal_page, so each module is already registered with
-  // Ace's loader by the time we ask for it here — no XHR.
-  const editor = Aceterm.createEditor(host, theme.aceTheme);
-  editor.setSession(libterm.aceSession);
-  editor.renderer.setShowGutter(false);
-  editor.renderer.setShowPrintMargin(false);
-  editor.setFontSize(13);
-  editor.setOption('fontFamily',
-    "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace");
-  host.style.height = '100%';
-  host.style.width = '100%';
 
-  attachTouchScroll(editor, host);
+  // Mount to DOM
+  try {
+    sterk.open(host);
+  } catch (err) {
+    console.error('[sterk] open failed:', err);
+    window.__sterkError = err;
+    throw err;
+  }
 
-  // The smoke suite (and a few CSS selectors in mobux itself) reach
-  // for xterm.js's class names. Alias them onto Ace's structurally
-  // equivalent elements so existing assertions about visibility /
-  // scrolling don't have to know which renderer is mounted.
-  // Synchronous — racing against page-side `expect(...).toBeVisible`
-  // means setTimeout(0) is too late.
-  aliasXtermClasses(host);
-  // Re-apply after Ace's first async layout in case it rebuilds the
-  // scroller/text-layer DOM (it does on resize / theme change).
-  editor.renderer.on('afterRender', () => aliasXtermClasses(host));
+  // Wire up input
+  sterk.onData(sendCb);
+
+  // The smoke suite (and CSS selectors) reach for xterm.js's class names.
+  // Sterk uses Ace under the hood, so we alias Ace's classes after the DOM is ready.
+  setTimeout(() => aliasXtermClasses(host), 100);
 
   const writeParsedSubs = [];
-  const dataSubs = [];
-
-  // OSC 133 stub — libterm's parser doesn't surface OSC 133, so the
-  // map stays empty and the reader's "shell integration not detected"
-  // hint stays visible (accurate for now).
-  const parser = {
-    registerOscHandler(_id, _cb) {
-      return { dispose() {} };
-    },
-  };
 
   return {
-    _libterm: libterm,
-    _editor: editor,
+    _sterk: sterk,
     _writeParsedSubs: writeParsedSubs,
-    _dataSubs: dataSubs,
-    options: { fontSize: 13 },
-    parser,
+    options: sterk.options,
+    parser: sterk.parser,
 
-    get cols() { return libterm.cols; },
-    get rows() { return libterm.rows; },
+    get cols() { return sterk.cols; },
+    get rows() { return sterk.rows; },
 
     write(data, cb) {
-      libterm.write(typeof data === 'string'
-        ? data
-        : new TextDecoder().decode(data));
-      if (typeof cb === 'function') queueMicrotask(cb);
+      sterk.write(data, cb);
     },
-    resize(cols, rows) { libterm.resize(cols, rows); },
-    clear() { libterm.clear && libterm.clear(); },
+    resize(cols, rows) {
+      sterk.resize(cols, rows);
+    },
+    clear() {
+      sterk.clear();
+    },
     scrollToBottom() {
-      try {
-        // Resolve Ace's "stick to bottom" by setting the explicit
-        // pixel scrollTop. Reading `session.getScrollTop()` after
-        // `setScrollTop(-1)` returns -1 (the sentinel), which makes
-        // synchronous callers (smoke tests) see no scroll. Setting
-        // an explicit pixel offset commits the position.
-        const lh = editor.renderer.lineHeight || 18;
-        const docLen = editor.session.doc.getLength();
-        const sh = (editor.renderer.scroller
-          ? editor.renderer.scroller.clientHeight
-          : (editor.renderer.$size && editor.renderer.$size.scrollerHeight)) || 0;
-        const maxScroll = Math.max(0, docLen * lh - sh);
-        editor.session.setScrollTop(maxScroll);
-      } catch (_) {}
+      sterk.scrollToBottom();
     },
     scrollLines(n) {
-      const r = editor.renderer;
-      r.session.setScrollTop(r.getScrollTop() + n * r.lineHeight);
+      sterk.scrollLines(n);
     },
 
     onWriteParsed(cb) {
@@ -367,147 +321,98 @@ function makeAcetermAdapter(host, sendCb) {
       } };
     },
     onData(cb) {
-      dataSubs.push(cb);
-      return { dispose() {
-        const i = dataSubs.indexOf(cb);
-        if (i >= 0) dataSubs.splice(i, 1);
-      } };
+      return sterk.onData(cb);
     },
 
     buffer: {
       get active() {
-        return makeBufferAdapter(libterm, editor);
+        return makeSterkBufferAdapter(sterk);
       },
     },
   };
 }
 
-function makeBufferAdapter(lt, editor) {
+function makeSterkBufferAdapter(sterk) {
+  const buf = sterk.buffer.active;
   return {
-    get length() {
-      return Math.max(lt.lines ? lt.lines.length : 0, lt.rows + (lt.ybase || 0));
-    },
-    get cursorX() { return lt.x || 0; },
-    get cursorY() { return lt.y || 0; },
-    get baseY() { return lt.ybase || 0; },
-    // xterm's `viewportY` is "the absolute row index of the topmost
-    // VISIBLE row" — tracks the user's scroll position. In aceterm
-    // libterm renders into Ace's session whose viewport scrolls
-    // independently of libterm's `ybase`, so read Ace's first
-    // visible row instead.
-    get viewportY() {
-      if (editor && editor.renderer) {
-        const r = editor.renderer;
-        return r.getFirstVisibleRow ? r.getFirstVisibleRow() : 0;
-      }
-      return lt.ybase || 0;
-    },
+    get length() { return buf.length; },
+    get cursorX() { return buf.cursorX; },
+    get cursorY() { return buf.cursorY; },
+    get baseY() { return buf.baseY; },
+    get viewportY() { return buf.viewportY; },
     getLine(y) {
-      if (!lt.lines || !lt.lines[y]) return null;
-      return makeLineAdapter(lt.lines[y]);
+      const line = buf.getLine(y);
+      return line ? makeSterkLineAdapter(line) : null;
     },
   };
 }
 
-// libterm packs each cell as `[attrInt, ch]` where attrInt is:
-//   bits  0..8  bg colour (256 = default)
-//   bits  9..17 fg colour (257 = default)
-//   bit   18    bold
-//   bit   19    underline
-//   bit   20    inverse
-// (no italic, no dim, no truecolour — libterm is palette-only.)
-const LT_BG_DEFAULT = 256;
-const LT_FG_DEFAULT = 257;
-
-function makeLineAdapter(cells) {
-  const text = cells.map((c) => (Array.isArray(c) ? c[1] : (c && c.ch) || '')).join('');
+function makeSterkLineAdapter(line) {
   return {
-    isWrapped: false,
-    translateToString(_trim) { return text; },
-    getCell(x) {
-      const c = cells[x];
-      const attr = Array.isArray(c) ? c[0] : 0;
-      const ch = Array.isArray(c) ? c[1] : (c && c.ch) || ' ';
-      const bg = attr & 0x1ff;
-      const fg = (attr >> 9) & 0x1ff;
-      const flags = attr >> 18;
-      const isFgDef = fg === LT_FG_DEFAULT;
-      const isBgDef = bg === LT_BG_DEFAULT;
-      return {
-        getChars() { return ch; },
-        getCode() { return ch ? ch.codePointAt(0) || 0 : 0; },
-        // libterm is palette-only; never RGB.
-        isFgRGB() { return false; },
-        isBgRGB() { return false; },
-        isFgPalette() { return !isFgDef; },
-        isBgPalette() { return !isBgDef; },
-        isFgDefault() { return isFgDef; },
-        isBgDefault() { return isBgDef; },
-        getFgColor() { return isFgDef ? -1 : fg; },
-        getBgColor() { return isBgDef ? -1 : bg; },
-        getFgColorMode() { return isFgDef ? 0 : 0x100; },
-        getBgColorMode() { return isBgDef ? 0 : 0x100; },
-        isBold()       { return !!(flags & 1); },
-        isUnderline()  { return !!(flags & 2); },
-        isInverse()    { return !!(flags & 4); },
-        // libterm doesn't track these — surface as off so the
-        // reader doesn't render them differently from the canvas.
-        isItalic()     { return false; },
-        isDim()        { return false; },
-      };
+    get isWrapped() { return line.isWrapped; },
+    translateToString(trimRight) {
+      return line.translateToString(trimRight);
     },
+    getCell(x) {
+      const cell = line.getCell(x);
+      return makeSterkCellAdapter(cell);
+    },
+  };
+}
+
+function makeSterkCellAdapter(cell) {
+  return {
+    getChars() { return cell.getChars(); },
+    getCode() { return cell.getCode(); },
+    isFgRGB() { return cell.isFgRGB(); },
+    isBgRGB() { return cell.isBgRGB(); },
+    isFgPalette() { return cell.isFgPalette(); },
+    isBgPalette() { return cell.isBgPalette(); },
+    isFgDefault() { return cell.isFgDefault(); },
+    isBgDefault() { return cell.isBgDefault(); },
+    getFgColor() { return cell.getFgColor(); },
+    getBgColor() { return cell.getBgColor(); },
+    getFgColorMode() { return cell.getFgColorMode(); },
+    getBgColorMode() { return cell.getBgColorMode(); },
+    isBold() { return cell.isBold(); },
+    isItalic() { return cell.isItalic(); },
+    isUnderline() { return cell.isUnderline(); },
+    isInverse() { return cell.isInverse(); },
+    isDim() { return cell.isDim(); },
   };
 }
 
 function aliasXtermClasses(host) {
-  try {
-    // .ace_scroller hosts the rendered text grid and is the scrolling
-    // viewport — same role as xterm's .xterm-viewport / .xterm-screen.
-    const scroller = host.querySelector('.ace_scroller');
-    if (scroller) scroller.classList.add('xterm-viewport', 'xterm-screen');
-    const text = host.querySelector('.ace_text-layer');
-    if (text) text.classList.add('xterm-rows');
-    // Ace's hidden textarea is the one that actually receives
-    // keystrokes — alias to xterm's helper-textarea so the smoke
-    // suite can `.focus()` it the same way.
-    const ta = host.querySelector('.ace_text-input');
-    if (ta) ta.classList.add('xterm-helper-textarea');
-  } catch (_) {}
-}
-
-// Ace's MouseHandler treats touchmove as drag-select on mobile —
-// finger-scroll the buffer and Ace highlights blocks of text instead
-// of moving the viewport. Pre-empt every touch event on the editor
-// container, translate vertical drag into renderer scroll, and
-// stopPropagation so Ace never sees it.
-function attachTouchScroll(editor, host) {
-  let lastY = null;
-  let activeId = null;
-
-  const onStart = (e) => {
-    if (e.touches.length !== 1) { activeId = null; return; }
-    activeId = e.touches[0].identifier;
-    lastY = e.touches[0].clientY;
-  };
-  const onMove = (e) => {
-    if (activeId == null) return;
-    let t = null;
-    for (const tt of e.touches) if (tt.identifier === activeId) { t = tt; break; }
-    if (!t) return;
-    const dy = lastY - t.clientY;
-    lastY = t.clientY;
-    if (Math.abs(dy) > 0) {
-      const r = editor.renderer;
-      const top = r.getScrollTop();
-      r.session.setScrollTop(top + dy);
-      e.preventDefault();
-      e.stopPropagation();
+  // Retry a few times since Ace might not have created the DOM yet.
+  let attempts = 0;
+  const maxAttempts = 10;
+  
+  const tryAlias = () => {
+    try {
+      // .ace_scroller hosts the rendered text grid and is the scrolling
+      // viewport — same role as xterm's .xterm-viewport / .xterm-screen.
+      const scroller = host.querySelector('.ace_scroller');
+      if (scroller) {
+        scroller.classList.add('xterm-viewport', 'xterm-screen');
+        // Ace might set visibility: hidden initially; force visible for tests
+        scroller.style.visibility = 'visible';
+        const text = host.querySelector('.ace_text-layer');
+        if (text) text.classList.add('xterm-rows');
+        // Ace's hidden textarea is the one that actually receives
+        // keystrokes — alias to xterm's helper-textarea so the smoke
+        // suite can `.focus()` it the same way.
+        const ta = host.querySelector('.ace_text-input');
+        if (ta) ta.classList.add('xterm-helper-textarea');
+        return true; // Success
+      }
+    } catch (_) {}
+    
+    // Retry if elements not found yet and we haven't exceeded max attempts
+    if (++attempts < maxAttempts) {
+      setTimeout(tryAlias, 50);
     }
+    return false;
   };
-  const onEnd = () => { activeId = null; lastY = null; };
-
-  host.addEventListener('touchstart', onStart, { capture: true, passive: false });
-  host.addEventListener('touchmove', onMove, { capture: true, passive: false });
-  host.addEventListener('touchend', onEnd, { capture: true, passive: true });
-  host.addEventListener('touchcancel', onEnd, { capture: true, passive: true });
+  
+  tryAlias();
 }
