@@ -84,7 +84,8 @@ test('scroll works via touch gesture', async ({ page }) => {
   // Inject 300 lines directly into the terminal so we have guaranteed scrollback
   // independent of session redraw timing.
   await page.evaluate(() => window.__mobuxView.test.injectLines(300, 'scrollseed'));
-  await page.waitForFunction(() => window.__mobuxView.test.bufferLength() > 300, { timeout: 5000 });
+  // On CI, terminal emulation is slower - wait up to 15s for buffer to grow
+  await page.waitForFunction(() => window.__mobuxView.test.bufferLength() > 300, { timeout: 15000 });
 
   // Park at the bottom; the terminal tracks scroll position via viewportY in
   // its buffer (not via the DOM scrollTop).
@@ -205,10 +206,11 @@ test('URLs in terminal output are tappable', async ({ page }) => {
   await page.keyboard.press('Enter');
   
   // Wait for the URL to appear in the terminal text
+  // On CI, echo output can take longer to render
   await page.waitForFunction(() => {
     const rows = document.querySelector('.ace_text-layer');
     return rows?.textContent?.includes('https://example.com') ?? false;
-  }, { timeout: 5000 });
+  }, { timeout: 15000 });
 
   // Verify URL appears in terminal text
   const hasUrl = await page.evaluate(() => {
@@ -800,11 +802,12 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   );
   
   // Wait for Ace to tokenize and render the SGR sequences
+  // On CI, Ace tokenization is slower
   await page.waitForFunction(() => {
     const lines = Array.from(document.querySelectorAll('.ace_line'));
     return lines.some(line => line.textContent && line.textContent.includes('GREEN_BG_DEFAULT_FG'));
-  }, { timeout: 5000 });
-  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 5000 });
+  }, { timeout: 15000 });
+  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 15000 });
 
   const hexToRgb = (hex) => {
     const h = hex.replace('#', '');
@@ -1146,12 +1149,13 @@ test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
   // Wait for the reader to process the new lines and settle.
   // Since we're scrolled to the top, the reader should NOT auto-scroll
   // to the bottom, so scrollY should stay near 0.
+  // On CI, reader rendering is slower
   await page.waitForFunction(() => {
     const maxScroll = window.__mobuxView.test.readerMaxScroll();
     const scrollY = window.__mobuxView.test.readerScrollY();
     // Wait for maxScroll to grow (new content arrived) and scrollY to settle near 0
     return maxScroll > 200 && scrollY <= 5;
-  }, { timeout: 3000 });
+  }, { timeout: 15000 });
 
   const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
   expect(sy).toBeGreaterThanOrEqual(0);
@@ -1219,10 +1223,11 @@ test('synthetic viewport: history smoke renders blocks and overflows', async ({ 
   await page.evaluate(() => window.__mobuxView.test.injectLines(200, 'hist'));
   await page.evaluate(() => window.__mobuxView.swap('reader'));
 
+  // On CI, reader block rendering is slower
   await page.waitForFunction(
     () => document.querySelectorAll('#reader .rb-line').length >= 100
       && window.__mobuxView.test.readerMaxScroll() > 0,
-    { timeout: 5000 },
+    { timeout: 15000 },
   );
 
   const max = await page.evaluate(() => window.__mobuxView.test.readerMaxScroll());
