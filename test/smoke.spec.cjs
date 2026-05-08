@@ -79,13 +79,23 @@ test('scroll works via touch gesture', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
-  // Wait for WS attach + redraw to settle so it doesn't clobber our inject.
-  await page.waitForTimeout(800);
+  // Wait for WS to be fully ready before injecting lines
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
+  // Wait for initial buffer to stabilize
+  await page.waitForTimeout(500);
+  
   // Inject 300 lines directly into the terminal so we have guaranteed scrollback
-  // independent of session redraw timing.
   await page.evaluate(() => window.__mobuxView.test.injectLines(300, 'scrollseed'));
-  // On CI, terminal emulation is slower - wait up to 15s for buffer to grow
-  await page.waitForFunction(() => window.__mobuxView.test.bufferLength() > 300, { timeout: 15000 });
+  
+  // On CI, terminal processing is slower - wait for buffer to grow large enough to scroll
+  await page.waitForFunction(
+    () => {
+      const len = window.__mobuxView.test.bufferLength();
+      // Buffer must be significantly larger than viewport (35 rows) for scrolling to work
+      return len > 200;
+    },
+    { timeout: 20000 }
+  );
 
   // Park at the bottom; the terminal tracks scroll position via viewportY in
   // its buffer (not via the DOM scrollTop).
@@ -192,25 +202,29 @@ test('URLs in terminal output are tappable', async ({ page }) => {
     const vp = document.querySelector('.ace_scroller');
     return vp && vp.scrollHeight > 100;
   }, { timeout: 5000 });
-
-  await page.waitForTimeout(500);
+  
+  // Wait for WS to be ready before typing commands
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
+  await page.waitForTimeout(300);
 
   // Clear any prior test pollution so the URL line stays in the visible viewport.
   await page.evaluate(() => document.querySelector('.ace_text-input').focus());
   await page.keyboard.type('clear');
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(300);
+  
+  // Wait for clear to complete (buffer should shrink or viewport should clear)
+  await page.waitForTimeout(500);
 
   // Type echo URL command
   await page.keyboard.type('echo https://example.com');
   await page.keyboard.press('Enter');
   
   // Wait for the URL to appear in the terminal text
-  // On CI, echo output can take longer to render
+  // On CI, echo output can take longer to render through the shell
   await page.waitForFunction(() => {
     const rows = document.querySelector('.ace_text-layer');
     return rows?.textContent?.includes('https://example.com') ?? false;
-  }, { timeout: 15000 });
+  }, { timeout: 20000 });
 
   // Verify URL appears in terminal text
   const hasUrl = await page.evaluate(() => {
@@ -784,7 +798,10 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   // theme's color values.
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
-  await page.waitForTimeout(800);
+  
+  // Wait for WS to be ready before injecting ANSI sequences
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
+  await page.waitForTimeout(300);
 
   // Make sure we're on the terminal view, not reader.
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
@@ -806,8 +823,8 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   await page.waitForFunction(() => {
     const lines = Array.from(document.querySelectorAll('.ace_line'));
     return lines.some(line => line.textContent && line.textContent.includes('GREEN_BG_DEFAULT_FG'));
-  }, { timeout: 15000 });
-  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 15000 });
+  }, { timeout: 20000 });
+  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 20000 });
 
   const hexToRgb = (hex) => {
     const h = hex.replace('#', '');
@@ -1046,7 +1063,9 @@ test('view preference persists per window', async ({ page }) => {
 async function bootReader(page) {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
-  await page.waitForTimeout(800);
+  // Wait for WS to be ready before swapping views
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
+  await page.waitForTimeout(300);
   // Make sure we start from a clean reader mount.
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
   await page.waitForTimeout(50);
@@ -1056,9 +1075,10 @@ async function bootReader(page) {
 
 async function fillReader(page, n = 300, prefix = 'svline') {
   await page.evaluate((args) => window.__mobuxView.test.injectLines(args.n, args.prefix), { n, prefix });
+  // On CI, reader rendering is slower
   await page.waitForFunction(
     () => window.__mobuxView.test.readerMaxScroll() > 0,
-    { timeout: 3000 },
+    { timeout: 15000 },
   );
 }
 
