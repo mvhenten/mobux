@@ -286,35 +286,6 @@ function makeSterkAdapter(host, sendCb) {
     throw err;
   }
 
-  // Force Ace to recalculate layout after DOM attachment.
-  // Ace's editor needs explicit pixel height to render properly.
-  // TODO: file sterk issue to call editor.resize() in AceRenderer.open()
-  if (sterk.renderer && sterk.renderer.getEditor) {
-    const editor = sterk.renderer.getEditor();
-    const viewport = host.querySelector('.sterk-viewport');
-    
-    if (editor && viewport && editor.resize) {
-      // Wait for DOM layout to settle
-      requestAnimationFrame(() => {
-        // Set explicit pixel height from parent
-        const hostHeight = host.clientHeight;
-        if (hostHeight > 0) {
-          viewport.style.height = `${hostHeight}px`;
-          editor.resize(true);
-        } else {
-          // Host not laid out yet; retry after another frame
-          requestAnimationFrame(() => {
-            const h = host.clientHeight;
-            if (h > 0) {
-              viewport.style.height = `${h}px`;
-              editor.resize(true);
-            }
-          });
-        }
-      });
-    }
-  }
-
   // Wire up input
   sterk.onData(sendCb);
 

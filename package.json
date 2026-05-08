@@ -27,7 +27,7 @@
     "@playwright/test": "^1.59.1"
   },
   "dependencies": {
-    "@kattebak/sterk": "^2.0.0",
+    "@kattebak/sterk": "^2.0.1",
     "esbuild": "^0.28.0"
   }
 }
