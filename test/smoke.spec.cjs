@@ -863,39 +863,50 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     ];
 
     const result = {};
+    const debug = { totalLines: lines.length, linesWithMarkers: 0, linesWithSterk: 0 };
+    
     for (const marker of markers) {
       // Find the line containing this marker
       const line = lines.find((l) => (l.textContent || '').includes(marker));
-      if (!line) continue;
-
-      // Find the first span with sterk- classes on this line
-      const spans = line.querySelectorAll('span');
-      for (const span of spans) {
-        const cls = span.className;
-        if (!cls.includes('sterk-')) continue;
-
-        let fgColor = defaultFg;
-        let bgColor = defaultBg;
-
-        // Extract fg palette index from class (e.g., "ace_sterk-fg-3")
-        const fgMatch = cls.match(/sterk-fg-(\d+)/);
-        if (fgMatch) {
-          const idx = parseInt(fgMatch[1], 10);
-          fgColor = palette[idx] || defaultFg;
-        }
-
-        // Extract bg palette index from class (e.g., "ace_sterk-bg-2")
-        const bgMatch = cls.match(/sterk-bg-(\d+)/);
-        if (bgMatch) {
-          const idx = parseInt(bgMatch[1], 10);
-          bgColor = palette[idx] || defaultBg;
-        }
-
-        // Use the first sterk-styled span on this line as representative
-        result[marker] = { marker, color: fgColor, bg: bgColor };
-        break;
+      if (!line) {
+        debug[`missing_${marker}`] = 'line not found';
+        continue;
       }
+      debug.linesWithMarkers++;
+
+      // Find ANY span with sterk- classes on this line (not just the first)
+      // On CI, the marker text might not be in the same span as the sterk classes
+      const spans = Array.from(line.querySelectorAll('span'));
+      const sterkSpan = spans.find((span) => span.className.includes('sterk-'));
+      
+      if (!sterkSpan) {
+        debug[`missing_${marker}`] = `line found but no sterk spans (total spans: ${spans.length}, classes: ${spans.map(s => s.className).join('; ')})`;
+        continue;
+      }
+      debug.linesWithSterk++;
+
+      const cls = sterkSpan.className;
+      let fgColor = defaultFg;
+      let bgColor = defaultBg;
+
+      // Extract fg palette index from class (e.g., "ace_sterk-fg-3")
+      const fgMatch = cls.match(/sterk-fg-(\d+)/);
+      if (fgMatch) {
+        const idx = parseInt(fgMatch[1], 10);
+        fgColor = palette[idx] || defaultFg;
+      }
+
+      // Extract bg palette index from class (e.g., "ace_sterk-bg-2")
+      const bgMatch = cls.match(/sterk-bg-(\d+)/);
+      if (bgMatch) {
+        const idx = parseInt(bgMatch[1], 10);
+        bgColor = palette[idx] || defaultBg;
+      }
+
+      // Use the first sterk-styled span on this line as representative
+      result[marker] = { marker, color: fgColor, bg: bgColor };
     }
+    result.__debug = debug;
     return result;
   });
 
@@ -907,8 +918,13 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   const blue = find('BLUE_BG_DEFAULT_FG');
   const yel = find('YELLOW_FG_BLUE_BG');
 
-  for (const s of [green, cyan, black, blue, yel]) {
-    expect(s).toBeTruthy();
+  // Diagnostic: show which markers were found
+  const markers = { green, cyan, black, blue, yel };
+  for (const [name, s] of Object.entries(markers)) {
+    if (!s) {
+      const debug = styled.__debug || {};
+      throw new Error(`Marker ${name} not found. Debug: ${JSON.stringify(debug, null, 2)}`);
+    }
     expect(s.color).toBeTruthy();
     expect(s.bg).toBeTruthy();
   }
