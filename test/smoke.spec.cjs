@@ -1175,13 +1175,15 @@ test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
   // Wait for the reader to process the new lines and settle.
   // Since we're scrolled to the top, the reader should NOT auto-scroll
   // to the bottom, so scrollY should stay near 0.
-  // On CI, reader rendering is slower
+  //
+  // Reader render is triggered by onWriteParsed → _scheduleRender (50ms throttle).
+  // On CI, the render may not have completed by the time the write Promise resolves.
   await page.waitForFunction(() => {
     const maxScroll = window.__mobuxView.test.readerMaxScroll();
     const scrollY = window.__mobuxView.test.readerScrollY();
-    // Wait for maxScroll to grow (new content arrived) and scrollY to settle near 0
+    // Wait for maxScroll to grow (new content arrived) and scrollY to stay near 0
     return maxScroll > 200 && scrollY <= 5;
-  }, { timeout: 15000 });
+  }, { timeout: 20000 });
 
   const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
   expect(sy).toBeGreaterThanOrEqual(0);
