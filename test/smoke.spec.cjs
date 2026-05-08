@@ -798,7 +798,13 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     '\x1b[44mBLUE_BG_DEFAULT_FG\x1b[0m\n' +
     '\x1b[33;44mYELLOW_FG_BLUE_BG\x1b[0m\n',
   );
-  await page.waitForTimeout(300);
+  
+  // Wait for Ace to tokenize and render the SGR sequences
+  await page.waitForFunction(() => {
+    const lines = Array.from(document.querySelectorAll('.ace_line'));
+    return lines.some(line => line.textContent && line.textContent.includes('GREEN_BG_DEFAULT_FG'));
+  }, { timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 5000 });
 
   const hexToRgb = (hex) => {
     const h = hex.replace('#', '');
