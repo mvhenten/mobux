@@ -84,7 +84,7 @@ test('scroll works via touch gesture', async ({ page }) => {
   // Inject 300 lines directly into the terminal so we have guaranteed scrollback
   // independent of session redraw timing.
   await page.evaluate(() => window.__mobuxView.test.injectLines(300, 'scrollseed'));
-  await page.waitForTimeout(200);
+  await page.waitForFunction(() => window.__mobuxView.test.bufferLength() > 300, { timeout: 5000 });
 
   // Park at the bottom; the terminal tracks scroll position via viewportY in
   // its buffer (not via the DOM scrollTop).
