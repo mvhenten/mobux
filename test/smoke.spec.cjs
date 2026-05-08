@@ -821,7 +821,11 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     '\x1b[44mBLUE_BG_DEFAULT_FG\x1b[0m\n' +
     '\x1b[33;44mYELLOW_FG_BLUE_BG\x1b[0m\n',
   );
-  
+  // Force the renderer to scroll to the bottom so all 5 SGR lines enter
+  // Ace's virtualized viewport (otherwise only the top-most rendered
+  // lines get tokenized and styled).
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+
   // Wait for xterm to parse and Ace to tokenize the SGR sequences.
   // On CI, this is significantly slower than locally. Wait for ALL markers to appear.
   // Diagnostic version: poll state every 2s and throw with full state on timeout.
