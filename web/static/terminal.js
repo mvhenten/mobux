@@ -379,6 +379,7 @@ window.__mobuxView = {
       return new Promise((resolve) => core.term.write(s, resolve));
     },
     bufferLength: () => core.getActiveBuffer().length,
+    isAlternate: () => core.term._sterk?.buffer?.alternate === core.term._sterk?.buffer?.active,
     terminalRows: () => core.term.rows,
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),

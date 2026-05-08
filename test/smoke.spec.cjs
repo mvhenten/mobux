@@ -95,7 +95,16 @@ test('scroll works via touch gesture', async ({ page }) => {
       return len > 200;
     },
     { timeout: 20000 }
-  );
+  ).catch(async () => {
+    const dump = await page.evaluate(() => ({
+      bufferLength: window.__mobuxView.test.bufferLength(),
+      isAlternate: window.__mobuxView.test.isAlternate(),
+      terminalRows: window.__mobuxView.test.terminalRows(),
+      viewportY: window.__mobuxView.test.viewportY(),
+      wsReady: window.__mobuxView.test.wsReady(),
+    }));
+    throw new Error('CI DIAG: ' + JSON.stringify(dump));
+  });
 
   // Park at the bottom; the terminal tracks scroll position via viewportY in
   // its buffer (not via the DOM scrollTop).
