@@ -203,7 +203,12 @@ test('URLs in terminal output are tappable', async ({ page }) => {
   // Type echo URL command
   await page.keyboard.type('echo https://example.com');
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(1000);
+  
+  // Wait for the URL to appear in the terminal text
+  await page.waitForFunction(() => {
+    const rows = document.querySelector('.ace_text-layer');
+    return rows?.textContent?.includes('https://example.com') ?? false;
+  }, { timeout: 5000 });
 
   // Verify URL appears in terminal text
   const hasUrl = await page.evaluate(() => {
