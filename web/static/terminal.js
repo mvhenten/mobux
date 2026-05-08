@@ -372,9 +372,9 @@ window.__mobuxView = {
   send: (d) => core.send(d),
   test: {
     inject: (str) => new Promise((resolve) =>
-      core.term.write(str.replace(/\n/g, '\r\n'), resolve)),
+      core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve)),
     injectLines: (n, prefix = 'inject') => {
-      let s = '';
+      let s = '\x1b[?1049l';
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
     },

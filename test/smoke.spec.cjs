@@ -76,7 +76,6 @@ test('terminal renders and connects', async ({ page }) => {
 });
 
 test('scroll works via touch gesture', async ({ page }) => {
-  test.setTimeout(60000);
   await page.goto(`${BASE}/s/${SESSION}`);
 
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -89,24 +88,10 @@ test('scroll works via touch gesture', async ({ page }) => {
   await page.evaluate(() => window.__mobuxView.test.injectLines(300, 'scrollseed'));
   
   // On CI, terminal processing is slower - wait for buffer to grow large enough to scroll
-  // Diagnostic: poll state every 2s and log to console so we can see what's happening on CI.
-  const probeStart = Date.now();
-  let lastDump = null;
-  while (Date.now() - probeStart < 25000) {
-    lastDump = await page.evaluate(() => ({
-      bufferLength: window.__mobuxView.test.bufferLength(),
-      isAlternate: window.__mobuxView.test.isAlternate(),
-      terminalRows: window.__mobuxView.test.terminalRows(),
-      viewportY: window.__mobuxView.test.viewportY(),
-      wsReady: window.__mobuxView.test.wsReady(),
-    }));
-    console.log('[CI DIAG t=' + (Date.now() - probeStart) + 'ms]', JSON.stringify(lastDump));
-    if (lastDump.bufferLength > 200) break;
-    await page.waitForTimeout(2000);
-  }
-  if (!lastDump || lastDump.bufferLength <= 200) {
-    throw new Error('CI DIAG never grew buffer past 200; final: ' + JSON.stringify(lastDump));
-  }
+  await page.waitForFunction(
+    () => window.__mobuxView.test.bufferLength() > 200,
+    { timeout: 20000 }
+  );
 
   // Park at the bottom; the terminal tracks scroll position via viewportY in
   // its buffer (not via the DOM scrollTop).
