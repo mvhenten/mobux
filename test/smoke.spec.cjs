@@ -824,7 +824,13 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   // Force the renderer to scroll to the bottom so all 5 SGR lines enter
   // Ace's virtualized viewport (otherwise only the top-most rendered
   // lines get tokenized and styled).
-  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  // Note: sterk's scrollToBottom uses Ace's scrollToLine(y, center=true)
+  // which centers rather than pinning to bottom — work around by calling
+  // the editor directly here. (TODO: fix sterk to use gotoLine/scrollToRow.)
+  await page.evaluate(() => {
+    const ed = window.__sterk?.renderer?.getEditor?.();
+    if (ed) ed.gotoLine(ed.session.getLength(), 0, false);
+  });
 
   // Wait for xterm to parse and Ace to tokenize the SGR sequences.
   // On CI, this is significantly slower than locally. Wait for ALL markers to appear.
