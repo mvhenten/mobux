@@ -336,15 +336,16 @@ function makeSterkAdapter(host, sendCb) {
 }
 
 function makeSterkBufferAdapter(sterk) {
-  const buf = sterk.buffer.active;
+  // Don't capture buf — call sterk.buffer.active fresh each time so we see
+  // updated state after scrollToBottom() / scrollLines() / write().
   return {
-    get length() { return buf.length; },
-    get cursorX() { return buf.cursorX; },
-    get cursorY() { return buf.cursorY; },
-    get baseY() { return buf.baseY; },
-    get viewportY() { return buf.viewportY; },
+    get length() { return sterk.buffer.active.length; },
+    get cursorX() { return sterk.buffer.active.cursorX; },
+    get cursorY() { return sterk.buffer.active.cursorY; },
+    get baseY() { return sterk.buffer.active.baseY; },
+    get viewportY() { return sterk.buffer.active.viewportY; },
     getLine(y) {
-      const line = buf.getLine(y);
+      const line = sterk.buffer.active.getLine(y);
       return line ? makeSterkLineAdapter(line) : null;
     },
   };
