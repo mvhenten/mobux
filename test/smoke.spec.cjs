@@ -1215,15 +1215,24 @@ test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
   // Wait for the reader to process the new lines and settle.
   // Since we're scrolled to the top, the reader should NOT auto-scroll
   // to the bottom, so scrollY should stay near 0.
-  //
-  // Reader render is triggered by onWriteParsed → _scheduleRender (50ms throttle).
-  // On CI, the render may not have completed by the time the write Promise resolves.
-  await page.waitForFunction(() => {
-    const maxScroll = window.__mobuxView.test.readerMaxScroll();
-    const scrollY = window.__mobuxView.test.readerScrollY();
-    // Wait for maxScroll to grow (new content arrived) and scrollY to stay near 0
-    return maxScroll > 200 && scrollY <= 5;
-  }, { timeout: 20000 });
+  // Diagnostic: poll reader state every 2s; throw with state on timeout.
+  const probeStart = Date.now();
+  let lastState = null;
+  while (Date.now() - probeStart < 25000) {
+    lastState = await page.evaluate(() => ({
+      sy: window.__mobuxView.test.readerScrollY(),
+      max: window.__mobuxView.test.readerMaxScroll(),
+      inner: window.__mobuxView.test.readerInnerHeight(),
+      bufLen: window.__mobuxView.test.bufferLength(),
+      view: window.__mobuxView.current,
+    }));
+    console.log('[STICKY DIAG t=' + (Date.now() - probeStart) + 'ms]', JSON.stringify(lastState));
+    if (lastState.max > 200 && lastState.sy <= 5) break;
+    await page.waitForTimeout(2000);
+  }
+  if (!lastState || lastState.max <= 200 || lastState.sy > 5) {
+    throw new Error('STICKY DIAG never reached target; final: ' + JSON.stringify(lastState));
+  }
 
   const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
   expect(sy).toBeGreaterThanOrEqual(0);
