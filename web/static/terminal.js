@@ -386,6 +386,8 @@ window.__mobuxView = {
     },
     bufferLength: () => core.getActiveBuffer().length,
     isAlternate: () => core.term._sterk?.buffer?.alternate === core.term._sterk?.buffer?.active,
+    readerAtBottom: () => reader._atBottom,
+    readerForceScrollTop: () => { reader._atBottom = false; reader._scrollY = 0; reader._applyTransform?.(); },
     terminalRows: () => core.term.rows,
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),

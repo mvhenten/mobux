@@ -1206,7 +1206,7 @@ test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
   await bootReader(page);
   await fillReader(page, 200, 'noscroll');
 
-  await page.evaluate(() => window.__mobuxView.test.readerScrollBy(-9e9));
+  await page.evaluate(() => window.__mobuxView.test.readerForceScrollTop());
   const before = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
   expect(before).toBe(0);
 
