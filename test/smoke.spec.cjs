@@ -832,33 +832,18 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     if (ed) ed.gotoLine(ed.session.getLength(), 0, false);
   });
 
-  // Wait for xterm to parse and Ace to tokenize the SGR sequences.
-  // On CI, this is significantly slower than locally. Wait for ALL markers to appear.
-  // Diagnostic version: poll state every 2s and throw with full state on timeout.
-  const probeStart = Date.now();
-  let lastState = null;
-  while (Date.now() - probeStart < 25000) {
-    lastState = await page.evaluate(() => ({
-      bodyTextLength: (document.body.textContent || '').length,
-      hasGreen: (document.body.textContent || '').includes('GREEN_BG_DEFAULT_FG'),
-      hasCyan: (document.body.textContent || '').includes('CYAN_BG_DEFAULT_FG'),
-      hasBlack: (document.body.textContent || '').includes('BLACK_BG_DEFAULT_FG'),
-      hasBlue: (document.body.textContent || '').includes('BLUE_BG_DEFAULT_FG'),
-      hasYellow: (document.body.textContent || '').includes('YELLOW_FG_BLUE_BG'),
-      sterkBgSpans: document.querySelectorAll('[class*="ace_sterk-bg-"]').length,
-      isAlternate: window.__mobuxView.test.isAlternate?.(),
-      bufferLength: window.__mobuxView.test.bufferLength?.(),
-      view: window.__mobuxView.current,
-      sterkScreenInDom: !!document.querySelector('.sterk-screen'),
-      aceLines: document.querySelectorAll('.ace_line').length,
-    }));
-    console.log('[SGR DIAG t=' + (Date.now() - probeStart) + 'ms]', JSON.stringify(lastState));
-    if (lastState.hasGreen && lastState.hasCyan && lastState.hasBlack && lastState.hasBlue && lastState.hasYellow && lastState.sterkBgSpans > 0) break;
-    await page.waitForTimeout(2000);
-  }
-  if (!lastState || !lastState.sterkBgSpans) {
-    throw new Error('SGR DIAG markers/spans never appeared; final: ' + JSON.stringify(lastState));
-  }
+  // Wait for Ace to tokenize all 5 markers into sterk-* spans.
+  await page.waitForFunction(() => {
+    const text = document.body.textContent || '';
+    return (
+      text.includes('GREEN_BG_DEFAULT_FG') &&
+      text.includes('CYAN_BG_DEFAULT_FG') &&
+      text.includes('BLACK_BG_DEFAULT_FG') &&
+      text.includes('BLUE_BG_DEFAULT_FG') &&
+      text.includes('YELLOW_FG_BLUE_BG') &&
+      document.querySelector('[class*="ace_sterk-bg-"]') !== null
+    );
+  }, { timeout: 25000 });
 
   const hexToRgb = (hex) => {
     const h = hex.replace('#', '');
@@ -1213,26 +1198,12 @@ test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
   await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'tail'));
   
   // Wait for the reader to process the new lines and settle.
-  // Since we're scrolled to the top, the reader should NOT auto-scroll
-  // to the bottom, so scrollY should stay near 0.
-  // Diagnostic: poll reader state every 2s; throw with state on timeout.
-  const probeStart = Date.now();
-  let lastState = null;
-  while (Date.now() - probeStart < 25000) {
-    lastState = await page.evaluate(() => ({
-      sy: window.__mobuxView.test.readerScrollY(),
-      max: window.__mobuxView.test.readerMaxScroll(),
-      inner: window.__mobuxView.test.readerInnerHeight(),
-      bufLen: window.__mobuxView.test.bufferLength(),
-      view: window.__mobuxView.current,
-    }));
-    console.log('[STICKY DIAG t=' + (Date.now() - probeStart) + 'ms]', JSON.stringify(lastState));
-    if (lastState.max > 200 && lastState.sy <= 5) break;
-    await page.waitForTimeout(2000);
-  }
-  if (!lastState || lastState.max <= 200 || lastState.sy > 5) {
-    throw new Error('STICKY DIAG never reached target; final: ' + JSON.stringify(lastState));
-  }
+  // Since we explicitly cleared sticky-bottom, scrollY should stay near 0.
+  await page.waitForFunction(() => {
+    const m = window.__mobuxView.test.readerMaxScroll();
+    const sy = window.__mobuxView.test.readerScrollY();
+    return m > 200 && sy <= 5;
+  }, { timeout: 20000 });
 
   const sy = await page.evaluate(() => window.__mobuxView.test.readerScrollY());
   expect(sy).toBeGreaterThanOrEqual(0);
