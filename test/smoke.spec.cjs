@@ -1209,7 +1209,8 @@ test('synthetic viewport: mount/unmount has no duplicate inner', async ({ page }
 
 test('synthetic viewport: history smoke renders blocks and overflows', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  // On CI, terminal-core / sterk init can take longer than 5s (Ace bundle parse + first paint)
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 15000 });
   await page.waitForTimeout(800);
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
   await page.waitForTimeout(50);
