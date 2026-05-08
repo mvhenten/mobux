@@ -843,53 +843,63 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     // Sterk 2.0.1+ uses VtMode tokenizer which emits CSS classes.
     // Ace prefixes all token classes with "ace_", so sterk's "sterk-bg-2"
     // becomes "ace_sterk-bg-2".
+    //
+    // On CI, Ace may split marker text across multiple spans (token boundaries,
+    // line wrapping). Instead of requiring the entire marker to live in one span,
+    // find the line containing each marker and extract sterk classes from any
+    // span on that line.
     const lines = Array.from(document.querySelectorAll('.ace_line'));
     const palette = window.__sterk?.options?.theme?.palette || [];
     const theme = window.__sterk?.options?.theme || {};
     const defaultFg = theme.foreground || '#c5c8c6';
     const defaultBg = theme.background || '#1e1e1e';
 
-    const styledSpans = [];
-    for (const line of lines) {
-      const text = line.textContent || '';
-      if (/(GREEN|CYAN|BLACK|BLUE|YELLOW)_(BG|FG)/.test(text)) {
-        // Match spans with sterk- classes (Ace prefixes them with "ace_")
-        const spans = line.querySelectorAll('span');
-        for (const span of spans) {
-          const cls = span.className;
-          if (!cls.includes('sterk-')) continue;
-          
-          let fgColor = defaultFg;
-          let bgColor = defaultBg;
+    const markers = [
+      'GREEN_BG_DEFAULT_FG',
+      'CYAN_BG_DEFAULT_FG',
+      'BLACK_BG_DEFAULT_FG',
+      'BLUE_BG_DEFAULT_FG',
+      'YELLOW_FG_BLUE_BG',
+    ];
 
-          // Extract fg palette index from class (e.g., "ace_sterk-fg-3")
-          const fgMatch = cls.match(/sterk-fg-(\d+)/);
-          if (fgMatch) {
-            const idx = parseInt(fgMatch[1], 10);
-            fgColor = palette[idx] || defaultFg;
-          }
+    const result = {};
+    for (const marker of markers) {
+      // Find the line containing this marker
+      const line = lines.find((l) => (l.textContent || '').includes(marker));
+      if (!line) continue;
 
-          // Extract bg palette index from class (e.g., "ace_sterk-bg-2")
-          const bgMatch = cls.match(/sterk-bg-(\d+)/);
-          if (bgMatch) {
-            const idx = parseInt(bgMatch[1], 10);
-            bgColor = palette[idx] || defaultBg;
-          }
+      // Find the first span with sterk- classes on this line
+      const spans = line.querySelectorAll('span');
+      for (const span of spans) {
+        const cls = span.className;
+        if (!cls.includes('sterk-')) continue;
 
-          // Include ALL sterk-styled spans, even if bg/fg matches defaults
-          // (e.g., black bg on default-black theme)
-          styledSpans.push({
-            text: span.textContent.trim(),
-            color: fgColor,
-            bg: bgColor,
-          });
+        let fgColor = defaultFg;
+        let bgColor = defaultBg;
+
+        // Extract fg palette index from class (e.g., "ace_sterk-fg-3")
+        const fgMatch = cls.match(/sterk-fg-(\d+)/);
+        if (fgMatch) {
+          const idx = parseInt(fgMatch[1], 10);
+          fgColor = palette[idx] || defaultFg;
         }
+
+        // Extract bg palette index from class (e.g., "ace_sterk-bg-2")
+        const bgMatch = cls.match(/sterk-bg-(\d+)/);
+        if (bgMatch) {
+          const idx = parseInt(bgMatch[1], 10);
+          bgColor = palette[idx] || defaultBg;
+        }
+
+        // Use the first sterk-styled span on this line as representative
+        result[marker] = { marker, color: fgColor, bg: bgColor };
+        break;
       }
     }
-    return styledSpans;
+    return result;
   });
 
-  const find = (needle) => styled.find((s) => (s.text || '').includes(needle));
+  const find = (marker) => styled[marker];
 
   const green = find('GREEN_BG_DEFAULT_FG');
   const cyan = find('CYAN_BG_DEFAULT_FG');
