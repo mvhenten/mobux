@@ -814,11 +814,17 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     '\x1b[33;44mYELLOW_FG_BLUE_BG\x1b[0m\n',
   );
   
-  // Wait for Ace to tokenize and render the SGR sequences
-  // On CI, Ace tokenization is slower
+  // Wait for Ace to tokenize and render the SGR sequences.
+  // On CI, xterm write + Ace rendering is slower. Wait for ALL markers to appear.
   await page.waitForFunction(() => {
-    const lines = Array.from(document.querySelectorAll('.ace_line'));
-    return lines.some(line => line.textContent && line.textContent.includes('GREEN_BG_DEFAULT_FG'));
+    const text = document.body.textContent || '';
+    return (
+      text.includes('GREEN_BG_DEFAULT_FG') &&
+      text.includes('CYAN_BG_DEFAULT_FG') &&
+      text.includes('BLACK_BG_DEFAULT_FG') &&
+      text.includes('BLUE_BG_DEFAULT_FG') &&
+      text.includes('YELLOW_FG_BLUE_BG')
+    );
   }, { timeout: 20000 });
   await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 20000 });
 
@@ -863,27 +869,17 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     ];
 
     const result = {};
-    const debug = { totalLines: lines.length, linesWithMarkers: 0, linesWithSterk: 0 };
     
     for (const marker of markers) {
       // Find the line containing this marker
       const line = lines.find((l) => (l.textContent || '').includes(marker));
-      if (!line) {
-        debug[`missing_${marker}`] = 'line not found';
-        continue;
-      }
-      debug.linesWithMarkers++;
+      if (!line) continue;
 
-      // Find ANY span with sterk- classes on this line (not just the first)
-      // On CI, the marker text might not be in the same span as the sterk classes
-      const spans = Array.from(line.querySelectorAll('span'));
-      const sterkSpan = spans.find((span) => span.className.includes('sterk-'));
+      // Find ANY span with sterk- classes on this line
+      const sterkSpan = Array.from(line.querySelectorAll('span'))
+        .find((span) => span.className.includes('sterk-'));
       
-      if (!sterkSpan) {
-        debug[`missing_${marker}`] = `line found but no sterk spans (total spans: ${spans.length}, classes: ${spans.map(s => s.className).join('; ')})`;
-        continue;
-      }
-      debug.linesWithSterk++;
+      if (!sterkSpan) continue;
 
       const cls = sterkSpan.className;
       let fgColor = defaultFg;
@@ -906,7 +902,6 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
       // Use the first sterk-styled span on this line as representative
       result[marker] = { marker, color: fgColor, bg: bgColor };
     }
-    result.__debug = debug;
     return result;
   });
 
@@ -918,13 +913,8 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   const blue = find('BLUE_BG_DEFAULT_FG');
   const yel = find('YELLOW_FG_BLUE_BG');
 
-  // Diagnostic: show which markers were found
-  const markers = { green, cyan, black, blue, yel };
-  for (const [name, s] of Object.entries(markers)) {
-    if (!s) {
-      const debug = styled.__debug || {};
-      throw new Error(`Marker ${name} not found. Debug: ${JSON.stringify(debug, null, 2)}`);
-    }
+  for (const s of [green, cyan, black, blue, yel]) {
+    expect(s).toBeTruthy();
     expect(s.color).toBeTruthy();
     expect(s.bg).toBeTruthy();
   }
