@@ -828,7 +828,7 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   // which centers rather than pinning to bottom — work around by calling
   // the editor directly here. (TODO: fix sterk to use gotoLine/scrollToRow.)
   await page.evaluate(() => {
-    const ed = window.__sterk?.renderer?.getEditor?.();
+    const ed = window.__sterk?._sterk?.renderer?.getEditor?.();
     if (ed) ed.gotoLine(ed.session.getLength(), 0, false);
   });
 
