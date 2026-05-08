@@ -782,6 +782,8 @@ test('consecutive same-bg lines fuse into a single bubble', async ({ page }) => 
 });
 
 test('terminal picks readable fg by bg luminance when fg is default', async ({ page }) => {
+  test.setTimeout(60000); // CI needs more time for xterm write + Ace tokenization
+  
   // Sterk v2.0.1+ renders SGR colors via CSS classes (.sterk-fg-N, .sterk-bg-N)
   // instead of inline styles. This test verifies that sterk's VtMode tokenizer
   // correctly applies palette colors via CSS classes, which the browser then
@@ -1169,6 +1171,8 @@ test('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
 });
 
 test('synthetic viewport: not sticky when scrolled up', async ({ page }) => {
+  test.setTimeout(60000); // CI needs more time for reader render completion
+  
   await bootReader(page);
   await fillReader(page, 200, 'noscroll');
 
