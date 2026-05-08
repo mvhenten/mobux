@@ -371,9 +371,15 @@ window.__mobuxView = {
   get current() { return currentView; },
   send: (d) => core.send(d),
   test: {
-    inject: (str) => new Promise((resolve) =>
-      core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve)),
+    // Test injections close the WS first so tmux can't race/clobber
+    // the injected content (e.g. by re-asserting alt-screen mode).
+    inject: (str) => {
+      try { core.ws?.close(); } catch (_) {}
+      return new Promise((resolve) =>
+        core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve));
+    },
     injectLines: (n, prefix = 'inject') => {
+      try { core.ws?.close(); } catch (_) {}
       let s = '\x1b[?1049l';
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
