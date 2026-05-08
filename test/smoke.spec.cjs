@@ -799,11 +799,17 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   
   // Wait for WS to be ready before injecting ANSI sequences
   await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(500);
 
   // Make sure we're on the terminal view, not reader.
   await page.evaluate(() => window.__mobuxView.swap('xterm'));
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(500); // CI needs more time for view swap
+  // Verify terminal is actually visible and Ace has rendered lines
+  await page.waitForFunction(() => {
+    const term = document.getElementById('terminal');
+    const aceLines = document.querySelectorAll('.ace_line');
+    return term && !term.classList.contains('hidden') && aceLines.length > 0;
+  }, { timeout: 10000 });
 
   // Bright bgs (green=2, cyan=6) → dark bgs (black=0, blue=4).
   // Plus explicit fg+bg control (yellow fg=3, blue bg=4).
