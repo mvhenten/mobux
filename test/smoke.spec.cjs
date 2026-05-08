@@ -814,8 +814,8 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
     '\x1b[33;44mYELLOW_FG_BLUE_BG\x1b[0m\n',
   );
   
-  // Wait for Ace to tokenize and render the SGR sequences.
-  // On CI, xterm write + Ace rendering is slower. Wait for ALL markers to appear.
+  // Wait for xterm to parse and Ace to tokenize the SGR sequences.
+  // On CI, this is significantly slower than locally. Wait for ALL markers to appear.
   await page.waitForFunction(() => {
     const text = document.body.textContent || '';
     return (
@@ -825,8 +825,8 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
       text.includes('BLUE_BG_DEFAULT_FG') &&
       text.includes('YELLOW_FG_BLUE_BG')
     );
-  }, { timeout: 20000 });
-  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 20000 });
+  }, { timeout: 25000 });
+  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 25000 });
 
   const hexToRgb = (hex) => {
     const h = hex.replace('#', '');
