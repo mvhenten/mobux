@@ -824,17 +824,31 @@ test('terminal picks readable fg by bg luminance when fg is default', async ({ p
   
   // Wait for xterm to parse and Ace to tokenize the SGR sequences.
   // On CI, this is significantly slower than locally. Wait for ALL markers to appear.
-  await page.waitForFunction(() => {
-    const text = document.body.textContent || '';
-    return (
-      text.includes('GREEN_BG_DEFAULT_FG') &&
-      text.includes('CYAN_BG_DEFAULT_FG') &&
-      text.includes('BLACK_BG_DEFAULT_FG') &&
-      text.includes('BLUE_BG_DEFAULT_FG') &&
-      text.includes('YELLOW_FG_BLUE_BG')
-    );
-  }, { timeout: 25000 });
-  await page.waitForFunction(() => document.querySelector('[class*="ace_sterk-bg-"]') !== null, { timeout: 25000 });
+  // Diagnostic version: poll state every 2s and throw with full state on timeout.
+  const probeStart = Date.now();
+  let lastState = null;
+  while (Date.now() - probeStart < 25000) {
+    lastState = await page.evaluate(() => ({
+      bodyTextLength: (document.body.textContent || '').length,
+      hasGreen: (document.body.textContent || '').includes('GREEN_BG_DEFAULT_FG'),
+      hasCyan: (document.body.textContent || '').includes('CYAN_BG_DEFAULT_FG'),
+      hasBlack: (document.body.textContent || '').includes('BLACK_BG_DEFAULT_FG'),
+      hasBlue: (document.body.textContent || '').includes('BLUE_BG_DEFAULT_FG'),
+      hasYellow: (document.body.textContent || '').includes('YELLOW_FG_BLUE_BG'),
+      sterkBgSpans: document.querySelectorAll('[class*="ace_sterk-bg-"]').length,
+      isAlternate: window.__mobuxView.test.isAlternate?.(),
+      bufferLength: window.__mobuxView.test.bufferLength?.(),
+      view: window.__mobuxView.current,
+      sterkScreenInDom: !!document.querySelector('.sterk-screen'),
+      aceLines: document.querySelectorAll('.ace_line').length,
+    }));
+    console.log('[SGR DIAG t=' + (Date.now() - probeStart) + 'ms]', JSON.stringify(lastState));
+    if (lastState.hasGreen && lastState.hasCyan && lastState.hasBlack && lastState.hasBlue && lastState.hasYellow && lastState.sterkBgSpans > 0) break;
+    await page.waitForTimeout(2000);
+  }
+  if (!lastState || !lastState.sterkBgSpans) {
+    throw new Error('SGR DIAG markers/spans never appeared; final: ' + JSON.stringify(lastState));
+  }
 
   const hexToRgb = (hex) => {
     const h = hex.replace('#', '');
