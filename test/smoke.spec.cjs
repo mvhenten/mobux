@@ -548,6 +548,81 @@ test('OSC 133 ; A marks lines without a sigil as prompts', async ({ page }) => {
 // If either layer regresses, oscDetected stays false and the assertion
 // fires. Skips when the test server can't reach `tmux send-keys`
 // (podman target leaves TMUX_CMD unset for those tests).
+// FAILING SPEC: OSC 133 must work out-of-the-box for sessions mobux
+// creates itself, regardless of whether the user has installed the
+// shell-integration snippet into their RC files.
+//
+// Why this is the right contract:
+//   - The current installer-based flow is fragile (depends on user
+//     clicking install, RC version drift, shell variant, sourcing,
+//     tmux version, allow-passthrough). Bug repros: ~/.bashrc with v1
+//     snippet under tmux 3.4 -> bare OSC dropped -> reader empty.
+//   - When mobux owns session creation it controls the shell
+//     environment and can inject OSC 133 deterministically (e.g.
+//     bash --rcfile <(cat $HOME/.bashrc; <snippet>), zsh ZDOTDIR
+//     shim, fish one-liner). User's RC stays untouched.
+//   - Installer flow remains useful only for shells *outside* mobux
+//     (ssh, attach to pre-existing tmux), and graduates from
+//     'required' to 'nice-to-have'.
+//
+// Setup pretends the user has never run the installer:
+//   - Empty $HOME, no .bashrc / .zshrc / .config/fish.
+//   - mobux creates the tmux session via its own API.
+//   - Reader must observe OSC 133 the first time the prompt redraws.
+test('OSC 133 works out of the box for mobux-created sessions (no installer)', async ({ page }) => {
+  const OOTB_SESSION = `${SESSION}-ootb`;
+  const OOTB_HOME = '/tmp/mobux-ootb-home';
+
+  // Clean slate: empty HOME, no shell integration anywhere.
+  execSync(`rm -rf ${OOTB_HOME} && mkdir -p ${OOTB_HOME}`);
+  // Sanity-assert no FENCE in the empty home before we proceed.
+  expect(execSync(`grep -rl 'mobux OSC 133' ${OOTB_HOME} 2>/dev/null || true`)
+    .toString().trim()).toBe('');
+
+  // Make sure mobux's tmux server uses this clean HOME for new shells.
+  // (Layer 1 of the fix is responsible for actually wiring this up;
+  // the test only asserts the observable outcome.)
+  try { tmux(`kill-session -t ${OOTB_SESSION}`); } catch (_) {}
+
+  // Create the session via mobux's HTTP API — not a pre-seeded
+  // send-keys workaround. This is the path real users hit.
+  const create = await page.request.post(`${BASE}/api/sessions`, {
+    data: { name: OOTB_SESSION },
+  });
+  expect(create.ok()).toBeTruthy();
+
+  try {
+    await page.goto(`${BASE}/s/${OOTB_SESSION}`);
+    await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+    await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 5000 });
+
+    // Precondition: nothing has emitted OSC 133 yet.
+    const before = await page.evaluate(() => window.__mobuxView.test.oscDetected());
+    expect(before).toBe(false);
+
+    // Trigger a single prompt redraw — typing Enter is the most
+    // mundane user action possible. If OSC 133 only fires when the
+    // user manually installs a snippet, this stays false and the
+    // assertion below fails (which is the current state of main).
+    tmux(`send-keys -t ${OOTB_SESSION} "" Enter`);
+
+    await page.waitForFunction(
+      () => window.__mobuxView.test.oscDetected() === true,
+      { timeout: 5000 },
+    );
+    const after = await page.evaluate(() => window.__mobuxView.test.oscDetected());
+    expect(after).toBe(true);
+
+    // And the user's $HOME must remain untouched — mobux must NOT
+    // silently install the snippet to ~/.bashrc as a side effect.
+    const homeAfter = execSync(`grep -rl 'mobux OSC 133' ${OOTB_HOME} 2>/dev/null || true`)
+      .toString().trim();
+    expect(homeAfter).toBe('');
+  } finally {
+    try { tmux(`kill-session -t ${OOTB_SESSION}`); } catch (_) {}
+  }
+});
+
 test('OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm', async ({ page }) => {
   // Dedicated session so the existing pre-seeded `SESSION` keeps its
   // PS1 untouched and other tests' assertions don't race with our

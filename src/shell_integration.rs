@@ -6,6 +6,45 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Return the v2 snippet for the given shell, suitable for injection
+/// into a mobux-managed rcfile (no FENCE markers).
+pub fn v2_snippet(shell: Shell) -> &'static str {
+    shell.snippet()
+}
+
+/// Detect which shell to use for new sessions.
+/// Honors $SHELL from environment, falls back to /bin/bash,
+/// and allows override via MOBUX_SESSION_SHELL.
+pub fn detect_session_shell() -> (Shell, String) {
+    // Allow override for testing
+    if let Ok(override_shell) = env::var("MOBUX_SESSION_SHELL") {
+        if !override_shell.is_empty() {
+            return parse_shell_path(&override_shell);
+        }
+    }
+    
+    // Honor $SHELL
+    if let Ok(shell_path) = env::var("SHELL") {
+        if !shell_path.is_empty() {
+            return parse_shell_path(&shell_path);
+        }
+    }
+    
+    // Fallback to bash
+    (Shell::Bash, "/bin/bash".to_string())
+}
+
+fn parse_shell_path(path: &str) -> (Shell, String) {
+    let shell_type = if path.contains("zsh") {
+        Shell::Zsh
+    } else if path.contains("fish") {
+        Shell::Fish
+    } else {
+        Shell::Bash
+    };
+    (shell_type, path.to_string())
+}
+
 pub const FENCE_OPEN: &str = "# >>> mobux OSC 133 (managed) >>>";
 pub const FENCE_CLOSE: &str = "# <<< mobux OSC 133 (managed) <<<";
 // v2: wrap OSC 133 emissions in tmux's DCS passthrough envelope when
