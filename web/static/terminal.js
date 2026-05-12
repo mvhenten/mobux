@@ -52,27 +52,47 @@ const quotes = [
 
 // ── External links ──────────────────────────────────────────────────
 // In a TWA (Trusted Web Activity, package id `io.github.mvhenten.mobux`),
-// `window.open(url, '_blank')` from JS keeps the navigation inside the
-// underlying Chrome that powers the TWA — visually it still looks like
-// the user is "in mobux". Clicking a synthesised anchor with
-// `target="_blank" rel="noopener noreferrer"` triggers Chrome Custom
-// Tabs handoff for out-of-scope URLs (i.e. anything not on the trusted
-// origin), which is the documented escape hatch.
+// external links should open in the user's system default browser (e.g.
+// Firefox, Chrome, whatever the user has configured), not Chrome Custom
+// Tabs. Android's intent:// URL scheme with action=VIEW and no package=
+// attribute forces the system to resolve through the default browser.
 //
-// On the desktop / regular browser this is identical to a normal
-// new-tab open.
+// TWA detection: document.referrer starts with 'android-app://' when
+// running inside the TWA shell.
+//
+// On desktop / regular browsers, this uses the standard anchor-click
+// new-tab behavior.
+
+// Helper for navigation - exposed for test stubbing
+function navigateToUrl(url) {
+  window.location.assign(url);
+}
+
 function openExternal(url) {
+  const isTWA = document.referrer.startsWith('android-app://');
+  
+  if (isTWA && /^https?:\/\//.test(url)) {
+    // Build an intent:// URL that opens the link in the system default
+    // browser. Format:
+    // intent://<url>#Intent;action=android.intent.action.VIEW;scheme=<scheme>;S.browser_fallback_url=<url>;end;
+    const urlObj = new URL(url);
+    const intentUrl = `intent://${urlObj.host}${urlObj.pathname}${urlObj.search}${urlObj.hash}#Intent;action=android.intent.action.VIEW;scheme=${urlObj.protocol.replace(':', '')};S.browser_fallback_url=${encodeURIComponent(url)};end;`;
+    window.__mobuxNavigateToUrl(intentUrl);
+    return;
+  }
+  
+  // Non-TWA or non-http(s) URLs: use anchor-click fallback
   const a = document.createElement('a');
   a.href = url;
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
-  // Anchor must be in the DOM for the synthetic click to navigate
-  // reliably across browsers.
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   a.remove();
 }
+// Expose for tests
+window.__mobuxNavigateToUrl = navigateToUrl;
 // Expose for smoke tests (mirrors `window.__mobuxView` etc.).
 window.__mobuxOpenExternal = openExternal;
 
