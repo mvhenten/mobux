@@ -1,6 +1,6 @@
 // Theme bundles. Each bundle pairs:
 //   1. an Ace editor theme (sets editor bg/fg/gutter)
-//   2. a 16-colour ANSI palette for libterm (Terminal.colors[0..15])
+//   2. a 16-colour ANSI palette for sterk (sterk.options.theme.palette[0..15])
 //   3. a matching reader-mode --ansi-* CSS variable set on #reader.
 //
 // Storage key: localStorage['mobux:theme']. Default: tomorrow-night-soft.
@@ -98,32 +98,22 @@ export function applyReaderVars(theme) {
   }
 }
 
-// Push the bundle's palette onto an active libterm Terminal class —
-// the constructor copied Terminal.colors into defAttr at instantiation,
-// but updating Terminal.colors[i] in-place still affects all rendered
-// cells via the colour-lookup path (libterm reads colors[i] each frame
-// when computing inline styles). Returns true if applied.
+// Push the bundle's palette onto sterk's terminal options.
+// Updates the theme.palette array that sterk uses for rendering.
+// Returns true if applied.
 export function applyTerminalColors(theme) {
-  const Terminal = window.__Aceterm && window.__Aceterm.Terminal;
-  if (!Terminal) return false;
-  if (typeof Terminal.setColors === 'function') {
-    // setColors replaces 16/256/special slots — pass undefined for the
-    // 240-entry 256-colour block and the special block so we only
-    // touch the 16 we care about.
-    Terminal.setColors(undefined, undefined, theme.palette.slice(0, 16));
-    return true;
-  }
-  // Fallback: direct mutation. Some libterm builds expose an array.
-  if (Array.isArray(Terminal.colors)) {
-    for (let i = 0; i < 16; i++) Terminal.colors[i] = theme.palette[i];
+  const sterk = window.__sterk;
+  if (!sterk || !sterk.options || !sterk.options.theme) return false;
+  // Update sterk's palette in-place
+  if (Array.isArray(sterk.options.theme.palette)) {
+    sterk.options.theme.palette = theme.palette.slice(0, 16);
     return true;
   }
   return false;
 }
 
 // Apply the Ace editor theme (background, default fg, gutter) live.
-// `editor` is the Ace VirtualRenderer-backed Editor returned by
-// Aceterm.createEditor in terminal-core.js.
+// `editor` is the Ace Editor instance accessed via sterk's renderer.
 export function applyEditorTheme(theme, editor) {
   if (!editor || typeof editor.setTheme !== 'function') return false;
   editor.setTheme(theme.aceTheme);
