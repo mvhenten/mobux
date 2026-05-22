@@ -584,6 +584,43 @@ h1, h2, h3 { margin: 0; }
   line-height: 1.4;
 }
 
+.rb-speaker {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: #ccc;
+  font-size: 14px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  line-height: 1;
+}
+
+.rb-speaker:hover {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.rb-speaker.rb-speaking {
+  background: rgba(255, 100, 100, 0.5);
+  color: #fff;
+}
+
+.rb-text,
+.rb-prompt,
+.rb-bubble {
+  position: relative;
+}
+
+.rb-code .rb-speaker {
+  display: none;
+}
+
 
 #touchOverlay {
   position: absolute;
@@ -921,4 +958,54 @@ h1, h2, h3 { margin: 0; }
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
+}
+
+.listen-range-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.listen-range-group label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.listen-range-group input[type="range"] {
+  flex: 1;
+  min-width: 120px;
+}
+
+.listen-range-group .listen-value {
+  min-width: 40px;
+  text-align: right;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.listen-test-btn {
+  margin-top: 8px;
+  padding: 8px 16px;
+  background: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.listen-test-btn:hover {
+  opacity: 0.9;
+}
+
+.listen-unavailable {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
 }
