@@ -1414,7 +1414,6 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="apple-touch-icon" href="/static/icon-192.png" />
   <link rel="stylesheet" href="/static/style.css?v={v}" />
-  <link rel="stylesheet" href="/static/vendor/xterm.css?v={v}" />
 </head>
 <body class="term-body">
   <div id="terminal"></div>
@@ -1474,16 +1473,10 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     window.MOBUX_SESSION = {session_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
-  <!-- Spike: aceterm renderer (libterm + Ace VirtualRenderer).
-       ace.js + aceterm.bundle.js pin window.__Aceterm; terminal.js
-       imports the spike's TerminalCore (terminal-core.js on this
-       branch is aceterm-backed, same external API as main). -->
-  <script src="/static/vendor/ace.js?v={v}"></script>
-  <script src="/static/vendor/theme-tomorrow_night.js?v={v}"></script>
-  <script src="/static/vendor/theme-gruvbox.js?v={v}"></script>
-  <script src="/static/vendor/theme-nord_dark.js?v={v}"></script>
-  <script src="/static/vendor/theme-solarized_dark.js?v={v}"></script>
-  <script src="/static/vendor/aceterm.bundle.js?v={v}"></script>
+  <!-- Sterk terminal emulator (@kattebak/sterk@^2.0.0).
+       sterk.bundle.js includes ace-builds and pins window.Sterk;
+       terminal.js imports TerminalCore (terminal-core.js) which wraps sterk. -->
+  <script src="/static/vendor/sterk.bundle.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
