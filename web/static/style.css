@@ -503,10 +503,14 @@ h1, h2, h3 { margin: 0; }
 }
 
 .rb-prompt {
+  display: block;
+  position: relative;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: #8a93a6;
   margin-top: 8px;
+  padding-right: 52px;
+  padding-top: 42px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -518,7 +522,13 @@ h1, h2, h3 { margin: 0; }
   font-size: 17px;
 }
 
-.rb-text { white-space: normal; }
+.rb-text {
+  display: block;
+  position: relative;
+  white-space: normal;
+  padding-right: 52px;
+  padding-top: 42px;
+}
 .rb-text .rb-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -564,8 +574,9 @@ h1, h2, h3 { margin: 0; }
    is the sole visible boundary. */
 .rb-bubble {
   display: block;
+  position: relative;
   margin: 6px 0;
-  padding: 8px 12px;
+  padding: 42px 52px 8px 12px;
   border-radius: 10px;
   border: 1px solid;
   max-width: 100%;
@@ -586,8 +597,8 @@ h1, h2, h3 { margin: 0; }
 
 .rb-speaker {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 6px;
+  right: 6px;
   min-width: 32px;
   min-height: 32px;
   padding: 6px;
