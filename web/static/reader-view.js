@@ -25,6 +25,9 @@
 //   scrollY, maxScroll, innerHeight (read-only getters for tests)
 
 import { tokenize, extractRuns } from './term-tokenizer.js';
+import { loadPrefs } from './listen-settings.js';
+
+const SPEECH_AVAILABLE = 'speechSynthesis' in window;
 
 const RENDER_THROTTLE_MS = 50;
 const STICK_TO_BOTTOM_PX = 80;
@@ -270,6 +273,9 @@ function renderInlineBlock(className, runs) {
   const el = document.createElement('div');
   el.className = className;
   appendRuns(el, runs);
+  if (className === 'rb rb-prompt') {
+    addSpeakerIcon(el, 'prompt', runs);
+  }
   return el;
 }
 
@@ -277,6 +283,7 @@ function renderTextBlock(block) {
   const el = document.createElement('div');
   el.className = 'rb rb-text';
   appendLinesWithBubbles(el, block.lines, 'rb-line');
+  addSpeakerIcons(el, 'text', block);
   return el;
 }
 
@@ -356,4 +363,124 @@ function makeEl(tag, className, text) {
   el.className = className;
   if (text !== undefined) el.textContent = text;
   return el;
+}
+
+function addSpeakerIcon(el, kind, content) {
+  if (!SPEECH_AVAILABLE) return;
+  
+  const icon = document.createElement('button');
+  icon.className = 'rb-speaker';
+  icon.type = 'button';
+  icon.setAttribute('aria-label', 'Speak');
+  icon.textContent = '▶';
+  icon.dataset.kind = kind;
+  
+  icon.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleSpeakerClick(icon, kind, content);
+  });
+  
+  el.appendChild(icon);
+}
+
+function addSpeakerIcons(el, kind, block) {
+  if (!SPEECH_AVAILABLE) return;
+  
+  const bubbles = el.querySelectorAll('.rb-bubble');
+  if (bubbles.length > 0) {
+    bubbles.forEach((bubble) => {
+      const lines = bubble.querySelectorAll('.rb-bubble-line');
+      if (lines.length > 0) {
+        const content = Array.from(lines).map(l => l.textContent).join('\n');
+        addSpeakerIcon(bubble, kind, content);
+      }
+    });
+  } else {
+    const lines = el.querySelectorAll('.rb-line');
+    if (lines.length > 0) {
+      const content = Array.from(lines).map(l => l.textContent).join('\n');
+      addSpeakerIcon(el, kind, content);
+    }
+  }
+}
+
+function handleSpeakerClick(icon, kind, content) {
+  const isSpeaking = icon.classList.contains('rb-speaking');
+  
+  stopAllSpeech();
+  
+  if (isSpeaking) return;
+  
+  icon.classList.add('rb-speaking');
+  icon.textContent = '■';
+  
+  let text = typeof content === 'string' ? content : extractTextFromRuns(content);
+  if (kind === 'prompt') {
+    text = 'command: ' + text;
+  }
+  
+  speakText(text, () => {
+    icon.classList.remove('rb-speaking');
+    icon.textContent = '▶';
+  });
+}
+
+function extractTextFromRuns(runs) {
+  if (!runs) return '';
+  return runs.map(r => r.text || '').join('');
+}
+
+function stopAllSpeech() {
+  window.speechSynthesis.cancel();
+  document.querySelectorAll('.rb-speaker.rb-speaking').forEach((icon) => {
+    icon.classList.remove('rb-speaking');
+    icon.textContent = '▶';
+  });
+}
+
+function splitIntoSentences(text) {
+  const chunks = text.split(/([.!?])\s+/);
+  const sentences = [];
+  for (let i = 0; i < chunks.length; i += 2) {
+    const base = chunks[i];
+    const punct = chunks[i + 1] || '';
+    if (base.trim()) sentences.push(base + punct);
+  }
+  return sentences.length > 0 ? sentences : [text];
+}
+
+function speakText(text, onEnd) {
+  const prefs = loadPrefs();
+  const sentences = splitIntoSentences(text.trim());
+  let index = 0;
+  
+  function speakNext() {
+    if (index >= sentences.length) {
+      if (onEnd) onEnd();
+      return;
+    }
+    
+    const utterance = new SpeechSynthesisUtterance(sentences[index]);
+    utterance.rate = prefs.rate;
+    utterance.pitch = prefs.pitch;
+    
+    if (prefs.voice) {
+      const voices = window.speechSynthesis.getVoices();
+      const selected = voices.find((v) => v.name === prefs.voice);
+      if (selected) utterance.voice = selected;
+    }
+    
+    utterance.onend = () => {
+      index++;
+      speakNext();
+    };
+    
+    utterance.onerror = () => {
+      if (onEnd) onEnd();
+    };
+    
+    window.speechSynthesis.speak(utterance);
+  }
+  
+  speakNext();
 }
