@@ -31,6 +31,11 @@ jobs:
       - run: sudo apt-get install -y tmux
       - name: Build mobux
         run: cargo build
+      - name: Run critical-path tests
+        run: make test-critical-path
+        env:
+          CI: true
+          MOBUX_URL: http://localhost:8281
       - name: Run smoke tests
         run: make test-smoke
         env:

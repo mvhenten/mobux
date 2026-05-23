@@ -102,6 +102,22 @@ test-smoke:
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/smoke.spec.cjs
+
+.PHONY: test-critical-path
+test-critical-path:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/critical-path.spec.cjs
+
+.PHONY: test-e2e
+test-e2e:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test
 
 # ---------------------------------------------------------------------------
