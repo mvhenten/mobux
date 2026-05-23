@@ -83,14 +83,13 @@ const core = new TerminalCore({ session, host: termEl });
 // Apply the stored theme to all three layers. terminal-core.js already
 // picked the matching palette + Ace theme at construction; this call
 // pushes the --ansi-* vars onto #reader for tokenized reader output.
-const getEditor = () => core.term._sterk?.renderer?.getEditor?.();
-applyTheme(getStoredThemeId(), { editor: getEditor() });
+applyTheme(getStoredThemeId(), { editor: core.term._editor });
 
 // Live swap when the settings page (or another tab) changes the theme.
 // `storage` only fires in OTHER documents — same-doc swaps go through
 // `mobux:theme` (dispatched by the picker).
 function onThemeChange() {
-  applyTheme(getStoredThemeId(), { editor: getEditor() });
+  applyTheme(getStoredThemeId(), { editor: core.term._editor });
 }
 window.addEventListener('storage', (e) => {
   if (e.key === 'mobux:theme') onThemeChange();
@@ -371,23 +370,14 @@ window.__mobuxView = {
   get current() { return currentView; },
   send: (d) => core.send(d),
   test: {
-    // Test injections close the WS first so tmux can't race/clobber
-    // the injected content (e.g. by re-asserting alt-screen mode).
-    inject: (str) => {
-      try { core.ws?.close(); } catch (_) {}
-      return new Promise((resolve) =>
-        core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve));
-    },
+    inject: (str) => new Promise((resolve) =>
+      core.term.write(str.replace(/\n/g, '\r\n'), resolve)),
     injectLines: (n, prefix = 'inject') => {
-      try { core.ws?.close(); } catch (_) {}
-      let s = '\x1b[?1049l';
+      let s = '';
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
     },
     bufferLength: () => core.getActiveBuffer().length,
-    isAlternate: () => core.term._sterk?.buffer?.alternate === core.term._sterk?.buffer?.active,
-    readerAtBottom: () => reader._atBottom,
-    readerForceScrollTop: () => { reader._atBottom = false; reader._scrollY = 0; reader._applyTransform?.(); },
     terminalRows: () => core.term.rows,
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
