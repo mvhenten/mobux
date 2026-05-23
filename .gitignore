@@ -12,3 +12,4 @@ twa/app/
 twa/twa-manifest.json
 web/static/install/mobux.apk
 web/static/.well-known/assetlinks.json
+.tmp/
