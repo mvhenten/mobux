@@ -105,12 +105,21 @@ async function bootTerminal(page) {
     () => window.__mobuxView?.test?.wsReady?.() === true,
     { timeout: 8000 },
   );
+  // Sterk schedules the initial resize() inside ws.onopen which fires
+  // synchronously with the WS handshake. The PTY needs to receive the
+  // resize before keystrokes will be processed at the new dimensions;
+  // wait one beat for the resize round-trip.
+  await page.waitForTimeout(500);
 }
 
 async function visibleTerminalText(page) {
   return page.evaluate(() => {
     const t = document.getElementById('terminal');
-    return (t?.textContent || '').replace(/\s+/g, ' ').trim();
+    // innerText (unlike textContent) skips elements with display:none,
+    // which is what Ace does to its gutter when showGutter is false.
+    // Without this, the test sees gutter line numbers as if they were
+    // real terminal content.
+    return (t?.innerText || '').replace(/\s+/g, ' ').trim();
   });
 }
 

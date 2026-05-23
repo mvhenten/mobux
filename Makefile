@@ -102,7 +102,7 @@ test-smoke:
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test
+		npx playwright test test/smoke.spec.cjs
 
 .PHONY: test-critical-path
 test-critical-path:
@@ -111,6 +111,14 @@ test-critical-path:
 		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
+
+.PHONY: test-e2e
+test-e2e:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test
 
 # ---------------------------------------------------------------------------
 # podman-*: containerised mobux instance for full test isolation. Each run
