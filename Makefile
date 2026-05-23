@@ -104,6 +104,14 @@ test-smoke:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test
 
+.PHONY: test-critical-path
+test-critical-path:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/critical-path.spec.cjs
+
 # ---------------------------------------------------------------------------
 # podman-*: containerised mobux instance for full test isolation. Each run
 # gets its own tmux server inside the container, so playwright tests
