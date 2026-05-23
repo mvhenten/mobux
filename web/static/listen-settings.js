@@ -1,20 +1,11 @@
-const STORAGE_KEY = 'mobux.listen.prefs';
-const DEFAULT_PREFS = { voice: '', rate: 1.0, pitch: 1.0 };
+// Settings-page wiring for the listen (Web Speech API) feature.
+//
+// Pure prefs read/write lives in ./listen-prefs.js so it can be imported
+// from reader-view.js (session pages) without dragging in this file's
+// DOM-side effects (voice list population, voiceschanged listener,
+// slider value labels).
 
-function loadPrefs() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? { ...DEFAULT_PREFS, ...JSON.parse(raw) } : DEFAULT_PREFS;
-  } catch (_) {
-    return DEFAULT_PREFS;
-  }
-}
-
-function savePrefs(prefs) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
-  } catch (_) {}
-}
+import { loadPrefs, savePrefs } from './listen-prefs.js';
 
 function populateVoiceSelect() {
   const select = document.getElementById('listenVoice');
@@ -22,7 +13,7 @@ function populateVoiceSelect() {
 
   const voices = window.speechSynthesis.getVoices();
   select.innerHTML = '<option value="">Default</option>';
-  
+
   voices.forEach((v) => {
     const opt = document.createElement('option');
     opt.value = v.name;
@@ -34,8 +25,21 @@ function populateVoiceSelect() {
   select.value = prefs.voice;
 }
 
+function bindRangeLabel(sliderId, labelId) {
+  const slider = document.getElementById(sliderId);
+  const label = document.getElementById(labelId);
+  if (!slider || !label) return;
+  const update = () => { label.textContent = parseFloat(slider.value).toFixed(1); };
+  slider.addEventListener('input', update);
+  update();
+}
+
 function initListenSettings() {
   if (!('speechSynthesis' in window)) return;
+  // Only run on the settings page; bail out on other routes that may
+  // happen to load this module (defensive — current Rust template only
+  // includes it on /settings, but keep the contract local).
+  if (!document.getElementById('listen-settings')) return;
 
   const voiceSelect = document.getElementById('listenVoice');
   const rateSlider = document.getElementById('listenRate');
@@ -48,18 +52,19 @@ function initListenSettings() {
   if (pitchSlider) pitchSlider.value = prefs.pitch;
 
   populateVoiceSelect();
-  
-  if (window.speechSynthesis.onvoiceschanged !== undefined) {
-    window.speechSynthesis.onvoiceschanged = populateVoiceSelect;
-  }
+  // Voices populate asynchronously in Chrome; addEventListener avoids
+  // clobbering any other listener and is supported everywhere we ship.
+  window.speechSynthesis.addEventListener('voiceschanged', populateVoiceSelect);
+
+  bindRangeLabel('listenRate', 'listenRateValue');
+  bindRangeLabel('listenPitch', 'listenPitchValue');
 
   const save = () => {
-    const updated = {
+    savePrefs({
       voice: voiceSelect ? voiceSelect.value : '',
       rate: rateSlider ? parseFloat(rateSlider.value) : 1.0,
       pitch: pitchSlider ? parseFloat(pitchSlider.value) : 1.0,
-    };
-    savePrefs(updated);
+    });
   };
 
   if (voiceSelect) voiceSelect.addEventListener('change', save);
@@ -69,17 +74,17 @@ function initListenSettings() {
   if (testBtn) {
     testBtn.addEventListener('click', () => {
       window.speechSynthesis.cancel();
-      const prefs = loadPrefs();
+      const current = loadPrefs();
       const utterance = new SpeechSynthesisUtterance('Mobux listen mode test, one two three');
-      
-      if (prefs.voice) {
+
+      if (current.voice) {
         const voices = window.speechSynthesis.getVoices();
-        const selected = voices.find((v) => v.name === prefs.voice);
+        const selected = voices.find((v) => v.name === current.voice);
         if (selected) utterance.voice = selected;
       }
-      
-      utterance.rate = prefs.rate;
-      utterance.pitch = prefs.pitch;
+
+      utterance.rate = current.rate;
+      utterance.pitch = current.pitch;
       window.speechSynthesis.speak(utterance);
     });
   }

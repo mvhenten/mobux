@@ -988,24 +988,11 @@ end</code></pre>
   </main>
 
   <script>
+    // Capability gate only — all slider/value wiring lives in listen-settings.js
+    // (single source of truth for prefs + DOM behaviour).
     if (!('speechSynthesis' in window)) {{
       document.getElementById('listenCapable').hidden = true;
       document.getElementById('listenUnavailable').hidden = false;
-    }} else {{
-      const rateSlider = document.getElementById('listenRate');
-      const pitchSlider = document.getElementById('listenPitch');
-      const rateValue = document.getElementById('listenRateValue');
-      const pitchValue = document.getElementById('listenPitchValue');
-      if (rateSlider && rateValue) {{
-        rateSlider.addEventListener('input', () => {{
-          rateValue.textContent = parseFloat(rateSlider.value).toFixed(1);
-        }});
-      }}
-      if (pitchSlider && pitchValue) {{
-        pitchSlider.addEventListener('input', () => {{
-          pitchValue.textContent = parseFloat(pitchSlider.value).toFixed(1);
-        }});
-      }}
     }}
   </script>
   <script src="/static/settings.js?v={v}"></script>

@@ -617,15 +617,15 @@ h1, h2, h3 { margin: 0; }
   background: rgba(0, 0, 0, 0.6);
 }
 
+/* Muted teal accent for the speaking state — picked to read across all
+   four themes (Tomorrow Night Soft, Gruvbox Dark Soft, Nord, Solarized
+   Dark) without clashing. Avoids red (too hot for a night/phone palette,
+   per project preference) and any saturated hue. Soft alpha background
+   plus a thin outline so the state reads at a glance but never glares. */
 .rb-speaker.rb-speaking {
-  background: rgba(255, 100, 100, 0.5);
-  color: #fff;
-}
-
-.rb-text,
-.rb-prompt,
-.rb-bubble {
-  position: relative;
+  background: rgba(80, 160, 160, 0.22);
+  border-color: rgba(140, 200, 200, 0.55);
+  color: #d8eaea;
 }
 
 .rb-code .rb-speaker {

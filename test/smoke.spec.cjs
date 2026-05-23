@@ -1797,3 +1797,69 @@ test('listen settings visible in settings page when speechSynthesis available', 
     expect(unavailableVisible).toBe(true);
   }
 });
+
+test('rb-speaking survives a buffer-change re-render mid-speech', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
+  await page.waitForTimeout(500);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const hasSpeech = await page.evaluate(() => 'speechSynthesis' in window);
+  if (!hasSpeech) {
+    test.skip(true, 'speechSynthesis not available');
+    return;
+  }
+
+  // Stub speak() so the utterance never auto-ends — speech stays "in
+  // progress" across the forced re-render. The original utterance.onend
+  // is held by reader-view's speakNext closure and is simply never
+  // invoked from the stub.
+  await page.evaluate(() => {
+    window.speechSynthesis.speak = () => {};
+    window.speechSynthesis.cancel = () => {};
+  });
+
+  await injectRaw(page, 'speakable line for survival test\n');
+  await page.waitForTimeout(300);
+
+  const targetKey = await page.evaluate(() => {
+    const icons = Array.from(document.querySelectorAll('.rb-text .rb-speaker'));
+    const icon = icons[icons.length - 1];
+    if (!icon) return null;
+    const key = icon.dataset.speechKey;
+    icon.click();
+    return key;
+  });
+  expect(targetKey).toBeTruthy();
+  await page.waitForTimeout(50);
+
+  const initiallySpeaking = await page.evaluate((key) => {
+    const icon = document.querySelector(`.rb-speaker[data-speech-key="${CSS.escape(key)}"]`);
+    return !!(icon && icon.classList.contains('rb-speaking'));
+  }, targetKey);
+  expect(initiallySpeaking).toBe(true);
+
+  // Force a synchronous re-render — this is exactly what the
+  // onWriteParsed-driven render loop does every ~50ms when new data
+  // arrives, just without racing the throttle. _inner.replaceChildren
+  // wipes the icon DOM; the bug is that rb-speaking is lost. The fix
+  // re-applies it via the module-level speakingKey tracker.
+  await page.evaluate(() => window.__mobuxView.test.readerForceRender());
+
+  const after = await page.evaluate((key) => {
+    const icon = document.querySelector(`.rb-speaker[data-speech-key="${CSS.escape(key)}"]`);
+    return {
+      iconExists: !!icon,
+      hasClass: !!(icon && icon.classList.contains('rb-speaking')),
+      speakingCount: document.querySelectorAll('.rb-speaker.rb-speaking').length,
+    };
+  }, targetKey);
+
+  expect(after.iconExists).toBe(true);
+  expect(after.hasClass).toBe(true);
+  // No accidental duplicate "speaking" icons after re-render.
+  expect(after.speakingCount).toBe(1);
+});
