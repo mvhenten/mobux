@@ -1661,3 +1661,205 @@ test('shell integration: status, install, and uninstall round-trip', async ({ pa
     expect(post).not.toContain(FENCE_CLOSE);
   }
 });
+
+test('speaker icons appear on text and prompt bubbles, not code bubbles', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await injectRaw(page, [
+    '~/dev $',
+    'plain text line',
+    '```',
+    'code content',
+    '```',
+  ].join('\n') + '\n');
+  await page.waitForTimeout(250);
+
+  const hasSpeech = await page.evaluate(() => 'speechSynthesis' in window);
+  if (!hasSpeech) {
+    test.skip(true, 'speechSynthesis not available');
+    return;
+  }
+
+  const iconCounts = await page.evaluate(() => {
+    const prompts = document.querySelectorAll('.rb-prompt .rb-speaker');
+    const texts = document.querySelectorAll('.rb-text .rb-speaker');
+    const codes = document.querySelectorAll('.rb-code .rb-speaker');
+    return {
+      prompt: prompts.length,
+      text: texts.length,
+      code: codes.length,
+    };
+  });
+
+  expect(iconCounts.prompt).toBeGreaterThan(0);
+  expect(iconCounts.text).toBeGreaterThan(0);
+  expect(iconCounts.code).toBe(0);
+});
+
+test('clicking speaker icon toggles rb-speaking class', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(800);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  await injectRaw(page, 'test speech line\n');
+  await page.waitForTimeout(250);
+
+  const hasSpeech = await page.evaluate(() => 'speechSynthesis' in window);
+  if (!hasSpeech) {
+    test.skip(true, 'speechSynthesis not available');
+    return;
+  }
+
+  const iconExists = await page.evaluate(() => {
+    const icon = document.querySelector('.rb-speaker');
+    return !!icon;
+  });
+  expect(iconExists).toBe(true);
+
+  await page.evaluate(() => {
+    const originalSpeak = window.speechSynthesis.speak;
+    window.speechSynthesis.speak = (utterance) => {
+      setTimeout(() => {
+        if (utterance.onend) utterance.onend();
+      }, 100);
+    };
+  });
+
+  // Explicitly scroll to bottom using reader's custom scroll API
+  await page.evaluate(() => window.__mobuxView.test.readerStickToBottom());
+  await page.waitForTimeout(100);
+
+  // Use evaluate to directly trigger click, bypassing Playwright's viewport
+  // checks which don't work with the custom synthetic scrolling (translate3d).
+  // The CSS positioning is correct (verified: parent has position:relative with
+  // adequate padding; icon has position:absolute top:6px right:6px), but
+  // Playwright's geometry calculations fail due to the transform-based scroll.
+  await page.evaluate(() => {
+    const icon = document.querySelector('.rb-speaker');
+    if (icon) icon.click();
+  });
+  await page.waitForTimeout(50);
+
+  const hasSpeakingClass = await page.evaluate(() => {
+    const icon = document.querySelector('.rb-speaker');
+    return icon && icon.classList.contains('rb-speaking');
+  });
+  expect(hasSpeakingClass).toBe(true);
+
+  await page.waitForTimeout(100);
+  
+  const speakingGone = await page.evaluate(() => {
+    const icon = document.querySelector('.rb-speaker');
+    return icon && !icon.classList.contains('rb-speaking');
+  });
+  expect(speakingGone).toBe(true);
+});
+
+test('listen settings visible in settings page when speechSynthesis available', async ({ page }) => {
+  await page.goto(`${BASE}/settings`);
+  await page.waitForTimeout(300);
+
+  const hasSpeech = await page.evaluate(() => 'speechSynthesis' in window);
+  
+  const listenSection = await page.locator('#listen-settings').count();
+  expect(listenSection).toBe(1);
+
+  if (hasSpeech) {
+    const capableVisible = await page.evaluate(() => {
+      const el = document.getElementById('listenCapable');
+      return el && !el.hidden;
+    });
+    expect(capableVisible).toBe(true);
+
+    const unavailableHidden = await page.evaluate(() => {
+      const el = document.getElementById('listenUnavailable');
+      return el && el.hidden;
+    });
+    expect(unavailableHidden).toBe(true);
+
+    await expect(page.locator('#listenVoice')).toBeVisible();
+    await expect(page.locator('#listenRate')).toBeVisible();
+    await expect(page.locator('#listenPitch')).toBeVisible();
+    await expect(page.locator('#listenTest')).toBeVisible();
+  } else {
+    const unavailableVisible = await page.evaluate(() => {
+      const el = document.getElementById('listenUnavailable');
+      return el && !el.hidden;
+    });
+    expect(unavailableVisible).toBe(true);
+  }
+});
+
+test('rb-speaking survives a buffer-change re-render mid-speech', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForFunction(() => window.__mobuxView?.test?.wsReady?.() === true, { timeout: 15000 });
+  await page.waitForTimeout(500);
+
+  await page.evaluate(() => window.__mobuxView.swap('reader'));
+  await page.waitForTimeout(150);
+
+  const hasSpeech = await page.evaluate(() => 'speechSynthesis' in window);
+  if (!hasSpeech) {
+    test.skip(true, 'speechSynthesis not available');
+    return;
+  }
+
+  // Stub speak() so the utterance never auto-ends — speech stays "in
+  // progress" across the forced re-render. The original utterance.onend
+  // is held by reader-view's speakNext closure and is simply never
+  // invoked from the stub.
+  await page.evaluate(() => {
+    window.speechSynthesis.speak = () => {};
+    window.speechSynthesis.cancel = () => {};
+  });
+
+  await injectRaw(page, 'speakable line for survival test\n');
+  await page.waitForTimeout(300);
+
+  const targetKey = await page.evaluate(() => {
+    const icons = Array.from(document.querySelectorAll('.rb-text .rb-speaker'));
+    const icon = icons[icons.length - 1];
+    if (!icon) return null;
+    const key = icon.dataset.speechKey;
+    icon.click();
+    return key;
+  });
+  expect(targetKey).toBeTruthy();
+  await page.waitForTimeout(50);
+
+  const initiallySpeaking = await page.evaluate((key) => {
+    const icon = document.querySelector(`.rb-speaker[data-speech-key="${CSS.escape(key)}"]`);
+    return !!(icon && icon.classList.contains('rb-speaking'));
+  }, targetKey);
+  expect(initiallySpeaking).toBe(true);
+
+  // Force a synchronous re-render — this is exactly what the
+  // onWriteParsed-driven render loop does every ~50ms when new data
+  // arrives, just without racing the throttle. _inner.replaceChildren
+  // wipes the icon DOM; the bug is that rb-speaking is lost. The fix
+  // re-applies it via the module-level speakingKey tracker.
+  await page.evaluate(() => window.__mobuxView.test.readerForceRender());
+
+  const after = await page.evaluate((key) => {
+    const icon = document.querySelector(`.rb-speaker[data-speech-key="${CSS.escape(key)}"]`);
+    return {
+      iconExists: !!icon,
+      hasClass: !!(icon && icon.classList.contains('rb-speaking')),
+      speakingCount: document.querySelectorAll('.rb-speaker.rb-speaking').length,
+    };
+  }, targetKey);
+
+  expect(after.iconExists).toBe(true);
+  expect(after.hasClass).toBe(true);
+  // No accidental duplicate "speaking" icons after re-render.
+  expect(after.speakingCount).toBe(1);
+});

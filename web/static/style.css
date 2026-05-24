@@ -503,10 +503,14 @@ h1, h2, h3 { margin: 0; }
 }
 
 .rb-prompt {
+  display: block;
+  position: relative;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: #8a93a6;
   margin-top: 8px;
+  padding-right: 52px;
+  padding-top: 42px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -518,7 +522,13 @@ h1, h2, h3 { margin: 0; }
   font-size: 17px;
 }
 
-.rb-text { white-space: normal; }
+.rb-text {
+  display: block;
+  position: relative;
+  white-space: normal;
+  padding-right: 52px;
+  padding-top: 42px;
+}
 .rb-text .rb-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -564,8 +574,9 @@ h1, h2, h3 { margin: 0; }
    is the sole visible boundary. */
 .rb-bubble {
   display: block;
+  position: relative;
   margin: 6px 0;
-  padding: 8px 12px;
+  padding: 42px 52px 8px 12px;
   border-radius: 10px;
   border: 1px solid;
   max-width: 100%;
@@ -582,6 +593,43 @@ h1, h2, h3 { margin: 0; }
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.rb-speaker {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: #ccc;
+  font-size: 14px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  line-height: 1;
+}
+
+.rb-speaker:hover {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* Muted teal accent for the speaking state — picked to read across all
+   four themes (Tomorrow Night Soft, Gruvbox Dark Soft, Nord, Solarized
+   Dark) without clashing. Avoids red (too hot for a night/phone palette,
+   per project preference) and any saturated hue. Soft alpha background
+   plus a thin outline so the state reads at a glance but never glares. */
+.rb-speaker.rb-speaking {
+  background: rgba(80, 160, 160, 0.22);
+  border-color: rgba(140, 200, 200, 0.55);
+  color: #d8eaea;
+}
+
+.rb-code .rb-speaker {
+  display: none;
 }
 
 
@@ -921,4 +969,54 @@ h1, h2, h3 { margin: 0; }
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
+}
+
+.listen-range-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.listen-range-group label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.listen-range-group input[type="range"] {
+  flex: 1;
+  min-width: 120px;
+}
+
+.listen-range-group .listen-value {
+  min-width: 40px;
+  text-align: right;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.listen-test-btn {
+  margin-top: 8px;
+  padding: 8px 16px;
+  background: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.listen-test-btn:hover {
+  opacity: 0.9;
+}
+
+.listen-unavailable {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
 }

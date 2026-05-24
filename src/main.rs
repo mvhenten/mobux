@@ -949,11 +949,56 @@ end</code></pre>
       <div class="settings-status" id="shellIntegrationStatus" hidden></div>
       <p class="settings-foot">Reload the shell after installing. The fenced block is the contract — mobux only ever modifies what's between the fences. A timestamped <code>.mobux.bak.&lt;ts&gt;</code> is written next to the rc file before any change.</p>
     </section>
+
+    <section class="settings-card" id="listen-settings">
+      <h2>Listen</h2>
+      <p class="settings-lede">Make reader-view bubbles tappable to be spoken aloud via the Web Speech API. Settings are stored locally and apply to all sessions.</p>
+
+      <div id="listenCapable">
+        <div class="listen-range-group">
+          <label>
+            <strong>Voice</strong>
+            <select id="listenVoice" class="settings-select" style="flex: 1;"></select>
+          </label>
+        </div>
+
+        <div class="listen-range-group" style="margin-top: 12px;">
+          <label>
+            <strong>Rate</strong>
+            <input type="range" id="listenRate" min="0.5" max="2" step="0.1" value="1.0" />
+            <span class="listen-value" id="listenRateValue">1.0</span>
+          </label>
+        </div>
+
+        <div class="listen-range-group" style="margin-top: 8px;">
+          <label>
+            <strong>Pitch</strong>
+            <input type="range" id="listenPitch" min="0.5" max="2" step="0.1" value="1.0" />
+            <span class="listen-value" id="listenPitchValue">1.0</span>
+          </label>
+        </div>
+
+        <button type="button" id="listenTest" class="listen-test-btn">Test</button>
+      </div>
+
+      <div id="listenUnavailable" class="listen-unavailable" hidden>
+        Web Speech API not available in this browser.
+      </div>
+    </section>
   </main>
 
+  <script>
+    // Capability gate only — all slider/value wiring lives in listen-settings.js
+    // (single source of truth for prefs + DOM behaviour).
+    if (!('speechSynthesis' in window)) {{
+      document.getElementById('listenCapable').hidden = true;
+      document.getElementById('listenUnavailable').hidden = false;
+    }}
+  </script>
   <script src="/static/settings.js?v={v}"></script>
   <script type="module" src="/static/settings-theme.js?v={v}"></script>
   <script src="/static/shell-integration.js?v={v}"></script>
+  <script type="module" src="/static/listen-settings.js?v={v}"></script>
 </body>
 </html>
 "##,

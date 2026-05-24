@@ -398,6 +398,11 @@ window.__mobuxView = {
     readerInnerHeight: () => reader.innerHeight,
     readerScrollBy: (dy) => reader.scrollBy(dy),
     readerStickToBottom: () => reader.stickToBottom(),
+    // Force a synchronous re-render. Used by tests that need to assert
+    // post-render invariants (e.g. that rb-speaking re-applies after
+    // _inner.replaceChildren wipes the icon DOM) without racing the
+    // 50ms render throttle.
+    readerForceRender: () => reader._render(),
     switchWindow: (dir) => core.switchWindow(dir),
     statusBarOffsetHeight: () => document.querySelector('.reader-statusbar')?.offsetHeight ?? 0,
     statusBarFilled: () => document.querySelector('.reader-statusbar')?.classList.contains('reader-statusbar--filled') ?? false,

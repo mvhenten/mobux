@@ -25,9 +25,29 @@
 //   scrollY, maxScroll, innerHeight (read-only getters for tests)
 
 import { tokenize, extractRuns } from './term-tokenizer.js';
+import { loadPrefs } from './listen-prefs.js';
+
+const SPEECH_AVAILABLE = 'speechSynthesis' in window;
 
 const RENDER_THROTTLE_MS = 50;
 const STICK_TO_BOTTOM_PX = 80;
+
+// Module-level "what is currently speaking" tracker.
+//
+// Why module-scoped rather than per-instance: the render loop calls
+// `_inner.replaceChildren(frag)` every ~50 ms when the buffer changes,
+// which obliterates the speaker icon DOM. The new icon node has no
+// `rb-speaking` class even though `window.speechSynthesis` is still
+// reading the same content. We keep the speaking key here (survives
+// re-render), the matching utterance-end callback clears it, and after
+// every render we walk the freshly-built icons and re-apply the class
+// to whichever one matches.
+//
+// Key: the verbatim `text` that was passed to `speakText()`. It's
+// stable across re-renders as long as the underlying content hasn't
+// changed, which is the only state we actually care about preserving.
+let speakingKey = null;
+let speakingOnEnd = null;
 
 export class ReaderView {
   constructor({ host, core, overlay }) {
@@ -210,6 +230,13 @@ export class ReaderView {
     const frag = document.createDocumentFragment();
     for (const block of blocks) frag.appendChild(renderBlock(block));
     this._inner.replaceChildren(frag);
+    // After replaceChildren the previous speaker icon (if any) is gone;
+    // re-apply rb-speaking to whichever fresh icon matches the key the
+    // synthesizer is currently reading. If none matches (content
+    // scrolled out or changed), the visual state silently drops but
+    // speech keeps playing — `stopAllSpeech` / `cancel` is the user's
+    // recourse.
+    reapplySpeakingState(this._inner);
 
     this._recomputeBounds();
     if (wasAtBottom) this._scrollY = this._maxScroll;
@@ -270,6 +297,9 @@ function renderInlineBlock(className, runs) {
   const el = document.createElement('div');
   el.className = className;
   appendRuns(el, runs);
+  if (className === 'rb rb-prompt') {
+    addSpeakerIcon(el, 'prompt', runs);
+  }
   return el;
 }
 
@@ -277,6 +307,7 @@ function renderTextBlock(block) {
   const el = document.createElement('div');
   el.className = 'rb rb-text';
   appendLinesWithBubbles(el, block.lines, 'rb-line');
+  addSpeakerIcons(el, 'text', block);
   return el;
 }
 
@@ -356,4 +387,182 @@ function makeEl(tag, className, text) {
   el.className = className;
   if (text !== undefined) el.textContent = text;
   return el;
+}
+
+function addSpeakerIcon(el, kind, content) {
+  if (!SPEECH_AVAILABLE) return;
+
+  const icon = document.createElement('button');
+  icon.className = 'rb-speaker';
+  icon.type = 'button';
+  icon.setAttribute('aria-label', 'Speak');
+  icon.textContent = '▶';
+  icon.dataset.kind = kind;
+  // Stable key for matching across re-renders (see speakingKey docs).
+  const text = typeof content === 'string' ? content : extractTextFromRuns(content);
+  icon.dataset.speechKey = speechKeyFor(kind, text);
+
+  icon.addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleSpeakerClick(icon, kind, text);
+  });
+
+  el.appendChild(icon);
+}
+
+// Walk both naked `.rb-line` children and `.rb-bubble` descendants and
+// drop a speaker icon on each — a single block can hold a mix when
+// tokenization assigns bubble backgrounds to some lines but not others.
+function addSpeakerIcons(el, kind /*, block */) {
+  if (!SPEECH_AVAILABLE) return;
+
+  const bubbles = el.querySelectorAll(':scope > .rb-bubble');
+  bubbles.forEach((bubble) => {
+    const lines = bubble.querySelectorAll('.rb-bubble-line');
+    if (lines.length === 0) return;
+    const content = Array.from(lines).map((l) => l.textContent).join('\n');
+    addSpeakerIcon(bubble, kind, content);
+  });
+
+  const nakedLines = el.querySelectorAll(':scope > .rb-line');
+  if (nakedLines.length > 0) {
+    const content = Array.from(nakedLines).map((l) => l.textContent).join('\n');
+    // Attach to the block container itself so a single icon covers all
+    // contiguous non-bubble lines in the block.
+    addSpeakerIcon(el, kind, content);
+  }
+}
+
+function speechKeyFor(kind, text) {
+  return `${kind}::${text}`;
+}
+
+function handleSpeakerClick(icon, kind, text) {
+  const isSpeaking = icon.classList.contains('rb-speaking');
+
+  stopAllSpeech();
+
+  if (isSpeaking) return;
+
+  const key = icon.dataset.speechKey || speechKeyFor(kind, text);
+  icon.classList.add('rb-speaking');
+  icon.textContent = '■';
+
+  let utteranceText = text;
+  if (kind === 'prompt') {
+    utteranceText = 'command: ' + utteranceText;
+  }
+
+  const onEnd = () => {
+    // Clear the original icon (whether still attached or not) and any
+    // re-rendered icon currently wearing the class for the same key.
+    // Module state goes last so we can't race a render mid-clear.
+    if (icon.isConnected) {
+      icon.classList.remove('rb-speaking');
+      icon.textContent = '▶';
+    }
+    document.querySelectorAll(`.rb-speaker.rb-speaking`).forEach((other) => {
+      if (other.dataset.speechKey === key) {
+        other.classList.remove('rb-speaking');
+        other.textContent = '▶';
+      }
+    });
+    if (speakingOnEnd === onEnd) {
+      speakingKey = null;
+      speakingOnEnd = null;
+    }
+  };
+
+  speakingKey = key;
+  speakingOnEnd = onEnd;
+
+  speakText(utteranceText, onEnd);
+}
+
+function extractTextFromRuns(runs) {
+  if (!runs) return '';
+  if (Array.isArray(runs)) return runs.map((r) => r.text || '').join('');
+  // Block objects expose `.lines` (array of { runs }) for text blocks.
+  if (runs.lines && Array.isArray(runs.lines)) {
+    return runs.lines
+      .map((ln) => (ln.runs || []).map((r) => r.text || '').join(''))
+      .join('\n');
+  }
+  return '';
+}
+
+function stopAllSpeech() {
+  window.speechSynthesis.cancel();
+  speakingKey = null;
+  speakingOnEnd = null;
+  document.querySelectorAll('.rb-speaker.rb-speaking').forEach((icon) => {
+    icon.classList.remove('rb-speaking');
+    icon.textContent = '▶';
+  });
+}
+
+// After a re-render, the freshly-built icons have no rb-speaking class.
+// Walk them, match against the stored speakingKey, and re-apply state.
+function reapplySpeakingState(root) {
+  if (!speakingKey || !root) return;
+  const icons = root.querySelectorAll('.rb-speaker');
+  for (const icon of icons) {
+    if (icon.dataset.speechKey === speakingKey) {
+      icon.classList.add('rb-speaking');
+      icon.textContent = '■';
+      // Note: we deliberately do NOT rebind the onEnd callback to this
+      // fresh icon. The original onEnd closes over the original icon
+      // node; when it fires it'll check `isConnected` (false for the
+      // detached one) and skip. Speech end clearing relies on
+      // speakingKey going null, so subsequent renders won't re-apply.
+      return;
+    }
+  }
+}
+
+function splitIntoSentences(text) {
+  const chunks = text.split(/([.!?])\s+/);
+  const sentences = [];
+  for (let i = 0; i < chunks.length; i += 2) {
+    const base = chunks[i];
+    const punct = chunks[i + 1] || '';
+    if (base.trim()) sentences.push(base + punct);
+  }
+  return sentences.length > 0 ? sentences : [text];
+}
+
+function speakText(text, onEnd) {
+  const prefs = loadPrefs();
+  const sentences = splitIntoSentences(text.trim());
+  let index = 0;
+  
+  function speakNext() {
+    if (index >= sentences.length) {
+      if (onEnd) onEnd();
+      return;
+    }
+    
+    const utterance = new SpeechSynthesisUtterance(sentences[index]);
+    utterance.rate = prefs.rate;
+    utterance.pitch = prefs.pitch;
+    
+    if (prefs.voice) {
+      const voices = window.speechSynthesis.getVoices();
+      const selected = voices.find((v) => v.name === prefs.voice);
+      if (selected) utterance.voice = selected;
+    }
+    
+    utterance.onend = () => {
+      index++;
+      speakNext();
+    };
+    
+    utterance.onerror = () => {
+      if (onEnd) onEnd();
+    };
+    
+    window.speechSynthesis.speak(utterance);
+  }
+  
+  speakNext();
 }
