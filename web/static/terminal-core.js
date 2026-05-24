@@ -285,6 +285,18 @@ function makeSterkAdapter(host, sendCb) {
       scrollback: 10000,
       fontSize: 13,
       fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
+      // Opt OUT of sterk's built-in font registry. Per the v2.6.0+
+      // contract: `font === ""` AND an explicit `fontFamily` means
+      // "consumer manages their own font stack". Without this opt-out
+      // sterk would inject a `@font-face` for JetBrains Mono pointing
+      // at the placeholder URL the build.js define rewrites
+      // `import.meta.url` to — which the browser blocks as Mixed
+      // Content (HTTPS page, HTTP placeholder URL). The font-picker
+      // feature on the in-flight `feat/font-picker-consume-sterk-2-6`
+      // branch wires up the real /static/vendor/fonts/ asset paths;
+      // until that lands, the system monospace stack above is what
+      // mobux has always rendered with anyway.
+      font: "",
       theme: {
         foreground: theme.foreground,
         background: theme.background,
