@@ -341,6 +341,93 @@ test('cell-width parity: no left padding gutter and right-most cell hugs the rig
   assertNoFailures(captured);
 });
 
+test('row-height parity: PTY rows match what actually fits, including after the input bar appears', async ({ page }) => {
+  // Bottom-cut-off regression (Pixel 7, real device): when the mobile
+  // input bar appeared as a flex sibling of `#terminal`, mobux fired
+  // a synchronous `'resize'` event and asked sterk
+  // `getViewportCellCount()` for the new grid. Before sterk's
+  // `editor.resize(true)` precondition (kattebak/sterk#29), the API
+  // returned Ace's STALE pre-shrink `$size` — so the PTY ended up
+  // resized to MORE rows than the visible scroller could paint, and
+  // the bottom 2-5 rows rendered off-screen.
+  //
+  // The invariant this test enforces: after any layout change (here,
+  // unhiding the input bar), `term.rows * cellHeight` must fit
+  // within `#terminal.clientHeight` to the precision of one cell.
+  // I.e. no rows the PTY thinks exist but the user can't see.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  // Snapshot the initial (bar hidden) invariant first, so a baseline
+  // failure tells us the host geometry is busted before we even
+  // toggle the bar.
+  const initial = await page.evaluate(() => {
+    const t = document.getElementById('terminal');
+    const sterk = window.__sterk?._sterk;
+    const cell = sterk?.getCellMetrics?.();
+    return {
+      hostH: t.clientHeight,
+      rows: window.__mobuxView.test.rows(),
+      cellH: cell?.height ?? 0,
+    };
+  });
+  expect(initial.cellH, 'initial cell height should be > 0').toBeGreaterThan(0);
+  // rows * cellH must be <= hostH (the PTY isn't promised rows that
+  // don't fit). One cell of slack on the high side handles non-integer
+  // host heights divided by integer cell heights.
+  expect(
+    initial.rows * initial.cellH,
+    `initial: rows(${initial.rows})*cellH(${initial.cellH})=${initial.rows*initial.cellH} > hostH(${initial.hostH})`,
+  ).toBeLessThanOrEqual(initial.hostH);
+
+  // Show the input bar — the same mobux code path that fires on a
+  // real-device tap. Then re-measure: the new term.rows must still
+  // fit in the (now-shrunk) host.
+  await page.evaluate(() => {
+    const bar = document.getElementById('inputBar');
+    bar.classList.remove('hidden');
+    window.dispatchEvent(new Event('resize'));
+  });
+  // Give the resize round-trip a beat to land (mobux sends to PTY,
+  // PTY sends fresh redraw back).
+  await page.waitForTimeout(500);
+
+  const afterBar = await page.evaluate(() => {
+    const t = document.getElementById('terminal');
+    const bar = document.getElementById('inputBar');
+    const sterk = window.__sterk?._sterk;
+    const cell = sterk?.getCellMetrics?.();
+    return {
+      hostH: t.clientHeight,
+      rows: window.__mobuxView.test.rows(),
+      cellH: cell?.height ?? 0,
+      barH: bar.getBoundingClientRect().height,
+      barHidden: bar.classList.contains('hidden'),
+    };
+  });
+  expect(afterBar.barHidden, 'input bar must be visible for this scenario').toBe(false);
+  expect(afterBar.barH, 'input bar must occupy vertical space').toBeGreaterThan(10);
+  // The host must have shrunk (flex sibling took its bite).
+  expect(
+    afterBar.hostH,
+    `host should be smaller after bar show: was ${initial.hostH}, now ${afterBar.hostH}`,
+  ).toBeLessThan(initial.hostH);
+  // The key invariant: rows*cellH stays within hostH.
+  expect(
+    afterBar.rows * afterBar.cellH,
+    `after-bar: rows(${afterBar.rows})*cellH(${afterBar.cellH})=${afterBar.rows*afterBar.cellH} > hostH(${afterBar.hostH})`,
+  ).toBeLessThanOrEqual(afterBar.hostH);
+  // And the gap between rows*cellH and hostH must be SMALL — less
+  // than one cell. If it's > one cell, mobux is under-promising
+  // rows to the PTY (cosmetic but wasted vertical real estate).
+  // A failure on the OTHER direction (rows*cellH > hostH) is the
+  // actual bottom-cut-off bug; that's caught by the leq above.
+  const gap = afterBar.hostH - afterBar.rows * afterBar.cellH;
+  expect(gap, `tight-fit gap (px): ${gap}`).toBeLessThan(afterBar.cellH);
+
+  assertNoFailures(captured);
+});
+
 test('reader view: real PTY output reaches the reader pane', async ({ page }) => {
   const captured = seedErrorCapture(page);
   await bootTerminal(page);
