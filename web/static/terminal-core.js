@@ -110,6 +110,16 @@ export class TerminalCore extends EventTarget {
     
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+
+    // Force Ace to re-measure the container's pixel size. sterk's
+    // AceRenderer.resize() only re-syncs buffer→document (cols/rows of
+    // text); it never calls editor.resize(), and Ace only re-measures
+    // its viewport on the *window* 'resize' event. On Android, opening/
+    // closing the soft keyboard changes `visualViewport.height` but NOT
+    // window size, so Ace keeps painting against the stale viewport
+    // height → frozen rows + glyph overdraw in the lower region. We
+    // changed `.sterk-viewport` height above, so tell Ace to re-layout.
+    this.term.redraw();
   }
 
   _keyboardOffset() {
@@ -305,6 +315,25 @@ function makeSterkAdapter(host, sendCb) {
     },
     resize(cols, rows) {
       sterk.resize(cols, rows);
+    },
+    redraw() {
+      // Force the Ace editor to re-measure its container and do a full
+      // repaint. sterk exposes the AceRenderer via `renderer`, which in
+      // turn hands us the Ace.Editor via getEditor(). editor.resize(true)
+      // re-reads the container pixel size; updateFull() repaints every
+      // visible row (clearing stale glyphs from a previous, taller
+      // viewport). Guarded so a sterk API change degrades gracefully
+      // rather than throwing.
+      try {
+        const renderer = sterk.renderer;
+        const editor = renderer && renderer.getEditor ? renderer.getEditor() : null;
+        if (editor) {
+          editor.resize(true);
+          if (editor.renderer && editor.renderer.updateFull) {
+            editor.renderer.updateFull();
+          }
+        }
+      } catch (_) {}
     },
     clear() {
       sterk.clear();

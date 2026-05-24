@@ -389,6 +389,21 @@ window.__mobuxView = {
     readerAtBottom: () => reader._atBottom,
     readerForceScrollTop: () => { reader._atBottom = false; reader._scrollY = 0; reader._applyTransform?.(); },
     terminalRows: () => core.term.rows,
+    // Ace's renderer caches the viewport pixel height ($size.height). On a
+    // container-only height change (Android keyboard) Ace won't re-measure
+    // unless editor.resize() is called — core.resize() now does that. This
+    // hook lets tests assert the cached height tracks the container.
+    aceEditor: () => {
+      try { return core.term._sterk?.renderer?.getEditor?.() ?? null; }
+      catch (_) { return null; }
+    },
+    aceViewportHeight: () => {
+      try {
+        const ed = core.term._sterk?.renderer?.getEditor?.();
+        return ed?.renderer?.$size?.height ?? null;
+      } catch (_) { return null; }
+    },
+    triggerResize: () => core.resize(),
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
