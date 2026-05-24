@@ -211,6 +211,136 @@ test('PTY roundtrip: tmux new-window appears in the /panes API and is selectable
   assertNoFailures(captured);
 });
 
+test('cell-width parity: no left padding gutter and right-most cell hugs the right edge', async ({ page }) => {
+  // V8 regression. Before this fix mobux had `#terminal { padding: 0 12px }`,
+  // Ace had the default `setPadding(4)`, and the cols formula subtracted
+  // an extra 1 — adding up to ~28px of horizontal real estate that the
+  // PTY thought it had but the renderer couldn't paint. The right-most
+  // ~2 columns of any tmux output were clipped behind the (still-shown)
+  // vertical scrollbar gutter on a phone-sized viewport.
+  //
+  // This test asserts the geometry directly: col 0 sits within a few px
+  // of the container's left edge, and the cell at col (cols-1) sits
+  // within a few px of the right edge, with no scrollbar reservation
+  // between them.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  // Fill the visible row with `#` so we have something to measure.
+  // tmux send-keys is used directly (faster + deterministic than
+  // typing via the browser).
+  const cols = await page.evaluate(() => window.__mobuxView.test.cols());
+  expect(cols, 'sterk should report a sane column count').toBeGreaterThan(20);
+  // Build a string of exactly `cols` `#` characters and echo it. Doing
+  // the expansion locally instead of inside the shell avoids tmux's
+  // tab-completion / prompt-echo confusing the output (the shell would
+  // echo back the full command line including the `printf $(seq ...)`
+  // which our regex would then false-match on).
+  const hashes = '#'.repeat(cols);
+  await page.evaluate((s) => window.__mobuxView.send(`printf '%s\\n' '${s}'\r`), hashes);
+  // Wait until we see a line that is JUST `#` characters of the expected
+  // length (no prompt prefix, no other text). Anchor with a non-`#`
+  // boundary on each side to defeat the cmdline echo above it.
+  await expect.poll(
+    async () => {
+      const t = await visibleTerminalText(page);
+      return new RegExp(`(^|[^#])#{${cols}}([^#]|$)`).test(t);
+    },
+    { timeout: 10000, intervals: [200, 400, 800] },
+  ).toBe(true);
+
+  // Now measure: find the leftmost and rightmost `#` characters in the
+  // rendered DOM and assert their positions vs. the #terminal box.
+  const geom = await page.evaluate((expectedCols) => {
+    const t = document.getElementById('terminal');
+    const tRect = t.getBoundingClientRect();
+    // Ace renders each line as one or more spans inside .ace_line.
+    // We want the row whose content is JUST `#` characters — the
+    // printf output, not the cmdline echo above it. Match on lines
+    // that are mostly `#` with no leading prompt (`$` etc.).
+    let bestRange = null;
+    let bestLen = 0;
+    const lines = t.querySelectorAll('.ace_line, .ace_line_group');
+    for (const line of lines) {
+      const text = line.textContent || '';
+      // Lines containing the cmdline have non-`#` content (prompt,
+      // printf, quotes); skip them. The pure output line is the
+      // longest contiguous run of `#` with no other characters.
+      const m = text.match(/^#+$/) || text.match(/^\s*(#+)\s*$/);
+      if (!m) continue;
+      const hashes = m[1] ?? m[0];
+      if (hashes.length < expectedCols - 2) continue; // tolerate a wrap of ±2
+      if (hashes.length <= bestLen) continue;
+      bestLen = hashes.length;
+      // Walk text nodes to find the bounding rects of the first and
+      // last `#` in the longest run.
+      const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+      let consumed = 0;
+      let firstNode = null, firstOff = -1;
+      let lastNode = null, lastOff = -1;
+      const startIdx = text.indexOf(hashes);
+      const endIdx = startIdx + hashes.length - 1;
+      let node = walker.nextNode();
+      while (node) {
+        const len = node.data.length;
+        if (firstNode === null && consumed + len > startIdx) {
+          firstNode = node;
+          firstOff = startIdx - consumed;
+        }
+        if (consumed + len > endIdx) {
+          lastNode = node;
+          lastOff = endIdx - consumed;
+          break;
+        }
+        consumed += len;
+        node = walker.nextNode();
+      }
+      if (firstNode && lastNode) {
+        const r1 = document.createRange();
+        r1.setStart(firstNode, firstOff);
+        r1.setEnd(firstNode, firstOff + 1);
+        const r2 = document.createRange();
+        r2.setStart(lastNode, lastOff);
+        r2.setEnd(lastNode, lastOff + 1);
+        bestRange = {
+          firstRect: r1.getBoundingClientRect(),
+          lastRect: r2.getBoundingClientRect(),
+          len: m[0].length,
+        };
+      }
+    }
+    return {
+      terminal: { left: tRect.left, right: tRect.right, width: tRect.width },
+      range: bestRange,
+    };
+  }, cols);
+
+  expect(geom.range, 'should have found a long run of # in the DOM').toBeTruthy();
+  // Left edge: first `#` should be within 8px of the container's left edge.
+  const leftGap = geom.range.firstRect.left - geom.terminal.left;
+  expect(leftGap, `left-edge gap (px): ${leftGap}`).toBeLessThanOrEqual(8);
+  expect(leftGap, `left-edge gap (px): ${leftGap}`).toBeGreaterThanOrEqual(0);
+  // Right edge: last `#` should be within 12px of the container's right
+  // edge (the cell itself is ~9px wide so up to one cell of slack is
+  // allowed if the column count isn't an exact divisor).
+  const rightGap = geom.terminal.right - geom.range.lastRect.right;
+  expect(rightGap, `right-edge gap (px): ${rightGap}`).toBeLessThanOrEqual(12);
+  expect(rightGap, `right-edge gap (px): ${rightGap}`).toBeGreaterThanOrEqual(0);
+  // Symmetry: left and right gaps should be within one cell of each other.
+  expect(
+    Math.abs(leftGap - rightGap),
+    `asymmetry (left ${leftGap} vs right ${rightGap})`,
+  ).toBeLessThanOrEqual(12);
+
+  // Final invariant: the number of # characters actually rendered must
+  // match (within ±1) what mobux sent to the PTY — i.e. no characters
+  // were clipped past the right edge. ±1 tolerance covers the case
+  // where the row exactly fills cols and tmux wraps the final cell.
+  expect(geom.range.len, `rendered #s (${geom.range.len}) vs sent (${cols})`).toBeGreaterThanOrEqual(cols - 1);
+
+  assertNoFailures(captured);
+});
+
 test('reader view: real PTY output reaches the reader pane', async ({ page }) => {
   const captured = seedErrorCapture(page);
   await bootTerminal(page);

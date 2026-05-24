@@ -395,9 +395,13 @@ h1, h2, h3 { margin: 0; }
   width: 100%;
   min-height: 0;
   overflow: hidden;
-  /* Same horizontal breathing room the reader uses. xterm cells fit
-     inside the padding; resize() subtracts it from the col calc. */
-  padding: 0 12px;
+  /* No horizontal padding: sterk zeroes Ace's internal $padding and
+     hides the scrollbar so col 0 sits flush at the viewport's left
+     edge and the right-most column hugs the right edge. Adding any
+     padding here re-creates the V8 "right-side clipping + left-side
+     extra gutter" defect — the host's clientWidth is what cols/cellW
+     is divided by, so anything we subtract here is also subtracted
+     from the visible grid. */
   box-sizing: border-box;
 }
 
