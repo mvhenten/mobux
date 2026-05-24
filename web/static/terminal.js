@@ -389,6 +389,8 @@ window.__mobuxView = {
     readerAtBottom: () => reader._atBottom,
     readerForceScrollTop: () => { reader._atBottom = false; reader._scrollY = 0; reader._applyTransform?.(); },
     terminalRows: () => core.term.rows,
+    cols: () => core.term.cols,
+    rows: () => core.term.rows,
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,

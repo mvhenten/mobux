@@ -95,21 +95,45 @@ export class TerminalCore extends EventTarget {
   // ── Resize ────────────────────────────────────────────────────────
   resize() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const cell = this.cellSize();
-    const pad = this._horizontalPadding();
-    const hostW = this.host.clientWidth || (window.innerWidth - pad);
     const hostH = this.host.clientHeight || window.innerHeight;
-    const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
-    const rows = Math.max(10, Math.floor(hostH / cell.height));
-    
-    // Update .sterk-viewport height to match host
+
+    // Update .sterk-viewport height to match host so Ace sees a sized
+    // viewport before we ask it for its grid count.
     const viewport = this.host.querySelector('.sterk-viewport');
     if (viewport && hostH > 0) {
       viewport.style.height = `${hostH}px`;
     }
-    
+
+    const { cols, rows } = this._computeCellGrid(hostH);
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  }
+
+  // Compute the (cols, rows) the PTY should run at.
+  //
+  // Prefer sterk's `getViewportCellCount()` which is the renderer's
+  // authoritative answer — it already accounts for any internal
+  // padding / scrollbar reservation, so there is no `- 1` fudge
+  // needed and the right-most cell sits at the scroller's right edge.
+  //
+  // Fall back to `floor(clientWidth / cellWidth)` for older sterk
+  // builds without the API. We deliberately do NOT subtract 1 here:
+  // sterk hides its scrollbar and zeros `$padding` upstream, so the
+  // naive math is correct.
+  _computeCellGrid(hostH) {
+    const sterkCount = this.term._sterk?.getViewportCellCount?.();
+    if (sterkCount && sterkCount.cols > 0 && sterkCount.rows > 0) {
+      return {
+        cols: Math.max(20, sterkCount.cols),
+        rows: Math.max(10, sterkCount.rows),
+      };
+    }
+    const cell = this.cellSize();
+    const pad = this._horizontalPadding();
+    const hostW = this.host.clientWidth || (window.innerWidth - pad);
+    const cols = Math.max(20, Math.floor(hostW / cell.width));
+    const rows = Math.max(10, Math.floor(hostH / cell.height));
+    return { cols, rows };
   }
 
   _keyboardOffset() {
@@ -179,12 +203,8 @@ export class TerminalCore extends EventTarget {
 
   _forceRedraw() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const cell = this.cellSize();
-    const pad = this._horizontalPadding();
-    const hostW = this.host.clientWidth || (window.innerWidth - pad);
     const hostH = this.host.clientHeight || window.innerHeight;
-    const cols = Math.max(20, Math.floor(hostW / cell.width) - 1);
-    const rows = Math.max(10, Math.floor(hostH / cell.height));
+    const { cols, rows } = this._computeCellGrid(hostH);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
