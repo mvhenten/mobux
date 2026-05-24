@@ -27,7 +27,7 @@
     "@playwright/test": "^1.59.1"
   },
   "dependencies": {
-    "@kattebak/sterk": "^2.0.2",
+    "@kattebak/sterk": "file:./.local-sterk/kattebak-sterk-0.0.0.tgz",
     "esbuild": "^0.28.0"
   }
 }
