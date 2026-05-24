@@ -44,6 +44,10 @@ export class TerminalCore extends EventTarget {
     // Debug peephole for tests.
     if (typeof window !== 'undefined') {
       window.__sterk = this.term;
+      // Callback used by the makeSterkAdapter font-preload hook.
+      // After the chosen bundled font finishes loading, Ace re-measures
+      // its cell size; we then resize the PTY to match the new grid.
+      window.__sterkResizeAfterFont = () => this.resize();
     }
   }
 
@@ -316,6 +320,32 @@ function makeSterkAdapter(host, sendCb) {
 
   // Wire up input
   sterk.onData(sendCb);
+
+  // Bundled fonts are fetched async. Sterk's initial cell-metric
+  // measurement runs while the woff2 is still loading, so Ace measures
+  // the fallback monospace and the PTY is resized to that grid. Once
+  // the real face lands the cells shift, leaving the PTY rows/cols
+  // out of sync with what fits on screen until the next user-driven
+  // resize. Wait for the chosen face to load, then re-measure +
+  // re-resize the PTY through the live `__mobuxView` adapter. Using
+  // `document.fonts.load(font-shorthand)` resolves to the registered
+  // FontFace; falls back to a no-op when the platform lacks the API
+  // (very old browsers — mobux only targets Android Chrome, so this
+  // is purely defensive).
+  try {
+    const fontFamily = sterk.options?.fontFamily || '';
+    const fontSize = sterk.options?.fontSize || 13;
+    const probe = `${fontSize}px ${fontFamily}`;
+    if (document.fonts && document.fonts.load) {
+      document.fonts.load(probe).then(() => {
+        // Force the renderer to re-measure with the loaded face, then
+        // ask the host to recompute cols/rows and resize the PTY.
+        if (window.__sterkResizeAfterFont) {
+          try { window.__sterkResizeAfterFont(); } catch (_) {}
+        }
+      }).catch(() => {});
+    }
+  } catch (_) {}
 
   const writeParsedSubs = [];
 

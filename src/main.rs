@@ -1472,6 +1472,26 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="apple-touch-icon" href="/static/icon-192.png" />
   <link rel="stylesheet" href="/static/style.css?v={v}" />
+  <!-- Preload + declare @font-face for all bundled monospace fonts so
+       Ace's first cell-metric measurement uses the real face and the
+       PTY is sized correctly on the first WS handshake. Without this,
+       the woff2 fetch races with `Sterk.createTerminal()` and the
+       initial grid is computed against the fallback monospace,
+       leaving cols/rows out of sync until the next user-driven
+       resize. The font assets are copied to /static/vendor/fonts/ by
+       web/build.js. -->
+  <link rel="preload" as="font" type="font/woff2" href="/static/vendor/fonts/JetBrainsMono-Regular.woff2?v={v}" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/static/vendor/fonts/IBMPlexMono-Regular.woff2?v={v}" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/static/vendor/fonts/CascadiaMono-Regular.woff2?v={v}" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/static/vendor/fonts/FiraMono-Regular.woff2?v={v}" crossorigin />
+  <link rel="preload" as="font" type="font/woff2" href="/static/vendor/fonts/SourceCodePro-Regular.woff2?v={v}" crossorigin />
+  <style>
+    @font-face {{ font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: block; src: url('/static/vendor/fonts/JetBrainsMono-Regular.woff2?v={v}') format('woff2'); }}
+    @font-face {{ font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: block; src: url('/static/vendor/fonts/IBMPlexMono-Regular.woff2?v={v}') format('woff2'); }}
+    @font-face {{ font-family: 'Cascadia Mono'; font-style: normal; font-weight: 400; font-display: block; src: url('/static/vendor/fonts/CascadiaMono-Regular.woff2?v={v}') format('woff2'); }}
+    @font-face {{ font-family: 'Fira Mono'; font-style: normal; font-weight: 400; font-display: block; src: url('/static/vendor/fonts/FiraMono-Regular.woff2?v={v}') format('woff2'); }}
+    @font-face {{ font-family: 'Source Code Pro'; font-style: normal; font-weight: 400; font-display: block; src: url('/static/vendor/fonts/SourceCodePro-Regular.woff2?v={v}') format('woff2'); }}
+  </style>
 </head>
 <body class="term-body">
   <div id="terminal"></div>

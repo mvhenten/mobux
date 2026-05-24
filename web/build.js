@@ -46,7 +46,17 @@ if (fs.existsSync(FONTS_SRC)) {
   console.warn(`[build] WARN: sterk fonts dir not found at ${FONTS_SRC}`);
 }
 
-// Bundle sterk (includes ace-builds as a dependency)
+// Bundle sterk (includes ace-builds as a dependency).
+//
+// `--define:import.meta.url='"http://sterk.invalid/"'` is critical:
+// sterk's fonts/index.ts evaluates `new URL('../../assets/fonts/X.woff2',
+// import.meta.url)` at module load. Under IIFE esbuild emits
+// `import.meta` as `{}`, so the URL constructor throws "Invalid URL"
+// and the entire `BUILTIN_FONTS` initializer aborts — `window.Sterk`
+// is then never set and every consumer load fails. The define gives
+// the URL constructor a valid base so the freeze succeeds;
+// sterk-entry.js overwrites each `BUILTIN_FONTS[id].url` to the real
+// public path (/static/vendor/fonts/...) before any consumer reads it.
 console.log('[build] Bundling sterk...');
 execSync([
   'npx esbuild',
@@ -56,6 +66,7 @@ execSync([
   '--minify',
   '--sourcemap',
   '--target=es2020',
+  `--define:import.meta.url='"http://sterk.invalid/"'`,
   `--outfile=${path.join(VENDOR, 'sterk.bundle.js')}`,
 ].join(' '), { cwd: ROOT, stdio: 'inherit' });
 
