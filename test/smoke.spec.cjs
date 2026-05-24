@@ -1170,18 +1170,28 @@ test('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
     max: window.__mobuxView.test.readerMaxScroll(),
   }));
   expect(before.sy).toBe(before.max);
+  expect(before.max).toBeGreaterThan(0);
 
   await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'sticky2'));
-  await page.waitForFunction((prev) => {
-    const m = window.__mobuxView.test.readerMaxScroll();
-    return m > prev;
-  }, before.max, { timeout: 3000 });
+  // Wait for the new content to render into the DOM. Use a content
+  // marker rather than `maxScroll > prev`: `injectLines` issues
+  // `\x1b[?1049l`, which sterk treats as a buffer reset, so the
+  // post-inject maxScroll can be lower than the baseline if the
+  // baseline render had already captured large pre-inject content.
+  // Matching on text is deterministic across CI render-timing
+  // variance.
+  await page.waitForFunction(
+    () => /sticky2/.test(document.querySelector('#reader .reader-inner')?.textContent || ''),
+    null,
+    { timeout: 5000 },
+  );
 
   const after = await page.evaluate(() => ({
     sy: window.__mobuxView.test.readerScrollY(),
     max: window.__mobuxView.test.readerMaxScroll(),
   }));
-  expect(after.max).toBeGreaterThan(before.max);
+  expect(after.max).toBeGreaterThan(0);
+  // Sticky-to-bottom: scrollY pinned to maxScroll after the new render.
   expect(after.sy).toBe(after.max);
 });
 
