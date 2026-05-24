@@ -120,6 +120,26 @@ test-e2e:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test
 
+# Visual e2e: Pixel 7 emulation, pixel-diff baselines. Strict mode (CI
+# default) compares against committed baselines and fails on drift. Use
+# `make test-visual-update` to regenerate baselines after a deliberate
+# visual change; commit the resulting PNGs in test/visual.spec.cjs-snapshots/.
+.PHONY: test-visual
+test-visual:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/visual.spec.cjs
+
+.PHONY: test-visual-update
+test-visual-update:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/visual.spec.cjs --update-snapshots
+
 # ---------------------------------------------------------------------------
 # podman-*: containerised mobux instance for full test isolation. Each run
 # gets its own tmux server inside the container, so playwright tests
