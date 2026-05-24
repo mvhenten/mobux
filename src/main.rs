@@ -865,6 +865,18 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
       </label>
     </section>
 
+    <section class="settings-card" id="font-settings">
+      <h2>Font</h2>
+      <p class="settings-lede">Pick the monospace font used in the terminal grid. Five bundled woff2 fonts ship with sterk — JetBrains Mono is the default. Currently the woff2 files are LATIN-only subsets, so box-drawing glyphs and dingbats still fall back to the system monospace until a wider subset lands.</p>
+      <label class="settings-row">
+        <span class="settings-label">
+          <strong>Terminal font</strong>
+          <small>Stored locally as <code>mobux:font</code>. Applied on next session load.</small>
+        </span>
+        <select id="fontSelect" class="settings-select"></select>
+      </label>
+    </section>
+
     <section class="settings-card" id="shell-integration">
       <h2>Shell integration</h2>
       <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristics. Click install — mobux appends a managed, fenced block to your rc file and keeps a timestamped backup. Nothing outside the fence is touched. The snippet detects <code>$TMUX</code> and wraps OSC 133 in tmux's DCS passthrough envelope so tmux 3.4's default <code>allow-passthrough off</code> doesn't drop the marker; mobux turns the option on for sessions it attaches.</p>
@@ -997,6 +1009,7 @@ end</code></pre>
   </script>
   <script src="/static/settings.js?v={v}"></script>
   <script type="module" src="/static/settings-theme.js?v={v}"></script>
+  <script type="module" src="/static/font-picker.js?v={v}"></script>
   <script src="/static/shell-integration.js?v={v}"></script>
   <script type="module" src="/static/listen-settings.js?v={v}"></script>
 </body>

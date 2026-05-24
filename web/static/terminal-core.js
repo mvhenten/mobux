@@ -13,6 +13,7 @@
 // - Events: 'open', 'data', 'panes', 'history', 'osc-detected'
 
 import { getStoredThemeId, getTheme } from './themes.js';
+import { getStoredFontId } from './font-picker.js';
 
 // `window.Sterk` is populated by sterk.bundle.js (loaded as a classic
 // <script> in render_terminal_page before this module runs).
@@ -275,8 +276,15 @@ export class TerminalCore extends EventTarget {
 // ── Sterk adapter ────────────────────────────────────────────────────
 function makeSterkAdapter(host, sendCb) {
   const theme = getTheme(getStoredThemeId());
-  
-  // Create sterk terminal with theme and scrollback
+  const fontId = getStoredFontId();
+
+  // Create sterk terminal with theme, scrollback, and bundled font.
+  // The `font` option resolves through sterk's `BUILTIN_FONTS` registry
+  // and lazily injects the matching `@font-face` (woff2 served from
+  // `/static/vendor/fonts/` — see web/build.js + web/src/sterk-entry.js).
+  // We deliberately do NOT pass a `fontFamily` alongside `font`: sterk
+  // composes `'<family>', monospace` from the built-in entry, which is
+  // the documented winning combination.
   let sterk;
   try {
     sterk = Sterk.createTerminal({
@@ -284,7 +292,7 @@ function makeSterkAdapter(host, sendCb) {
       rows: 35,
       scrollback: 10000,
       fontSize: 13,
-      fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
+      font: fontId,
       theme: {
         foreground: theme.foreground,
         background: theme.background,
