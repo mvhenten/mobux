@@ -21,6 +21,17 @@ test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
 });
 
+// The smoke suite is sterk-specific (asserts on .sterk-viewport,
+// ace_sterk-bg-* classes, window.__sterk internals, etc.). Force the
+// experimental sterk renderer for every page in this file, regardless
+// of the user-facing default (xterm). To test the xterm renderer add a
+// dedicated suite (follow-up).
+test.beforeEach(async ({ context }) => {
+  await context.addInitScript(() => {
+    try { localStorage.setItem('mobux:renderer', 'sterk'); } catch (_) {}
+  });
+});
+
 test.beforeAll(() => {
   // Create a dedicated tmux session for the suite so tests never
   // mutate (or get polluted by) whatever the user is currently doing.
@@ -350,9 +361,14 @@ test('reader view live-updates on new output', async ({ page }) => {
 });
 
 test('long-press menu toggles reader view', async ({ page }) => {
-  // Start clean: no stored view preference
+  // Start clean: no stored view preference. Re-seed the renderer override
+  // (the suite-wide beforeEach init runs BEFORE this test's, so the clear
+  // would otherwise wipe it).
   await page.addInitScript(() => {
-    try { localStorage.clear(); } catch (_) {}
+    try {
+      localStorage.clear();
+      localStorage.setItem('mobux:renderer', 'sterk');
+    } catch (_) {}
   });
   await page.goto(`${BASE}/s/${SESSION}`);
   await expect(page.locator('.ace_scroller')).toBeVisible({ timeout: 5000 });
