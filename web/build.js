@@ -1,17 +1,10 @@
 #!/usr/bin/env node
-// Build script: bundle the two terminal renderers mobux supports.
+// Build script: bundle sterk for the browser
 //
 // Usage: node web/build.js
 //
-// 1. Patches @xterm/xterm in-place (idempotent) and bundles it +
-//    @xterm/addon-web-links into web/static/vendor/xterm.bundle.js,
-//    plus copies xterm.css alongside.
-// 2. Bundles @kattebak/sterk (which includes ace-builds) into
-//    web/static/vendor/sterk.bundle.js.
-//
-// Both bundles are emitted unconditionally; the page-level boot script
-// decides which one to load at runtime based on the user's
-// `mobux:renderer` localStorage choice. Safe to re-run.
+// Bundles @kattebak/sterk (which includes ace-builds) into
+// web/static/vendor/sterk.bundle.js. Safe to re-run (idempotent).
 
 const { execSync } = require('child_process');
 const fs = require('fs');
@@ -25,58 +18,6 @@ const FONTS_SRC = path.join(ROOT, 'node_modules', '@kattebak', 'sterk', 'assets'
 fs.mkdirSync(VENDOR, { recursive: true });
 fs.mkdirSync(FONTS_OUT, { recursive: true });
 
-// ── 1. xterm.js ──────────────────────────────────────────────────────
-const XTERM_PATCH = path.join(ROOT, 'patches', 'xterm-composition-helper.patch');
-const XTERM_TARGET = path.join(ROOT, 'node_modules', '@xterm', 'xterm', 'src',
-  'browser', 'input', 'CompositionHelper.ts');
-const XTERM_PKG = path.join(ROOT, 'node_modules', '@xterm', 'xterm');
-
-if (fs.existsSync(XTERM_PKG)) {
-  // Apply patch (idempotent — reverse-dry-run first; skip if already applied).
-  console.log('[build] Applying xterm patch...');
-  try {
-    execSync(`patch --dry-run --forward --reject-file=- -p0 -i "${XTERM_PATCH}" "${XTERM_TARGET}"`, {
-      cwd: ROOT, stdio: 'pipe',
-    });
-    execSync(`patch --forward --reject-file=- -p0 -i "${XTERM_PATCH}" "${XTERM_TARGET}"`, {
-      cwd: ROOT, stdio: 'pipe',
-    });
-    console.log('[build] xterm patch applied.');
-  } catch (e) {
-    const out = (e.stdout?.toString() || '') + (e.stderr?.toString() || '');
-    if (out.includes('Reversed') || out.includes('previously applied')) {
-      console.log('[build] xterm patch already applied.');
-    } else {
-      console.error('[build] xterm patch failed:', out.trim());
-      process.exit(1);
-    }
-  }
-
-  console.log('[build] Bundling xterm...');
-  execSync([
-    'npx esbuild',
-    path.join(ROOT, 'web', 'src', 'xterm-entry.js'),
-    '--bundle',
-    '--format=iife',
-    '--minify',
-    '--sourcemap',
-    '--target=es2020',
-    `--outfile=${path.join(VENDOR, 'xterm.bundle.js')}`,
-  ].join(' '), { cwd: ROOT, stdio: 'inherit' });
-
-  const xtermCssSrc = path.join(XTERM_PKG, 'css', 'xterm.css');
-  const xtermCssDest = path.join(VENDOR, 'xterm.css');
-  if (fs.existsSync(xtermCssSrc)) {
-    fs.copyFileSync(xtermCssSrc, xtermCssDest);
-    console.log('[build] xterm.css copied.');
-  } else {
-    console.warn(`[build] WARN: xterm.css not found at ${xtermCssSrc}`);
-  }
-} else {
-  console.warn(`[build] WARN: @xterm/xterm not installed at ${XTERM_PKG}; skipping xterm bundle. Run \`npm install\` first.`);
-}
-
-// ── 2. sterk ─────────────────────────────────────────────────────────
 // Copy sterk's bundled woff2 fonts to a stable public URL so style.css's
 // @font-face rules can resolve them. The corresponding @font-face block
 // is in web/static/style.css; the symbol-fallback `SterkTUISymbols.woff2`
