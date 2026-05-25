@@ -439,3 +439,37 @@ updateToggleLabel();
 window.addEventListener("resize", () => core.resize());
 setTimeout(() => core.resize(), 100);
 setInterval(() => core.refreshPanes(), 5000);
+
+// ── Soft keyboard (visualViewport) handler ──────────────────────────
+// Renderer-agnostic. On Android Chrome (the TWA target) the soft
+// keyboard does NOT shrink the layout viewport — `window.innerHeight`
+// and the `100vh`/`100dvh` units used by `.term-body` stay at full
+// screen — but `window.visualViewport.height` does shrink. Without
+// this handler the bottom rows of the terminal (typically the tmux
+// status line + active prompt) end up rendered behind the keyboard.
+//
+// We shrink the body to the visual viewport height so the flex
+// children (#terminal, #reader, #inputBar) reflow into the visible
+// area. Then we dispatch a `resize` so both backends recompute their
+// (cols, rows) from the new host clientHeight. input-bar.js still
+// owns its show/hide auto-restore on viewport grow-back — this handler
+// only handles the body height tracking, which must work whether the
+// input bar is mounted or not (the bug also reproduces when the
+// renderer's native textarea gets focus directly).
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  let lastH = vv.height;
+  const trackKeyboard = () => {
+    const shrunk = vv.height < window.innerHeight - 1;
+    document.body.style.height = shrunk ? `${vv.height}px` : '';
+    if (Math.abs(vv.height - lastH) > 0.5) {
+      lastH = vv.height;
+      // Synchronous resize so both backends recompute cols/rows from
+      // the freshly-laid-out host height in the same task — no visible
+      // jump on the next frame.
+      window.dispatchEvent(new Event('resize'));
+    }
+  };
+  vv.addEventListener('resize', trackKeyboard);
+  vv.addEventListener('scroll', trackKeyboard);
+}

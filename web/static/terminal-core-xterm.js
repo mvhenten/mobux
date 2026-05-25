@@ -136,14 +136,22 @@ export class TerminalCoreXterm extends EventTarget {
   resize() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const cell = this.cellSize();
-    const bar = document.getElementById('inputBar');
-    const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
+    // Drive rows from the host's actual painted height, not from
+    // `window.innerHeight`. On Android Chrome the layout viewport stays
+    // at full screen when the soft keyboard opens, but the body is
+    // shrunk to `visualViewport.height` by terminal.js's
+    // visualViewport handler — so `#terminal` (a flex child) shrinks
+    // too. Reading clientHeight here is what makes the row count
+    // follow the keyboard. Falls back to window.innerHeight pre-flex
+    // (initial paint where clientHeight may briefly be 0).
+    const hostW = this.host.clientWidth || window.innerWidth;
+    const hostH = this.host.clientHeight || window.innerHeight;
     // #terminal has horizontal padding (style.css). Subtract it so
     // xterm doesn't overrun the inner content box and shave a column
     // off the right edge.
     const pad = this._horizontalPadding();
-    const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
+    const cols = Math.max(20, Math.floor((hostW - pad) / cell.width) - 1);
+    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
     this.term.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
   }
@@ -205,11 +213,11 @@ export class TerminalCoreXterm extends EventTarget {
   _forceRedraw() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const cell = this.cellSize();
-    const bar = document.getElementById('inputBar');
-    const barHeight = (bar && !bar.classList.contains('hidden')) ? bar.offsetHeight : 0;
+    const hostW = this.host.clientWidth || window.innerWidth;
+    const hostH = this.host.clientHeight || window.innerHeight;
     const pad = this._horizontalPadding();
-    const cols = Math.max(20, Math.floor((window.innerWidth - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor((window.innerHeight - barHeight) / cell.height) - 1);
+    const cols = Math.max(20, Math.floor((hostW - pad) / cell.width) - 1);
+    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
     this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;

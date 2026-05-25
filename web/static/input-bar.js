@@ -45,7 +45,11 @@ export function createInputBar(term, send) {
 
   function hide() {
     bar.classList.add('hidden');
-    document.body.style.height = '';
+    // terminal.js owns body.style.height tracking (renderer-agnostic
+    // visualViewport handler). It will clear the inline height the
+    // next time the viewport grows back; we don't touch it here so a
+    // hide() while the keyboard is still up doesn't cause body to snap
+    // to 100vh and re-cover the keyboard space.
     input.blur();
     resizeTerminal();
   }
@@ -119,55 +123,24 @@ export function createInputBar(term, send) {
     setTimeout(() => input.focus(), 50);
   }
 
-  // ── Track on-screen keyboard via visualViewport ───────────────────
-  // Android Chrome leaves the layout viewport at full height when the
-  // soft keyboard appears — only `visualViewport.height` shrinks. The
-  // bar is now a flex item in `.term-body` (the body element), so we
-  // override body's explicit `height: 100vh` with the visual viewport
-  // height and the bar moves with the body bottom automatically.
-  // Flex children (#terminal / #reader) shrink to the remaining space
-  // above the bar, so xterm and reader content stay visible above the
-  // keyboard with no overlap.
+  // ── Auto-hide bar when the keyboard dismisses ─────────────────────
+  // Body-height tracking (i.e. shrinking the layout to match
+  // visualViewport.height when the soft keyboard opens) is owned by
+  // terminal.js's renderer-agnostic visualViewport handler — it must
+  // work whether or not the input bar is mounted. This listener only
+  // handles bar UX: when the keyboard dismisses (viewport grows back
+  // by > 50px), tuck the bar away too so the user gets terminal-full
+  // space back.
   if (window.visualViewport) {
     const vv = window.visualViewport;
     let lastHeight = vv.height;
-    let lastOffset = 0;
-
-    const applyOffset = () => {
-      const offset = computeKeyboardOffset(window.innerHeight, vv.height, vv.offsetTop);
-      if (bar.classList.contains('hidden')) {
-        document.body.style.height = '';
-        lastOffset = 0;
-        return offset;
-      }
-      // Shrink .term-body (= body) to the visual viewport height so
-      // flex children pick up the new viewport height. .term-body has
-      // explicit `height: 100vh`, which overrides `bottom:0` — so we
-      // override `height` directly when the keyboard is up.
-      document.body.style.height = offset > 0 ? `${vv.height}px` : '';
-      if (offset !== lastOffset) {
-        lastOffset = offset;
-        // Notify reader/terminal synchronously so the reader re-pins
-        // to the bottom in the same task as the body shrink — without
-        // this, ResizeObserver fires a frame later and the user sees
-        // a visible jump (content stuck at top with a gap above the
-        // lifted bar). Reader's _handleResize reads host.clientHeight,
-        // which forces a layout flush, so the synchronous dispatch
-        // sees the new shrunk size.
-        window.dispatchEvent(new Event('resize'));
-      }
-      return offset;
-    };
-
     const onViewportChange = () => {
-      applyOffset();
       const h = vv.height;
       if (h > lastHeight + 50 && !bar.classList.contains('hidden')) {
         hide();
       }
       lastHeight = h;
     };
-
     vv.addEventListener('resize', onViewportChange);
     vv.addEventListener('scroll', onViewportChange);
   }
