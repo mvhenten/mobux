@@ -1,4 +1,4 @@
-const { test, expect } = require('@playwright/test');
+const { test, expect } = require('./fixtures.cjs');
 const { execSync } = require('child_process');
 
 const BASE = process.env.MOBUX_URL || 'https://localhost:5151';
