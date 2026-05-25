@@ -12,8 +12,27 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const VENDOR = path.join(ROOT, 'web', 'static', 'vendor');
+const FONTS_OUT = path.join(VENDOR, 'fonts');
+const FONTS_SRC = path.join(ROOT, 'node_modules', '@kattebak', 'sterk', 'assets', 'fonts');
 
 fs.mkdirSync(VENDOR, { recursive: true });
+fs.mkdirSync(FONTS_OUT, { recursive: true });
+
+// Copy sterk's bundled woff2 fonts to a stable public URL so style.css's
+// @font-face rules can resolve them. The corresponding @font-face block
+// is in web/static/style.css; the symbol-fallback `SterkTUISymbols.woff2`
+// is critical for TUI dingbat coverage (box-drawing + dingbats) under
+// the same family names via unicode-range.
+if (fs.existsSync(FONTS_SRC)) {
+  for (const entry of fs.readdirSync(FONTS_SRC)) {
+    if (!entry.endsWith('.woff2') && entry !== 'LICENSES.txt') continue;
+    fs.copyFileSync(path.join(FONTS_SRC, entry), path.join(FONTS_OUT, entry));
+  }
+  const fonts = fs.readdirSync(FONTS_OUT).filter((f) => f.endsWith('.woff2'));
+  console.log(`[build] Copied ${fonts.length} woff2 fonts -> web/static/vendor/fonts/`);
+} else {
+  console.warn(`[build] WARN: sterk fonts dir not found at ${FONTS_SRC}`);
+}
 
 // Bundle sterk (includes ace-builds as a dependency).
 //

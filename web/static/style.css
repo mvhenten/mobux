@@ -1,3 +1,24 @@
+/* Vendored monospace fonts from @kattebak/sterk (full TUI coverage:
+   Latin + box-drawing + dingbats + geometric shapes). The
+   SterkTUISymbols fallback is declared under the same family names
+   with unicode-range so the browser fetches it once and uses it for
+   the dingbat/symbol ranges no general-purpose mono ships. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/static/vendor/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/static/vendor/fonts/SterkTUISymbols.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+2500-257F, U+2580-259F, U+25A0-25FF, U+2600-26FF, U+2700-27BF, U+2190-21FF;
+}
+
 :root {
   --bg: #0f1115;
   --panel: #16181e;
@@ -7,7 +28,7 @@
   --accent: #7a8a9e;
   --danger: #c45c5c;
   --border: #22262f;
-  --mono: 'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace;
+  --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace;
 }
 
 * { box-sizing: border-box; }
