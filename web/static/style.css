@@ -883,6 +883,24 @@ h1, h2, h3 { margin: 0; }
   color: #fff;
 }
 
+/* Mic / dictation states. Recording pulses red; the countdown digit lives in
+   the button label. Error flashes amber briefly. */
+#micBtn.mic-recording {
+  background: #c0392b;
+  color: #fff;
+  border-color: #e74c3c;
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+#micBtn.mic-error {
+  background: #6b5500;
+  color: #ffd54a;
+  border-color: #b8860b;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.6); }
+  50%      { box-shadow: 0 0 0 4px rgba(231, 76, 60, 0); }
+}
+
 .input-row {
   display: flex;
   padding: 4px 6px 6px;
