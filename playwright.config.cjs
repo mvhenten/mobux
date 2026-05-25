@@ -22,6 +22,12 @@ module.exports = defineConfig({
   testMatch: '**/*.spec.cjs',
   timeout: 30000,
   retries: 0,
+  // Force a single worker so the xterm and sterk projects don't both
+  // try to drive the same tmux test session at once. The suite shares
+  // server-side state (the MOBUX_TEST_SESSION tmux session) which
+  // each project's beforeAll creates and tears down — running them
+  // in parallel races on that resource and the boot tests flake.
+  workers: 1,
   use: {
     ignoreHTTPSErrors: true,
   },

@@ -853,6 +853,22 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
       <div class="settings-status" id="settingsStatus" hidden>Saved.</div>
     </section>
 
+    <section class="settings-card" id="renderer-picker">
+      <h2>Terminal renderer</h2>
+      <p class="settings-lede">The browser-side terminal emulator. <strong>xterm.js</strong> is the stable default. <strong>sterk</strong> is an experimental renderer (libterm + Ace) that is still catching up to xterm parity — switch back to xterm if the experimental lane breaks. The setting is per-device; reload the terminal tab after changing it.</p>
+      <label class="settings-row">
+        <span class="settings-label">
+          <strong>Renderer</strong>
+          <small>Stored locally as <code>mobux:renderer</code>. Per-device. Reload the terminal page after switching.</small>
+        </span>
+        <select id="rendererSelect" class="settings-select">
+          <option value="xterm">xterm.js (stable, default)</option>
+          <option value="sterk">sterk (experimental)</option>
+        </select>
+      </label>
+      <div class="settings-status" id="rendererStatus" hidden></div>
+    </section>
+
     <section class="settings-card" id="theme-picker">
       <h2>Theme</h2>
       <p class="settings-lede">Sets the editor theme, terminal palette and reader palette together. All bundles are muted, low-contrast — picked for a phone screen at night. Switching applies live to any open terminal tab.</p>
@@ -997,6 +1013,7 @@ end</code></pre>
   </script>
   <script src="/static/settings.js?v={v}"></script>
   <script type="module" src="/static/settings-theme.js?v={v}"></script>
+  <script src="/static/settings-renderer.js?v={v}"></script>
   <script src="/static/shell-integration.js?v={v}"></script>
   <script type="module" src="/static/listen-settings.js?v={v}"></script>
 </body>
@@ -1518,10 +1535,27 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     window.MOBUX_SESSION = {session_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
-  <!-- Sterk terminal emulator (@kattebak/sterk@^2.0.0).
-       sterk.bundle.js includes ace-builds and pins window.Sterk;
-       terminal.js imports TerminalCore (terminal-core.js) which wraps sterk. -->
-  <script src="/static/vendor/sterk.bundle.js?v={v}"></script>
+  <!-- Renderer picker: reads `mobux:renderer` from localStorage and
+       synchronously injects the matching bundle script (xterm.bundle.js
+       or sterk.bundle.js) via document.write so its globals
+       (`window.Terminal` / `window.Sterk`) are guaranteed to be present
+       by the time terminal.js (the module below) evaluates.
+       Default: xterm (stable). User toggles on /settings. -->
+  <script>
+    (function () {{
+      var r = 'xterm';
+      try {{
+        var s = localStorage.getItem('mobux:renderer');
+        if (s === 'sterk' || s === 'xterm') r = s;
+      }} catch (_) {{}}
+      window.__mobuxRenderer = r;
+      var bundle = (r === 'sterk') ? 'sterk.bundle.js' : 'xterm.bundle.js';
+      document.write('<script src="/static/vendor/' + bundle + '?v={v}"><\/script>');
+      if (r === 'xterm') {{
+        document.write('<link rel="stylesheet" href="/static/vendor/xterm.css?v={v}">');
+      }}
+    }})();
+  </script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>

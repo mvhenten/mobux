@@ -16,7 +16,7 @@
 //   __mobuxView.send    — PTY input
 //   __mobuxView.test.*  — buffer length, ws state, etc.
 
-const { test, expect } = require('./fixtures.cjs');
+const { test, expect, sterkOnly } = require('./fixtures.cjs');
 const { execSync } = require('child_process');
 
 const BASE = process.env.MOBUX_URL || 'https://localhost:5151';
@@ -211,7 +211,12 @@ test('PTY roundtrip: tmux new-window appears in the /panes API and is selectable
   assertNoFailures(captured);
 });
 
-test('cell-width parity: no left padding gutter and right-most cell hugs the right edge', async ({ page }) => {
+test('cell-width parity: no left padding gutter and right-most cell hugs the right edge', async ({ page }, testInfo) => {
+  // Walks the sterk Ace DOM (.ace_line, .ace_text-layer) to measure
+  // cell geometry. xterm.js paints into a canvas (or its own DOM
+  // renderer) with a different node structure — covered indirectly
+  // by the boot/PTY tests above.
+  sterkOnly(test, testInfo);
   // V8 regression. Before this fix mobux had `#terminal { padding: 0 12px }`,
   // Ace had the default `setPadding(4)`, and the cols formula subtracted
   // an extra 1 — adding up to ~28px of horizontal real estate that the
@@ -341,7 +346,13 @@ test('cell-width parity: no left padding gutter and right-most cell hugs the rig
   assertNoFailures(captured);
 });
 
-test('row-height parity: PTY rows match what actually fits, including after the input bar appears', async ({ page }) => {
+test('row-height parity: PTY rows match what actually fits, including after the input bar appears', async ({ page }, testInfo) => {
+  // Reads window.__sterk._sterk.getCellMetrics() — sterk-only API.
+  // The xterm equivalent (`_core._renderService.dimensions.css.cell`)
+  // would need a parallel test wired against that property. The row-
+  // fit-vs-host invariant matters for both renderers; just not via
+  // the same accessor.
+  sterkOnly(test, testInfo);
   // Bottom-cut-off regression (Pixel 7, real device): when the mobile
   // input bar appeared as a flex sibling of `#terminal`, mobux fired
   // a synchronous `'resize'` event and asked sterk
