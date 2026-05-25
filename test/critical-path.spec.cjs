@@ -456,3 +456,143 @@ test('reader view: real PTY output reaches the reader pane', async ({ page }) =>
   expect(readerText).toContain(marker);
   assertNoFailures(captured);
 });
+
+test('soft keyboard: terminal bottom stays visible when visualViewport shrinks', async ({ page }, testInfo) => {
+  // Regression for the "bottom rows hidden behind Android soft keyboard"
+  // bug. On Android Chrome the soft keyboard does NOT shrink
+  // `window.innerHeight` / `100vh` — only `window.visualViewport.height`
+  // shrinks. Without a renderer-agnostic visualViewport handler in
+  // terminal.js, `.term-body` stays at 100vh and the bottom of the
+  // terminal (typically tmux status line + prompt) renders behind the
+  // keyboard.
+  //
+  // Repro choice: we override `visualViewport.height` via
+  // Object.defineProperty and dispatch a synthetic `resize` on it.
+  // CDP `Emulation.setVisibleSize` would be closer to real Android but
+  // does not reliably decouple layoutViewport from visualViewport in
+  // headless Chromium — the JS override gives a clean, deterministic
+  // Android-shaped event.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  // Type a unique marker so we can locate "the bottom" of the terminal
+  // content in the DOM. echo lands at the prompt row, which is the
+  // last live row in the viewport.
+  const marker = `MOBUX_KBD_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect.poll(
+    () => visibleTerminalText(page),
+    { timeout: 10000, intervals: [200, 400, 800] },
+  ).toContain(marker);
+
+  // Snapshot the pre-keyboard layout viewport — this is what the
+  // visualViewport handler must respect.
+  const initial = await page.evaluate(() => ({
+    innerHeight: window.innerHeight,
+    vvHeight: window.visualViewport?.height ?? window.innerHeight,
+    bodyH: document.body.getBoundingClientRect().height,
+  }));
+  // Sanity: on the configured Pixel 7 device we should have a tall
+  // viewport before we simulate the keyboard.
+  expect(initial.innerHeight, 'baseline innerHeight').toBeGreaterThan(700);
+
+  // Simulate the soft keyboard opening: shrink visualViewport.height
+  // to ~440px (typical visible-area on Pixel 7 with Gboard up). Leave
+  // window.innerHeight alone — that's the whole point of the bug.
+  const SHRUNK_VV_HEIGHT = 440;
+  await page.evaluate((newH) => {
+    const vv = window.visualViewport;
+    if (!vv) throw new Error('visualViewport unavailable in test browser');
+    // Stash original descriptors so we don't permanently poison the
+    // page if this test fails mid-way (Playwright recycles contexts).
+    window.__keyboardTestOriginal = {
+      height: Object.getOwnPropertyDescriptor(VisualViewport.prototype, 'height'),
+    };
+    Object.defineProperty(vv, 'height', {
+      configurable: true,
+      get: () => newH,
+    });
+    vv.dispatchEvent(new Event('resize'));
+  }, SHRUNK_VV_HEIGHT);
+
+  // Give the page-level visualViewport handler + per-backend resize a
+  // beat to land (body shrinks → flex reflows → PTY resize round-trip).
+  await page.waitForTimeout(800);
+
+  // Assert: the body has been shrunk to the visualViewport height
+  // (within a small epsilon for fractional layout pixels).
+  const afterShrink = await page.evaluate(() => ({
+    bodyH: document.body.getBoundingClientRect().height,
+    termRect: document.getElementById('terminal').getBoundingClientRect(),
+    innerHeight: window.innerHeight,
+    vvHeight: window.visualViewport.height,
+  }));
+  expect(
+    afterShrink.bodyH,
+    `body should shrink to ~vvHeight: got ${afterShrink.bodyH}, expected ≈ ${SHRUNK_VV_HEIGHT}`,
+  ).toBeLessThanOrEqual(SHRUNK_VV_HEIGHT + 4);
+  // And the #terminal host (the renderer parent) must fit inside the
+  // shrunk viewport — its bottom edge sits at or above vvHeight.
+  expect(
+    afterShrink.termRect.bottom,
+    `#terminal bottom (${afterShrink.termRect.bottom}) should be within vvHeight (${SHRUNK_VV_HEIGHT})`,
+  ).toBeLessThanOrEqual(SHRUNK_VV_HEIGHT + 4);
+
+  // Now the meat: find the rendered line containing our marker and
+  // confirm its bounding-box bottom sits inside the visualViewport.
+  // We can't rely on locator.isVisible() alone — CSS visibility lies
+  // when content is painted outside the viewport but inside its own
+  // overflow scroller.
+  const markerGeom = await page.evaluate((m) => {
+    // Walk the #terminal DOM and find the deepest text node containing
+    // the marker, then read its bounding-client-rect. This works for
+    // both xterm (.xterm-rows > div > span) and sterk (.ace_line span)
+    // without per-backend selectors.
+    const t = document.getElementById('terminal');
+    const walker = document.createTreeWalker(t, NodeFilter.SHOW_TEXT);
+    let node;
+    let best = null;
+    while ((node = walker.nextNode())) {
+      if (node.data && node.data.includes(m)) {
+        const r = document.createRange();
+        const idx = node.data.indexOf(m);
+        r.setStart(node, idx);
+        r.setEnd(node, idx + m.length);
+        const rect = r.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          best = { top: rect.top, bottom: rect.bottom, height: rect.height };
+        }
+      }
+    }
+    return best;
+  }, marker);
+
+  // Take an artifact screenshot regardless of pass/fail — useful for
+  // debugging the bug-fixed state.
+  const screenshotPath = `.tmp/keyboard-up-${testInfo.project.name}.png`;
+  await page.screenshot({ path: screenshotPath, fullPage: false });
+
+  expect(markerGeom, `must find marker "${marker}" in rendered terminal DOM`).toBeTruthy();
+  // The bottom edge of the marker line must sit at or above the visual
+  // viewport's bottom (= SHRUNK_VV_HEIGHT, since vv.offsetTop is 0 in
+  // our simulation). Small epsilon for sub-pixel rendering.
+  expect(
+    markerGeom.bottom,
+    `marker bottom (${markerGeom.bottom}) must be ≤ vvHeight (${SHRUNK_VV_HEIGHT}); screenshot: ${screenshotPath}`,
+  ).toBeLessThanOrEqual(SHRUNK_VV_HEIGHT + 4);
+
+  // Restore the visualViewport descriptor and grow back to original to
+  // mirror the keyboard-dismiss path. Not strictly required (context
+  // is torn down after the test), but exercises the grow-back code
+  // path and lets us assert the body unsticks.
+  await page.evaluate(() => {
+    const vv = window.visualViewport;
+    delete vv.height; // remove our property override
+    vv.dispatchEvent(new Event('resize'));
+  });
+  await page.waitForTimeout(400);
+  const afterRestore = await page.evaluate(() => document.body.style.height);
+  expect(afterRestore, 'body inline height should clear after vv grows back').toBe('');
+
+  assertNoFailures(captured);
+});
