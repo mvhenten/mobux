@@ -98,34 +98,15 @@ export function applyReaderVars(theme) {
   }
 }
 
-// Push the bundle's palette onto the active terminal renderer.
-// - sterk: writes into `__sterk.options.theme.palette` in place.
-// - xterm: rebuilds `__xterm.options.theme` with the 16 ANSI slots
-//   mapped onto xterm.js's named-color keys.
+// Push the bundle's palette onto sterk's terminal options.
+// Updates the theme.palette array that sterk uses for rendering.
 // Returns true if applied.
 export function applyTerminalColors(theme) {
-  // Sterk first (palette is just an array slot)
   const sterk = window.__sterk;
-  if (sterk && sterk.options && sterk.options.theme && Array.isArray(sterk.options.theme.palette)) {
+  if (!sterk || !sterk.options || !sterk.options.theme) return false;
+  // Update sterk's palette in-place
+  if (Array.isArray(sterk.options.theme.palette)) {
     sterk.options.theme.palette = theme.palette.slice(0, 16);
-    return true;
-  }
-
-  // Xterm.js uses named keys for the ANSI palette (no `palette` array).
-  // The 16 ANSI slots map to: black/red/green/yellow/blue/magenta/cyan/white
-  // plus the brightX variants. xterm reads `theme.background`/`theme.foreground`
-  // from the same options object.
-  const xterm = window.__xterm;
-  if (xterm && xterm.options) {
-    const p = theme.palette;
-    xterm.options.theme = {
-      background: p[0],
-      foreground: p[7] || '#c5c8c6',
-      black: p[0],   red: p[1],     green: p[2],   yellow: p[3],
-      blue:  p[4],   magenta: p[5], cyan:  p[6],   white: p[7],
-      brightBlack: p[8],  brightRed: p[9],     brightGreen: p[10], brightYellow: p[11],
-      brightBlue:  p[12], brightMagenta: p[13], brightCyan: p[14], brightWhite: p[15],
-    };
     return true;
   }
   return false;

@@ -34,18 +34,6 @@ test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
 });
 
-// The existing critical-path suite was wired against the sterk renderer
-// (e.g. the row-height parity test pokes `window.__sterk._sterk` for
-// cell metrics). Force the experimental sterk renderer here so the
-// suite keeps passing on the existing target while we restore xterm as
-// the user-facing default. Adding an xterm-targeted critical-path
-// suite is a follow-up.
-test.beforeEach(async ({ context }) => {
-  await context.addInitScript(() => {
-    try { localStorage.setItem('mobux:renderer', 'sterk'); } catch (_) {}
-  });
-});
-
 test.beforeAll(() => {
   try { tmux(`kill-session -t ${SESSION}`); } catch (_) {}
   // bash --norc --noprofile gives us a clean, predictable prompt.
