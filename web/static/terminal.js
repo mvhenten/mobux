@@ -83,7 +83,8 @@ const core = new TerminalCore({ session, host: termEl });
 // Apply the stored theme to all three layers. terminal-core.js already
 // picked the matching palette + Ace theme at construction; this call
 // pushes the --ansi-* vars onto #reader for tokenized reader output.
-const getEditor = () => core.term._sterk?.renderer?.getEditor?.();
+// Only the sterk backend has an Ace editor under the hood; xterm has none.
+const getEditor = () => core.term?._sterk?.renderer?.getEditor?.();
 applyTheme(getStoredThemeId(), { editor: getEditor() });
 
 // Live swap when the settings page (or another tab) changes the theme.
@@ -385,7 +386,15 @@ window.__mobuxView = {
       return new Promise((resolve) => core.term.write(s, resolve));
     },
     bufferLength: () => core.getActiveBuffer().length,
-    isAlternate: () => core.term._sterk?.buffer?.alternate === core.term._sterk?.buffer?.active,
+    isAlternate: () => {
+      // sterk: compare alternate vs active buffer references
+      if (core.term?._sterk?.buffer) {
+        return core.term._sterk.buffer.alternate === core.term._sterk.buffer.active;
+      }
+      // xterm: the BufferNamespace exposes `active.type` ('normal' | 'alternate')
+      const t = core.term?.buffer?.active?.type;
+      return t === 'alternate';
+    },
     readerAtBottom: () => reader._atBottom,
     readerForceScrollTop: () => { reader._atBottom = false; reader._scrollY = 0; reader._applyTransform?.(); },
     terminalRows: () => core.term.rows,
