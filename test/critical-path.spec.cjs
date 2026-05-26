@@ -457,6 +457,90 @@ test('reader view: real PTY output reaches the reader pane', async ({ page }) =>
   assertNoFailures(captured);
 });
 
+test('auto-reconnect: unexpected socket drop re-establishes the WS via onclose backoff', async ({ page }) => {
+  // Regression for the "tap-to-reconnect only" behaviour. The core's
+  // ws.onclose now arms a capped exponential backoff (min 500ms) that
+  // reconnects after an *unexpected* close. We simulate the drop with
+  // the `forceDrop` test hook (closes the socket WITHOUT marking the
+  // close intentional — i.e. what a real server/network blip looks
+  // like to the client) and assert the WS comes back on its own, with
+  // NO user gesture and NO page-level visibility/online/pageshow event.
+  //
+  // Fails without the new code: the old `ws.onclose = () => {}` left the
+  // socket closed forever, so wsReady() would never return true again.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  // Sanity: we start connected.
+  expect(await page.evaluate(() => window.__mobuxView.test.wsReady())).toBe(true);
+
+  // Drop the socket as if the server hung up.
+  await page.evaluate(() => window.__mobuxView.test.forceDrop());
+
+  // It must transition to closed first (proves the drop took effect),
+  // then the onclose backoff must bring it back without intervention.
+  await expect.poll(
+    () => page.evaluate(() => window.__mobuxView.test.wsReady()),
+    { timeout: 8000, intervals: [100, 200, 400, 800] },
+  ).toBe(true);
+
+  // And the resumed session is live: a real PTY roundtrip still works.
+  const marker = `RECON_CRIT_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect.poll(
+    () => visibleTerminalText(page),
+    { timeout: 10000, intervals: [200, 400, 800] },
+  ).toContain(marker);
+
+  assertNoFailures(captured);
+});
+
+test('auto-reconnect: visibilitychange to visible while disconnected triggers a reconnect', async ({ page }) => {
+  // The primary "screen is open again → reconnect" path. We mark the
+  // close intentional first so the onclose backoff is DISARMED — this
+  // isolates the page-level visibilitychange listener as the sole thing
+  // that can bring the socket back. If the listener is missing (i.e.
+  // without the new code), wsReady() stays false and the poll times
+  // out → the test fails.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  expect(await page.evaluate(() => window.__mobuxView.test.wsReady())).toBe(true);
+
+  // Close with the backoff disarmed so nothing else can reconnect.
+  await page.evaluate(() => {
+    // __mobuxView.test.inject sets intentionalClose=true then closes;
+    // reuse that exact path to get a disarmed close, but we don't need
+    // its injected content — we just want the socket down with no
+    // pending backoff.
+    return window.__mobuxView.test.inject('');
+  });
+  // Confirm it's actually down (and stays down — backoff is disarmed).
+  await expect.poll(
+    () => page.evaluate(() => window.__mobuxView.test.wsReady()),
+    { timeout: 3000, intervals: [100, 200, 400] },
+  ).toBe(false);
+
+  // Now fire the visibility path. Playwright can't toggle the real
+  // document.visibilityState, so we stub it to 'visible' and dispatch
+  // the event the listener keys off — the same shape the browser emits
+  // when the app is foregrounded.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+
+  await expect.poll(
+    () => page.evaluate(() => window.__mobuxView.test.wsReady()),
+    { timeout: 8000, intervals: [100, 200, 400, 800] },
+  ).toBe(true);
+
+  assertNoFailures(captured);
+});
+
 test('soft keyboard: terminal bottom stays visible when visualViewport shrinks', async ({ page }, testInfo) => {
   // Regression for the "bottom rows hidden behind Android soft keyboard"
   // bug. On Android Chrome the soft keyboard does NOT shrink

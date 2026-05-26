@@ -375,11 +375,15 @@ window.__mobuxView = {
     // Test injections close the WS first so tmux can't race/clobber
     // the injected content (e.g. by re-asserting alt-screen mode).
     inject: (str) => {
+      // Mark the close intentional so auto-reconnect doesn't reopen the
+      // WS and let tmux clobber the injected content.
+      core.intentionalClose = true;
       try { core.ws?.close(); } catch (_) {}
       return new Promise((resolve) =>
         core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve));
     },
     injectLines: (n, prefix = 'inject') => {
+      core.intentionalClose = true;
       try { core.ws?.close(); } catch (_) {}
       let s = '\x1b[?1049l';
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
@@ -420,6 +424,14 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
+    // Simulate an *unexpected* server-side drop: close the socket
+    // WITHOUT marking the close intentional, so the core's onclose
+    // backoff fires exactly as it would for a real network/server blip.
+    // Used by the auto-reconnect test.
+    forceDrop: () => {
+      core.intentionalClose = false;
+      try { core.ws?.close(); } catch (_) {}
+    },
     oscDetected: () => !!core.oscDetected,
     readerScrollY: () => reader.scrollY,
     readerMaxScroll: () => reader.maxScroll,
@@ -448,14 +460,52 @@ if (bootDefault === 'reader') {
 updateToggleLabel();
 
 // ── Boot ────────────────────────────────────────────────────────────
+// `booted` gates the page-level auto-reconnect listeners below: until
+// boot's own connect() has run there's nothing to reconnect, and firing
+// reconnect() while `core.ws` is still null would open a competing
+// socket that boot then immediately replaces.
+let booted = false;
 (async () => {
   await core.reloadHistory();
   core.connect();
+  booted = true;
 })();
 
 window.addEventListener("resize", () => core.resize());
 setTimeout(() => core.resize(), 100);
 setInterval(() => core.refreshPanes(), 5000);
+
+// ── Auto-reconnect ──────────────────────────────────────────────────
+// Renderer-agnostic. The tmux session persists server-side, so
+// re-establishing the WS resumes cleanly. `core.reconnect()` is
+// idempotent (no-ops if the socket is already OPEN), so wiring several
+// triggers is safe — whichever fires first reconnects, the rest no-op.
+//
+// The core's own `ws.onclose` handler does capped exponential backoff
+// for the "server bounced / network blip" case; these page-level
+// listeners are the "user came back to the app" fast paths that
+// reconnect immediately instead of waiting out the backoff window. The
+// existing touch-based reconnect (touch.js onTouchStart → onReconnect)
+// stays as a manual fallback.
+
+function autoReconnect() {
+  if (!booted) return;
+  core.reconnect();
+}
+
+// Primary path: screen/tab is visible again → reconnect now.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') autoReconnect();
+});
+// Network came back.
+window.addEventListener('online', autoReconnect);
+// Android bfcache restore (app swapped back into the foreground).
+window.addEventListener('pageshow', autoReconnect);
+
+// A real navigation away / unload is an intentional teardown — mark it
+// so the socket's onclose doesn't arm a (pointless) backoff retry on a
+// page that's going away.
+window.addEventListener('pagehide', () => { core.intentionalClose = true; });
 
 // ── Soft keyboard (visualViewport) handler ──────────────────────────
 // Renderer-agnostic. On Android Chrome (the TWA target) the soft
