@@ -596,3 +596,127 @@ test('soft keyboard: terminal bottom stays visible when visualViewport shrinks',
 
   assertNoFailures(captured);
 });
+
+test('tap-to-snap: a tap snaps to bottom, a swipe does not', async ({ page }, testInfo) => {
+  // Regression for issue #99 — re-attempt after PR #100 was reverted in
+  // #102. When the user is parked mid-scrollback and TAPS the terminal
+  // to type, the soft keyboard comes up but the viewport stays in
+  // scrollback, so typed text lands where they can't see it. A genuine
+  // tap on #terminal must snap the viewport to the bottom.
+  //
+  // The critical regression that #100 shipped (and the reason it was
+  // reverted): it hooked `focusin`, which fires on tap-to-scroll too,
+  // so swiping up to read scrollback immediately snapped back to
+  // bottom and broke incremental scrolling. #100's test used a
+  // synthetic `page.focus()` — no swipe context — so it never caught
+  // this. This test drives REAL pointer events (pointerdown → move →
+  // pointerup) and asserts BOTH:
+  //   * TAP (no movement)        → snaps to bottom   (the fix)
+  //   * SWIPE (movement > thresh) → does NOT snap     (the regression guard)
+  //
+  // Setup uses the synthetic `injectLines()` helper (closes the WS
+  // first so tmux can't clobber the injected content). Both backends
+  // grow scrollback identically through their VT parsers on a
+  // newline-rich write — what we test is the page-level pointer
+  // handler in terminal.js, not tmux's redraw protocol.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  const rows = await page.evaluate(() => window.__mobuxView.test.rows());
+  expect(rows, 'terminal must report a row count').toBeGreaterThan(5);
+
+  // Inject rows + 20 lines so there's real scrollback to park in.
+  const totalLines = rows + 20;
+  const marker = `TAP_SNAP_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate(({ n, m }) => window.__mobuxView.test.injectLines(n, m), { n: totalLines, m: marker });
+  await page.waitForTimeout(200);
+
+  // Pin to bottom and capture the "bottom" viewportY for this backend.
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  await page.waitForTimeout(50);
+  const bottomViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+
+  // Dispatch a sequence of pointer events on the #terminal host with
+  // the given total travel. Returns nothing — caller reads viewportY.
+  // We hit the host element directly (renderer-agnostic) at its centre.
+  const pointerGesture = async (dxTotal, dyTotal, durationMs) => {
+    await page.evaluate(({ dx, dy, dur }) => {
+      const t = document.getElementById('terminal');
+      const r = t.getBoundingClientRect();
+      const startX = r.left + r.width / 2;
+      const startY = r.top + r.height / 2;
+      const fire = (type, x, y) => t.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        pointerType: 'touch',
+        pointerId: 1,
+        isPrimary: true,
+      }));
+      fire('pointerdown', startX, startY);
+      // A couple of intermediate moves so a swipe accumulates travel.
+      const steps = 4;
+      for (let i = 1; i <= steps; i++) {
+        fire('pointermove', startX + (dx * i) / steps, startY + (dy * i) / steps);
+      }
+      // The handler reads e.timeStamp; PointerEvent.timeStamp is set by
+      // the engine at construction, so back-to-back dispatch is well
+      // under the 250ms tap window. Long-press is covered by the
+      // movement guard plus the duration guard in the handler; we keep
+      // the test deterministic by only varying movement here.
+      void dur;
+      fire('pointerup', startX + dx, startY + dy);
+    }, { dx: dxTotal, dy: dyTotal, dur: durationMs });
+  };
+
+  // ── Case 1: SWIPE first (regression guard) ──────────────────────
+  // Scroll up off the bottom, then swipe (large vertical travel). The
+  // viewport must STAY in scrollback — a swipe is not a tap.
+  await page.evaluate(() => {
+    const t = window.__xterm || window.__sterk;
+    t.scrollLines(-5);
+  });
+  await page.waitForTimeout(100);
+  const preSwipeViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    preSwipeViewportY,
+    `pre-condition: viewportY (${preSwipeViewportY}) should be < bottom (${bottomViewportY}) after scrollLines(-5)`,
+  ).toBeLessThan(bottomViewportY);
+
+  await pointerGesture(0, -120, 120); // 120px upward swipe
+  await page.waitForTimeout(150);
+  const postSwipeViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    postSwipeViewportY,
+    `SWIPE must NOT snap to bottom: viewportY (${postSwipeViewportY}) should stay < bottom (${bottomViewportY})`,
+  ).toBeLessThan(bottomViewportY);
+
+  // ── Case 2: TAP (the fix) ───────────────────────────────────────
+  // Re-park in scrollback, then tap (no movement). Must snap to bottom.
+  await page.evaluate(() => {
+    window.__mobuxView.test.scrollToBottom();
+    const t = window.__xterm || window.__sterk;
+    t.scrollLines(-5);
+  });
+  await page.waitForTimeout(100);
+  const preTapViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    preTapViewportY,
+    `pre-condition: viewportY (${preTapViewportY}) should be < bottom (${bottomViewportY}) before tap`,
+  ).toBeLessThan(bottomViewportY);
+
+  await pointerGesture(0, 0, 60); // genuine tap: no movement
+  await page.waitForTimeout(150);
+
+  const screenshotPath = `.tmp/tap-snap-${testInfo.project.name}.png`;
+  await page.screenshot({ path: screenshotPath, fullPage: false });
+
+  const postTapViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    postTapViewportY,
+    `TAP must snap to bottom: viewportY should be ${bottomViewportY}, got ${postTapViewportY}; screenshot: ${screenshotPath}`,
+  ).toBe(bottomViewportY);
+
+  assertNoFailures(captured);
+});
