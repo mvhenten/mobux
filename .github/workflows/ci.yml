@@ -62,6 +62,16 @@ jobs:
           fi
       - name: Build mobux
         run: cargo build
+      - name: Export sherpa-onnx lib path
+        # The binary's rpath points at a content-hashed dir under
+        # ~/.cache/sherpa-rs; when target/ and the sherpa cache restore from
+        # different builds those hashes diverge, so resolve the lib's real dir
+        # and put it on LD_LIBRARY_PATH for the test steps.
+        shell: bash
+        run: |
+          LIBDIR=$(find "$HOME/.cache/sherpa-rs" -name 'libsherpa-onnx-c-api.so' -printf '%h\n' 2>/dev/null | head -1)
+          echo "Found sherpa-onnx libs in: ${LIBDIR:-<none>}"
+          echo "LD_LIBRARY_PATH=${LIBDIR}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Run critical-path tests
         run: make test-critical-path
         env:
