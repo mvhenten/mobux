@@ -18,6 +18,17 @@ jobs:
           # here; without caching it, a warm target/ cache makes cargo skip
           # the build-script download and the linker can't find -lonnxruntime.
           cache-directories: ~/.cache/sherpa-rs
+      - name: Ensure sherpa-onnx libs present
+        # A warm target/ cache can restore without ~/.cache/sherpa-rs, so cargo
+        # skips the build-script download and the prebuilt .so is absent on disk
+        # (link fails with -lonnxruntime, or the binary fails to load it at run
+        # time). Force sherpa-rs-sys to rebuild so the download re-runs.
+        shell: bash
+        run: |
+          if [ -z "$(find "$HOME/.cache/sherpa-rs" -name 'libsherpa-onnx-c-api.so' 2>/dev/null)" ]; then
+            echo "sherpa-onnx libs missing from cache — forcing sherpa-rs-sys rebuild"
+            cargo clean -p sherpa-rs-sys
+          fi
       - run: cargo check
       - run: cargo test --no-run
       - run: cargo clippy -- -D warnings
@@ -39,6 +50,16 @@ jobs:
       - run: npm ci
       - run: npx playwright install chromium
       - run: sudo apt-get install -y tmux
+      - name: Ensure sherpa-onnx libs present
+        # See the check job: a warm target/ cache can restore without
+        # ~/.cache/sherpa-rs, leaving the prebuilt .so absent so the binary
+        # fails to load libsherpa-onnx-c-api.so at run time. Force a rebuild.
+        shell: bash
+        run: |
+          if [ -z "$(find "$HOME/.cache/sherpa-rs" -name 'libsherpa-onnx-c-api.so' 2>/dev/null)" ]; then
+            echo "sherpa-onnx libs missing from cache — forcing sherpa-rs-sys rebuild"
+            cargo clean -p sherpa-rs-sys
+          fi
       - name: Build mobux
         run: cargo build
       - name: Run critical-path tests
