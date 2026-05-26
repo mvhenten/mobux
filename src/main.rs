@@ -35,6 +35,7 @@ mod push;
 mod shell_integration;
 mod ssl;
 mod tmux;
+mod transcribe;
 
 #[derive(Clone)]
 struct AppState {
@@ -42,6 +43,7 @@ struct AppState {
     auth: Option<AuthConfig>,
     cache_bust: String,
     db: Arc<db::Db>,
+    stt: Arc<transcribe::SpeechToText>,
 }
 
 #[derive(Clone)]
@@ -73,6 +75,23 @@ async fn main() -> Result<()> {
     // endpoints can rely on it being present. Idempotent on later starts.
     let _ = db.vapid_keys()?;
 
+    // Speech-to-text (Parakeet via sherpa-rs). The recognizer is built lazily
+    // on the first /transcribe request (~4 s to load the ONNX graphs), so a
+    // missing model never blocks startup — the endpoint just reports 503.
+    let stt_model_dir = transcribe::resolve_model_dir(&data_dir);
+    let stt = Arc::new(transcribe::SpeechToText::new(stt_model_dir));
+    if stt.model_present() {
+        println!(
+            "speech-to-text: model found at {}",
+            stt.model_dir().display()
+        );
+    } else {
+        println!(
+            "speech-to-text: model NOT found at {} (run `make stt-model` or set MOBUX_STT_MODEL_DIR); /transcribe will return 503",
+            stt.model_dir().display()
+        );
+    }
+
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
@@ -84,6 +103,7 @@ async fn main() -> Result<()> {
                 .as_secs()
         ),
         db,
+        stt,
     };
 
     let state_for_mw = state.clone();
@@ -101,6 +121,13 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
         .route("/api/upload", post(api_upload))
+        // 60 s of 16 kHz mono 16-bit PCM is ~1.9 MB; the default 2 MB body
+        // limit is too tight once the multipart envelope is added. Allow 8 MB
+        // for this route only (the 70 s sample cap is enforced after decode).
+        .route(
+            "/transcribe",
+            post(api_transcribe).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/push/vapid-public-key", get(api_push_vapid_public_key))
         .route(
             "/api/push/subscribe",
@@ -580,6 +607,67 @@ async fn api_upload(
     }
 
     Err(AppError::bad_request(anyhow::anyhow!("no file in upload")))
+}
+
+// ── Speech-to-text: POST /transcribe ──────────────────────────────────
+//
+// Accepts a 16 kHz mono 16-bit PCM WAV as multipart/form-data (field name
+// `audio`, mirroring the `/api/upload` pattern) and returns `{ "text": "..." }`.
+//
+// An optional `context` field (recent terminal text) is accepted for forward
+// compatibility but currently IGNORED — sherpa-rs hotword biasing wants a
+// pre-built hotwords file, not free-form context, so wiring it up is not worth
+// the complexity for this first cut. The field is read and dropped so clients
+// can send it without error.
+async fn api_transcribe(
+    State(state): State<AppState>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut audio: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::bad_request(e.into()))?
+    {
+        match field.name() {
+            Some("audio") => {
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::bad_request(e.into()))?;
+                audio = Some(bytes.to_vec());
+            }
+            // `context` is accepted but intentionally unused (see fn docs).
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let Some(audio) = audio else {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "no `audio` field in multipart body"
+        )));
+    };
+
+    let stt = state.stt.clone();
+    // Inference is CPU-bound and blocking; keep it off the async runtime.
+    let result = tokio::task::spawn_blocking(move || stt.transcribe_wav(&audio))
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("transcription task failed: {e}")))?;
+
+    match result {
+        Ok(text) => Ok(Json(json!({ "text": text }))),
+        Err(transcribe::TranscribeError::ModelUnavailable(m)) => Err(AppError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: m,
+        }),
+        Err(transcribe::TranscribeError::BadAudio(m)) => {
+            Err(AppError::bad_request(anyhow::anyhow!(m)))
+        }
+        Err(transcribe::TranscribeError::Engine(m)) => Err(AppError::internal(anyhow::anyhow!(m))),
+    }
 }
 
 // ── Web Push: VAPID public key + subscription endpoints ───────────────
@@ -1508,6 +1596,7 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     <div id="inputRibbon" class="input-ribbon">
       <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
       <button id="uploadBtn">📷</button>
+      <button id="micBtn" title="Dictate (speech to text)">🎤</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
       <button data-key="\x1b[D">←</button>
