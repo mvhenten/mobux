@@ -473,20 +473,3 @@ if (window.visualViewport) {
   vv.addEventListener('resize', trackKeyboard);
   vv.addEventListener('scroll', trackKeyboard);
 }
-
-// ── Focus-in snap-to-bottom ─────────────────────────────────────────
-// Renderer-agnostic. When the user is parked mid-scrollback and taps
-// the terminal (which moves focus to the renderer's hidden textarea —
-// `.xterm-helper-textarea` for xterm, `.ace_text-input` for sterk),
-// the soft keyboard comes up but the viewport stays parked in
-// scrollback so what they type lands somewhere they can't see. Snap to
-// the live screen on focus so keystrokes always land in view.
-//
-// Originally proposed inside sterk (PR #47, closed) — but this is
-// opinionated host UX, not terminal protocol behaviour, and putting
-// the policy in either backend produces divergent UX across the dual-
-// renderer matrix. Page-level handling keeps both backends consistent.
-// Same pattern as the visualViewport handler above (PR #98).
-document.addEventListener('focusin', (e) => {
-  if (termEl.contains(e.target)) core.scrollToBottom();
-});
