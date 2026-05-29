@@ -385,6 +385,23 @@ window.__mobuxView = {
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
     },
+    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit)
+    // prefix. Use this in tests that care about sticky-to-bottom
+    // behaviour after incremental content growth: the alt-screen exit
+    // sequence causes sterk to reset the buffer, which races with the
+    // test's scroll-geometry probe.
+    injectLinesPlain: (n, prefix = 'inject') => {
+      try { core.ws?.close(); } catch (_) {}
+      let s = '';
+      for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
+      return new Promise((resolve) => core.term.write(s, resolve));
+    },
+    // Returns a Promise that resolves after the reader's next _render()
+    // call has committed updated scroll geometry (maxScroll, scrollY).
+    // Safe to call from page.evaluate() — Playwright serialises the
+    // resolved value via structured-clone, so callers should not await
+    // a non-serialisable payload.
+    readerAwaitRender: () => reader.awaitNextRender(),
     bufferLength: () => core.getActiveBuffer().length,
     isAlternate: () => {
       // sterk: compare alternate vs active buffer references

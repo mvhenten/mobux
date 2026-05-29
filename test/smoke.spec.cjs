@@ -1194,12 +1194,17 @@ test('synthetic viewport: clamps at max with overflowing content', async ({ page
   expect(sy).toBe(max);
 });
 
-// TODO(mvhenten/mobux#85): Brittle — content-marker wait races with sterk's
-// alt-screen reset on CI. Test passes locally (incl. x20 CPU throttle) but
-// times out reliably on CI runners under V8 cell-grid timing. Skipping
-// until we add proper render-quiesce observables or rework to drive sterk's
-// public refresh() API. See PR #83 for context.
-test.skip('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
+// Fix for mobux#85: use injectLinesPlain (no \x1b[?1049l alt-screen exit)
+// and await the reader's render-quiesce signal instead of polling DOM text.
+//
+// Root cause of the old flake: injectLines() prefixes content with
+// \x1b[?1049l, which sterk treats as a buffer reset. That wipes the buffer
+// right when the waitForFunction probe was running, so maxScroll > prev
+// was a race. The new approach:
+//   1. injectLinesPlain — no alt-screen escape, buffer grows monotonically.
+//   2. readerAwaitRender() — resolves after the reader's next _render()
+//      has committed scroll geometry. No waitForFunction polling.
+test('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
   await bootReader(page);
   await fillReader(page, 200, 'sticky');
 
@@ -1211,19 +1216,14 @@ test.skip('synthetic viewport: sticky-to-bottom on new output', async ({ page })
   expect(before.sy).toBe(before.max);
   expect(before.max).toBeGreaterThan(0);
 
-  await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'sticky2'));
-  // Wait for the new content to render into the DOM. Use a content
-  // marker rather than `maxScroll > prev`: `injectLines` issues
-  // `\x1b[?1049l`, which sterk treats as a buffer reset, so the
-  // post-inject maxScroll can be lower than the baseline if the
-  // baseline render had already captured large pre-inject content.
-  // Matching on text is deterministic across CI render-timing
-  // variance.
-  await page.waitForFunction(
-    () => /sticky2/.test(document.querySelector('#reader .reader-inner')?.textContent || ''),
-    null,
-    { timeout: 5000 },
-  );
+  // Register the render-quiesce observer BEFORE writing so we can't
+  // miss the render that fires from the write. Then write the new
+  // content (no alt-screen reset → buffer grows, not resets).
+  await page.evaluate(async () => {
+    const renderDone = window.__mobuxView.test.readerAwaitRender();
+    window.__mobuxView.test.injectLinesPlain(80, 'sticky2');
+    await renderDone;
+  });
 
   const after = await page.evaluate(() => ({
     sy: window.__mobuxView.test.readerScrollY(),
