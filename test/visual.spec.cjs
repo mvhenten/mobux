@@ -12,7 +12,8 @@
 //
 // Run via: `make test-visual`.
 
-const { test, expect, devices } = require('@playwright/test');
+const { test, expect } = require('./fixtures.cjs');
+const { devices } = require('@playwright/test');
 const { execSync } = require('child_process');
 
 const BASE = process.env.MOBUX_URL || 'https://localhost:5151';
@@ -288,21 +289,18 @@ test('V5 — reader-view toggle: on then off leaves no ghost', async ({ page }) 
 
 // ── V6: theme swap (4 baselines) ───────────────────────────────────
 // Each theme reloads with `localStorage['mobux:theme']` pre-seeded
-// so sterk picks up the matching palette at construction time. We
-// assert two things:
-//   1. DOM-level — sterk injects a CSS rule with the theme's palette
-//      colour for `.sterk-fg-2` (the canonical green slot). This proves
-//      the localStorage → terminal-core.js wiring works and is the
-//      thing that would break if a future refactor moved theme reads
-//      somewhere new.
-//   2. Visual — a screenshot baseline of the seeded ANSI rainbow strip.
-//      Today these baselines may all look identical because sterk's
-//      injected `.ace_editor .sterk-fg-N` selectors don't match Ace's
-//      `ace_sterk-fg-N` class form (Ace prepends `ace_` to user class
-//      names). The DOM assertion above guards the wiring; the
-//      screenshot will start diverging the moment sterk fixes the
-//      selector. [needs confirmation]: this is a known sterk gap to
-//      flag back to @kattebak/sterk maintainers.
+// so the renderer picks up the matching palette at construction time.
+// We assert two things:
+//   1. DOM-level — the renderer must carry this theme's palette[2]
+//      (the green slot). Both backends expose it differently:
+//        - sterk: emits a `<style id="sterk-theme">` block that defines
+//          `--sterk-palette-2: <hex>` on the `.sterk` root.
+//        - xterm: applyTheme() (themes.js) writes the resolved palette
+//          onto `window.__xterm.options.theme.green`.
+//      Both prove the localStorage → terminal-core.js wiring works and
+//      would break if a future refactor moved theme reads somewhere new.
+//   2. Visual — a screenshot baseline of the seeded ANSI rainbow strip
+//      per theme per renderer.
 const THEMES = [
   { id: 'tomorrow-night-soft', greenHex: '#b5bd68' },
   { id: 'gruvbox-dark-soft',  greenHex: '#98971a' },
@@ -330,25 +328,36 @@ async function seedThemedTerminal(page) {
 }
 
 for (const { id: themeId, greenHex } of THEMES) {
-  test(`V6 — theme ${themeId}`, async ({ page }) => {
+  test(`V6 — theme ${themeId}`, async ({ page }, testInfo) => {
     // Seed the theme BEFORE the bundle reads localStorage at boot —
-    // sterk picks its palette at construction time (terminal-core.js).
+    // sterk picks its palette at construction time (terminal-core.js),
+    // xterm picks it up via applyTheme() called synchronously from
+    // terminal.js after construction.
     await page.addInitScript((id) => {
       try { localStorage.setItem('mobux:theme', id); } catch (_) {}
     }, themeId);
     await bootTerminal(page);
     await seedThemedTerminal(page);
 
-    // DOM: the injected sterk stylesheet must carry this theme's
-    // palette[2] (green slot) on the `.sterk-fg-2` rule.
-    const ruleColor = await page.evaluate(() => {
-      for (const style of document.querySelectorAll('style')) {
-        const m = style.textContent.match(/\.sterk-fg-2 \{ color: (#[0-9a-fA-F]{6})/);
-        if (m) return m[1].toLowerCase();
+    // DOM: assert palette[2] (green slot) made it into the active
+    // renderer. Each backend exposes it differently — see the comment
+    // block above the THEMES list.
+    const renderer = testInfo.project.use.renderer;
+    const ruleColor = await page.evaluate((r) => {
+      if (r === 'sterk') {
+        // sterk's injected <style id="sterk-theme"> sets CSS variables
+        // on the `.sterk` root. Match `--sterk-palette-2: #rrggbb`.
+        for (const style of document.querySelectorAll('style')) {
+          const m = style.textContent.match(/--sterk-palette-2:\s*(#[0-9a-fA-F]{6})/);
+          if (m) return m[1].toLowerCase();
+        }
+        return null;
       }
-      return null;
-    });
-    expect(ruleColor, 'sterk must inject palette[2] for the selected theme').toBe(greenHex.toLowerCase());
+      // xterm: themes.js writes the green slot onto __xterm.options.theme.green.
+      const c = window.__xterm?.options?.theme?.green;
+      return typeof c === 'string' ? c.toLowerCase() : null;
+    }, renderer);
+    expect(ruleColor, `${renderer} must carry palette[2] for the selected theme`).toBe(greenHex.toLowerCase());
 
     await expect(page).toHaveScreenshot(`v6-theme-${themeId}.png`, DIFF);
   });
