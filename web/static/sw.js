@@ -1,6 +1,9 @@
 // Minimal push-only service worker.
 // No fetch handler, no precache — mobux relies on the cache_bust query param
 // for static asset versioning instead.
+// The Rust handler at /sw.js appends a per-restart version comment so this
+// file's bytes differ on every release, forcing Chrome to re-install the
+// SW and run skipWaiting + clients.claim.
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
