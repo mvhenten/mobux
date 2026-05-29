@@ -24,7 +24,7 @@ pub struct VapidKeys {
 
 /// A persisted Web Push subscription (read shape).
 ///
-/// `endpoint`, `p256dh`, and `auth` are consumed by `push::notify_bell`; the
+/// `endpoint`, `p256dh`, and `auth` are consumed by `push::notify`; the
 /// `/api/push/devices` endpoint deliberately omits them, since the device-
 /// management UI only needs identifiers, labels, and timestamps.
 #[derive(Debug, Clone)]

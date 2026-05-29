@@ -1,6 +1,22 @@
-//! Web Push delivery on terminal BEL.
+//! Web Push delivery.
 //!
 //! See `docs/twa-push-implementation-plan.md` (Phase 6) for the design.
+//!
+//! ## Trigger source
+//!
+//! Bell triggers come from tmux's `alert-bell` hook (set up at startup
+//! via `tmux::install_bell_hook`). The hook fires *exactly once per
+//! actual bell* and includes the originating session and window in its
+//! format context — tmux is the source of truth, so there is no
+//! repaint-vs-event ambiguity and no need for client-side dedupe.
+//!
+//! `bell_emoji` and `program_exit` triggers in `NotificationPrefs` are
+//! currently dormant: they require content scanning of the PTY stream,
+//! which only works correctly against an append-only source like
+//! `tmux pipe-pane`. That plumbing is a separate piece of work — until
+//! it lands, those prefs are accepted by the settings UI but no event
+//! source feeds them. Scripted notifications still work via
+//! `POST /api/push/notify`.
 //!
 //! ## Library choice
 //!
@@ -14,8 +30,8 @@
 //! ## Best-effort delivery
 //!
 //! All errors are logged via `eprintln!` and swallowed. Push delivery must
-//! never block or error the WebSocket forwarding loop. Dead subscriptions
-//! (HTTP 404 / 410) are pruned from the database on the fly.
+//! never block or error any handler. Dead subscriptions (HTTP 404 / 410)
+//! are pruned from the database on the fly.
 //!
 //! [`web-push-native`]: https://crates.io/crates/web-push-native
 //! [`reqwest`]: https://crates.io/crates/reqwest
@@ -28,112 +44,28 @@ use web_push_native::{
     jwt_simple::algorithms::ES256KeyPair, p256::PublicKey, Auth, WebPushBuilder,
 };
 
-use crate::db::{Db, NotificationPrefs, Subscription, VapidKeys};
+use crate::db::{Db, Subscription, VapidKeys};
 
-/// 🔔 (U+1F514) encoded as UTF-8.
-const BELL_EMOJI_UTF8: &[u8] = &[0xf0, 0x9f, 0x94, 0x94];
-
-/// OSC 133 ; D — semantic shell prompt sequence emitted after each command,
-/// carrying the exit code. Body is `\x1b]133;D;<digits>` followed by the
-/// string terminator (BEL `\x07` or ESC `\x1b\\`).
-const OSC_133_D_PREFIX: &[u8] = b"\x1b]133;D;";
-
-/// What a chunk of PTY output is asking the user to be notified about.
-#[derive(Debug, Clone, Copy)]
-pub enum Trigger {
-    Bell,
-    BellEmoji,
-    ProgramExit { code: i32 },
+/// Build the deep-link URL for a session notification, embedding
+/// `?w={window}` so a click can land on the originating tmux window.
+fn session_url(session: &str, window: Option<&str>) -> String {
+    match window {
+        Some(w) if !w.is_empty() => format!("/s/{session}?w={w}"),
+        _ => format!("/s/{session}"),
+    }
 }
 
-/// Scan a single chunk of PTY output for notification triggers. One chunk
-/// may produce multiple triggers; each is fired independently respecting
-/// `NotificationPrefs`.
-pub fn scan_pty_chunk(chunk: &[u8]) -> Vec<Trigger> {
-    let mut out = Vec::new();
-    if chunk.contains(&0x07) {
-        out.push(Trigger::Bell);
-    }
-    if chunk
-        .windows(BELL_EMOJI_UTF8.len())
-        .any(|w| w == BELL_EMOJI_UTF8)
-    {
-        out.push(Trigger::BellEmoji);
-    }
-    let mut start = 0;
-    while start + OSC_133_D_PREFIX.len() <= chunk.len() {
-        let Some(pos) = chunk[start..]
-            .windows(OSC_133_D_PREFIX.len())
-            .position(|w| w == OSC_133_D_PREFIX)
-        else {
-            break;
-        };
-        let code_start = start + pos + OSC_133_D_PREFIX.len();
-        let mut code_end = code_start;
-        while code_end < chunk.len() && chunk[code_end].is_ascii_digit() {
-            code_end += 1;
-        }
-        start = code_end.max(code_start + 1);
-        if code_end == code_start {
-            continue;
-        }
-        if let Ok(s) = std::str::from_utf8(&chunk[code_start..code_end]) {
-            if let Ok(n) = s.parse::<i32>() {
-                out.push(Trigger::ProgramExit { code: n });
-            }
-        }
-    }
-    out
-}
-
-/// Apply a trigger respecting `prefs`. Spawns `notify` (best-effort,
-/// fire-and-forget) when the corresponding pref is on.
-pub fn handle_trigger(
-    db: Arc<Db>,
-    session_name: &str,
-    trigger: Trigger,
-    prefs: NotificationPrefs,
-) {
-    match trigger {
-        Trigger::Bell if prefs.bell => {
-            tokio::spawn(notify_bell(db, session_name.to_string()));
-        }
-        Trigger::BellEmoji if prefs.bell_emoji => {
-            tokio::spawn(notify(
-                db,
-                Payload {
-                    title: "mobux".to_string(),
-                    body: format!("session {session_name}: 🔔 ping"),
-                    tag: Some(format!("emoji-{session_name}")),
-                    url: Some(format!("/s/{session_name}")),
-                },
-            ));
-        }
-        Trigger::ProgramExit { code } => {
-            let fire = if code != 0 {
-                prefs.program_exit_nonzero || prefs.program_exit
-            } else {
-                prefs.program_exit
-            };
-            if fire {
-                let label = if code == 0 {
-                    "ok".to_string()
-                } else {
-                    format!("exit {code}")
-                };
-                tokio::spawn(notify(
-                    db,
-                    Payload {
-                        title: "mobux".to_string(),
-                        body: format!("session {session_name}: {label}"),
-                        tag: Some(format!("exit-{session_name}")),
-                        url: Some(format!("/s/{session_name}")),
-                    },
-                ));
-            }
-        }
-        _ => {}
-    }
+/// Fire a "bell" push for `session` (and optional `window`). Spawned
+/// fire-and-forget by the tmux-hook callback — tmux already deduped the
+/// event, so callers don't need to.
+pub fn fire_bell(db: Arc<Db>, session: &str, window: Option<&str>) {
+    let payload = Payload {
+        title: "mobux".to_string(),
+        body: format!("session {session}: 🔔"),
+        tag: Some(format!("bell-{session}")),
+        url: Some(session_url(session, window)),
+    };
+    tokio::spawn(notify(db, payload));
 }
 
 /// Default VAPID contact (RFC 8292 requires `mailto:` or `https:`).
@@ -218,21 +150,6 @@ pub async fn notify(db: Arc<Db>, payload: Payload) {
     }
 
     eprintln!("push: notify sent={sent} failed={failed} pruned={pruned}");
-}
-
-/// Convenience wrapper for the WS BEL detector. Same as `notify` but with the
-/// session-bell payload baked in.
-pub async fn notify_bell(db: Arc<Db>, session_name: String) {
-    notify(
-        db,
-        Payload {
-            title: "mobux".to_string(),
-            body: format!("session {session_name}: 🔔"),
-            tag: Some(format!("bell-{session_name}")),
-            url: Some(format!("/s/{session_name}")),
-        },
-    )
-    .await
 }
 
 enum DeliveryOutcome {
