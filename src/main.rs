@@ -902,6 +902,12 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
   </header>
 
   <main class="settings-page">
+    <section class="settings-card" id="install-app">
+      <h2>Install app</h2>
+      <p class="settings-lede">Add Mobux to your home screen as a standalone Android app. The install page has the CA certificate and APK with step-by-step instructions.</p>
+      <a href="/install" class="settings-link-btn">Open install page →</a>
+    </section>
+
     <section class="settings-card">
       <h2>Notifications</h2>
       <p class="settings-lede">Pick what fires a push to subscribed devices. Everything is detected by parsing the PTY stream — no shell hooks needed except the OSC-133 prompt for the exit toggles.</p>
@@ -1570,6 +1576,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
 
   <script src="/static/index.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
+  <script src="/static/install-hint.js?v={v}"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </body>
 </html>

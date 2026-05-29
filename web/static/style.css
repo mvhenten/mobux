@@ -74,6 +74,31 @@ body {
   margin-left: -6px;
 }
 
+.install-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.install-hint-link {
+  flex: 1;
+  color: var(--accent);
+  text-decoration: none;
+}
+.install-hint-link:hover,
+.install-hint-link:active { background: rgba(255,255,255,0.05); }
+.install-hint-x {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.install-hint-x:active { background: rgba(255,255,255,0.05); }
+
 /* ── Settings page ─────────────────────────────────────────────────── */
 .settings-page {
   padding: 16px;
@@ -96,6 +121,18 @@ body {
   font-size: 13px;
   margin: 0 0 16px;
 }
+.settings-link-btn {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+}
+.settings-link-btn:active { background: rgba(255,255,255,0.05); }
 .settings-row {
   display: flex;
   gap: 12px;
