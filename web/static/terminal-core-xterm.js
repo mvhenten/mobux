@@ -62,6 +62,17 @@ export class TerminalCoreXterm extends EventTarget {
     this.panes = [];
     this.activeIndex = 0;
 
+    // Auto-reconnect state. `intentionalClose` guards the onclose
+    // backoff so we don't reconnect after a deliberate teardown (page
+    // unload, a `reconnect()` that closes a stale socket, or the test
+    // `inject` helper closing the WS on purpose). Backoff caps the
+    // retry interval so a server that's down doesn't get hammered.
+    this.intentionalClose = false;
+    this._reconnectTimer = null;
+    this._reconnectDelay = 0;
+    this._reconnectMin = 500;
+    this._reconnectMax = 10000;
+
     // OSC 133 (FinalTerm / shell-integration) markers.
     this.oscMarkers = new Map();
     this.oscDetected = false;
@@ -90,12 +101,20 @@ export class TerminalCoreXterm extends EventTarget {
 
   // ── WebSocket lifecycle ───────────────────────────────────────────
   connect() {
+    // A fresh connect attempt supersedes any pending backoff retry.
+    if (this._reconnectTimer !== null) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this.intentionalClose = false;
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.ws = new WebSocket(
       `${wsProto}://${location.host}/ws/${encodeURIComponent(this.session)}`,
     );
     this.ws.binaryType = 'arraybuffer';
     this.ws.onopen = () => {
+      // A clean open resets the backoff window.
+      this._reconnectDelay = 0;
       this.resize();
       this.refreshPanes();
       this.dispatchEvent(new Event('open'));
@@ -116,13 +135,40 @@ export class TerminalCoreXterm extends EventTarget {
       }
       this.dispatchEvent(new CustomEvent('data', { detail: bytes }));
     };
-    this.ws.onclose = () => {};
+    this.ws.onclose = () => this._scheduleReconnect();
     this.ws.onerror = () => {};
   }
 
+  // Schedule an auto-reconnect after an unexpected close, using capped
+  // exponential backoff. No-ops on an intentional close so a deliberate
+  // teardown (page unload, reconnect()'s own close, test injection)
+  // doesn't trigger a reconnect loop.
+  _scheduleReconnect() {
+    if (this.intentionalClose) return;
+    if (this._reconnectTimer !== null) return;
+    this._reconnectDelay = this._reconnectDelay
+      ? Math.min(this._reconnectDelay * 2, this._reconnectMax)
+      : this._reconnectMin;
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this.connect();
+    }, this._reconnectDelay);
+  }
+
   reconnect() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
-    if (this.ws) { try { this.ws.close(); } catch (_) {} }
+    // Idempotent: a socket that's already OPEN or still CONNECTING needs
+    // no action. The CONNECTING guard also avoids a double-socket race
+    // when an early `pageshow`/`visibilitychange` fires before boot's
+    // own connect() has finished handshaking.
+    if (this.ws &&
+        (this.ws.readyState === WebSocket.OPEN ||
+         this.ws.readyState === WebSocket.CONNECTING)) return;
+    if (this.ws) {
+      // Tear down the stale socket without arming the backoff — connect()
+      // below opens a fresh one immediately.
+      this.intentionalClose = true;
+      try { this.ws.close(); } catch (_) {}
+    }
     this.connect();
   }
 
