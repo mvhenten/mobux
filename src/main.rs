@@ -440,9 +440,9 @@ async fn auth_middleware(
     resp
 }
 
-async fn index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+async fn index(State(state): State<AppState>) -> Result<axum::response::Response, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
-    Ok(Html(render_index(&sessions, None, &state.cache_bust)))
+    Ok(html_no_store(render_index(&sessions, None, &state.cache_bust)))
 }
 
 async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
@@ -1113,16 +1113,47 @@ end</code></pre>
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Html<String>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     validate_session_name(&state, &name)?;
-    Ok(Html(render_terminal_page(&name, &state.cache_bust)))
+    Ok(html_no_store(render_terminal_page(&name, &state.cache_bust)))
 }
 
-async fn serve_sw() -> impl axum::response::IntoResponse {
+// Same payload as Html<String> but with Cache-Control: no-store.
+// The HTML embeds the per-restart cache_bust query param on every
+// /static asset URL; if the HTML itself is cached the embedded
+// version IDs go stale and the page ends up loading a mismatched
+// mix of old→new JS. no-store guarantees the browser always sees a
+// fresh document and therefore a fresh set of asset version pins.
+fn html_no_store(body: String) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let mut resp = Html(body).into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, must-revalidate"),
+    );
+    resp
+}
+
+// Serve sw.js with the per-restart cache_bust appended as a comment.
+// Chrome considers a service worker "updated" when its bytes differ
+// from the cached copy; without this, a release that only changes JS
+// bundles (not sw.js itself) leaves the old SW installed indefinitely.
+// Appending cache_bust forces a fresh install on every restart so the
+// SW's lifecycle (skipWaiting + clients.claim) runs and any stale state
+// is cleared.
+async fn serve_sw(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     use axum::http::header;
-    (
-        [(header::CONTENT_TYPE, "text/javascript")],
+    let body = format!(
+        "{}\n// sw-version: {}\n",
         include_str!("../web/static/sw.js"),
+        state.cache_bust,
+    );
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript"),
+            (header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        body,
     )
 }
 
