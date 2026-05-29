@@ -228,6 +228,16 @@ If you're running mobux behind a publicly-trusted cert (Let's Encrypt — set
 `MOBUX_ACME_DOMAINS` and `MOBUX_ACME_EMAIL`), the CA install step is skipped
 entirely; the install page won't even render that section.
 
+## Third-Party Code
+
+mobux includes vendored code from third parties. Full attribution and license texts are in [`THIRD_PARTY-LICENSES.md`](./THIRD_PARTY-LICENSES.md).
+
+**⚠️ License Compliance Notice**: The current terminal emulator stack (`web/static/vendor/aceterm/`) is vendored from the now-discontinued AWS Cloud9 SDK (c9/core). This code is licensed under the **Cloud9 SDK Non-Commercial License Agreement**, which is **incompatible with mobux's MIT license**. These files are scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk), a clean-room MIT-licensed terminal emulator. See the tracking issue for migration progress: [#68](https://github.com/mvhenten/mobux/issues/68)
+
+Other vendored components:
+- **Ace Editor** (`web/static/vendor/ace.js`) — BSD-3-Clause ✅
+- **wc.js** (`web/static/vendor/aceterm/wc.js`) — Permissive (Markus Kuhn's public-domain-like license) ✅
+
 ## License
 
-ISC
+MIT
