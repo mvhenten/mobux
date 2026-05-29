@@ -473,3 +473,54 @@ if (window.visualViewport) {
   vv.addEventListener('resize', trackKeyboard);
   vv.addEventListener('scroll', trackKeyboard);
 }
+
+// ── Tap-to-snap-to-bottom ───────────────────────────────────────────
+// Renderer-agnostic. When the user is parked mid-scrollback and TAPS
+// the terminal to type, the soft keyboard comes up but the viewport
+// stays parked in scrollback — so what they type lands somewhere they
+// can't see (issue #99). Snap to the live screen on a genuine tap so
+// keystrokes always land in view.
+//
+// We discriminate a TAP from a SWIPE using pointer events, NOT focus.
+// PR #100 hooked `focusin` and snapped on every touch — but focusin
+// fires on tap-to-scroll too, so swiping up to read scrollback
+// immediately snapped back to bottom and broke incremental scrolling.
+// That PR was reverted in #102. Here we only snap when the pointer
+// barely moved (< TAP_MOVE_PX) and was down only briefly
+// (< TAP_MAX_MS): a real tap, not a swipe or a long-press-drag.
+//
+// Both backends mount under `#terminal` (xterm: `.xterm-helper-textarea`,
+// sterk: `.ace_text-input`), so listening on the host element keeps
+// this renderer-agnostic. This coexists with the visualViewport
+// handler above (PR #98) — that one tracks keyboard height, this one
+// tracks the viewport scroll position. Both stay.
+{
+  const TAP_MOVE_PX = 10; // max pointer travel for a tap (vs. swipe)
+  const TAP_MAX_MS = 250; // max press duration for a tap (vs. drag)
+  let downX = 0;
+  let downY = 0;
+  let downT = 0;
+  let tracking = false;
+
+  termEl.addEventListener('pointerdown', (e) => {
+    downX = e.clientX;
+    downY = e.clientY;
+    downT = e.timeStamp;
+    tracking = true;
+  });
+
+  termEl.addEventListener('pointerup', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+    const elapsed = e.timeStamp - downT;
+    if (moved < TAP_MOVE_PX && elapsed < TAP_MAX_MS) {
+      core.scrollToBottom();
+    }
+  });
+
+  // A canceled pointer (e.g. the gesture recogniser claims it for a
+  // scroll/pinch) is never a tap — drop tracking so the next pointerup
+  // can't be misread.
+  termEl.addEventListener('pointercancel', () => { tracking = false; });
+}
