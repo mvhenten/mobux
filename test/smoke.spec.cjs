@@ -473,6 +473,54 @@ async function fireTouch(page, selector, type, x, y) {
   }, { selector, type, x, y });
 }
 
+test('swipe-up from bottom edge opens the command menu', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // Make sure overlay is interactive (touch UAs do this automatically).
+  await page.evaluate(() => {
+    document.getElementById('touchOverlay').style.pointerEvents = 'auto';
+    document.getElementById('cmdPickList').classList.remove('visible');
+  });
+
+  const vh = await page.evaluate(() => window.innerHeight);
+  const xMid = await page.evaluate(() => window.innerWidth / 2);
+
+  // Edge-swipe-up: start within bottom 80px, travel ~100px upward.
+  await fireTouch(page, '#touchOverlay', 'touchstart', xMid, vh - 20);
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, vh - 60);
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, vh - 100);
+  await fireTouch(page, '#touchOverlay', 'touchend',   xMid, vh - 100);
+  await page.waitForTimeout(150);
+
+  await expect(page.locator('#cmdPickList')).toHaveClass(/visible/);
+});
+
+test('mid-screen upward drag does not trigger the command menu', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await page.evaluate(() => {
+    document.getElementById('touchOverlay').style.pointerEvents = 'auto';
+    document.getElementById('cmdPickList').classList.remove('visible');
+  });
+
+  const vh = await page.evaluate(() => window.innerHeight);
+  const xMid = await page.evaluate(() => window.innerWidth / 2);
+
+  // Start mid-screen, drag upward. This is normal scroll; it must NOT
+  // open the menu.
+  await fireTouch(page, '#touchOverlay', 'touchstart', xMid, Math.round(vh / 2));
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, Math.round(vh / 2) - 40);
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, Math.round(vh / 2) - 100);
+  await fireTouch(page, '#touchOverlay', 'touchend',   xMid, Math.round(vh / 2) - 100);
+  await page.waitForTimeout(150);
+
+  await expect(page.locator('#cmdPickList')).not.toHaveClass(/visible/);
+});
+
 test('reader view disables terminal touch overlay', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });

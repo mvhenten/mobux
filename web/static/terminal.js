@@ -97,7 +97,10 @@ window.__mobuxNavigateToUrl = navigateToUrl;
 window.__mobuxOpenExternal = openExternal;
 
 // ── Core ────────────────────────────────────────────────────────────
-const isMobile = window.innerWidth < 620;
+// `coarse` pointer = touch primary (phones + tablets). Width fallback
+// catches devices that misreport pointer capability. Desktops with a
+// mouse stay `false` and skip the on-screen input bar.
+const isMobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
 
 // Apply the stored theme to all three layers. terminal-core.js already
@@ -228,6 +231,7 @@ createGestureRecognizer(overlay, {
   onHSwipe: (dir) => core.switchWindow(dir),
 
   onLongPress: showCmdList,
+  onSwipeUp: showCmdList,
 });
 
 // ReaderView uses fully synthetic scroll: native overflow scrolling
@@ -241,6 +245,7 @@ function mountReaderGestures() {
   readerGestures = createGestureRecognizer(readerEl, {
     onReconnect: () => core.reconnect(),
     onLongPress: showCmdList,
+    onSwipeUp: showCmdList,
     onHSwipe: (dir) => core.switchWindow(dir),
     onTap: () => {},
     // Double-tap in reader mode is for typing, but the reader has no
