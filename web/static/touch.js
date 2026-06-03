@@ -20,10 +20,22 @@ const FLICK_H_PX = 50;
 const FLICK_H_VEL = 0.3;    // px/ms
 const PINCH_SCALE_THRESHOLD = 0.08;
 
+// Swipe-up-from-bottom: a discoverable "drawer" gesture for opening the
+// command menu without conflicting with normal terminal scroll.
+//   - Must START within the bottom EDGE_PX of the overlay viewport.
+//   - Must travel SWIPE_UP_PX upward within SWIPE_UP_MS.
+//   - Must be vertical-dominant (|dx| < dy/2).
+// The recogniser fires it from inside the TAP state (so it pre-empts
+// the SCROLL transition); started-from-the-middle vertical drags still
+// scroll the terminal as before.
+const SWIPE_UP_EDGE_PX = 80;
+const SWIPE_UP_PX = 60;
+const SWIPE_UP_MS = 400;
+
 // callbacks: { onScroll(dy), onFling(), onTap(x,y), onDoubleTap(x,y),
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
-//              onLongPress(), onReconnect() }
+//              onLongPress(), onSwipeUp(), onReconnect() }
 export function createGestureRecognizer(overlay, callbacks, options = {}) {
   const { passiveScroll = false } = options;
   const physics = createScrollPhysics(callbacks.onScroll);
@@ -33,6 +45,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
   let lastY;
   let lastTapTime = 0;
   let longPressTimer = null;
+  let startedAtBottomEdge = false;
 
   // Two-finger state
   let pinchStartDist = 0;
@@ -70,6 +83,12 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
     startY = t.pageY;
     lastY = t.pageY;
     startTime = performance.now();
+    // Bottom-edge bookkeeping for swipe-up. `clientY` is viewport-relative,
+    // which is what we want — the overlay covers the visual viewport. Use
+    // visualViewport height when available so on-screen keyboards don't
+    // throw the edge calculation off.
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    startedAtBottomEdge = (vh - t.clientY) <= SWIPE_UP_EDGE_PX;
     transition('TAP');
     physics.reset();
     physics.addSample(t.pageY, startTime);
@@ -123,6 +142,43 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
     const x = e.touches[0].pageX;
     const now = performance.now();
     physics.addSample(y, now);
+
+    // Swipe-up-from-bottom-edge → open command menu. Checked across
+    // both TAP and SCROLL states because the first ~8-12px of upward
+    // travel transitions TAP→SCROLL before we've accumulated the full
+    // SWIPE_UP_PX. Bounded by elapsed time + startedAtBottomEdge so it
+    // can't fire mid-gesture for a long ordinary scroll that happens
+    // to start near the bottom edge.
+    if (
+      (state === 'TAP' || state === 'SCROLL') &&
+      startedAtBottomEdge &&
+      callbacks.onSwipeUp
+    ) {
+      const dy = y - startY;             // negative = upward
+      const adx = Math.abs(x - startX);
+      const ady = Math.abs(y - startY);
+      const elapsed = now - startTime;
+      if (
+        dy < -SWIPE_UP_PX &&
+        ady > adx * 2 &&
+        elapsed <= SWIPE_UP_MS
+      ) {
+        clearLongPress();
+        // Rewind any scroll deltas this gesture already pushed (we may
+        // have leaked one drag frame between TAP→SCROLL transition and
+        // hitting the swipe-up threshold).
+        physics.stopMomentum();
+        transition('IDLE');
+        startedAtBottomEdge = false;
+        if (navigator.vibrate) navigator.vibrate(20);
+        callbacks.onSwipeUp();
+        return;
+      }
+      // Once we've passed the time budget without crossing the swipe
+      // threshold, this gesture can't be a swipe-up — disarm the flag
+      // so further checks become cheap no-ops.
+      if (elapsed > SWIPE_UP_MS) startedAtBottomEdge = false;
+    }
 
     if (state === 'TAP') {
       const adx = Math.abs(x - startX);

@@ -231,6 +231,7 @@ createGestureRecognizer(overlay, {
   onHSwipe: (dir) => core.switchWindow(dir),
 
   onLongPress: showCmdList,
+  onSwipeUp: showCmdList,
 });
 
 // ReaderView uses fully synthetic scroll: native overflow scrolling
@@ -244,6 +245,7 @@ function mountReaderGestures() {
   readerGestures = createGestureRecognizer(readerEl, {
     onReconnect: () => core.reconnect(),
     onLongPress: showCmdList,
+    onSwipeUp: showCmdList,
     onHSwipe: (dir) => core.switchWindow(dir),
     onTap: () => {},
     // Double-tap in reader mode is for typing, but the reader has no
