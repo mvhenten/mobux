@@ -28,7 +28,18 @@ use rand::{distr::Alphanumeric, Rng};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
-use tower_http::services::ServeDir;
+
+/// Frontend assets compiled into the binary so `cargo install mobux` yields a
+/// self-contained executable that serves the UI from memory — no `web/` dir
+/// next to the binary required. Source maps are excluded (dev-only, large) and
+/// the optional install/well-known files are served by their own disk-based
+/// handlers, so they're excluded here too.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "web/static"]
+#[exclude = "vendor/*.map"]
+#[exclude = "install/*"]
+#[exclude = ".well-known/*"]
+struct StaticAssets;
 
 mod db;
 mod push;
@@ -163,7 +174,7 @@ async fn main() -> Result<()> {
         .route("/install/mobux.apk", get(serve_install_apk))
         .route("/install/mobux-ca.crt", get(serve_install_ca))
         .route("/.well-known/assetlinks.json", get(serve_assetlinks))
-        .nest_service("/static", ServeDir::new("web/static"))
+        .route("/static/{*path}", get(serve_static))
         .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -1150,6 +1161,32 @@ async fn serve_sw(State(state): State<AppState>) -> impl axum::response::IntoRes
         ],
         body,
     )
+}
+
+// Serve a frontend asset embedded in the binary (see `StaticAssets`). The
+// `?v=<cache_bust>` query param the HTML appends to every asset URL is for
+// browser cache-busting only and is ignored here (the wildcard match is on the
+// path, not the query). Assets carry a far-future immutable Cache-Control:
+// because the `?v=` changes on every restart, a stale cached body can never be
+// served for a fresh deploy.
+async fn serve_static(Path(path): Path<String>) -> Response {
+    use axum::http::header;
+    match StaticAssets::get(&path) {
+        Some(file) => {
+            let mime = file.metadata.mimetype();
+            let mut resp = (StatusCode::OK, file.data).into_response();
+            let headers = resp.headers_mut();
+            if let Ok(v) = HeaderValue::from_str(mime) {
+                headers.insert(header::CONTENT_TYPE, v);
+            }
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+            resp
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 // ── /install: TWA install page (APK + CA download, with QR codes) ────

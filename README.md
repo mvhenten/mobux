@@ -70,9 +70,15 @@ make run
 └──────────────┘                    └──────────────┘
 ```
 
-- **Server**: Rust (axum) — serves static files, WebSocket terminal proxy, REST API for session/pane management, file upload
+- **Server**: Rust (axum) — serves the frontend (embedded in the binary), WebSocket terminal proxy, REST API for session/pane management, file upload
 - **Client**: vanilla JS modules — xterm.js (patched, bundled with esbuild), touch gesture recognizer, mobile input bar
 - **Build**: `node web/build.js` applies a diff patch to xterm.js's `CompositionHelper` and bundles with esbuild
+
+### Embedded frontend / `cargo install`
+
+The entire `web/static` tree is compiled into the binary with [`rust-embed`](https://crates.io/crates/rust-embed) and served from memory at `/static/*` — there is no runtime dependency on a `web/` directory next to the executable. This makes `cargo install mobux` produce a self-contained binary that runs from anywhere.
+
+For this to work, the generated vendor bundles (`web/static/vendor/*.bundle.js`, `xterm.css`, `fonts/*.woff2`) are committed to git so the published crate embeds the real frontend. They are build artifacts — regenerate them with `make build` (which runs `node web/build.js`) whenever the frontend or its dependencies change, then commit the result. Only the dev-only source maps (`*.map`) stay gitignored and are excluded from the embed.
 
 ## Patched xterm.js
 
