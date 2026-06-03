@@ -9,10 +9,18 @@ MOBUX_SMOKE_PORT ?= 8281
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
+
+# TWA build identity (overridable so `twa-dev` can produce a coexisting app).
+# Prod defaults must keep current behavior exactly.
+MOBUX_PACKAGE_ID  ?= io.github.mvhenten.mobux
+MOBUX_APP_NAME    ?= Mobux
+TWA_INSTALL_DIR   ?= web/static/install
+TWA_WELLKNOWN_DIR ?= web/static/.well-known
+MOBUX_DEV_DOMAIN  ?= sandbox:5152
 PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
-.PHONY: build run clean start stop restart status logs test web setup setup-twa twa \
+.PHONY: build run clean start stop restart status logs test web setup setup-twa twa twa-dev \
         smoke-start smoke-stop smoke-logs smoke-status \
         podman-build podman-run podman-stop podman-test
 
@@ -222,9 +230,11 @@ twa:
 			"$${ANDROID_HOME:-$$HOME/.android}" \
 			> "$$HOME/.bubblewrap/config.json"; \
 	fi; \
-	echo "Rendering twa/twa-manifest.json (MOBUX_DOMAIN=$$MOBUX_DOMAIN)"; \
+	echo "Rendering twa/twa-manifest.json (MOBUX_DOMAIN=$$MOBUX_DOMAIN, packageId=$(MOBUX_PACKAGE_ID), name=$(MOBUX_APP_NAME))"; \
 	sed -e "s|__MOBUX_DOMAIN__|$$MOBUX_DOMAIN|g" \
 		-e "s|__MOBUX_KEYSTORE_PATH__|$$KEYSTORE|g" \
+		-e "s|__MOBUX_PACKAGE_ID__|$(MOBUX_PACKAGE_ID)|g" \
+		-e "s|__MOBUX_APP_NAME__|$(MOBUX_APP_NAME)|g" \
 		twa/twa-manifest.json.template > twa/twa-manifest.json; \
 	if [ -d twa/app ]; then \
 		echo "Regenerating TWA project from manifest (twa/app/)"; \
@@ -241,9 +251,9 @@ twa:
 		echo "Expected signed APK at $$APK_SRC but it is missing." >&2; \
 		exit 1; \
 	fi; \
-	mkdir -p web/static/install; \
-	cp "$$APK_SRC" web/static/install/mobux.apk; \
-	echo "Wrote web/static/install/mobux.apk"; \
+	mkdir -p $(TWA_INSTALL_DIR); \
+	cp "$$APK_SRC" $(TWA_INSTALL_DIR)/mobux.apk; \
+	echo "Wrote $(TWA_INSTALL_DIR)/mobux.apk"; \
 	FINGERPRINT="$$(keytool -list -v \
 		-keystore "$$KEYSTORE" \
 		-alias mobux \
@@ -253,10 +263,21 @@ twa:
 		echo "Could not extract SHA-256 fingerprint from keystore." >&2; \
 		exit 1; \
 	fi; \
-	mkdir -p web/static/.well-known; \
-	printf '[{\n  "relation": ["delegate_permission/common.handle_all_urls"],\n  "target": {\n    "namespace": "android_app",\n    "package_name": "io.github.mvhenten.mobux",\n    "sha256_cert_fingerprints": ["%s"]\n  }\n}]\n' "$$FINGERPRINT" > web/static/.well-known/assetlinks.json; \
-	echo "Wrote web/static/.well-known/assetlinks.json (fingerprint $$FINGERPRINT)"; \
+	mkdir -p $(TWA_WELLKNOWN_DIR); \
+	printf '[{\n  "relation": ["delegate_permission/common.handle_all_urls"],\n  "target": {\n    "namespace": "android_app",\n    "package_name": "$(MOBUX_PACKAGE_ID)",\n    "sha256_cert_fingerprints": ["%s"]\n  }\n}]\n' "$$FINGERPRINT" > $(TWA_WELLKNOWN_DIR)/assetlinks.json; \
+	echo "Wrote $(TWA_WELLKNOWN_DIR)/assetlinks.json (fingerprint $$FINGERPRINT)"; \
 	if [ "$$FRESH_KEY" = "1" ]; then \
 		echo ""; \
 		echo "Reminder: back up $$KEYSTORE and $$PASSFILE before you forget."; \
 	fi
+
+# twa-dev: build the coexisting "Mobux Dev" app (package id ...mobux.dev, host
+# sandbox:5152) into the repo-local staging dir twa/dist-dev/ so it never
+# clobbers the prod web/static/install/mobux.apk. Reuses the same signing key.
+twa-dev:
+	@$(MAKE) twa \
+		MOBUX_DOMAIN=$(MOBUX_DEV_DOMAIN) \
+		MOBUX_PACKAGE_ID=io.github.mvhenten.mobux.dev \
+		MOBUX_APP_NAME="Mobux Dev" \
+		TWA_INSTALL_DIR=twa/dist-dev/install \
+		TWA_WELLKNOWN_DIR=twa/dist-dev/.well-known
