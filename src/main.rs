@@ -1630,21 +1630,21 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <div id="cmdPickList">
     <div class="cmd-header">
       <h3>tmux</h3>
-      <button class="cmd-close" id="cmdCloseBtn">✕</button>
+      <button class="cmd-close" id="cmdCloseBtn" aria-label="Close">Close</button>
     </div>
-    <button class="cmd-item" data-cmd="new-window"><span class="cmd-icon">➕</span><span class="cmd-label">New Window</span></button>
-    <button class="cmd-item" data-cmd="kill-window"><span class="cmd-icon">❌</span><span class="cmd-label">Close Window</span></button>
+    <button class="cmd-item" data-cmd="new-window">New window</button>
+    <button class="cmd-item" data-cmd="kill-window">Close window</button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="split-h"><span class="cmd-icon">│</span><span class="cmd-label">Split Horizontal</span></button>
-    <button class="cmd-item" data-cmd="split-v"><span class="cmd-icon">─</span><span class="cmd-label">Split Vertical</span></button>
-    <button class="cmd-item" data-cmd="kill-pane"><span class="cmd-icon">🗑</span><span class="cmd-label">Close Pane</span></button>
+    <button class="cmd-item" data-cmd="split-h">Split horizontal</button>
+    <button class="cmd-item" data-cmd="split-v">Split vertical</button>
+    <button class="cmd-item" data-cmd="kill-pane">Close pane</button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="next-window"><span class="cmd-icon">▶</span><span class="cmd-label">Next Window</span></button>
-    <button class="cmd-item" data-cmd="prev-window"><span class="cmd-icon">◀</span><span class="cmd-label">Previous Window</span></button>
-    <button class="cmd-item" data-cmd="next-pane"><span class="cmd-icon">↻</span><span class="cmd-label">Next Pane</span></button>
-    <button class="cmd-item" data-cmd="prev-pane"><span class="cmd-icon">↺</span><span class="cmd-label">Previous Pane</span></button>
+    <button class="cmd-item" data-cmd="next-window">Next window</button>
+    <button class="cmd-item" data-cmd="prev-window">Previous window</button>
+    <button class="cmd-item" data-cmd="next-pane">Next pane</button>
+    <button class="cmd-item" data-cmd="prev-pane">Previous pane</button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="zoom-pane"><span class="cmd-icon">🔍</span><span class="cmd-label">Zoom Pane</span></button>
+    <button class="cmd-item" data-cmd="zoom-pane">Zoom pane</button>
   </div>
 
   <div id="inputBar" class="input-bar hidden">
