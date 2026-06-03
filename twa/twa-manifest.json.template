@@ -1,8 +1,8 @@
 {
-  "packageId": "io.github.mvhenten.mobux",
+  "packageId": "__MOBUX_PACKAGE_ID__",
   "host": "__MOBUX_DOMAIN__",
-  "name": "Mobux",
-  "launcherName": "Mobux",
+  "name": "__MOBUX_APP_NAME__",
+  "launcherName": "__MOBUX_APP_NAME__",
   "themeColor": "#0f1115",
   "themeColorDark": "#0f1115",
   "navigationColor": "#0f1115",

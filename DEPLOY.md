@@ -179,6 +179,31 @@ independently on `:5151` and `:5152`. Update it with
 Port map: **`:5151`** prod (systemd, installed release) · **`:5152`** dev
 (installed branch build) · **`:8281`** ephemeral smoke/test.
 
+#### Dev TWA app
+
+`make twa-dev` builds a separate **Mobux Dev** Android app — package id
+`io.github.mvhenten.mobux.dev`, host `sandbox:5152` — into the repo-local
+staging dir `twa/dist-dev/`, reusing the **same signing keystore** as prod
+(the assetlinks fingerprint is per-key; only `package_name` differs). Because
+it has a different package id, it **coexists** with the prod Mobux app on the
+same device — both install side by side.
+
+Deploy it to the `:5152` instance (the dir is *that* instance's
+`WorkingDirectory`, e.g. `~/apps/mobux-dev/`):
+
+```bash
+make twa-dev
+cp twa/dist-dev/install/mobux.apk \
+   ~/apps/mobux-dev/web/static/install/mobux.apk
+cp twa/dist-dev/.well-known/assetlinks.json \
+   ~/apps/mobux-dev/web/static/.well-known/assetlinks.json
+```
+
+Then install it from `https://sandbox:5152/install`.
+
+Prod `make twa` is unchanged: it still writes `web/static/install/mobux.apk`
+and an assetlinks with `package_name` `io.github.mvhenten.mobux`.
+
 ## Reboot behaviour
 
 - **mobux** — comes back automatically (systemd user service + linger).
