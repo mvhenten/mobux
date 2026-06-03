@@ -1,0 +1,190 @@
+# Deploying mobux
+
+mobux runs as a **single self-contained binary**: the entire `web/static`
+frontend is embedded with `rust-embed`, so the executable serves the UI from
+memory and needs no `web/` directory beside it. That makes `cargo install`
+the whole deployment story.
+
+The production instance is a **systemd user service** on `:5151`, running the
+**published, installed binary** — completely decoupled from the dev checkout.
+Hack on the repo all you want; it does not touch the running app until you
+deliberately `cargo install` a new version and restart the service.
+
+> ⚠️ `:5151` is the live instance accessed from the phone. Never run
+> `make run` / `make start` / `make restart` against it — those launch a
+> nohup process that fights the service's `Restart=always`. See
+> [Development](#development-never-touch-5151) below.
+
+## Install
+
+From crates.io (released versions):
+
+```bash
+cargo install mobux --locked
+```
+
+Straight from GitHub (latest `main`, including unreleased commits):
+
+```bash
+cargo install --git https://github.com/mvhenten/mobux --locked
+# or a specific point:  --tag v0.1.1   /   --branch some-branch
+```
+
+`cargo install` always builds the release profile, so the result is the
+self-contained binary at `~/.cargo/bin/mobux`. It runs from any directory.
+
+## Run as a boot-persistent service (`:5151`)
+
+The host runs mobux as a **systemd `--user`** service with linger enabled, so
+it starts on boot (no login needed) and restarts on crash — no root required.
+
+```bash
+cargo install mobux --locked                 # → ~/.cargo/bin/mobux
+loginctl enable-linger "$USER"                # start the user service at boot
+
+# Deploy dir: holds ONLY the two files mobux reads from disk relative to its
+# working dir — the TWA APK and the Digital Asset Links file, both for the
+# /install flow. Everything else (the whole UI) is embedded in the binary.
+mkdir -p ~/apps/mobux/web/static/install ~/apps/mobux/web/static/.well-known
+cp /path/to/mobux.apk        ~/apps/mobux/web/static/install/mobux.apk
+cp /path/to/assetlinks.json  ~/apps/mobux/web/static/.well-known/assetlinks.json
+
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/mobux.service <<'EOF'
+[Unit]
+Description=mobux — mobile tmux web frontend (HTTPS on :5151)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/mobux
+ExecStart=%h/.cargo/bin/mobux
+Environment=PORT=5151
+Environment=MOBUX_AUTH_USER=changeme
+Environment=MOBUX_PIN=changeme
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now mobux
+```
+
+The TLS cert is auto-generated (and reused across restarts) at
+`~/.config/mobux/leaf.crt`; the data dir (sessions, push subscriptions) is
+`~/.local/share/mobux`. Neither depends on the working directory.
+
+Verify the embed + service:
+
+```bash
+curl -sk -u "$MOBUX_AUTH_USER:$MOBUX_PIN" https://localhost:5151/static/style.css   # 200 → served from the binary
+systemctl --user status mobux
+journalctl --user -u mobux -f
+```
+
+### Redeploy a new version
+
+```bash
+cargo install mobux --locked        # or the --git form
+systemctl --user restart mobux      # sub-second swap; :5151 barely blinks
+```
+
+## Release & publish (crates.io)
+
+Versioning is owned by **release-plz** (driven by conventional commits — single
+source of truth, don't hand-pick versions):
+
+1. Merge feature PRs to `main` with conventional-commit messages
+   (`feat:`, `fix:`, `refactor:`…).
+2. release-plz opens a **`chore: release vX.Y.Z`** PR (version bump + changelog).
+3. Merge that PR → release-plz tags it, creates the GitHub release, and
+   **publishes to crates.io**.
+
+**Gotcha — CI doesn't auto-run on the release PR.** release-plz opens it using
+the default `GITHUB_TOKEN`, and GitHub won't trigger workflows for
+token-created events (anti-recursion). Branch protection requires `check` +
+`e2e`, so the PR sits un-mergeable with no checks. Fix it the right way (do
+**not** `--admin`-bypass — CI must run):
+
+```bash
+git fetch origin <release-plz-branch>
+git switch <release-plz-branch>
+git commit --allow-empty -m "ci: trigger required checks on release PR"
+git push                         # a *user*-authored push triggers check/e2e
+```
+
+Then merge normally once green. The permanent fix is to give release-plz a PAT
+or GitHub-App token (so its PRs trigger CI on their own); until then, the empty
+commit is the nudge.
+
+Prerequisites already configured on this repo: the `CARGO_REGISTRY_TOKEN`
+secret, and the repo setting **Settings → Actions → General → "Allow GitHub
+Actions to create and approve pull requests"** (without it, release-plz's PR
+create fails with HTTP 422).
+
+## Development (never touch `:5151`)
+
+`:5151` is the live instance the phone connects to. Run dev/experimental
+builds on a **different port**, detached.
+
+**Quick, throwaway test** (ephemeral, isolated, torn down after):
+
+```bash
+make smoke-start        # throwaway instance on :8281 (HTTP, isolated data dir)
+make smoke-stop
+make test-smoke         # full Playwright suite against the smoke instance
+```
+
+The `make run` / `make start` / `make restart` targets bind `:5151` directly
+and will collide with the systemd service — use them only on a host where
+mobux is **not** running as a service.
+
+### Installable dev instance (parallel to prod, isolated config)
+
+You can install and run a **dev build the same way as prod** — via cargo —
+just with its own binary path, port, and data dir so it never touches the
+`:5151` instance. `cargo install` defaults to `~/.cargo/bin/mobux`, which is
+the prod binary, so a dev build must go to a separate `--root`:
+
+```bash
+# install a branch/main build into its OWN location (doesn't overwrite prod)
+cargo install --git https://github.com/mvhenten/mobux \
+  --branch my-feature --root ~/.local/mobux-dev --locked
+# → ~/.local/mobux-dev/bin/mobux
+```
+
+Run it with a **different context** — distinct port + data dir (keep its
+sessions/push state separate from prod). The TLS cert under
+`~/.config/mobux/` is shared (same host), which is fine:
+
+```bash
+PORT=5152 \
+MOBUX_DATA_DIR=~/.local/share/mobux-dev \
+MOBUX_AUTH_USER=me MOBUX_PIN=changeme \
+~/.local/mobux-dev/bin/mobux
+```
+
+For a persistent dev instance you can reach from the phone, mirror the prod
+unit as `~/.config/systemd/user/mobux-dev.service` with
+`ExecStart=%h/.local/mobux-dev/bin/mobux`, `Environment=PORT=5152`,
+`Environment=MOBUX_DATA_DIR=%h/.local/share/mobux-dev`, and its own
+`WorkingDirectory`. Enable it alongside `mobux.service`; the two run
+independently on `:5151` and `:5152`. Update it with
+`cargo install --git … --root ~/.local/mobux-dev && systemctl --user restart mobux-dev`.
+
+Port map: **`:5151`** prod (systemd, installed release) · **`:5152`** dev
+(installed branch build) · **`:8281`** ephemeral smoke/test.
+
+## Reboot behaviour
+
+- **mobux** — comes back automatically (systemd user service + linger).
+- **tailscale** — `tailscaled` is an enabled system service with persisted
+  state; it reconnects on its own. The phone/tablet reach the host as
+  `sandbox:5151` over the tailnet (MagicDNS) — that exact host is baked into
+  the TWA app, so keep it stable.
+- **tmux sessions** — do **not** survive a reboot. mobux only *attaches* to a
+  running tmux server; there's no tmux-resurrect/continuum configured.
