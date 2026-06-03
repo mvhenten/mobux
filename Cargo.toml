@@ -42,12 +42,6 @@ time = "0.3"
 web-push-native = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-# Local CPU speech-to-text. sherpa-rs (sherpa-onnx bindings) runs an NVIDIA
-# Parakeet TDT transducer entirely on CPU; `download-binaries` (default) fetches
-# prebuilt onnxruntime + sherpa-onnx libs at build time (needs `cmake`). hound
-# parses the 16 kHz mono 16-bit WAV the client uploads into f32 samples.
-sherpa-rs = "0.6"
-hound = "3"
 
 [dev-dependencies]
 tempfile = "3"
