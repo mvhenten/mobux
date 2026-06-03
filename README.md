@@ -124,10 +124,29 @@ On mobile, the xterm.js hidden textarea is bypassed. Instead:
 ## Development
 
 ```bash
-make build      # patch xterm + esbuild + cargo build
-make run        # build + run
-make test       # playwright smoke tests (mobile Chrome)
-make restart    # stop + start as background daemon
+make build         # patch xterm + esbuild + cargo build
+make test          # playwright smoke tests (mobile Chrome)
+make smoke-start   # throwaway instance on :8281 (isolated, for testing)
+make smoke-stop
+```
+
+> On a host already running mobux as a service (see **[DEPLOY.md](DEPLOY.md)**),
+> don't use `make run` / `make start` / `make restart` — they bind `:5151`
+> directly and collide with the systemd service. Run dev builds on a different
+> port (`make smoke-start` → `:8281`, or an installable dev instance on
+> `:5152` — see DEPLOY.md).
+
+## Deploying
+
+mobux is a single self-contained binary (the frontend is embedded), so
+deployment is just `cargo install`. The production instance runs as a
+boot-persistent systemd user service. Full runbook — install, the service
+unit, releasing to crates.io, and running an isolated dev instance — is in
+**[DEPLOY.md](DEPLOY.md)**.
+
+```bash
+cargo install mobux --locked     # or: cargo install --git https://github.com/mvhenten/mobux --locked
+systemctl --user restart mobux   # if running as the service
 ```
 
 ## Building the TWA
