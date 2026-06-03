@@ -1667,6 +1667,8 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       <button data-key="\x1b[F">End</button>
       <button data-key="\x15">^U</button>
       <button data-key="\x0c">^L</button>
+      <button data-key="/clear\r">/clear</button>
+      <button data-key="/quit\r">/quit</button>
     </div>
     <div class="input-row">
       <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />

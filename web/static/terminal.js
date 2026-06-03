@@ -97,7 +97,10 @@ window.__mobuxNavigateToUrl = navigateToUrl;
 window.__mobuxOpenExternal = openExternal;
 
 // ── Core ────────────────────────────────────────────────────────────
-const isMobile = window.innerWidth < 620;
+// `coarse` pointer = touch primary (phones + tablets). Width fallback
+// catches devices that misreport pointer capability. Desktops with a
+// mouse stay `false` and skip the on-screen input bar.
+const isMobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
 
 // Apply the stored theme to all three layers. terminal-core.js already
