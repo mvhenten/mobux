@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.1.2] - 2026-06-03
+
+### 🚀 Features
+
+- *(twa)* Parameterize build for a separate Mobux Dev app ([#118](https://github.com/mvhenten/mobux/pull/118))
+- *(touch)* Tablet input bar, /clear /quit, swipe-up menu, de-emoji menu ([#115](https://github.com/mvhenten/mobux/pull/115))
+
+### 📚 Documentation
+
+- Deployment + dev runbook in-repo (DEPLOY.md, AGENTS.md) ([#116](https://github.com/mvhenten/mobux/pull/116))
+
+
 ## [0.1.1] - 2026-06-03
 
 ### 🚀 Features
