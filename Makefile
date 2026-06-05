@@ -21,6 +21,7 @@ PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
 .PHONY: build run clean start stop restart status logs test web setup setup-twa twa twa-dev \
+        transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
         podman-build podman-run podman-stop podman-test
 
@@ -28,11 +29,35 @@ PODMAN_IMAGE     ?= localhost/mobux:dev
 PODMAN_PORT      ?= 8381
 PODMAN_NAME      ?= mobux-podman
 
+# Local speech-to-text (whisper.cpp) for transcribing uploaded recordings.
+# Host-side tooling — NOT bundled into the mobux binary. Lives under
+# $(WHISPER_DIR); `transcribe` is capability-gated and no-ops gracefully if
+# whisper isn't installed (run `make setup-transcribe`).
+WHISPER_DIR        ?= $(HOME)/.local/whisper.cpp
+WHISPER_MODEL_NAME ?= base.en
+
 setup:
 	./bin/setup
 
 setup-twa:
 	./bin/setup-twa
+
+# Transcribe an uploaded audio/video file with local whisper.cpp.
+#   make transcribe FILE=/tmp/mobux-uploads/<file>
+transcribe:
+	@if [ -z "$(FILE)" ]; then echo "usage: make transcribe FILE=<audio-or-video-file>" >&2; exit 2; fi
+	@WHISPER_DIR="$(WHISPER_DIR)" ./bin/transcribe "$(FILE)"
+
+# Build whisper.cpp + download the model into $(WHISPER_DIR). Idempotent.
+setup-transcribe:
+	@command -v ffmpeg >/dev/null 2>&1 || { echo "ffmpeg is required (apt install ffmpeg)"; exit 1; }
+	@if [ ! -d "$(WHISPER_DIR)" ]; then \
+		git clone --depth 1 https://github.com/ggerganov/whisper.cpp "$(WHISPER_DIR)"; \
+	fi
+	cmake -B "$(WHISPER_DIR)/build" -S "$(WHISPER_DIR)" -DCMAKE_BUILD_TYPE=Release
+	cmake --build "$(WHISPER_DIR)/build" -j --config Release
+	bash "$(WHISPER_DIR)/models/download-ggml-model.sh" "$(WHISPER_MODEL_NAME)" "$(WHISPER_DIR)/models"
+	@echo "whisper.cpp ready at $(WHISPER_DIR) (model: $(WHISPER_MODEL_NAME))"
 
 web:
 	node web/build.js
