@@ -142,7 +142,10 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
-        .route("/api/upload", post(api_upload))
+        .route(
+            "/api/upload",
+            post(api_upload).layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024)),
+        )
         .route("/api/push/vapid-public-key", get(api_push_vapid_public_key))
         .route(
             "/api/push/subscribe",
@@ -1650,7 +1653,8 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
       <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
-      <button id="uploadBtn">📷</button>
+      <button id="uploadBtn" title="Attach file">📎</button>
+      <button id="recBtn" title="Record audio">🎤</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
       <button data-key="\x1b[D">←</button>

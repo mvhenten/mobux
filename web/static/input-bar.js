@@ -153,11 +153,27 @@ export function createInputBar(term, send) {
     }
   });
 
-  // ── Image upload ───────────────────────────────────────────────
+  // ── Shared upload helper ──────────────────────────────────────────
+  // POSTs a File/Blob to /api/upload and drops the returned path into
+  // the terminal via send(). Used by both the attach button and the
+  // audio record button.
+  async function uploadFile(file) {
+    const form = new FormData();
+    form.append('file', file);
+
+    const res = await fetch('/api/upload', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const { path } = await res.json();
+
+    // Send path directly to terminal, ready to use
+    send(path);
+  }
+
+  // ── File attach (any file type) ───────────────────────────────────
   const uploadBtn = document.getElementById('uploadBtn');
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
-  fileInput.accept = 'image/*';
+  fileInput.accept = '*/*';
   fileInput.style.display = 'none';
   document.body.appendChild(fileInput);
 
@@ -174,16 +190,8 @@ export function createInputBar(term, send) {
     const file = fileInput.files?.[0];
     if (!file) return;
 
-    const form = new FormData();
-    form.append('file', file);
-
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
-      if (!res.ok) throw new Error(await res.text());
-      const { path } = await res.json();
-
-      // Send path directly to terminal, ready to use
-      send(path);
+      await uploadFile(file);
     } catch (err) {
       console.error('Upload failed:', err);
     }
@@ -191,6 +199,119 @@ export function createInputBar(term, send) {
     // Reset so the same file can be re-selected
     fileInput.value = '';
   });
+
+  // ── Audio record (MediaRecorder → /api/upload) ────────────────────
+  const recBtn = document.getElementById('recBtn');
+  let mediaRecorder = null;
+  let chunks = [];
+  let recStream = null;
+
+  function recCleanup() {
+    if (recStream) {
+      recStream.getTracks().forEach((t) => t.stop());
+      recStream = null;
+    }
+    mediaRecorder = null;
+    if (recBtn) recBtn.classList.remove('recording');
+  }
+
+  function recFlashError() {
+    if (!recBtn) return;
+    recBtn.classList.add('rec-error');
+    setTimeout(() => recBtn.classList.remove('rec-error'), 1500);
+  }
+
+  function extForMime(mime) {
+    if (!mime) return 'webm';
+    if (mime.includes('mp4')) return 'm4a';
+    if (mime.includes('ogg')) return 'ogg';
+    if (mime.includes('webm')) return 'webm';
+    return 'webm';
+  }
+
+  function pickMimeType() {
+    const prefs = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+    for (const t of prefs) {
+      if (MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return ''; // let the browser pick a default
+  }
+
+  async function startRecording() {
+    try {
+      recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      console.error('Microphone access failed:', err);
+      recCleanup();
+      recFlashError();
+      return;
+    }
+
+    chunks = [];
+    const mimeType = pickMimeType();
+    try {
+      mediaRecorder = mimeType
+        ? new MediaRecorder(recStream, { mimeType })
+        : new MediaRecorder(recStream);
+    } catch (err) {
+      console.error('MediaRecorder init failed:', err);
+      recCleanup();
+      recFlashError();
+      return;
+    }
+
+    mediaRecorder.addEventListener('dataavailable', (e) => {
+      if (e.data && e.data.size > 0) chunks.push(e.data);
+    });
+
+    mediaRecorder.addEventListener('stop', async () => {
+      const type = mediaRecorder?.mimeType || 'audio/webm';
+      const ext = extForMime(type);
+      const blob = new Blob(chunks, { type });
+      chunks = [];
+      // Release the mic before the upload round-trip.
+      recCleanup();
+
+      if (blob.size === 0) return;
+      const file = new File([blob], 'recording-' + Date.now() + '.' + ext, { type });
+      try {
+        await uploadFile(file);
+      } catch (err) {
+        console.error('Upload failed:', err);
+        recFlashError();
+      }
+    });
+
+    mediaRecorder.start();
+    if (recBtn) recBtn.classList.add('recording');
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop(); // triggers onstop → upload + cleanup
+    } else {
+      recCleanup();
+    }
+  }
+
+  if (recBtn) {
+    const recSupported =
+      !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined';
+    if (!recSupported) {
+      recBtn.style.display = 'none';
+    } else {
+      recBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          stopRecording();
+        } else {
+          startRecording();
+        }
+      });
+      // Prevent focus steal
+      recBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    }
+  }
 
   // ── Public API ────────────────────────────────────────────────────
   return {
