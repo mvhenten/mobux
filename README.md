@@ -13,7 +13,8 @@
 - **Full terminal** — xterm.js v6 with scrollback, colors, and links
 - **Touch-native input** — bottom input bar with control key ribbon (^C, arrows, backspace, etc.) and native text field with autocomplete/voice support
 - **Two send modes** — keyboard Enter executes; ▶ button injects text without Enter for readline editing
-- **Image upload** — 📷 button uploads photos from camera/gallery, injects the file path into the terminal
+- **Attach any file** — 📎 button uploads anything (gallery photo, video, audio, PDF, logs…) and injects the saved path into the terminal
+- **Audio record** — 🎤 button records mic audio in-browser and uploads it; transcribe it locally with `make transcribe FILE=<path>` (offline whisper.cpp — `make setup-transcribe` to install). No on-device STT bundled in the binary; nothing leaves the host
 - **Swipe gestures** — swipe sessions to rename/kill, swipe terminal to switch tmux windows, pinch to zoom, long-press for tmux commands
 - **Session management** — create, rename, kill sessions from a mobile-native home screen
 - **Secure** — self-signed TLS by default, HTTP Basic auth with PIN

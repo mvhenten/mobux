@@ -38,3 +38,23 @@ over Tailscale with HTTPS. The whole frontend is embedded in the binary
   result. Only `*.map` source maps stay gitignored.
 - CI (`check` + `e2e`) runs on every PR and is required to merge — don't bypass
   it. The full suite runs against an isolated smoke instance (`make test-smoke`).
+
+## Handling uploads from the phone (incl. audio transcription)
+
+The 📎 attach and 🎤 record buttons upload to `/api/upload`, which saves the
+file to **`/tmp/mobux-uploads/<ts>-<name>`** and drops that path into the
+terminal. So when the user sends a path under `/tmp/mobux-uploads/`, that's a
+file they handed you — act on it:
+
+- **Images / PDFs / text / code / logs** → read directly with the Read tool.
+- **Audio** (e.g. `recording-*.webm` from the 🎤 button) → **transcribe
+  locally**: `make transcribe FILE=<path>` (or `./bin/transcribe <path>`).
+  It uses local whisper.cpp (offline, private; `ffmpeg` converts the format).
+  Treat the transcript as the user's actual message/command.
+- **Video** → no native viewing; use `ffmpeg` to extract frames (read as
+  images) and/or its audio track (pipe through `bin/transcribe`).
+
+Transcription is **capability-gated host tooling, not bundled in mobux**. If
+`bin/transcribe` exits 3 ("local transcription unavailable"), tell the user and
+offer to run **`make setup-transcribe`** (builds whisper.cpp + downloads the
+model into `~/.local/whisper.cpp`). Local-first ethos: nothing leaves the host.

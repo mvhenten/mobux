@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# transcribe — local, offline speech-to-text for mobux uploads.
+#
+# Usage: transcribe <audio-or-video-file> [more files...]
+#
+# mobux's 🎤 record button and 📎 attach button drop uploaded files in
+# /tmp/mobux-uploads/. This converts any ffmpeg-readable media (webm/opus from
+# the browser recorder, mp4, m4a, ogg, wav, or the audio track of a video) to
+# 16 kHz mono WAV and runs it through whisper.cpp, printing the transcript to
+# stdout. Fully local — nothing leaves the host.
+#
+# Capability-gated: if ffmpeg / whisper.cpp / the model aren't present it prints
+# how to install (make setup-transcribe) and exits 3, so callers can fall back.
+#
+# Override locations via env:
+#   WHISPER_DIR   (default ~/.local/whisper.cpp)
+#   WHISPER_BIN   (default $WHISPER_DIR/build/bin/whisper-cli)
+#   WHISPER_MODEL (default $WHISPER_DIR/models/ggml-base.en.bin)
+set -euo pipefail
+
+WHISPER_DIR="${WHISPER_DIR:-$HOME/.local/whisper.cpp}"
+WHISPER_BIN="${WHISPER_BIN:-$WHISPER_DIR/build/bin/whisper-cli}"
+WHISPER_MODEL="${WHISPER_MODEL:-$WHISPER_DIR/models/ggml-base.en.bin}"
+
+missing=()
+command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg (apt install ffmpeg)")
+[ -x "$WHISPER_BIN" ] || missing+=("whisper.cpp binary at $WHISPER_BIN")
+[ -f "$WHISPER_MODEL" ] || missing+=("whisper model at $WHISPER_MODEL")
+if [ "${#missing[@]}" -ne 0 ]; then
+  {
+    echo "transcribe: local transcription unavailable. Missing:"
+    for m in "${missing[@]}"; do echo "  - $m"; done
+    echo "Install with: make setup-transcribe"
+  } >&2
+  exit 3
+fi
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: transcribe <audio-or-video-file> [more...]" >&2
+  exit 2
+fi
+
+for f in "$@"; do
+  if [ ! -f "$f" ]; then
+    echo "transcribe: no such file: $f" >&2
+    exit 2
+  fi
+  wav="$(mktemp --suffix=.wav)"
+  trap 'rm -f "$wav"' EXIT
+  # -vn drops any video stream; resample to whisper's expected 16 kHz mono PCM.
+  ffmpeg -nostdin -loglevel error -y -i "$f" -vn -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
+  # -nt = no timestamps → clean transcript text only.
+  "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -nt 2>/dev/null
+  rm -f "$wav"
+  trap - EXIT
+done
