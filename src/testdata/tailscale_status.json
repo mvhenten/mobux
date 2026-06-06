@@ -1,0 +1,213 @@
+{
+  "Version": "1.98.4-t9e69045b2-ged3a62f14",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": [
+    "100.64.0.1",
+    "fd7a:115c:a1e0::1"
+  ],
+  "Self": {
+    "ID": "nID1",
+    "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000001",
+    "HostName": "selfhost",
+    "DNSName": "selfhost.tailnet-scrub.ts.net.",
+    "OS": "linux",
+    "UserID": 1001,
+    "TailscaleIPs": [
+      "100.64.0.1",
+      "fd7a:115c:a1e0::1"
+    ],
+    "AllowedIPs": [
+      "100.64.0.1/32",
+      "fd7a:115c:a1e0::1/128"
+    ],
+    "Addrs": [
+      "95.99.46.192:1046",
+      "95.99.46.192:12550",
+      "95.99.46.192:41641",
+      "192.168.122.44:41641"
+    ],
+    "CurAddr": "",
+    "Relay": "derp1",
+    "PeerRelay": "",
+    "RxBytes": 0,
+    "TxBytes": 0,
+    "Created": "2026-03-15T22:54:52.183071504Z",
+    "LastWrite": "0001-01-01T00:00:00Z",
+    "LastSeen": "0001-01-01T00:00:00Z",
+    "LastHandshake": "0001-01-01T00:00:00Z",
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false,
+    "Active": false,
+    "PeerAPIURL": [
+      "http://100.64.0.1:48708"
+    ],
+    "TaildropTarget": 0,
+    "NoFileSharingReason": "",
+    "Capabilities": [
+      "HTTPS://TAILSCALE.COM/s/DEPRECATED-NODE-CAPS#see-https://github.com/tailscale/tailscale/issues/11508",
+      "default-auto-update",
+      "https://tailscale.com/cap/file-sharing",
+      "https://tailscale.com/cap/is-admin",
+      "https://tailscale.com/cap/is-owner",
+      "https://tailscale.com/cap/ssh",
+      "https://tailscale.com/cap/tailnet-lock",
+      "probe-udp-lifetime",
+      "ssh-behavior-v1",
+      "ssh-env-vars",
+      "store-appc-routes",
+      "tailnet-display-name"
+    ],
+    "CapMap": {
+      "default-auto-update": [
+        true
+      ],
+      "https://tailscale.com/cap/file-sharing": null,
+      "https://tailscale.com/cap/is-admin": null,
+      "https://tailscale.com/cap/is-owner": null,
+      "https://tailscale.com/cap/ssh": null,
+      "https://tailscale.com/cap/tailnet-lock": null,
+      "probe-udp-lifetime": null,
+      "ssh-behavior-v1": null,
+      "ssh-env-vars": null,
+      "store-appc-routes": null,
+      "tailnet-display-name": [
+        "kattebak.org.github"
+      ]
+    },
+    "InNetworkMap": true,
+    "InMagicSock": false,
+    "InEngine": false,
+    "KeyExpiry": "2026-09-11T22:54:52Z"
+  },
+  "Health": [],
+  "MagicDNSSuffix": "tailnet-scrub.ts.net",
+  "CurrentTailnet": null,
+  "CertDomains": [
+    "selfhost.tailnet-scrub.ts.net"
+  ],
+  "Peer": {
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000002": {
+      "ID": "nID2",
+      "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000002",
+      "HostName": "host2",
+      "DNSName": "host2.tailnet-scrub.ts.net.",
+      "OS": "macOS",
+      "UserID": 1002,
+      "TailscaleIPs": [
+        "100.64.0.2",
+        "fd7a:115c:a1e0::2"
+      ],
+      "AllowedIPs": [
+        "100.64.0.2/32",
+        "fd7a:115c:a1e0::2/128"
+      ],
+      "Addrs": null,
+      "CurAddr": "",
+      "Relay": "derp1",
+      "PeerRelay": "",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "Created": "2026-03-15T22:46:51.730037365Z",
+      "LastWrite": "0001-01-01T00:00:00Z",
+      "LastSeen": "2026-06-06T22:00:00.1Z",
+      "LastHandshake": "0001-01-01T00:00:00Z",
+      "Online": false,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "PeerAPIURL": [
+        "http://100.64.0.2:48708"
+      ],
+      "TaildropTarget": 5,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false,
+      "KeyExpiry": "2026-09-11T22:46:51Z"
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000003": {
+      "ID": "nID3",
+      "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000003",
+      "HostName": "host3",
+      "DNSName": "host3.tailnet-scrub.ts.net.",
+      "OS": "android",
+      "UserID": 1003,
+      "TailscaleIPs": [
+        "100.64.0.3",
+        "fd7a:115c:a1e0::3"
+      ],
+      "AllowedIPs": [
+        "100.64.0.3/32",
+        "fd7a:115c:a1e0::3/128"
+      ],
+      "Addrs": null,
+      "CurAddr": "100.64.0.3:41641",
+      "Relay": "derp1",
+      "PeerRelay": "",
+      "RxBytes": 2132124,
+      "TxBytes": 5401588,
+      "Created": "2026-04-24T07:02:42.240952398Z",
+      "LastWrite": "2026-06-06T21:55:12.835898505Z",
+      "LastSeen": "0001-01-01T00:00:00Z",
+      "LastHandshake": "2026-06-06T21:55:00.089833901Z",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": true,
+      "PeerAPIURL": [
+        "http://100.64.0.3:48708"
+      ],
+      "TaildropTarget": 1,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": true,
+      "KeyExpiry": "2026-10-21T07:02:42Z"
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000004": {
+      "ID": "nID4",
+      "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000004",
+      "HostName": "host4",
+      "DNSName": "host4.tailnet-scrub.ts.net.",
+      "OS": "android",
+      "UserID": 1004,
+      "TailscaleIPs": [
+        "100.64.0.4",
+        "fd7a:115c:a1e0::4"
+      ],
+      "AllowedIPs": [
+        "100.64.0.4/32",
+        "fd7a:115c:a1e0::4/128"
+      ],
+      "Addrs": null,
+      "CurAddr": "",
+      "Relay": "derp1",
+      "PeerRelay": "",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "Created": "2026-05-29T06:38:30.633785742Z",
+      "LastWrite": "0001-01-01T00:00:00Z",
+      "LastSeen": "2026-06-06T19:00:00.1Z",
+      "LastHandshake": "0001-01-01T00:00:00Z",
+      "Online": false,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "PeerAPIURL": [
+        "http://100.64.0.4:48708"
+      ],
+      "TaildropTarget": 5,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": false,
+      "KeyExpiry": "2026-11-25T06:38:30Z"
+    }
+  },
+  "User": {},
+  "ClientVersion": null
+}
