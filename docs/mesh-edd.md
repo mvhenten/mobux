@@ -1,125 +1,103 @@
-# EDD: Mobux mesh — fat client, multi-host
+# EDD: Mobux mesh — every node proxies to every peer
 
 Issue: [#123](https://github.com/mvhenten/mobux/issues/123)
 
 ## Problem
 
-The FE is same-origin-only and the TWA is pinned to one host. If that host is
-down, the app is dead even when other mobux hosts on the tailnet are up.
-Required: one UI that can reach any mobux host, surviving any single host
-outage (the holiday scenario).
+The UI only talks to the host that served it. If that host is down, other
+mobux hosts on the tailnet are up but unreachable from the app. Required: any
+mobux host gives access to all of them; any single host outage is survivable.
 
 ## Architecture
 
-A mesh of equal nodes. Every mobux binary is simultaneously:
+A mesh of equal nodes. Every mobux binary:
 
-- **FE host** — serves the embedded UI (unchanged, also the dev loop)
-- **Backend** — tmux API + terminal WebSocket (unchanged)
-- **Discovery node** — enumerates tailnet peers, probes for mobux
-- **Relay** — stateless proxy to any peer, for clients that can't reach the
-  target directly
+- serves the embedded UI (unchanged)
+- runs its own tmux backend (unchanged)
+- **enumerates** mobux peers on the tailnet
+- **relays** API + WebSocket traffic to any peer
 
-The client is fat: it owns a **backend registry** (per-device localStorage)
-and connects **direct-first, relay-fallback**. Bootstrap from any node:
+The browser stays strictly same-origin with the node it loaded from. Picking
+another host in the UI routes everything through the current node:
 
 ```
-open https://<any-host>:5151
-  └─> embedded UI loads ──> wizard: this origin = first backend
-        └─> /api/discover ──> peer checklist ──> registry complete
-TWA: pinned origin + service-worker cache = boots even when that node is down
+phone ──HTTPS──> node-a:5151 ──tailnet──> node-b:5151
+                 (UI + relay)             (selected peer)
 ```
 
-No master. Lose any host and both the UI and the registry survive via every
-other host.
+No CORS, no cross-origin WebSocket auth, no browser trust of peer certs —
+the relay validates peers server-side. Outage story: every node serves the
+full UI, so open any survivor's URL.
 
 ## Decisions
 
-### Credentials: separate per node
-
-Each node keeps its own Basic-auth user/PIN. One leaked PIN doesn't open the
-mesh.
-
-- Registry entry: `{name, baseUrl, user, pin}`; wizard prompts per host on add
-- Discovery lists peers without creds; adding one requires a successful login
-- Cost: creds at rest in localStorage (see Risks)
-
 ### Relay: stateless pass-through
 
-`/r/<peer>/api/...` plus WS relay. The client authenticates to the relay node
-with the relay's creds (`Authorization`) and sends the target's creds in
+`/r/<peer>/api/...` and `/r/<peer>/ws/...`. The client authenticates to the
+relay node as usual (`Authorization`) and supplies the peer's creds in
 `X-Mobux-Upstream-Authorization`; the relay swaps headers when forwarding.
-The relay stores nothing and trusts nothing — it is a pipe.
+The relay stores no creds — it is a pipe.
 
-Client policy: try the target directly; on failure (no route, untrusted cert)
-route via the node currently serving the UI.
+### Credentials: separate per node
 
-### Discovery
+Each node keeps its own Basic-auth user/PIN (per-node blast radius). The UI
+prompts when a peer is first selected and remembers per-device.
+
+### Peer certs: server-side TOFU
+
+Peers run self-signed leafs (status quo). The relay pins a peer's cert
+fingerprint on first contact and rejects changes. No Let's Encrypt / `ts.net`
+dependency.
+
+### Enumeration
 
 - `GET /api/identify` (unauthed): `{app: "mobux", version}` — nothing else
-- `GET /api/discover` (authed): peer list from `tailscale status --json`,
-  probed on the mobux port with a short timeout
-- Prereq on Linux hosts: `tailscale set --operator=<user>` so the mobux
-  process can query tailscaled
+- `GET /api/peers` (authed): tailnet peers from `tailscale status --json`,
+  probed for `/api/identify` on the mobux port with a short timeout; plus
+  manually configured peers
+- Prereq on Linux: `tailscale set --operator=<user>` so mobux can query
+  tailscaled; surface the error in the UI, never an empty list
 
-### Cross-origin (landed, PR #124)
+### UI
 
-- CORS allowlist via `MOBUX_ALLOWED_ORIGINS`; unset = same-origin-only
-  (today's behavior, dev default)
-- WS auth: browsers can't send Basic on cross-origin upgrades →
-  `POST /api/ws-token` mints a single-use 30s token, WS accepts `?token=`
-
-### Certificates
-
-Cross-origin fetch requires browser-trusted backend certs. Self-signed leafs
-fail silently. Direction: `tailscale cert` (`*.ts.net` Let's Encrypt, free
-tier) per host. The relay softens the requirement: only the bootstrap node
-strictly needs a trusted cert; relayed peers are validated server-side, where
-pinning is possible.
-
-### Offline boot
-
-Service worker precaches the app shell, cache-busted per release. The TWA
-boots from cache when its pinned origin is down, then connects to any live
-backend. Update strategy: stale-while-revalidate — serve cached shell, refresh
-in the background on contact with the serving node.
+- First boot: current host is the backend, as today — zero config
+- Host picker in the session list, fed by `/api/peers`; manual add for
+  non-discovered hosts
+- Selected peer + per-peer creds persist per device (localStorage)
 
 ### Version skew
 
-FE from node A talks to backend B of a different version. Rule: API changes
-are additive; `/api/identify` carries the version; the UI warns when a backend
-is older than the FE's minimum.
+FE from node A drives backend B. API changes are additive; `/api/identify`
+carries the version; the UI warns when a peer is older than it knows how to
+drive.
 
 ## Phases
 
-| # | Scope | Status |
-|---|-------|--------|
-| 1 | CORS + WS tokens | PR [#124](https://github.com/mvhenten/mobux/pull/124), CI green, unmerged |
-| 2 | FE: backend registry, install wizard, host switcher (per-node creds) | |
-| 3 | Service worker offline shell | |
-| 4 | Discovery: `/api/identify`, `/api/discover`, wizard scan | |
-| 5 | Relay: `/r/<peer>/...`, WS relay, direct-first client policy | |
+| # | Scope |
+|---|-------|
+| 1 | `/api/identify` + `/api/peers` (enumeration) |
+| 2 | Relay: `/r/<peer>/...` API + WS forwarding, TOFU cert pinning |
+| 3 | UI: host picker, per-peer creds prompt, peer status |
 
-Each phase lands independently; the mesh degrades gracefully to today's
-single-host behavior at every step.
+Each phase lands independently; behavior without peers is identical to today.
+
+PR [#124](https://github.com/mvhenten/mobux/pull/124) (CORS + cross-origin WS
+tokens) was built for the rejected direct-connection variant and is obsolete
+under this design — close unmerged.
 
 ## Risks
 
-- **Creds in localStorage** — readable by any XSS in the FE. Mitigation:
-  strict CSP; accept the residual risk (tailnet-only exposure, per-node blast
-  radius).
-- **Self-signed certs** — direct cross-origin connections fail until hosts
-  have `ts.net` certs or a user-installed CA. Verify TWA behavior on device
-  before relying on direct mode.
-- **Stale SW shell** — an old cached FE against newer backends; covered by the
-  additive-API rule, but a kill-switch (SW version floor in `/api/identify`)
-  may be warranted.
-- **Discovery prereq drift** — hosts without the tailscale operator setting
-  silently return empty peer lists; surface the error in the UI rather than
-  an empty result.
+- **Relay hop latency** — phone → node-a → node-b adds a tailnet round trip
+  per request and per WS frame. Acceptable on a LAN-grade tailnet; measure in
+  phase 2.
+- **Peer creds in localStorage** — readable by XSS on the serving node's
+  origin. Mitigation: strict CSP; per-node creds limit the blast radius.
+- **TOFU pinning** — a reinstalled peer (new leaf cert) needs an explicit
+  un-pin; the UI must make that a one-tap action, not a config-file dig.
 
 ## Out of scope
 
-- Registry sync between devices (each device discovers on its own)
+- Direct browser-to-peer connections (CORS/cert/WS-auth complexity — rejected)
+- Hosted UI (GitHub Pages — rejected; every node serves the FE)
+- Registry sync between devices
 - Proxying to non-mobux hosts
-- GitHub Pages hosting (rejected: public origin adds PNA/cert/version-skew
-  constraints for no benefit once every node serves the FE)
