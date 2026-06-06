@@ -1,15 +1,18 @@
-const mesh = window.MobuxMesh;
+// NB: host-picker.js (loaded first, same global scope as this non-module
+// script) already binds a top-level `mesh`. Use a distinct name here so the
+// two files don't collide on a duplicate `const` declaration.
+const meshClient = window.MobuxMesh;
 
 // Mesh-aware JSON fetch: routes through the relay when a peer is selected,
 // and turns the mesh failure modes (peer 401, pin mismatch) into actionable
 // UX instead of a silent failure.
 async function fetchJSON(url, opts) {
   try {
-    return await mesh.apiFetchJSON(url, opts);
+    return await meshClient.apiFetchJSON(url, opts);
   } catch (e) {
     if (await handleMeshError(e)) {
       // Recovered (re-auth or re-trust) — retry once.
-      return mesh.apiFetchJSON(url, opts);
+      return meshClient.apiFetchJSON(url, opts);
     }
     throw e;
   }
@@ -30,24 +33,37 @@ async function handleMeshError(e) {
       `${e.message}\n\nTrust the new certificate for ${e.peer}?`,
     );
     if (!trust) return false;
-    await mesh.trustNewCert(e.peer);
+    await meshClient.trustNewCert(e.peer);
     return true;
   }
   return false;
 }
 
+// Escape for safe interpolation into innerHTML. Session names (and now, over
+// the relay, a remote peer's session names + error bodies) are peer-controlled,
+// so they must never be treated as markup.
+function escapeHTML(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 // ── Session list rendering ──────────────────────────────────────────
 function sessionRow(s) {
-  return `<div class="swipe-row" data-name="${s.name}">
+  const name = escapeHTML(s.name);
+  return `<div class="swipe-row" data-name="${name}">
   <div class="swipe-action swipe-left"><button class="swipe-btn rename-btn">Rename</button></div>
   <a class="session-item" href="/s/${encodeURIComponent(s.name)}">
     <div class="session-info">
-      <span class="session-name">${s.name}</span>
+      <span class="session-name">${name}</span>
       <span class="session-meta">${s.windows} win · ${s.attached} attached</span>
     </div>
     <span class="session-arrow">›</span>
   </a>
-  <div class="swipe-action swipe-right"><button class="swipe-btn kill-btn" data-kill="${s.name}">Kill</button></div>
+  <div class="swipe-action swipe-right"><button class="swipe-btn kill-btn" data-kill="${name}">Kill</button></div>
 </div>`;
 }
 
@@ -63,9 +79,13 @@ async function refreshSessions() {
     initSwipeRows();
   } catch (e) {
     // Inline rather than alert(): a relayed host may be unreachable and the
-    // user needs the host context to act (re-pick, re-auth, re-trust).
-    const where = mesh.isCurrentNode() ? "" : ` from ${mesh.getPeer()}`;
-    list.innerHTML = `<p class="hint">Failed to load sessions${where}: ${e.message}</p>`;
+    // user needs the host context to act (re-pick, re-auth, re-trust). Build
+    // with textContent so a peer's error body can never inject markup.
+    const where = meshClient.isCurrentNode() ? "" : ` from ${meshClient.getPeer()}`;
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = `Failed to load sessions${where}: ${e.message}`;
+    list.replaceChildren(p);
   }
 }
 
@@ -190,7 +210,7 @@ function initSwipeRows() {
 
 // Init on load. The page is server-rendered for the current node, so we only
 // need to (re)fetch when a peer is already selected from a previous visit.
-if (!mesh.isCurrentNode()) {
+if (!meshClient.isCurrentNode()) {
   refreshSessions();
 } else {
   initSwipeRows();

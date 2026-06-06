@@ -17,6 +17,7 @@
 
 const PEER_KEY = 'mobux:peer'; // selected peer: "host:port" or "" (current node)
 const CRED_PREFIX = 'mobux:peer-cred:'; // per-peer base64(user:pass), keyed by peer
+const MANUAL_KEY = 'mobux:manual-peers'; // JSON array of "host:port" added by hand
 
 // ── selection ────────────────────────────────────────────────────────
 function getPeer() {
@@ -63,6 +64,60 @@ function clearPeerCred(peer) {
   try {
     localStorage.removeItem(CRED_PREFIX + peer);
   } catch (_) {}
+}
+
+// ── manual peers ──────────────────────────────────────────────────────
+// Hosts the operator adds by hand for nodes tailscale enumeration doesn't
+// surface (per the EDD UI section). Stored per device as "host:port" and
+// merged into the picker alongside discovered peers. They go through the
+// relay exactly like a discovered peer — only their origin differs.
+
+// Normalize a hand-typed entry to "host:port", defaulting the port to the
+// current page's port (homogeneous mesh). Returns null for empty/invalid.
+function normalizeManualPeer(raw) {
+  const s = (raw || '').trim();
+  if (!s || s.includes('/') || s.includes(' ')) return null;
+  const i = s.lastIndexOf(':');
+  if (i > 0) {
+    const port = Number(s.slice(i + 1));
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return `${s.slice(0, i)}:${port}`;
+  }
+  const port = location.port || (location.protocol === 'https:' ? '443' : '80');
+  return `${s}:${port}`;
+}
+
+function getManualPeers() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(MANUAL_KEY) || '[]');
+    return Array.isArray(arr) ? arr.filter((p) => typeof p === 'string') : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+// Add a manual peer. Returns the normalized id, or null if invalid.
+function addManualPeer(raw) {
+  const peer = normalizeManualPeer(raw);
+  if (!peer) return null;
+  const peers = getManualPeers();
+  if (!peers.includes(peer)) {
+    peers.push(peer);
+    try {
+      localStorage.setItem(MANUAL_KEY, JSON.stringify(peers));
+    } catch (_) {}
+  }
+  return peer;
+}
+
+function removeManualPeer(peer) {
+  const peers = getManualPeers().filter((p) => p !== peer);
+  try {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify(peers));
+  } catch (_) {}
+  // Forget its creds too, and deselect if it was the active host.
+  clearPeerCred(peer);
+  if (getPeer() === peer) setPeer('');
 }
 
 // ── path resolution ──────────────────────────────────────────────────
@@ -182,6 +237,10 @@ window.MobuxMesh = {
   getPeerCred,
   setPeerCred,
   clearPeerCred,
+  getManualPeers,
+  addManualPeer,
+  removeManualPeer,
+  normalizeManualPeer,
   apiPath,
   wsUrl,
   apiFetch,

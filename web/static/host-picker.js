@@ -158,8 +158,12 @@ async function openPicker(container) {
     });
     list.appendChild(current);
 
+    // Discovered peers (from /api/peers), keyed by id so we can skip any that
+    // a manual entry duplicates.
+    const seen = new Set();
     for (const p of peers || []) {
       const peerId = `${p.host}:${p.port}`;
+      seen.add(peerId);
       const sub = p.version ? `v${p.version}` : 'unreachable';
       const opt = peerOption(p.name, sub, selected === peerId, p.reachable);
       opt.addEventListener('click', async () => {
@@ -169,12 +173,58 @@ async function openPicker(container) {
       list.appendChild(opt);
     }
 
+    // Manual peers the operator added by hand — merged in, marked, removable.
+    for (const peerId of mesh.getManualPeers()) {
+      if (seen.has(peerId)) continue; // discovery already shows it
+      const opt = peerOption(peerId, 'manual', selected === peerId, null);
+      opt.addEventListener('click', async () => {
+        await selectPeer(peerId);
+        container.replaceChildren();
+      });
+      const remove = el('button', { class: 'peer-remove', type: 'button', text: '✕' });
+      remove.setAttribute('aria-label', `Remove ${peerId}`);
+      remove.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const wasActive = mesh.getPeer() === peerId;
+        // removeManualPeer deselects if it was the active host.
+        mesh.removeManualPeer(peerId);
+        if (wasActive) {
+          // Dropped the active host → back to current node; refresh everything.
+          onPeerChange();
+        } else {
+          renderList(peers, errorMsg);
+        }
+      });
+      opt.appendChild(remove);
+      list.appendChild(opt);
+    }
+
     if (errorMsg) {
       // Tailscale unavailable: show the operator hint, never an empty picker.
       list.appendChild(el('div', { class: 'peer-error', text: errorMsg }));
-    } else if (!peers || !peers.length) {
+    } else if ((!peers || !peers.length) && !mesh.getManualPeers().length) {
       list.appendChild(el('p', { class: 'hint', text: 'No other hosts discovered.' }));
     }
+
+    // "Add host" affordance for nodes discovery doesn't surface.
+    const add = el('button', { class: 'peer-add', type: 'button', text: '+ Add host' });
+    add.addEventListener('click', async () => {
+      const vals = await showDialog({
+        title: 'Add host',
+        fields: [{ name: 'host', placeholder: 'host or host:port', required: true }],
+        confirmLabel: 'Add',
+      });
+      if (!vals || !vals.host) return;
+      const peerId = mesh.addManualPeer(vals.host);
+      if (!peerId) {
+        alert('Invalid host. Use "host" or "host:port".');
+        return;
+      }
+      // Select it straight away (prompts for creds like any peer).
+      await selectPeer(peerId);
+      container.replaceChildren();
+    });
+    list.appendChild(add);
   };
 
   try {

@@ -2086,3 +2086,68 @@ test('mesh client: peer selection rewrites API + WS paths and carries creds', as
   // base64("bob:12345")
   expect(out.cred).toBe(btoa('bob:12345'));
 });
+
+test('session list: relayed error body renders as text, not HTML (XSS)', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.waitForFunction(() => typeof window.refreshSessions === 'function');
+  // Force refreshSessions() down its catch branch with a peer-controlled
+  // error message that contains markup. It must land as text, not nodes.
+  await page.evaluate(() => {
+    window.MobuxMesh.apiFetchJSON = async () => {
+      throw new Error('<img src=x onerror=window.__xss=1>');
+    };
+    return window.refreshSessions();
+  });
+  const list = page.locator('#sessionList');
+  // The payload appears verbatim as text…
+  await expect(list.locator('.hint')).toContainText('<img src=x onerror=');
+  // …and did NOT parse into an element or fire the handler.
+  expect(await list.locator('img').count()).toBe(0);
+  expect(await page.evaluate(() => window.__xss)).toBeUndefined();
+});
+
+test('session list: peer-controlled session names are escaped', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.waitForFunction(() => typeof window.refreshSessions === 'function');
+  await page.evaluate(() => {
+    window.MobuxMesh.apiFetchJSON = async () => [
+      { name: '<b>pwn</b>', windows: 1, attached: 0 },
+    ];
+    return window.refreshSessions();
+  });
+  const list = page.locator('#sessionList');
+  await expect(list.locator('.session-name')).toHaveText('<b>pwn</b>');
+  // No injected <b> element from the name.
+  expect(await list.locator('.session-name b').count()).toBe(0);
+});
+
+test('host picker: manual add host merges, selects, and removes', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  // Add via the mesh API directly (the dialog flow is covered by selection).
+  const added = await page.evaluate(() => {
+    const m = window.MobuxMesh;
+    m.removeManualPeer('manualbox:7000'); // start clean
+    return { id: m.addManualPeer('manualbox:7000'), list: m.getManualPeers() };
+  });
+  expect(added.id).toBe('manualbox:7000');
+  expect(added.list).toContain('manualbox:7000');
+
+  // It shows up in the picker, labelled "manual", with a remove control.
+  await page.locator('.host-trigger').click();
+  await expect(page.locator('.peer-list .hint', { hasText: 'Loading' })).toHaveCount(0);
+  const manualOpt = page.locator('.peer-option', { hasText: 'manualbox:7000' });
+  await expect(manualOpt).toBeVisible();
+  await expect(manualOpt.locator('.peer-sub')).toHaveText('manual');
+  await expect(manualOpt.locator('.peer-remove')).toBeVisible();
+
+  // normalize bare host → host:port using the page port.
+  const norm = await page.evaluate(() => window.MobuxMesh.normalizeManualPeer('barehost'));
+  expect(norm).toMatch(/^barehost:\d+$/);
+
+  // Remove it and confirm it's gone from storage.
+  const after = await page.evaluate(() => {
+    window.MobuxMesh.removeManualPeer('manualbox:7000');
+    return window.MobuxMesh.getManualPeers();
+  });
+  expect(after).not.toContain('manualbox:7000');
+});
