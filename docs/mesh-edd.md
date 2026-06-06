@@ -17,37 +17,36 @@ A mesh of equal nodes. Every mobux binary:
 - **enumerates** mobux peers on the tailnet
 - **relays** API + WebSocket traffic to any peer
 
-The browser stays strictly same-origin with the node it loaded from. Picking
-another host in the UI routes everything through the current node:
+The browser stays same-origin with the node it loaded from. Picking another
+host in the UI routes everything through the current node:
 
 ```
 phone ──HTTPS──> node-a:5151 ──tailnet──> node-b:5151
                  (UI + relay)             (selected peer)
 ```
 
-No CORS, no cross-origin WebSocket auth, no browser trust of peer certs —
-the relay validates peers server-side. Outage story: every node serves the
-full UI, so open any survivor's URL.
+The relay validates peers server-side, so the browser never touches a peer's
+origin or cert. Any survivor's URL serves the full UI.
 
 ## Decisions
 
 ### Relay: stateless pass-through
 
 `/r/<peer>/api/...` and `/r/<peer>/ws/...`. The client authenticates to the
-relay node as usual (`Authorization`) and supplies the peer's creds in
-`X-Mobux-Upstream-Authorization`; the relay swaps headers when forwarding.
-The relay stores no creds — it is a pipe.
+relay node with `Authorization` and supplies the peer's creds in
+`X-Mobux-Upstream-Authorization`; the relay swaps headers when forwarding and
+stores no creds.
 
 ### Credentials: separate per node
 
-Each node keeps its own Basic-auth user/PIN (per-node blast radius). The UI
-prompts when a peer is first selected and remembers per-device.
+Each node keeps its own Basic-auth user/PIN, so a leaked credential reaches
+one node. The UI prompts when a peer is first selected and remembers
+per-device.
 
 ### Peer certs: server-side TOFU
 
 Peers run self-signed leafs (status quo). The relay pins a peer's cert
-fingerprint on first contact and rejects changes. No Let's Encrypt / `ts.net`
-dependency.
+fingerprint on first contact and rejects changes.
 
 ### Enumeration
 
@@ -81,23 +80,11 @@ drive.
 
 Each phase lands independently; behavior without peers is identical to today.
 
-PR [#124](https://github.com/mvhenten/mobux/pull/124) (CORS + cross-origin WS
-tokens) was built for the rejected direct-connection variant and is obsolete
-under this design — close unmerged.
-
 ## Risks
 
 - **Relay hop latency** — phone → node-a → node-b adds a tailnet round trip
-  per request and per WS frame. Acceptable on a LAN-grade tailnet; measure in
-  phase 2.
+  per request and per WS frame. Measure in phase 2.
 - **Peer creds in localStorage** — readable by XSS on the serving node's
-  origin. Mitigation: strict CSP; per-node creds limit the blast radius.
+  origin. Strict CSP; per-node creds cap the reach.
 - **TOFU pinning** — a reinstalled peer (new leaf cert) needs an explicit
-  un-pin; the UI must make that a one-tap action, not a config-file dig.
-
-## Out of scope
-
-- Direct browser-to-peer connections (CORS/cert/WS-auth complexity — rejected)
-- Hosted UI (GitHub Pages — rejected; every node serves the FE)
-- Registry sync between devices
-- Proxying to non-mobux hosts
+  un-pin; the UI makes that a one-tap action, not a config-file dig.
