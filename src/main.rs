@@ -15,7 +15,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, delete, get, post},
     Extension, Json, Router,
 };
 use base64::{
@@ -44,6 +44,7 @@ struct StaticAssets;
 mod db;
 mod mesh;
 mod push;
+mod relay;
 mod shell_integration;
 mod ssl;
 mod tmux;
@@ -181,6 +182,11 @@ async fn main() -> Result<()> {
             "/api/shell-integration/uninstall",
             post(api_shell_integration_uninstall),
         )
+        // Mesh relay (EDD phase 2). The WS route is more specific than the
+        // catch-all HTTP relay so the upgrade lands on the right handler.
+        .route("/r/{peer}/ws/{*rest}", get(relay::relay_ws))
+        .route("/r/{peer}/{*rest}", any(relay::relay_http))
+        .route("/api/peers/{peer}/pin", delete(relay::delete_peer_pin))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
         .route("/ws/{name}", get(terminal_ws))
