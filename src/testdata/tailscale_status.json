@@ -24,10 +24,10 @@
       "fd7a:115c:a1e0::1/128"
     ],
     "Addrs": [
-      "95.99.46.192:1046",
-      "95.99.46.192:12550",
-      "95.99.46.192:41641",
-      "192.168.122.44:41641"
+      "203.0.113.50:1046",
+      "203.0.113.50:12550",
+      "203.0.113.50:41641",
+      "192.168.0.10:41641"
     ],
     "CurAddr": "",
     "Relay": "derp1",
@@ -75,7 +75,7 @@
       "ssh-env-vars": null,
       "store-appc-routes": null,
       "tailnet-display-name": [
-        "kattebak.org.github"
+        "example-org.github"
       ]
     },
     "InNetworkMap": true,
