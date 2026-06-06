@@ -42,6 +42,7 @@ use serde_json::json;
 struct StaticAssets;
 
 mod db;
+mod mesh;
 mod push;
 mod relay;
 mod shell_integration;
@@ -58,6 +59,9 @@ struct AppState {
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
     internal_token: Arc<String>,
+    /// The TCP port this instance serves on. Mesh peer probing dials peers on
+    /// the same port (the EDD assumes a homogeneous mobux port across nodes).
+    port: u16,
 }
 
 #[derive(Clone)]
@@ -95,6 +99,11 @@ async fn main() -> Result<()> {
         .map(char::from)
         .collect();
 
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
+
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
@@ -107,6 +116,7 @@ async fn main() -> Result<()> {
         ),
         db,
         internal_token: Arc::new(internal_token),
+        port,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -132,6 +142,8 @@ async fn main() -> Result<()> {
     let state_for_mw = state.clone();
     let app = Router::new()
         .route("/", get(index))
+        .route("/api/identify", get(api_identify))
+        .route("/api/peers", get(api_peers))
         .route("/api/sessions", get(api_sessions).post(api_create_session))
         .route("/api/sessions/{name}/kill", post(api_kill_session))
         .route("/api/sessions/{name}/rename", post(api_rename_session))
@@ -191,10 +203,6 @@ async fn main() -> Result<()> {
             auth_middleware,
         ));
 
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     if state.auth.is_some() {
@@ -390,8 +398,13 @@ fn load_auth_config() -> Option<AuthConfig> {
 /// them over HTTPS from the running server), and the service worker
 /// must be reachable for the SW registration request — some Android
 /// browsers fetch /sw.js without page credentials.
+///
+/// `/api/identify` is intentionally unauthenticated (mesh EDD): peers probe
+/// it for app+version discovery before any credentials exist. It leaks
+/// nothing beyond "this is mobux, version X".
 fn is_public_path(path: &str) -> bool {
-    path == "/install"
+    path == "/api/identify"
+        || path == "/install"
         || path.starts_with("/install/")
         || path.starts_with("/.well-known/")
         || path.starts_with("/static/icon-")
@@ -476,6 +489,30 @@ async fn index(State(state): State<AppState>) -> Result<axum::response::Response
 async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
     Ok(Json(sessions))
+}
+
+/// Unauthenticated mesh discovery probe. Returns only the app name and crate
+/// version — nothing else leaks. Bypasses auth via `is_public_path`.
+async fn api_identify() -> Json<mesh::Identify> {
+    Json(mesh::Identify {
+        app: "mobux".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// Authenticated tailnet peer enumeration. On tailscale failure, returns a
+/// structured error (HTTP 502) the UI can show — never a silent empty list.
+/// An empty `peers` array means "tailscale fine, nothing found"; the error
+/// path means "tailscale unavailable".
+async fn api_peers(State(state): State<AppState>) -> Response {
+    match mesh::enumerate(state.port).await {
+        Ok(peers) => Json(json!({ "peers": peers })).into_response(),
+        Err(err) => {
+            // 502: this node is up, but the upstream dependency (tailscaled)
+            // it relies on to enumerate peers is not cooperating.
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": err }))).into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]
