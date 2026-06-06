@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.1.3] - 2026-06-06
+
+### 🚀 Features
+
+- *(input)* Attach any file + audio record button ([#119](https://github.com/mvhenten/mobux/pull/119))
+- Local audio transcription helper (whisper.cpp) ([#121](https://github.com/mvhenten/mobux/pull/121))
+
+### 🐛 Bug Fixes
+
+- Don't 500 the session list when no tmux server is running ([#122](https://github.com/mvhenten/mobux/pull/122))
+
+
 ## [0.1.2] - 2026-06-03
 
 ### 🚀 Features
