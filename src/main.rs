@@ -41,11 +41,13 @@ use serde_json::json;
 #[exclude = ".well-known/*"]
 struct StaticAssets;
 
+mod cors;
 mod db;
 mod push;
 mod shell_integration;
 mod ssl;
 mod tmux;
+mod ws_token;
 
 #[derive(Clone)]
 struct AppState {
@@ -57,6 +59,11 @@ struct AppState {
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
     internal_token: Arc<String>,
+    /// Cross-origin allowlist (from `MOBUX_ALLOWED_ORIGINS`). Empty = same-origin
+    /// only (no CORS headers emitted).
+    allowed_origins: Arc<Vec<String>>,
+    /// Short-lived single-use tokens for cross-origin WebSocket upgrades.
+    ws_tokens: Arc<ws_token::WsTokenStore>,
 }
 
 #[derive(Clone)]
@@ -106,6 +113,10 @@ async fn main() -> Result<()> {
         ),
         db,
         internal_token: Arc::new(internal_token),
+        allowed_origins: Arc::new(cors::parse_allowed_origins(
+            &env::var("MOBUX_ALLOWED_ORIGINS").unwrap_or_default(),
+        )),
+        ws_tokens: Arc::new(ws_token::WsTokenStore::new()),
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -142,6 +153,7 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
+        .route("/api/ws-token", post(api_ws_token))
         .route(
             "/api/upload",
             post(api_upload).layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024)),
@@ -185,6 +197,26 @@ async fn main() -> Result<()> {
             auth_middleware,
         ));
 
+    // Cross-origin layers wrap the auth middleware so they run *first*: a CORS
+    // preflight (OPTIONS) must short-circuit before auth, and CORS/PNA headers
+    // must be present even on auth failures. Both are no-ops when the
+    // allowlist is empty (same-origin-only default).
+    //
+    // Layer order is bottom-up: the last `.layer(...)` is the outermost (runs
+    // first). The PNA middleware must sit *outside* `CorsLayer` because
+    // `CorsLayer` short-circuits the OPTIONS preflight and returns without
+    // calling inner layers — so PNA runs last here to post-process that
+    // preflight response and add `Access-Control-Allow-Private-Network`.
+    let app = if let Some(cors_layer) = cors::build_cors_layer((*state.allowed_origins).clone()) {
+        app.layer(cors_layer)
+            .layer(middleware::from_fn_with_state(
+                state.allowed_origins.clone(),
+                cors::private_network_access,
+            ))
+    } else {
+        app
+    };
+
     let port = env::var("PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
@@ -195,6 +227,15 @@ async fn main() -> Result<()> {
         println!("auth: enabled (HTTP Basic)");
     } else {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
+    }
+
+    if state.allowed_origins.is_empty() {
+        println!("cors: disabled (same-origin only; set MOBUX_ALLOWED_ORIGINS to enable)");
+    } else {
+        println!(
+            "cors: enabled for origins: {}",
+            state.allowed_origins.join(", ")
+        );
     }
 
     let use_tls = env::var("MOBUX_TLS")
@@ -406,6 +447,18 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
+    // Cross-origin WebSocket upgrades can't carry Basic auth (or, cross-site,
+    // cookies), so a `/ws/<session>?token=<...>` upgrade authenticates with a
+    // short-lived single-use token minted via POST /api/ws-token. Same-origin
+    // clients keep using Basic auth / the session cookie below, unchanged.
+    if req.uri().path().starts_with("/ws/") {
+        if let Some(token) = req.uri().query().and_then(ws_token_from_query) {
+            if state.ws_tokens.consume(&token) {
+                return next.run(req).await;
+            }
+        }
+    }
+
     let cookie_ok = req
         .headers()
         .get(axum::http::header::COOKIE)
@@ -456,6 +509,28 @@ async fn auth_middleware(
         HeaderValue::from_static("Basic realm=\"mobux\""),
     );
     resp
+}
+
+/// Extract the `token` value from a raw query string (`a=b&token=...&c=d`).
+/// Minimal percent-decoding isn't needed: the token is URL-safe base64
+/// (`A-Za-z0-9-_`), which is never percent-encoded by browsers.
+fn ws_token_from_query(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .filter_map(|p| p.split_once('='))
+        .find(|(k, _)| *k == "token")
+        .map(|(_, v)| v.to_string())
+}
+
+/// Mint a short-lived single-use WebSocket token. Authenticated by the normal
+/// auth middleware (this route sits behind it), so only an already-authed
+/// client can mint one. The client then opens `/ws/<session>?token=<value>`.
+async fn api_ws_token(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let token = state.ws_tokens.mint();
+    Json(json!({
+        "token": token,
+        "expires_in": ws_token::DEFAULT_TTL.as_secs(),
+    }))
 }
 
 async fn index(State(state): State<AppState>) -> Result<axum::response::Response, AppError> {
