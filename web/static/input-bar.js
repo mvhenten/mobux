@@ -161,7 +161,9 @@ export function createInputBar(term, send) {
     const form = new FormData();
     form.append('file', file);
 
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
+    // Upload to whichever host drives the terminal: the returned path is only
+    // meaningful on that host's filesystem, so it must go through the relay.
+    const res = await window.MobuxMesh.apiFetch('/api/upload', { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
 

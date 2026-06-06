@@ -1637,6 +1637,8 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     </form>
   </dialog>
 
+  <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/host-picker.js?v={v}"></script>
   <script src="/static/index.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
   <script src="/static/install-hint.js?v={v}"></script>
@@ -1748,6 +1750,9 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       }}
     }})();
   </script>
+  <!-- mesh-client (global) must be present before the terminal module so the
+       renderer cores can resolve relayed API/WS paths for a selected peer. -->
+  <script src="/static/mesh-client.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>

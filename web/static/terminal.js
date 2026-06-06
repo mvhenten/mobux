@@ -491,7 +491,7 @@ updateToggleLabel();
 // so we can switch without a reload.
 function selectWindow(windowIndex) {
   if (windowIndex == null || windowIndex === '') return;
-  fetch(
+  window.MobuxMesh.apiFetch(
     `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select`,
     { method: 'POST' },
   ).then(() => {
