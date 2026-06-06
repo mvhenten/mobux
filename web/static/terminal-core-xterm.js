@@ -107,10 +107,8 @@ export class TerminalCoreXterm extends EventTarget {
       this._reconnectTimer = null;
     }
     this.intentionalClose = false;
-    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.ws = new WebSocket(
-      `${wsProto}://${location.host}/ws/${encodeURIComponent(this.session)}`,
-    );
+    // Same-origin by default; routed through the relay when a peer is picked.
+    this.ws = new WebSocket(window.MobuxMesh.wsUrl(this.session));
     this.ws.binaryType = 'arraybuffer';
     this.ws.onopen = () => {
       // A clean open resets the backoff window.
@@ -233,7 +231,7 @@ export class TerminalCoreXterm extends EventTarget {
   // ── Panes (= tmux windows) ────────────────────────────────────────
   async refreshPanes() {
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(this.session)}/panes`);
+      const res = await window.MobuxMesh.apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/panes`);
       if (!res.ok) return;
       this.panes = await res.json();
       this.activeIndex = this.panes.findIndex((p) => p.active);
@@ -274,7 +272,7 @@ export class TerminalCoreXterm extends EventTarget {
 
   async runTmuxCmd(command) {
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(this.session)}/command`, {
+      await window.MobuxMesh.apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command }),
@@ -290,7 +288,7 @@ export class TerminalCoreXterm extends EventTarget {
   // ── History ───────────────────────────────────────────────────────
   async reloadHistory() {
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(this.session)}/history`);
+      const res = await window.MobuxMesh.apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/history`);
       if (!res.ok) return;
       const history = await res.text();
       if (history.trim()) {

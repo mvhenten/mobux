@@ -145,6 +145,18 @@ test-critical-path:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
 
+# Mesh relay flow: smoke instance is the relay node, the spec spins up a
+# second TLS instance (the peer) on its own port/data-dir/tmux socket and
+# drives it through the relay. Proves peer selection → relay → upstream-auth
+# → TOFU pin → pin-mismatch recovery end to end.
+.PHONY: test-mesh
+test-mesh:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/mesh-relay.spec.cjs
+
 .PHONY: test-e2e
 test-e2e:
 	@$(MAKE) smoke-start

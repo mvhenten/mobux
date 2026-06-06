@@ -2008,3 +2008,81 @@ test('rb-speaking survives a buffer-change re-render mid-speech', async ({ page 
   // No accidental duplicate "speaking" icons after re-render.
   expect(after.speakingCount).toBe(1);
 });
+
+// ── Host picker (mesh EDD phase 3) ──────────────────────────────────
+// These run against the single smoke instance: tailscale is typically
+// unavailable in the test env, which exercises the error-surfacing path
+// (a structured 502, never an empty picker). The current node ("This
+// host") is always the first option and the zero-config default.
+
+test('host picker: trigger renders, current node listed first', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await expect(page.locator('.host-trigger')).toBeVisible();
+  // Default selection is the current node — no peer stored.
+  const peer = await page.evaluate(() => window.MobuxMesh.getPeer());
+  expect(peer).toBe('');
+  await expect(page.locator('.host-trigger .host-label')).toHaveText('This host');
+
+  await page.locator('.host-trigger').click();
+  await expect(page.locator('.host-dropdown.open')).toBeVisible();
+  // First option is always the current node and starts selected.
+  const first = page.locator('.peer-option').first();
+  await expect(first).toHaveClass(/selected/);
+  await expect(first.locator('.peer-name')).toHaveText('This host');
+});
+
+test('host picker: never shows an empty picker (error or hint)', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.locator('.host-trigger').click();
+  await expect(page.locator('.host-dropdown.open')).toBeVisible();
+  // Wait for the async /api/peers load to settle (loading hint gone).
+  await expect(page.locator('.peer-list .hint', { hasText: 'Loading' })).toHaveCount(0);
+  // The current-node option always exists; plus either peers, a
+  // "no other hosts" hint, or a structured tailscale error — never blank.
+  await expect(page.locator('.peer-option')).not.toHaveCount(0);
+  const bodyText = await page.locator('.host-dropdown').textContent();
+  expect(bodyText.trim().length).toBeGreaterThan(0);
+});
+
+test('host picker: selecting current node changes nothing (same-origin)', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.locator('.host-trigger').click();
+  // Click the current-node option explicitly.
+  await page.locator('.peer-option', { hasText: 'This host' }).first().click();
+  // Still same-origin: no peer stored, API paths stay non-relayed.
+  const state = await page.evaluate(() => ({
+    peer: window.MobuxMesh.getPeer(),
+    apiPath: window.MobuxMesh.apiPath('/api/sessions'),
+    ws: window.MobuxMesh.wsUrl('demo'),
+  }));
+  expect(state.peer).toBe('');
+  expect(state.apiPath).toBe('/api/sessions');
+  expect(state.ws).not.toContain('/r/');
+  expect(state.ws).not.toContain('upstream_auth');
+  // Sessions still load over the plain path.
+  const res = await page.request.get(`${BASE}/api/sessions`);
+  expect(res.ok()).toBeTruthy();
+});
+
+test('mesh client: peer selection rewrites API + WS paths and carries creds', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  const out = await page.evaluate(() => {
+    const m = window.MobuxMesh;
+    m.setPeer('peerhost:5151');
+    m.setPeerCred('peerhost:5151', 'bob', '12345');
+    const result = {
+      apiPath: m.apiPath('/api/sessions'),
+      ws: m.wsUrl('demo'),
+      cred: m.getPeerCred('peerhost:5151'),
+    };
+    // Clean up so other tests start from the current node.
+    m.setPeer('');
+    m.clearPeerCred('peerhost:5151');
+    return result;
+  });
+  expect(out.apiPath).toBe('/r/peerhost%3A5151/api/sessions');
+  expect(out.ws).toContain('/r/peerhost%3A5151/ws/demo');
+  expect(out.ws).toContain('upstream_auth=');
+  // base64("bob:12345")
+  expect(out.cred).toBe(btoa('bob:12345'));
+});

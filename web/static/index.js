@@ -1,13 +1,39 @@
+const mesh = window.MobuxMesh;
+
+// Mesh-aware JSON fetch: routes through the relay when a peer is selected,
+// and turns the mesh failure modes (peer 401, pin mismatch) into actionable
+// UX instead of a silent failure.
 async function fetchJSON(url, opts) {
-  const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(txt || `${res.status}`);
+  try {
+    return await mesh.apiFetchJSON(url, opts);
+  } catch (e) {
+    if (await handleMeshError(e)) {
+      // Recovered (re-auth or re-trust) — retry once.
+      return mesh.apiFetchJSON(url, opts);
+    }
+    throw e;
   }
-  return res.json();
+}
+
+// React to the two mesh-specific errors apiFetch throws. Returns true when
+// the situation was resolved and the caller should retry.
+async function handleMeshError(e) {
+  const picker = window.MobuxHostPicker;
+  if (e.meshKind === "unauthorized" && picker) {
+    // Creds were already cleared; re-prompt for this peer.
+    return picker.promptPeerCred(e.peer, {
+      note: "Sign-in was rejected. Re-enter the host's credentials.",
+    });
+  }
+  if (e.meshKind === "pin_mismatch") {
+    const trust = confirm(
+      `${e.message}\n\nTrust the new certificate for ${e.peer}?`,
+    );
+    if (!trust) return false;
+    await mesh.trustNewCert(e.peer);
+    return true;
+  }
+  return false;
 }
 
 // ── Session list rendering ──────────────────────────────────────────
@@ -36,9 +62,15 @@ async function refreshSessions() {
     list.innerHTML = sessions.map(sessionRow).join("");
     initSwipeRows();
   } catch (e) {
-    alert(`Failed to load sessions: ${e.message}`);
+    // Inline rather than alert(): a relayed host may be unreachable and the
+    // user needs the host context to act (re-pick, re-auth, re-trust).
+    const where = mesh.isCurrentNode() ? "" : ` from ${mesh.getPeer()}`;
+    list.innerHTML = `<p class="hint">Failed to load sessions${where}: ${e.message}</p>`;
   }
 }
+
+// Exposed so the host picker can re-render the list after switching hosts.
+window.refreshSessions = refreshSessions;
 
 // ── FAB + dialog ────────────────────────────────────────────────────
 const fab = document.getElementById("fabNew");
@@ -156,5 +188,10 @@ function initSwipeRows() {
   });
 }
 
-// Init on load
-initSwipeRows();
+// Init on load. The page is server-rendered for the current node, so we only
+// need to (re)fetch when a peer is already selected from a previous visit.
+if (!mesh.isCurrentNode()) {
+  refreshSessions();
+} else {
+  initSwipeRows();
+}
