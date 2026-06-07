@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+> **Note:** This file is frozen as of the entries below. Starting with the next
+> release, mobux uses semantic-release: release notes are generated per release
+> and published as **GitHub Releases** (see the repo's Releases page), not
+> appended here. This changelog is kept for historical reference.
+
 ## [0.1.5] - 2026-06-07
 
 ### 🚀 Features
@@ -10,7 +16,6 @@ All notable changes to this project will be documented in this file.
 ### 👷 CI
 
 - Auto-merge and publish green release PRs ([#131](https://github.com/mvhenten/mobux/pull/131))
-
 
 ## [0.1.4] - 2026-06-06
 
