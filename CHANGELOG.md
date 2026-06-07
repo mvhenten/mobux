@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.1.4] - 2026-06-06
+
+### 🚀 Features
+
+- Mesh enumeration (Phase 1 of mesh EDD) — /api/identify + /api/peers ([#127](https://github.com/mvhenten/mobux/pull/127))
+- Mesh relay with TOFU cert pinning (EDD phase 2) ([#128](https://github.com/mvhenten/mobux/pull/128))
+- Mesh host picker UI (EDD phase 3) ([#129](https://github.com/mvhenten/mobux/pull/129))
+
+### 📚 Documentation
+
+- Mesh EDD — fat client, multi-host ([#125](https://github.com/mvhenten/mobux/pull/125))
+
+
 ## [0.1.3] - 2026-06-06
 
 ### 🚀 Features
