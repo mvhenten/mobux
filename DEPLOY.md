@@ -98,33 +98,31 @@ systemctl --user restart mobux      # sub-second swap; :5151 barely blinks
 Versioning is owned by **release-plz** (driven by conventional commits — single
 source of truth, don't hand-pick versions):
 
+The pipeline is **fully automatic** from merge to crates.io:
+
 1. Merge feature PRs to `main` with conventional-commit messages
    (`feat:`, `fix:`, `refactor:`…).
-2. release-plz opens a **`chore: release vX.Y.Z`** PR (version bump + changelog).
-3. Merge that PR → release-plz tags it, creates the GitHub release, and
-   **publishes to crates.io**.
+2. release-plz opens/updates a **`chore: release vX.Y.Z`** PR (version bump +
+   changelog). Its branch pushes go over an SSH **deploy key**
+   (`RELEASE_PLZ_DEPLOY_KEY` secret), so CI triggers on the release PR —
+   `GITHUB_TOKEN` events wouldn't (anti-recursion).
+3. When `check` + `e2e` pass on the release PR, the `release-auto-merge` job
+   squash-merges it and runs `release-plz release` in the same run: tag,
+   GitHub release, **publish to crates.io**. (The publish runs in-job because
+   a bot-token merge push to main doesn't retrigger CI.)
 
-**Gotcha — CI doesn't auto-run on the release PR.** release-plz opens it using
-the default `GITHUB_TOKEN`, and GitHub won't trigger workflows for
-token-created events (anti-recursion). Branch protection requires `check` +
-`e2e`, so the PR sits un-mergeable with no checks. Fix it the right way (do
-**not** `--admin`-bypass — CI must run):
+To hold a release back, close the release PR or push a commit that fails CI;
+to release manually, the old way still works: merge the release PR yourself
+and the main-push `release-plz-release` job publishes.
 
-```bash
-git fetch origin <release-plz-branch>
-git switch <release-plz-branch>
-git commit --allow-empty -m "ci: trigger required checks on release PR"
-git push                         # a *user*-authored push triggers check/e2e
-```
-
-Then merge normally once green. The permanent fix is to give release-plz a PAT
-or GitHub-App token (so its PRs trigger CI on their own); until then, the empty
-commit is the nudge.
-
-Prerequisites already configured on this repo: the `CARGO_REGISTRY_TOKEN`
-secret, and the repo setting **Settings → Actions → General → "Allow GitHub
+Prerequisites already configured on this repo: the `CARGO_REGISTRY_TOKEN` and
+`RELEASE_PLZ_DEPLOY_KEY` secrets, a write-access deploy key ("release-plz CI
+trigger"), and the repo setting **Settings → Actions → General → "Allow GitHub
 Actions to create and approve pull requests"** (without it, release-plz's PR
 create fails with HTTP 422).
+
+Deploying to hosts stays a separate, manual concern (see above; in-app
+self-update is issue #130).
 
 ## Development (never touch `:5151`)
 
