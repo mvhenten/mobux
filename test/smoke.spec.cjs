@@ -55,6 +55,27 @@ test('sessions API works', async ({ page }) => {
   expect(sessions.length).toBeGreaterThan(0);
 });
 
+// Regression: tmux rewrites '.' to '_' in session names, so a created
+// "my.app" became "my_app" while the API reported it as "my.app" — every
+// later op then failed with "can't find session". Names with tmux
+// target-spec separators must be rejected, not silently mangled.
+test('create rejects session names with tmux-unsafe characters', async ({ page }) => {
+  for (const name of ['my.app', 'a:b']) {
+    const res = await page.request.post(`${BASE}/api/sessions`, {
+      data: { name },
+    });
+    expect(res.status(), `"${name}" must be rejected, not mangled`).toBe(400);
+  }
+  // A clean name still creates and reports back the exact name tmux used.
+  const ok = await page.request.post(`${BASE}/api/sessions`, {
+    data: { name: 'regress_dot' },
+  });
+  expect(ok.status()).toBe(200);
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  expect(sessions.some((s) => s.name === 'regress_dot')).toBeTruthy();
+  await page.request.post(`${BASE}/api/sessions/regress_dot/kill`);
+});
+
 test('terminal renders and connects', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
 

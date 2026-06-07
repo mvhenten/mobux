@@ -121,7 +121,12 @@ async fn main() -> Result<()> {
     update::spawn_checker(update_state.clone());
 
     let state = AppState {
-        session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
+        // tmux forbids '.' and ':' in session names (they're target-spec
+        // separators) and silently rewrites '.' to '_'. Allowing '.' here let
+        // a name like "my.app" pass validation while tmux created "my_app",
+        // so every later op targeting "my.app" failed with "can't find
+        // session". Keep '.' out of the allowed set.
+        session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$")?),
         auth,
         cache_bust: format!(
             "{}",
@@ -1971,5 +1976,20 @@ mod tests {
             "error mentions field name: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn session_name_regex_rejects_tmux_unsafe_chars() {
+        let re = Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
+        // Accepted: plain names, underscores, hyphens, digits.
+        for ok in ["foo", "my_app", "build-2", "ABC", "0"] {
+            assert!(re.is_match(ok), "should accept {ok:?}");
+        }
+        // Rejected: '.' and ':' are tmux target-spec separators (tmux
+        // rewrites '.' to '_', which previously caused "can't find session"),
+        // plus whitespace and empty.
+        for bad in ["my.app", "a:b", "with space", ""] {
+            assert!(!re.is_match(bad), "should reject {bad:?}");
+        }
     }
 }
