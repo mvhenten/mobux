@@ -90,6 +90,21 @@ rollback() {
 main() {
   log "self-update start: crate=${CRATE} version=${VERSION} bin=${BIN} root=${ROOT} service=${SERVICE} port=${PORT}"
 
+  # Cross-process lock (belt-and-braces with the in-process guard in mobux):
+  # even two independently spawned scripts can't race the snapshot/install. The
+  # lock fd stays open for the whole run; flock releases it when the process
+  # exits. If flock isn't available, proceed (the in-process guard still holds).
+  LOCK_FILE="${ROOT}/mobux-update.lock"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE" || { log "ABORT: could not open lock file ${LOCK_FILE}"; exit 4; }
+    if ! flock -n 9; then
+      log "ABORT: another updater holds the lock (${LOCK_FILE}); refusing to race"
+      exit 4
+    fi
+  else
+    log "WARN: flock not found; relying on in-process guard only"
+  fi
+
   if [ ! -f "$BIN" ]; then
     log "ABORT: binary not found at ${BIN}"
     exit 1

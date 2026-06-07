@@ -145,6 +145,37 @@ run_updater "4.0.0" "$BIN4" "$ROOT4" "$CARGO_OK"
 rc=$?
 [ "$rc" -eq 1 ] && ok "missing-bin: exit 1 (abort)" || bad "missing-bin: exit $rc (expected 1)"
 
+# ── Test 5: flock backstop → a second updater refuses to race ──────────────
+# Hold the lock from the test, then run the updater against the same ROOT. With
+# flock present it must refuse (exit 4) and leave the binary untouched.
+if command -v flock >/dev/null 2>&1; then
+  ROOT5="$WORK/root5"; mkdir -p "$ROOT5/bin"
+  BIN5="$ROOT5/bin/mobux"
+  printf 'OLD-V0' > "$BIN5"
+  printf 'NEW-V5' > "$WORK/payload-v5"
+  printf '{"app":"mobux","version":"5.0.0"}' > "$WORK/identify.json"
+  CARGO_OK5="$(make_stub_cargo success "$WORK/payload-v5")"
+
+  # Acquire the lock in a background holder that sleeps while we run the updater.
+  ( exec 8>"$ROOT5/mobux-update.lock"; flock 8; sleep 5 ) &
+  HOLDER=$!
+  sleep 0.5  # let the holder grab the lock first
+
+  run_updater "5.0.0" "$BIN5" "$ROOT5" "$CARGO_OK5"
+  rc=$?
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+
+  [ "$rc" -eq 4 ] && ok "flock: second updater refused (exit 4)" || bad "flock: exit $rc (expected 4)"
+  [ "$(cat "$BIN5")" = "OLD-V0" ] && ok "flock: binary untouched while locked" || bad "flock: binary changed under lock"
+
+  # Sanity: with the lock free again, the same run now succeeds.
+  run_updater "5.0.0" "$BIN5" "$ROOT5" "$CARGO_OK5"
+  rc=$?
+  [ "$rc" -eq 0 ] && ok "flock: succeeds once lock is free" || bad "flock: exit $rc after unlock (expected 0)"
+else
+  echo "ok   - flock: SKIP (flock not installed)"
+fi
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

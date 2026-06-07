@@ -50,6 +50,10 @@ const USER_AGENT: &str = concat!(
 #[derive(Clone)]
 pub struct UpdateState {
     inner: Arc<RwLock<Cache>>,
+    /// Set while an updater is being spawned / running, so a second concurrent
+    /// `POST /api/update/run` is rejected instead of racing the snapshot. Belt
+    /// to the script's flock braces.
+    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Default)]
@@ -84,12 +88,34 @@ impl UpdateState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(Cache::default())),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     /// This binary's compile-time version.
     pub fn current_version() -> &'static str {
         env!("CARGO_PKG_VERSION")
+    }
+
+    /// Atomically claim the "an update is running" flag. Returns `true` to the
+    /// first caller and `false` to any concurrent caller until the run
+    /// finishes. The first caller owns the flag and must clear it (via
+    /// [`UpdateState::end_run`]) if it does NOT go on to spawn a detached
+    /// updater — once the updater is spawned the flag stays set for this
+    /// process's lifetime, since a successful update restarts it anyway.
+    pub fn try_begin_run(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Release the running flag. Called when a claimed run is abandoned before
+    /// spawning (e.g. nothing to update, or the spawn itself failed) so a later
+    /// retry isn't permanently locked out.
+    pub fn end_run(&self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Snapshot the cache into the API status shape.
@@ -356,6 +382,9 @@ pub enum RunError {
     NotSystemd { message: String },
     /// No newer version is known, so there's nothing to install.
     NoUpdateAvailable { message: String },
+    /// An update is already in progress in this process — refuse the second
+    /// request so two updaters can't race the binary snapshot.
+    AlreadyRunning { message: String },
     /// Couldn't lay down or launch the updater script.
     SpawnFailed { message: String },
 }
@@ -365,6 +394,7 @@ impl std::fmt::Display for RunError {
         match self {
             RunError::NotSystemd { message }
             | RunError::NoUpdateAvailable { message }
+            | RunError::AlreadyRunning { message }
             | RunError::SpawnFailed { message } => write!(f, "{message}"),
         }
     }
@@ -539,6 +569,31 @@ mod tests {
         // No updater script should have been written (guard runs first).
         assert!(!tmp.join("mobux-update.sh").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn run_guard_admits_one_and_rejects_concurrent() {
+        let st = UpdateState::new();
+        // First claim wins.
+        assert!(st.try_begin_run(), "first run must claim the lock");
+        // A second concurrent claim is rejected while the first holds it.
+        assert!(!st.try_begin_run(), "second run must be rejected");
+        assert!(!st.try_begin_run(), "still rejected while running");
+        // Releasing (abandoned run) lets a later run claim again.
+        st.end_run();
+        assert!(st.try_begin_run(), "lock reusable after release");
+    }
+
+    #[test]
+    fn run_guard_shared_across_clones() {
+        // The flag lives behind an Arc, so a cloned handle (as axum hands to
+        // each request via AppState) sees the same lock.
+        let st = UpdateState::new();
+        let clone = st.clone();
+        assert!(st.try_begin_run());
+        assert!(!clone.try_begin_run(), "clone shares the running flag");
+        clone.end_run();
+        assert!(st.try_begin_run(), "release via one handle frees the other");
     }
 
     #[test]

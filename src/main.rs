@@ -585,30 +585,42 @@ async fn api_update_run(State(state): State<AppState>) -> Response {
         return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
     }
 
+    // In-process lock: only one updater may be in flight. A concurrent second
+    // request is rejected here (409) so the two scripts never race the binary
+    // snapshot. The script's flock is the cross-process backstop.
+    if !state.update.try_begin_run() {
+        let err = update::RunError::AlreadyRunning {
+            message: "an update is already in progress".to_string(),
+        };
+        return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
+    }
+
     match update::spawn_updater(&state.data_dir, &latest, state.port, state.use_tls) {
-        Ok(log_path) => (
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "started": true,
-                "version": latest,
-                "log": log_path.to_string_lossy(),
-            })),
-        )
-            .into_response(),
-        Err(err @ update::RunError::NotSystemd { .. }) => {
-            // 412 Precondition Failed: the environment can't support in-app
-            // update (no systemd unit to restart).
+        Ok(log_path) => {
+            // Keep the flag set: a successful update restarts the process, and
+            // until then no second run should start.
             (
-                StatusCode::PRECONDITION_FAILED,
-                Json(json!({ "error": err })),
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "started": true,
+                    "version": latest,
+                    "log": log_path.to_string_lossy(),
+                })),
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err })),
-        )
-            .into_response(),
+        Err(err) => {
+            // We claimed the lock but never spawned — release it so a later
+            // retry isn't permanently blocked.
+            state.update.end_run();
+            let status = match err {
+                // 412 Precondition Failed: the environment can't support in-app
+                // update (no systemd unit / disabled on this host).
+                update::RunError::NotSystemd { .. } => StatusCode::PRECONDITION_FAILED,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, Json(json!({ "error": err }))).into_response()
+        }
     }
 }
 
