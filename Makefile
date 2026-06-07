@@ -105,6 +105,9 @@ smoke-start: build
 	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
 		HOME=/tmp/mobux-smoke/home HISTFILE=/dev/null \
 		MOBUX_TMUX_SOCKET=mobux-test \
+		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
+		MOBUX_UPDATE_CHECK_URL=http://localhost:$(MOBUX_SMOKE_PORT)/api/update/test-index \
+		MOBUX_UPDATE_DISABLE_RUN=1 \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
@@ -156,6 +159,14 @@ test-mesh:
 		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/mesh-relay.spec.cjs
+
+# Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
+# against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,
+# no network, no prod anything). See test/update-runner.test.sh.
+.PHONY: test-update-runner
+test-update-runner:
+	@command -v shellcheck >/dev/null 2>&1 && shellcheck src/update_runner.sh test/update-runner.test.sh || echo "shellcheck not installed; skipping lint"
+	@bash test/update-runner.test.sh
 
 .PHONY: test-e2e
 test-e2e:
