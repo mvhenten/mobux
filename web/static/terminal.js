@@ -14,10 +14,8 @@ const session = window.MOBUX_SESSION;
 // which calls wsUrl() again — target the host the session actually lives on,
 // regardless of what the global host picker is set to. Empty (same-origin /
 // current node) → no override, behaviour unchanged.
-{
-  const host = window.MOBUX_PEER;
-  if (host) window.MobuxMesh.usePeerForPage(host);
-}
+const pinnedHost = window.MOBUX_PEER || '';
+if (pinnedHost) window.MobuxMesh.usePeerForPage(pinnedHost);
 
 const termEl = document.getElementById("terminal");
 const readerEl = document.getElementById("reader");
@@ -535,6 +533,28 @@ if ('serviceWorker' in navigator) {
 // socket that boot then immediately replaces.
 let booted = false;
 (async () => {
+  // When pinned to a peer (deep-linked /s/<host>/<name>) whose creds aren't
+  // stored on this device yet, the relayed WS would 401 → close-loop and the
+  // panes/history fetches would .catch() silently, leaving a blank
+  // "reconnecting" terminal. Prompt for the host's creds first so the very
+  // first connect carries them; if the prompt is unavailable or declined,
+  // surface a visible note instead of wedging.
+  if (pinnedHost && !window.MobuxMesh.getPeerCred(pinnedHost)) {
+    const picker = window.MobuxHostPicker;
+    let signedIn = false;
+    if (picker && typeof picker.promptPeerCred === 'function') {
+      try { signedIn = await picker.promptPeerCred(pinnedHost); } catch (_) {}
+    }
+    if (!signedIn) {
+      if (loadquote) {
+        const q = document.getElementById('quote');
+        const a = document.getElementById('qauthor');
+        if (q) q.textContent = `Sign in to ${pinnedHost} to open this session.`;
+        if (a) a.textContent = '';
+      }
+      return; // don't connect with no creds — avoids the silent close-loop
+    }
+  }
   await core.reloadHistory();
   core.connect();
   booted = true;

@@ -1337,11 +1337,38 @@ async fn terminal_page_pinned(
     Path((host, name)): Path<(String, String)>,
 ) -> Result<axum::response::Response, AppError> {
     validate_session_name(&state, &name)?;
+    // `host` is reflected into an inline <script> as window.MOBUX_PEER, and
+    // serde_json does NOT escape `<`/`>`/`</script>` — an unvalidated host is a
+    // reflected-XSS breakout. Gate it to the legal peer shape (canonical_peer
+    // rejects slashes/spaces/bad ports) AND a strict charset so no markup
+    // metacharacter can survive. Reject anything else as 400, mirroring
+    // validate_session_name.
+    let peer = validate_pinned_host(&host)?;
     Ok(html_no_store(render_terminal_page(
         &name,
-        &host,
+        &peer,
         &state.cache_bust,
     )))
+}
+
+/// Validate + canonicalize a `host` path segment for the pinned terminal route.
+///
+/// Reuses the relay's `canonical_peer` (legal `host[:port]` shape) and then
+/// enforces the conservative peer charset `[A-Za-z0-9.:_-]`. `canonical_peer`
+/// alone rejects slashes and spaces but still admits markup metacharacters
+/// (e.g. `<img>` → `<img>:8080`), which would break out of the inline
+/// `window.MOBUX_PEER` script — so the charset gate is the load-bearing
+/// defence here. Returns the canonical `host:port`, or a 400 on reject.
+fn validate_pinned_host(host: &str) -> Result<String, AppError> {
+    let peer = relay::canonical_peer(host)
+        .map_err(|e| AppError::bad_request(anyhow::anyhow!("invalid host: {e}")))?;
+    if !peer
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_' | '-'))
+    {
+        return Err(AppError::bad_request(anyhow::anyhow!("invalid host")));
+    }
+    Ok(peer)
 }
 
 // Same payload as Html<String> but with Cache-Control: no-store.
@@ -1932,8 +1959,12 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     }})();
   </script>
   <!-- mesh-client (global) must be present before the terminal module so the
-       renderer cores can resolve relayed API/WS paths for a selected peer. -->
+       renderer cores can resolve relayed API/WS paths for a selected peer.
+       host-picker supplies the cred prompt the page reuses when it's pinned to
+       a peer (?MOBUX_PEER) whose creds aren't stored yet; its mount() no-ops
+       here since the terminal page has no .app-header. -->
   <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/host-picker.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
@@ -2023,5 +2054,31 @@ mod tests {
         for bad in ["my.app", "a:b", "with space", ""] {
             assert!(!re.is_match(bad), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn pinned_host_rejects_script_breakout() {
+        // Reflected-XSS guard for /s/{host}/{name}: the host is echoed into an
+        // inline <script> as window.MOBUX_PEER, and serde_json does not escape
+        // markup metacharacters. A host carrying </script>, '<' or '>' (or
+        // quotes) must be rejected as 400, never rendered.
+        for bad in [
+            "</script><script>alert(1)</script>",
+            "<img src=x onerror=alert(1)>",
+            "<svg",
+            "a>b",
+            "a\"b",
+            "a'b",
+            "",
+        ] {
+            let err = validate_pinned_host(bad).expect_err(&format!("should reject {bad:?}"));
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "for {bad:?}");
+        }
+        // Legal peers still pass and canonicalize to host:port.
+        assert_eq!(validate_pinned_host("box:8443").unwrap(), "box:8443");
+        assert_eq!(
+            validate_pinned_host("host-1.tailnet.ts.net").unwrap(),
+            "host-1.tailnet.ts.net:8080"
+        );
     }
 }

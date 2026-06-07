@@ -301,6 +301,21 @@ test('host-pinned page route injects MOBUX_PEER; same-origin route does not', as
   expect(plainHtml).toContain('window.MOBUX_PEER = ""');
 });
 
+test('host-pinned route rejects a script-breakout host (reflected XSS guard)', async () => {
+  // The host segment is reflected into an inline <script> as window.MOBUX_PEER
+  // and serde_json does not escape markup. A host carrying </script> / < / >
+  // must be rejected (400), never rendered into the page.
+  const payload = '</script><script>window.__xss=1</script>';
+  const res = await fetch(
+    `${RELAY}/s/${encodeURIComponent(payload)}/${encodeURIComponent(PEER_SESSION)}`,
+    { headers: { Authorization: RELAY_AUTH } },
+  );
+  expect(res.status).toBe(400);
+  const body = await res.text();
+  // The payload must not be reflected verbatim into any response body.
+  expect(body).not.toContain('window.__xss');
+});
+
 test('global picker set to B does not cross-wire a link pinned to A', async () => {
   // Pinning is page-lifetime state, independent of the global selection. The
   // pinned WS targets PEER regardless of what "the picker" (the relay's own
