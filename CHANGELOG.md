@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.1.5] - 2026-06-07
+
+### 🚀 Features
+
+- In-app self-update (check + one-tap deploy) ([#130](https://github.com/mvhenten/mobux/pull/130)) ([#133](https://github.com/mvhenten/mobux/pull/133))
+
+### 👷 CI
+
+- Auto-merge and publish green release PRs ([#131](https://github.com/mvhenten/mobux/pull/131))
+
+
 ## [0.1.4] - 2026-06-06
 
 ### 🚀 Features
