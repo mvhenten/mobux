@@ -54,9 +54,20 @@ function escapeHTML(s) {
 // ── Session list rendering ──────────────────────────────────────────
 function sessionRow(s) {
   const name = escapeHTML(s.name);
+  // Pin each session link to the host it actually lives on. When a peer is
+  // selected, the host is canonical in the path (/s/<host>/<name>) so the
+  // terminal page drives that host for its whole lifetime — flipping the
+  // picker afterwards can't re-point an already-open session at the wrong
+  // node (issue #123). With no peer selected (current node / same-origin) the
+  // link stays plain (/s/<name>), so same-origin behaviour is byte-identical
+  // to before.
+  const peer = meshClient.getPeer();
+  const href = peer
+    ? `/s/${encodeURIComponent(peer)}/${encodeURIComponent(s.name)}`
+    : `/s/${encodeURIComponent(s.name)}`;
   return `<div class="swipe-row" data-name="${name}">
   <div class="swipe-action swipe-left"><button class="swipe-btn rename-btn">Rename</button></div>
-  <a class="session-item" href="/s/${encodeURIComponent(s.name)}">
+  <a class="session-item" href="${href}">
     <div class="session-info">
       <span class="session-name">${name}</span>
       <span class="session-meta">${s.windows} win · ${s.attached} attached</span>
@@ -91,6 +102,9 @@ async function refreshSessions() {
 
 // Exposed so the host picker can re-render the list after switching hosts.
 window.refreshSessions = refreshSessions;
+// Exposed for smoke tests: lets them assert the per-host link pinning
+// (issue #123) without a live peer — they set mobux:peer and read the href.
+window.__mobuxSessionRow = sessionRow;
 
 // ── FAB + dialog ────────────────────────────────────────────────────
 const fab = document.getElementById("fabNew");

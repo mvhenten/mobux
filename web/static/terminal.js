@@ -5,6 +5,20 @@ import { createInputBar } from './input-bar.js';
 import { applyTheme, getStoredThemeId } from './themes.js';
 
 const session = window.MOBUX_SESSION;
+
+// ── Pin this page to the session's host (issue #123) ─────────────────
+// The host the session lives on is canonical in the URL path (/s/<host>/<name>)
+// and the server injects it as window.MOBUX_PEER. Bind routing to that peer for
+// the whole lifetime of this page BEFORE the terminal core constructs its WS /
+// fetches, so the very first WS + history + panes — and every later reconnect,
+// which calls wsUrl() again — target the host the session actually lives on,
+// regardless of what the global host picker is set to. Empty (same-origin /
+// current node) → no override, behaviour unchanged.
+{
+  const host = window.MOBUX_PEER;
+  if (host) window.MobuxMesh.usePeerForPage(host);
+}
+
 const termEl = document.getElementById("terminal");
 const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");

@@ -218,6 +218,13 @@ async fn main() -> Result<()> {
         .route("/api/peers/{peer}/pin", delete(relay::delete_peer_pin))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
+        // Host-pinned terminal page (issue #123): the peer the session lives
+        // on is canonical in the path so the page binds to the right host
+        // regardless of the global host-picker selection. The server does NOT
+        // route by host (the relay still does) — it only surfaces the host to
+        // the client so it can pin the peer. One- vs two-segment patterns
+        // disambiguate cleanly in axum.
+        .route("/s/{host}/{name}", get(terminal_page_pinned))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
         .route("/install", get(install_page))
@@ -1313,8 +1320,26 @@ async fn terminal_page(
     Path(name): Path<String>,
 ) -> Result<axum::response::Response, AppError> {
     validate_session_name(&state, &name)?;
+    // No host segment → current node / same-origin, no peer pinned.
     Ok(html_no_store(render_terminal_page(
         &name,
+        "",
+        &state.cache_bust,
+    )))
+}
+
+// Host-pinned variant: `/s/{host}/{name}`. Renders the SAME terminal page but
+// surfaces the host so the client pins that peer for the page's lifetime. The
+// server itself does not route by host — the relay does — so `host` is only
+// echoed back to the client, never used to resolve the session here.
+async fn terminal_page_pinned(
+    State(state): State<AppState>,
+    Path((host, name)): Path<(String, String)>,
+) -> Result<axum::response::Response, AppError> {
+    validate_session_name(&state, &name)?;
+    Ok(html_no_store(render_terminal_page(
+        &name,
+        &host,
         &state.cache_bust,
     )))
 }
@@ -1798,8 +1823,12 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     )
 }
 
-fn render_terminal_page(session: &str, v: &str) -> String {
+fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
+    // Peer the page is pinned to ("" for the same-origin/current-node route).
+    // JSON-encoded so the client can read it verbatim and decide whether to
+    // override the global host-picker selection for this page.
+    let peer_json = serde_json::to_string(peer).unwrap_or_else(|_| "\"\"".to_string());
     let session_title = html_escape::encode_text(session);
 
     format!(
@@ -1876,6 +1905,9 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <script>
     window.MOBUX_SESSION = {session_json};
+    // Host this page is pinned to (issue #123). Empty string = current node
+    // (no override); terminal.js binds MobuxMesh to this peer before connect.
+    window.MOBUX_PEER = {peer_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <!-- Renderer picker: reads `mobux:renderer` from localStorage and
