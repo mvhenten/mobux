@@ -1,0 +1,46 @@
+name: Release
+
+# Tag-based releasing (semantic-release). Runs only after the CI workflow
+# completes successfully on main: computes the next version from conventional
+# commits since the latest v* tag, then tags + creates a GitHub release with
+# generated notes + publishes to crates.io. No release PR, no commit back to
+# main — the git tag is the version truth (in-repo Cargo.toml stays at the last
+# committed version; the publish step patches the real version in the workflow
+# workspace only). See DEPLOY.md → "Release & publish".
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write # create tags + GitHub releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Only on a green CI run that was triggered by a push to main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so semantic-release can find the last v* tag
+          # and the commits since it.
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

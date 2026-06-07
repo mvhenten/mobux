@@ -95,31 +95,68 @@ systemctl --user restart mobux      # sub-second swap; :5151 barely blinks
 
 ## Release & publish (crates.io)
 
-Versioning is owned by **release-plz** (driven by conventional commits — single
-source of truth, don't hand-pick versions):
+Releasing is owned by **semantic-release** (driven by conventional commits —
+single source of truth, don't hand-pick versions). There is **no release PR**
+and **no commit back to `main`** (branch protection forbids it). The pipeline is
+**fully automatic** from merge to crates.io:
 
-The pipeline is **fully automatic** from merge to crates.io:
+1. Merge feature PRs to `main` with conventional-commit messages. The version
+   bump follows the commit types:
+   - `feat:` → **minor**
+   - `fix:` / `perf:` → **patch**
+   - breaking change (`feat!:`, or `BREAKING CHANGE:` footer) → **major**
+   - `chore:` / `docs:` / `ci:` / `test:` / `refactor:` / `style:` → **no
+     release**
+2. The push to `main` runs **CI** (`check` + `e2e`). When CI succeeds, the
+   separate **Release** workflow (`.github/workflows/release.yml`, triggered by
+   `workflow_run` on CI) runs `npx semantic-release`. It computes the next
+   version from the conventional commits since the latest `v*` tag, then:
+   creates the **git tag** (`vX.Y.Z`), a **GitHub Release** with generated
+   notes, and **publishes to crates.io**.
 
-1. Merge feature PRs to `main` with conventional-commit messages
-   (`feat:`, `fix:`, `refactor:`…).
-2. release-plz opens/updates a **`chore: release vX.Y.Z`** PR (version bump +
-   changelog). Its branch pushes go over an SSH **deploy key**
-   (`RELEASE_PLZ_DEPLOY_KEY` secret), so CI triggers on the release PR —
-   `GITHUB_TOKEN` events wouldn't (anti-recursion).
-3. When `check` + `e2e` pass on the release PR, the `release-auto-merge` job
-   squash-merges it and runs `release-plz release` in the same run: tag,
-   GitHub release, **publish to crates.io**. (The publish runs in-job because
-   a bot-token merge push to main doesn't retrigger CI.)
+### The tag is the version truth
 
-To hold a release back, close the release PR or push a commit that fails CI;
-to release manually, the old way still works: merge the release PR yourself
-and the main-push `release-plz-release` job publishes.
+There is **no version-bump commit**. The in-repo `Cargo.toml` `version` stays at
+the last value that was committed by hand and is therefore **historical** — do
+not trust it as the released version; the latest `v*` git tag / GitHub Release /
+crates.io is the truth. At publish time the cargo plugin
+(`@semantic-release-cargo/semantic-release-cargo`) patches the computed version
+into `Cargo.toml` **in the workflow workspace only** before `cargo publish`, so
+the crates.io artifact carries the real version while the repo tree is left
+untouched. semantic-release derives the next version from the latest `v*` tag,
+so the in-repo `Cargo.toml` value is irrelevant to versioning.
 
-Prerequisites already configured on this repo: the `CARGO_REGISTRY_TOKEN` and
-`RELEASE_PLZ_DEPLOY_KEY` secrets, a write-access deploy key ("release-plz CI
-trigger"), and the repo setting **Settings → Actions → General → "Allow GitHub
-Actions to create and approve pull requests"** (without it, release-plz's PR
-create fails with HTTP 422).
+### Holding back / skipping a release
+
+- Commit with a non-releasing type (`chore:`, `docs:`, `ci:`, `test:`,
+  `refactor:`, `style:`) — semantic-release will find no releasable change and
+  do nothing.
+- Add `[skip ci]` to the commit message to skip CI entirely (the Release
+  workflow only fires on a *successful* CI run, so skipping CI also skips the
+  release).
+
+### Dry run
+
+`semantic-release` needs a `GITHUB_TOKEN` even in dry-run mode (it queries the
+GitHub API). To preview the next version and notes locally:
+
+```bash
+GITHUB_TOKEN=<a token with repo read> npx semantic-release --dry-run --no-ci
+```
+
+Without a token the run fails at the GitHub verifyConditions step; that's
+expected. To only sanity-check that the config and plugins load (no token
+needed), the parse/verify-config portion of `npx semantic-release --dry-run
+--no-ci` output is enough — it lists the loaded plugins before hitting auth.
+
+### Prerequisites
+
+The only secret needed is **`CARGO_REGISTRY_TOKEN`** (crates.io publish);
+`GITHUB_TOKEN` is the built-in Actions token, and the Release workflow grants it
+`contents: write` for tagging + release creation. The old release-plz secrets
+(`RELEASE_PLZ_DEPLOY_KEY`, the "release-plz CI trigger" deploy key) and the
+"Allow GitHub Actions to create and approve pull requests" repo setting are **no
+longer used** and can be removed.
 
 Deploying to hosts stays a separate, manual concern (see above; in-app
 self-update is issue #130).

@@ -15,9 +15,11 @@ over Tailscale with HTTPS. The whole frontend is embedded in the binary
   `:5151` cuts off the phone, so only deploy there once verified.
 - **Deploy a change to `:5151`:** `cargo install mobux --locked` (or
   `cargo install --git … --locked`) then `systemctl --user restart mobux`.
-- **Releases** are owned by release-plz (conventional commits → version bump
-  PR → crates.io publish). The release PR needs a user-authored empty commit
-  to trigger CI (don't `--admin`-bypass). See DEPLOY.md → *Release & publish*.
+- **Releases** are owned by semantic-release (conventional commits → git tag +
+  GitHub release + crates.io publish, on a green CI run on `main`). No release
+  PR, no version-bump commit — the latest `v*` tag is the version truth; the
+  in-repo `Cargo.toml` version is historical. See DEPLOY.md → *Release &
+  publish*.
 
 ## Working in the repo
 
