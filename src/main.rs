@@ -48,6 +48,7 @@ mod relay;
 mod shell_integration;
 mod ssl;
 mod tmux;
+mod update;
 
 #[derive(Clone)]
 struct AppState {
@@ -62,6 +63,13 @@ struct AppState {
     /// The TCP port this instance serves on. Mesh peer probing dials peers on
     /// the same port (the EDD assumes a homogeneous mobux port across nodes).
     port: u16,
+    /// Where mobux persists state — used to write/spawn the detached updater.
+    data_dir: PathBuf,
+    /// Whether this instance serves over TLS — the updater health-checks
+    /// `/api/identify` on the matching scheme.
+    use_tls: bool,
+    /// In-memory cache of the latest crates.io version (self-update, #130).
+    update: update::UpdateState,
 }
 
 #[derive(Clone)]
@@ -104,6 +112,14 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8080);
 
+    let use_tls = env::var("MOBUX_TLS")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true);
+
+    let update_state = update::UpdateState::new();
+    // Kick off the background crates.io poller (polls now, then every ~6h).
+    update::spawn_checker(update_state.clone());
+
     let state = AppState {
         session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
         auth,
@@ -117,6 +133,9 @@ async fn main() -> Result<()> {
         db,
         internal_token: Arc::new(internal_token),
         port,
+        data_dir: data_dir.clone(),
+        use_tls,
+        update: update_state,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -182,6 +201,11 @@ async fn main() -> Result<()> {
             "/api/shell-integration/uninstall",
             post(api_shell_integration_uninstall),
         )
+        // Self-update (#130). Plain /api routes so they ride the mesh relay —
+        // any node is updatable from one UI.
+        .route("/api/update/status", get(api_update_status))
+        .route("/api/update/check", post(api_update_check))
+        .route("/api/update/run", post(api_update_run))
         // Mesh relay (EDD phase 2). The WS route is more specific than the
         // catch-all HTTP relay so the upgrade lands on the right handler.
         .route("/r/{peer}/ws/{*rest}", get(relay::relay_ws))
@@ -195,7 +219,18 @@ async fn main() -> Result<()> {
         .route("/install/mobux.apk", get(serve_install_apk))
         .route("/install/mobux-ca.crt", get(serve_install_ca))
         .route("/.well-known/assetlinks.json", get(serve_assetlinks))
-        .route("/static/{*path}", get(serve_static))
+        .route("/static/{*path}", get(serve_static));
+
+    // Test-only: serve a fixed sparse-index body so the update checker can be
+    // exercised hermetically (no live crates.io). Registered only when
+    // MOBUX_UPDATE_TEST_INDEX is set; never present in a normal/prod run.
+    let app = if std::env::var_os("MOBUX_UPDATE_TEST_INDEX").is_some() {
+        app.route("/api/update/test-index", get(api_update_test_index))
+    } else {
+        app
+    };
+
+    let app = app
         .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -210,10 +245,6 @@ async fn main() -> Result<()> {
     } else {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
     }
-
-    let use_tls = env::var("MOBUX_TLS")
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(true);
 
     if use_tls {
         let extra_hosts: Vec<String> = env::var("MOBUX_TLS_HOSTS")
@@ -404,6 +435,10 @@ fn load_auth_config() -> Option<AuthConfig> {
 /// nothing beyond "this is mobux, version X".
 fn is_public_path(path: &str) -> bool {
     path == "/api/identify"
+        // Test-only update-index fixture: the background poller fetches it
+        // without credentials, so it must bypass auth. Only ever routed when
+        // MOBUX_UPDATE_TEST_INDEX is set (see router construction).
+        || path == "/api/update/test-index"
         || path == "/install"
         || path.starts_with("/install/")
         || path.starts_with("/.well-known/")
@@ -513,6 +548,76 @@ async fn api_peers(State(state): State<AppState>) -> Response {
             (StatusCode::BAD_GATEWAY, Json(json!({ "error": err }))).into_response()
         }
     }
+}
+
+// ── self-update (#130) ─────────────────────────────────────────────────────
+
+/// Cached update status: current version, latest known, availability,
+/// last-checked timestamp. Reads the in-memory cache the background poller
+/// maintains — no network call here.
+async fn api_update_status(State(state): State<AppState>) -> Json<update::UpdateStatus> {
+    Json(state.update.status().await)
+}
+
+/// Force an immediate crates.io poll and return the refreshed status.
+async fn api_update_check(State(state): State<AppState>) -> Json<update::UpdateStatus> {
+    Json(state.update.refresh().await)
+}
+
+/// Spawn the detached updater toward the latest known version. Returns 202 when
+/// started; a structured 4xx/5xx otherwise (not systemd, nothing to update,
+/// spawn failed).
+async fn api_update_run(State(state): State<AppState>) -> Response {
+    let status = state.update.status().await;
+    let Some(latest) = status.latest.clone() else {
+        let err = update::RunError::NoUpdateAvailable {
+            message: "no latest version known yet; run a check first".to_string(),
+        };
+        return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
+    };
+    if !status.available {
+        let err = update::RunError::NoUpdateAvailable {
+            message: format!(
+                "already on the latest version ({})",
+                update::UpdateState::current_version()
+            ),
+        };
+        return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
+    }
+
+    match update::spawn_updater(&state.data_dir, &latest, state.port, state.use_tls) {
+        Ok(log_path) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "started": true,
+                "version": latest,
+                "log": log_path.to_string_lossy(),
+            })),
+        )
+            .into_response(),
+        Err(err @ update::RunError::NotSystemd { .. }) => {
+            // 412 Precondition Failed: the environment can't support in-app
+            // update (no systemd unit to restart).
+            (
+                StatusCode::PRECONDITION_FAILED,
+                Json(json!({ "error": err })),
+            )
+                .into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err })),
+        )
+            .into_response(),
+    }
+}
+
+/// Test-only handler: echoes `MOBUX_UPDATE_TEST_INDEX` as a sparse-index body
+/// so the update checker can be driven hermetically. Only routed when that env
+/// var is set.
+async fn api_update_test_index() -> impl IntoResponse {
+    let body = std::env::var("MOBUX_UPDATE_TEST_INDEX").unwrap_or_default();
+    ([(axum::http::header::CONTENT_TYPE, "text/plain")], body)
 }
 
 #[derive(Deserialize)]
@@ -945,6 +1050,30 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
   </header>
 
   <main class="settings-page">
+    <section class="settings-card" id="update">
+      <h2>Software update</h2>
+      <p class="settings-lede">mobux checks crates.io for newer published versions. Updating installs the new version with <code>cargo install</code>, restarts the systemd service, health-checks it, and rolls back automatically if the new version doesn't come up. This acts on <strong>the node you're connected to</strong> — pick a host first to update a peer.</p>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Current version</strong>
+          <small>This running binary.</small>
+        </span>
+        <span id="updateCurrent" class="settings-value">…</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Latest version</strong>
+          <small id="updateCheckedAt">Checking crates.io…</small>
+        </span>
+        <span id="updateLatest" class="settings-value">…</span>
+      </div>
+      <div class="shell-card-actions">
+        <button type="button" id="updateCheckBtn">Check for updates</button>
+        <button type="button" id="updateRunBtn" hidden>Update now</button>
+      </div>
+      <div class="settings-status" id="updateStatus" hidden></div>
+    </section>
+
     <section class="settings-card" id="install-app">
       <h2>Install app</h2>
       <p class="settings-lede">Add Mobux to your home screen as a standalone Android app. The install page has the CA certificate and APK with step-by-step instructions.</p>
@@ -1149,6 +1278,9 @@ end</code></pre>
     }}
   </script>
   <script src="/static/settings.js?v={v}"></script>
+  <!-- mesh-client first so update.js can relay update calls to a selected peer. -->
+  <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/update.js?v={v}"></script>
   <script type="module" src="/static/settings-theme.js?v={v}"></script>
   <script src="/static/settings-renderer.js?v={v}"></script>
   <script src="/static/shell-integration.js?v={v}"></script>

@@ -182,6 +182,14 @@ body {
   font-size: 13px;
   color: var(--muted);
 }
+.settings-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.settings-value--new {
+  color: var(--accent, #6ee7b7);
+}
 .settings-detail {
   margin-top: 12px;
   border: 1px solid var(--border);
