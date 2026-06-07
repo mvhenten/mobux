@@ -1,6 +1,6 @@
 [package]
 name = "mobux"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A touch-friendly tmux web UI for unhinged people who run terminal sessions from their phone while walking the dog"
 license = "MIT"
