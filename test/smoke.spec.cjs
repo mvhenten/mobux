@@ -1970,13 +1970,15 @@ test('settings page shows current version and update check button', async ({ pag
   await expect(page.locator('#updateRunBtn')).toBeVisible();
 });
 
-// Without a systemd unit (smoke runs as a plain nohup process, no
-// INVOCATION_ID), POST /api/update/run must refuse with a structured error
-// instead of spawning an updater.
-test('update run refuses outside systemd with a structured error', async ({ page, request }) => {
+// POST /api/update/run must refuse with a structured error rather than ever
+// spawning a real updater in the test harness. The smoke instance runs with
+// MOBUX_UPDATE_DISABLE_RUN=1 (a hard off-switch) so the response is a 412
+// structured refusal regardless of whether the check has populated a latest
+// version — and no `cargo install` is ever launched.
+test('update run refuses with a structured error (never spawns in tests)', async ({ request }) => {
   const res = await request.post(`${BASE}/api/update/run`);
-  // 412 Precondition Failed (not systemd) — or 409 if the check hasn't run yet
-  // in this worker; both are structured refusals, never a 202.
+  // 412 Precondition Failed (disabled / not systemd) — or 409 if no latest is
+  // known yet in this worker; both are structured refusals, never a 202.
   expect([409, 412]).toContain(res.status());
   const body = await res.json();
   expect(body.error).toBeTruthy();

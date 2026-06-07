@@ -107,6 +107,7 @@ smoke-start: build
 		MOBUX_TMUX_SOCKET=mobux-test \
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://localhost:$(MOBUX_SMOKE_PORT)/api/update/test-index \
+		MOBUX_UPDATE_DISABLE_RUN=1 \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \

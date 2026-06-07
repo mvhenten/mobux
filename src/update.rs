@@ -436,6 +436,17 @@ pub fn spawn_updater(
     port: u16,
     use_tls: bool,
 ) -> Result<PathBuf, RunError> {
+    // Hard off-switch. Set on hosts that manage updates externally, and by the
+    // test/CI harness so a self-update never actually `cargo install`s anything
+    // (CI runs steps under systemd, so INVOCATION_ID alone isn't enough to keep
+    // tests from spawning a real updater).
+    if std::env::var_os("MOBUX_UPDATE_DISABLE_RUN").is_some() {
+        return Err(RunError::NotSystemd {
+            message: "in-app update is disabled on this host (MOBUX_UPDATE_DISABLE_RUN)"
+                .to_string(),
+        });
+    }
+
     let Some(service) = resolve_service_name() else {
         return Err(RunError::NotSystemd {
             message: "not running under systemd (no INVOCATION_ID); in-app update \
@@ -512,6 +523,22 @@ mod tests {
         assert!(!is_newer("0.1.4", "0.1.4"));
         assert!(!is_newer("0.1.5", "0.1.4"));
         assert!(!is_newer("1.0.0", "0.9.9"));
+    }
+
+    #[test]
+    fn disable_run_guard_refuses_without_spawning() {
+        // The hard off-switch must short-circuit before any systemd check or
+        // spawn. Use a temp dir as the data dir; nothing should be written.
+        let tmp = std::env::temp_dir().join(format!("mobux-update-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: single-threaded test; we set+remove the env around the call.
+        unsafe { std::env::set_var("MOBUX_UPDATE_DISABLE_RUN", "1") };
+        let res = spawn_updater(&tmp, "999.0.0", 8281, false);
+        unsafe { std::env::remove_var("MOBUX_UPDATE_DISABLE_RUN") };
+        assert!(matches!(res, Err(RunError::NotSystemd { .. })));
+        // No updater script should have been written (guard runs first).
+        assert!(!tmp.join("mobux-update.sh").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
