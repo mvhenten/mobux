@@ -35,6 +35,28 @@ function setPeer(peer) {
   } catch (_) {}
 }
 
+// ── per-page peer override ────────────────────────────────────────────
+// A terminal page is bound to the host its session actually lives on
+// (encoded as ?host=<peer> on the /s/<name> link). Once set, every
+// fetch/WS on THIS page routes to that peer regardless of the globally
+// selected peer in localStorage — so flipping the host picker after the
+// terminal is open can't re-point the open session at the wrong node.
+//
+// This is page-lifetime only (a module variable, never persisted). The
+// peer's creds still come from getPeerCred(peer) in localStorage, so an
+// overridden peer reuses whatever creds the picker already stored for it.
+let pagePeer = null; // null = no override (fall back to getPeer())
+
+function usePeerForPage(peer) {
+  pagePeer = peer || null;
+}
+
+// The peer all routing on this page should use: the page override when
+// set, otherwise the globally selected peer from localStorage.
+function activePeer() {
+  return pagePeer != null ? pagePeer : getPeer();
+}
+
 // True when driving the current (serving) node — the zero-config default.
 function isCurrentNode() {
   return !getPeer();
@@ -125,7 +147,7 @@ function removeManualPeer(peer) {
 // selected peer. Accepts paths with or without a leading slash.
 function apiPath(path) {
   const p = path.startsWith('/') ? path : `/${path}`;
-  const peer = getPeer();
+  const peer = activePeer();
   if (!peer) return p;
   // /api/foo → /r/<peer>/api/foo
   return `/r/${encodeURIComponent(peer)}${p}`;
@@ -137,7 +159,7 @@ function apiPath(path) {
 // Authorization header over the pinned wss hop, per PR #128).
 function wsUrl(session) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const peer = getPeer();
+  const peer = activePeer();
   if (!peer) {
     return `${proto}://${location.host}/ws/${encodeURIComponent(session)}`;
   }
@@ -186,7 +208,7 @@ async function trustNewCert(peer) {
 // Returns the raw Response; callers decide what to do with non-ok statuses.
 // Throws a tagged error only for the cases the UI must react to.
 async function apiFetch(path, opts = {}) {
-  const peer = getPeer();
+  const peer = activePeer();
   const url = apiPath(path);
   const headers = new Headers(opts.headers || {});
   if (peer) {
@@ -233,6 +255,8 @@ async function apiFetchJSON(path, opts = {}) {
 window.MobuxMesh = {
   getPeer,
   setPeer,
+  usePeerForPage,
+  activePeer,
   isCurrentNode,
   getPeerCred,
   setPeerCred,

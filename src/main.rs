@@ -218,6 +218,13 @@ async fn main() -> Result<()> {
         .route("/api/peers/{peer}/pin", delete(relay::delete_peer_pin))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
+        // Host-pinned terminal page (issue #123): the peer the session lives
+        // on is canonical in the path so the page binds to the right host
+        // regardless of the global host-picker selection. The server does NOT
+        // route by host (the relay still does) — it only surfaces the host to
+        // the client so it can pin the peer. One- vs two-segment patterns
+        // disambiguate cleanly in axum.
+        .route("/s/{host}/{name}", get(terminal_page_pinned))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
         .route("/install", get(install_page))
@@ -1313,10 +1320,55 @@ async fn terminal_page(
     Path(name): Path<String>,
 ) -> Result<axum::response::Response, AppError> {
     validate_session_name(&state, &name)?;
+    // No host segment → current node / same-origin, no peer pinned.
     Ok(html_no_store(render_terminal_page(
         &name,
+        "",
         &state.cache_bust,
     )))
+}
+
+// Host-pinned variant: `/s/{host}/{name}`. Renders the SAME terminal page but
+// surfaces the host so the client pins that peer for the page's lifetime. The
+// server itself does not route by host — the relay does — so `host` is only
+// echoed back to the client, never used to resolve the session here.
+async fn terminal_page_pinned(
+    State(state): State<AppState>,
+    Path((host, name)): Path<(String, String)>,
+) -> Result<axum::response::Response, AppError> {
+    validate_session_name(&state, &name)?;
+    // `host` is reflected into an inline <script> as window.MOBUX_PEER, and
+    // serde_json does NOT escape `<`/`>`/`</script>` — an unvalidated host is a
+    // reflected-XSS breakout. Gate it to the legal peer shape (canonical_peer
+    // rejects slashes/spaces/bad ports) AND a strict charset so no markup
+    // metacharacter can survive. Reject anything else as 400, mirroring
+    // validate_session_name.
+    let peer = validate_pinned_host(&host)?;
+    Ok(html_no_store(render_terminal_page(
+        &name,
+        &peer,
+        &state.cache_bust,
+    )))
+}
+
+/// Validate + canonicalize a `host` path segment for the pinned terminal route.
+///
+/// Reuses the relay's `canonical_peer` (legal `host[:port]` shape) and then
+/// enforces the conservative peer charset `[A-Za-z0-9.:_-]`. `canonical_peer`
+/// alone rejects slashes and spaces but still admits markup metacharacters
+/// (e.g. `<img>` → `<img>:8080`), which would break out of the inline
+/// `window.MOBUX_PEER` script — so the charset gate is the load-bearing
+/// defence here. Returns the canonical `host:port`, or a 400 on reject.
+fn validate_pinned_host(host: &str) -> Result<String, AppError> {
+    let peer = relay::canonical_peer(host)
+        .map_err(|e| AppError::bad_request(anyhow::anyhow!("invalid host: {e}")))?;
+    if !peer
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_' | '-'))
+    {
+        return Err(AppError::bad_request(anyhow::anyhow!("invalid host")));
+    }
+    Ok(peer)
 }
 
 // Same payload as Html<String> but with Cache-Control: no-store.
@@ -1798,8 +1850,12 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     )
 }
 
-fn render_terminal_page(session: &str, v: &str) -> String {
+fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
+    // Peer the page is pinned to ("" for the same-origin/current-node route).
+    // JSON-encoded so the client can read it verbatim and decide whether to
+    // override the global host-picker selection for this page.
+    let peer_json = serde_json::to_string(peer).unwrap_or_else(|_| "\"\"".to_string());
     let session_title = html_escape::encode_text(session);
 
     format!(
@@ -1876,6 +1932,9 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <script>
     window.MOBUX_SESSION = {session_json};
+    // Host this page is pinned to (issue #123). Empty string = current node
+    // (no override); terminal.js binds MobuxMesh to this peer before connect.
+    window.MOBUX_PEER = {peer_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <!-- Renderer picker: reads `mobux:renderer` from localStorage and
@@ -1900,8 +1959,12 @@ fn render_terminal_page(session: &str, v: &str) -> String {
     }})();
   </script>
   <!-- mesh-client (global) must be present before the terminal module so the
-       renderer cores can resolve relayed API/WS paths for a selected peer. -->
+       renderer cores can resolve relayed API/WS paths for a selected peer.
+       host-picker supplies the cred prompt the page reuses when it's pinned to
+       a peer (?MOBUX_PEER) whose creds aren't stored yet; its mount() no-ops
+       here since the terminal page has no .app-header. -->
   <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/host-picker.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
@@ -1991,5 +2054,31 @@ mod tests {
         for bad in ["my.app", "a:b", "with space", ""] {
             assert!(!re.is_match(bad), "should reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn pinned_host_rejects_script_breakout() {
+        // Reflected-XSS guard for /s/{host}/{name}: the host is echoed into an
+        // inline <script> as window.MOBUX_PEER, and serde_json does not escape
+        // markup metacharacters. A host carrying </script>, '<' or '>' (or
+        // quotes) must be rejected as 400, never rendered.
+        for bad in [
+            "</script><script>alert(1)</script>",
+            "<img src=x onerror=alert(1)>",
+            "<svg",
+            "a>b",
+            "a\"b",
+            "a'b",
+            "",
+        ] {
+            let err = validate_pinned_host(bad).expect_err(&format!("should reject {bad:?}"));
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "for {bad:?}");
+        }
+        // Legal peers still pass and canonicalize to host:port.
+        assert_eq!(validate_pinned_host("box:8443").unwrap(), "box:8443");
+        assert_eq!(
+            validate_pinned_host("host-1.tailnet.ts.net").unwrap(),
+            "host-1.tailnet.ts.net:8080"
+        );
     }
 }

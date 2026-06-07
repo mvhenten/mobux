@@ -200,3 +200,131 @@ test('pin mismatch surfaces 409, and re-trust (DELETE pin) recovers', async () =
   const recovered = await relayCall();
   expect(recovered.ok).toBeTruthy();
 });
+
+// ── Per-page host binding (issue #123) ────────────────────────────────
+// A terminal page derives its session NAME from the URL but, pre-fix, the
+// PEER from the global host picker. So opening a session that lives on host
+// A, then flipping the picker to host B, re-pointed the OPEN terminal at B →
+// tmux on B answered "can't find session: <name>".
+//
+// The fix pins each session link to its host (`/s/<host>/<name>`, with the
+// host injected back as window.MOBUX_PEER) and makes the terminal page route
+// through that peer for its whole lifetime via
+// MobuxMesh.usePeerForPage(), independent of the global picker. These tests
+// assert the routing contract that pinning produces: the WS the pinned page
+// opens hits the RIGHT host regardless of what the picker is set to.
+//
+// A = the peer (has PEER_SESSION). B = the relay/current node (does NOT).
+// The relay WS path the pinned page builds is /r/<peer>/ws/<name>?upstream_auth=…
+// for a peer link, and the plain /ws/<name> for a same-origin link — exactly
+// what mesh-client.wsUrl() emits for the page's bound peer.
+
+const RELAY_WS_BASE = RELAY.replace(/^http/, 'ws');
+
+// Open a relay WS to a peer, collect frames until close or timeout. Returns
+// the concatenated text received (binary frames decoded as utf-8).
+function collectWs(url, { headers, timeoutMs = 4000 } = {}) {
+  return new Promise((resolve) => {
+    let text = '';
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch (_) {}
+      resolve(text);
+    };
+    const ws = new WebSocket(url, headers ? { headers } : undefined);
+    ws.binaryType = 'arraybuffer';
+    const timer = setTimeout(finish, timeoutMs);
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') text += ev.data;
+      else text += Buffer.from(ev.data).toString('utf-8');
+    };
+    ws.onclose = () => { clearTimeout(timer); finish(); };
+    ws.onerror = () => { clearTimeout(timer); finish(); };
+  });
+}
+
+// The WS URL a page pinned to PEER builds (mirror of mesh-client.wsUrl with
+// activePeer() === PEER): relay path + the peer creds in ?upstream_auth=.
+const pinnedPeerWsUrl = (name) =>
+  `${RELAY_WS_BASE}/r/${encodeURIComponent(PEER)}/ws/${encodeURIComponent(name)}` +
+  `?upstream_auth=${encodeURIComponent(PEER_AUTH_B64)}`;
+
+test('pinned to host A (the peer): WS attaches the session that lives there', async () => {
+  // /s/<PEER>/<PEER_SESSION> → page pins PEER → this WS.
+  const out = await collectWs(pinnedPeerWsUrl(PEER_SESSION), {
+    headers: { Authorization: RELAY_AUTH },
+  });
+  // A successful attach streams the live screen; it must NOT be the
+  // can't-find-session error. tmux paints something (prompt / status line),
+  // so we get non-empty data and no not-found marker.
+  expect(out).not.toContain("can't find session");
+  expect(out.length).toBeGreaterThan(0);
+});
+
+test('pinned to host B (relay/current node): a peer-only session surfaces not-found, not silence', async () => {
+  // The session lives on the PEER, not on the relay. Opening it bound to the
+  // CURRENT node (same-origin /ws/<name>, no relay) is what the old bug did
+  // after flipping the picker to "This host". tmux on the relay can't find it
+  // and says so — the error reaches the terminal rather than wedging.
+  const out = await collectWs(
+    `${RELAY_WS_BASE}/ws/${encodeURIComponent(PEER_SESSION)}`,
+    { headers: { Authorization: RELAY_AUTH } },
+  );
+  // tmux on the relay can't attach a session that isn't there. The exact
+  // wording depends on whether the relay's tmux server has any sessions at
+  // all ("can't find session: <name>" vs "no sessions"); either way an error
+  // surfaces in the stream instead of the session's live screen — that's the
+  // not-found-rather-than-silently-wedged contract.
+  expect(out).toMatch(/can't find session|no sessions|session not found/);
+});
+
+test('host-pinned page route injects MOBUX_PEER; same-origin route does not', async () => {
+  // Two-segment /s/<host>/<name> renders the terminal page with the host
+  // surfaced as window.MOBUX_PEER so the client pins it. The one-segment
+  // /s/<name> stays byte-identical (empty peer).
+  const pinned = await fetch(
+    `${RELAY}/s/${encodeURIComponent(PEER)}/${encodeURIComponent(PEER_SESSION)}`,
+    { headers: { Authorization: RELAY_AUTH } },
+  );
+  expect(pinned.ok).toBeTruthy();
+  const pinnedHtml = await pinned.text();
+  expect(pinnedHtml).toContain(`window.MOBUX_PEER = ${JSON.stringify(PEER)}`);
+
+  const plain = await fetch(`${RELAY}/s/${encodeURIComponent(PEER_SESSION)}`, {
+    headers: { Authorization: RELAY_AUTH },
+  });
+  expect(plain.ok).toBeTruthy();
+  const plainHtml = await plain.text();
+  // Same-origin: peer is the empty string (no override on the client).
+  expect(plainHtml).toContain('window.MOBUX_PEER = ""');
+});
+
+test('host-pinned route rejects a script-breakout host (reflected XSS guard)', async () => {
+  // The host segment is reflected into an inline <script> as window.MOBUX_PEER
+  // and serde_json does not escape markup. A host carrying </script> / < / >
+  // must be rejected (400), never rendered into the page.
+  const payload = '</script><script>window.__xss=1</script>';
+  const res = await fetch(
+    `${RELAY}/s/${encodeURIComponent(payload)}/${encodeURIComponent(PEER_SESSION)}`,
+    { headers: { Authorization: RELAY_AUTH } },
+  );
+  expect(res.status).toBe(400);
+  const body = await res.text();
+  // The payload must not be reflected verbatim into any response body.
+  expect(body).not.toContain('window.__xss');
+});
+
+test('global picker set to B does not cross-wire a link pinned to A', async () => {
+  // Pinning is page-lifetime state, independent of the global selection. The
+  // pinned WS targets PEER regardless of what "the picker" (the relay's own
+  // global selection) would be — so the same pinned URL still attaches the
+  // peer session. (The browser-side guarantee is usePeerForPage overriding
+  // getPeer(); here we assert the resulting relay route is unchanged.)
+  const out = await collectWs(pinnedPeerWsUrl(PEER_SESSION), {
+    headers: { Authorization: RELAY_AUTH },
+  });
+  expect(out).not.toContain("can't find session");
+  expect(out.length).toBeGreaterThan(0);
+});

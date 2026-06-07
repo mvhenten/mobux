@@ -48,6 +48,32 @@ test('index loads', async ({ page }) => {
   await expect(page).toHaveTitle(/Mobux/);
 });
 
+// Per-host link pinning (issue #123): a session link must carry the selected
+// peer as a path segment (/s/<host>/<name>) so the terminal page binds to the
+// host the session lives on; with no peer selected (current node) it stays
+// plain (/s/<name>) so same-origin behaviour is byte-identical to before.
+test('sessionRow pins /s/<host>/<name> when a peer is selected, plain when not', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  const hrefs = await page.evaluate(() => {
+    const row = window.__mobuxSessionRow;
+    const hrefOf = (html) => {
+      const el = document.createElement('div');
+      el.innerHTML = html;
+      return el.querySelector('a.session-item').getAttribute('href');
+    };
+    // No peer selected → plain link.
+    window.MobuxMesh.setPeer('');
+    const plain = hrefOf(row({ name: 'demo', windows: 1, attached: 0 }));
+    // Peer selected → host as a leading path segment.
+    window.MobuxMesh.setPeer('box:8443');
+    const pinned = hrefOf(row({ name: 'demo', windows: 1, attached: 0 }));
+    window.MobuxMesh.setPeer('');
+    return { plain, pinned };
+  });
+  expect(hrefs.plain).toBe('/s/demo');
+  expect(hrefs.pinned).toBe('/s/box%3A8443/demo');
+});
+
 test('sessions API works', async ({ page }) => {
   const res = await page.request.get(`${BASE}/api/sessions`);
   expect(res.ok()).toBeTruthy();
