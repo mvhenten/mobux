@@ -12,7 +12,9 @@ export function createInputBar(term, send) {
   const ribbon = document.getElementById('inputRibbon');
   const input = document.getElementById('inputText');
   const sendBtn = document.getElementById('inputSend');
-  if (!bar || !input) return { destroy() {} };
+  // Complete no-op shape: callers invoke .show()/.hide(), so a partial stub
+  // would throw. Mirror the real public API below.
+  if (!bar || !input) return { show() {}, hide() {}, destroy() {} };
 
   // ── Disable xterm.js textarea on mobile ───────────────────────────
   // We own input now. Prevent xterm's textarea from stealing focus.
@@ -153,6 +155,25 @@ export function createInputBar(term, send) {
     }
   });
 
+  // ── Visible failure feedback ──────────────────────────────────────
+  // The old `.rec-error` tint was near-invisible and the attach path gave
+  // no UI feedback at all. Show a brief, clearly visible state on the
+  // relevant button plus a short, accessible message in the input bar.
+  const toast = document.getElementById('inputToast');
+  let toastTimer = null;
+  function showError(msg, btn) {
+    if (toast) {
+      toast.textContent = msg;
+      toast.classList.remove('hidden');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.add('hidden'), 4000);
+    }
+    if (btn) {
+      btn.classList.add('rec-error');
+      setTimeout(() => btn.classList.remove('rec-error'), 1500);
+    }
+  }
+
   // ── Shared upload helper ──────────────────────────────────────────
   // POSTs a File/Blob to /api/upload and drops the returned path into
   // the terminal via send(). Used by both the attach button and the
@@ -196,6 +217,7 @@ export function createInputBar(term, send) {
       await uploadFile(file);
     } catch (err) {
       console.error('Upload failed:', err);
+      showError('Attach failed: upload error', uploadBtn);
     }
 
     // Reset so the same file can be re-selected
@@ -207,6 +229,11 @@ export function createInputBar(term, send) {
   let mediaRecorder = null;
   let chunks = [];
   let recStream = null;
+  // Synchronous guard: `mediaRecorder` stays null across the `await
+  // getUserMedia(...)`, so without this two quick taps would each start a
+  // stream and leak the first. Set true at the top of startRecording, before
+  // the await; cleared by recCleanup.
+  let recBusy = false;
 
   function recCleanup() {
     if (recStream) {
@@ -214,13 +241,8 @@ export function createInputBar(term, send) {
       recStream = null;
     }
     mediaRecorder = null;
+    recBusy = false;
     if (recBtn) recBtn.classList.remove('recording');
-  }
-
-  function recFlashError() {
-    if (!recBtn) return;
-    recBtn.classList.add('rec-error');
-    setTimeout(() => recBtn.classList.remove('rec-error'), 1500);
   }
 
   function extForMime(mime) {
@@ -240,12 +262,15 @@ export function createInputBar(term, send) {
   }
 
   async function startRecording() {
+    // Set the guard synchronously, before any await, so a second tap during
+    // the getUserMedia round-trip is a no-op (the click handler also checks).
+    recBusy = true;
     try {
       recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
       console.error('Microphone access failed:', err);
       recCleanup();
-      recFlashError();
+      showError('Mic access denied. In the TWA app, allow the Microphone permission.', recBtn);
       return;
     }
 
@@ -258,7 +283,7 @@ export function createInputBar(term, send) {
     } catch (err) {
       console.error('MediaRecorder init failed:', err);
       recCleanup();
-      recFlashError();
+      showError('Could not start recording on this device.', recBtn);
       return;
     }
 
@@ -280,7 +305,7 @@ export function createInputBar(term, send) {
         await uploadFile(file);
       } catch (err) {
         console.error('Upload failed:', err);
-        recFlashError();
+        showError('Recording upload failed.', recBtn);
       }
     });
 
@@ -306,7 +331,10 @@ export function createInputBar(term, send) {
         e.preventDefault();
         if (mediaRecorder && mediaRecorder.state === 'recording') {
           stopRecording();
-        } else {
+        } else if (!recBusy) {
+          // `recBusy` is set synchronously inside startRecording before the
+          // getUserMedia await; guarding here too means a rapid double-tap
+          // can't kick off a second stream while the first is still starting.
           startRecording();
         }
       });
