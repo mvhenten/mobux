@@ -663,6 +663,7 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
     Json(json!({
         "version": PKG_VERSION,
         "build_hash": state.build_hash,
+        "dev_mode": state.dev_mode,
     }))
 }
 
@@ -2532,5 +2533,19 @@ mod tests {
         for m in &models {
             assert!(!m.is_empty(), "model id must not be empty");
         }
+    }
+
+    // The dev flag is exposed via /api/build-info so the SPA can gate its
+    // telemetry module without server-side HTML injection (the old
+    // render_index/render_terminal_page pages are gone post-SPA-cutover).
+    #[tokio::test]
+    async fn build_info_reflects_dev_mode() {
+        let (state, _dir) = test_state(true);
+        let Json(val) = api_build_info(State(state)).await;
+        assert_eq!(val["dev_mode"], true);
+
+        let (state, _dir) = test_state(false);
+        let Json(val) = api_build_info(State(state)).await;
+        assert_eq!(val["dev_mode"], false);
     }
 }
