@@ -436,6 +436,47 @@ fn cargo_root(bin: &Path) -> String {
         })
 }
 
+/// Resolve cargo's absolute path for the detached updater.
+///
+/// The systemd `--user` service environment usually lacks the cargo bin dir on
+/// PATH, so the script's bare `cargo install` fails with "cargo: command not
+/// found". We resolve it up front: prefer a `cargo` sibling of the running mobux
+/// binary (the rustup proxy lives next to it under `<root>/bin`), else
+/// `~/.cargo/bin/cargo`. Only returns a path that actually exists on disk;
+/// `None` means "leave the script's bare-`cargo` default".
+fn resolve_cargo_path(bin: &Path) -> Option<PathBuf> {
+    if let Some(sibling) = bin.parent().map(|d| d.join("cargo")) {
+        if sibling.exists() {
+            return Some(sibling);
+        }
+    }
+    let home_cargo = directories::BaseDirs::new()?
+        .home_dir()
+        .join(".cargo")
+        .join("bin")
+        .join("cargo");
+    home_cargo.exists().then_some(home_cargo)
+}
+
+/// Build a PATH for the child that prepends the mobux binary's directory and
+/// `~/.cargo/bin` to the inherited PATH, so rustup proxies and helpers resolve
+/// even under a stripped systemd `--user` environment. The rest of PATH is
+/// preserved.
+fn augmented_path(bin: &Path) -> std::ffi::OsString {
+    let mut prefixes: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = bin.parent() {
+        prefixes.push(dir.to_path_buf());
+    }
+    if let Some(base) = directories::BaseDirs::new() {
+        prefixes.push(base.home_dir().join(".cargo").join("bin"));
+    }
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let existing = std::env::split_paths(&inherited);
+    // Prepend our dirs, then keep everything already on PATH.
+    let chained = prefixes.into_iter().chain(existing);
+    std::env::join_paths(chained).unwrap_or(inherited)
+}
+
 /// Write the updater script into `data_dir` (mode 0700) and return its path.
 fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
     let path = data_dir.join("mobux-update.sh");
@@ -461,6 +502,7 @@ fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
 /// Refuses with [`RunError::NotSystemd`] when there's no resolvable unit (so we
 /// never strand the service down with no way to restart it).
 pub fn spawn_updater(
+    state: &UpdateState,
     data_dir: &Path,
     version: &str,
     port: u16,
@@ -515,13 +557,35 @@ pub fn spawn_updater(
         .env("MOBUX_UPDATE_PORT", port.to_string())
         .env("MOBUX_UPDATE_SCHEME", scheme)
         .env("MOBUX_UPDATE_LOG", &log_path)
+        // Make cargo resolvable from a stripped systemd --user environment: pass
+        // an absolute cargo path the script honors (MOBUX_UPDATE_CARGO), and
+        // prepend the binary dir + ~/.cargo/bin to PATH so rustup proxies and
+        // helpers resolve too.
+        .env("PATH", augmented_path(&bin))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err));
+    if let Some(cargo) = resolve_cargo_path(&bin) {
+        cmd.env("MOBUX_UPDATE_CARGO", cargo);
+    }
 
-    cmd.spawn().map_err(|e| RunError::SpawnFailed {
+    let child = cmd.spawn().map_err(|e| RunError::SpawnFailed {
         message: format!("spawning updater (setsid bash {}): {e}", script.display()),
     })?;
+
+    // Supervise the detached updater so a failed run doesn't wedge the
+    // in-process lock forever. `setsid` from util-linux execs bash in place
+    // (our process isn't a group leader), so this `Child` is the bash updater
+    // and can be waited on. If it exits while THIS process is still alive, it
+    // did not restart us → the update failed → release the lock so a retry is
+    // possible. On success the OS restarts/kills this process before `wait()`
+    // returns, so the thread dies with the process and never double-releases.
+    let state = state.clone();
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+        state.end_run();
+    });
 
     Ok(log_path)
 }
@@ -561,14 +625,84 @@ mod tests {
         // spawn. Use a temp dir as the data dir; nothing should be written.
         let tmp = std::env::temp_dir().join(format!("mobux-update-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
+        let st = UpdateState::new();
         // SAFETY: single-threaded test; we set+remove the env around the call.
         unsafe { std::env::set_var("MOBUX_UPDATE_DISABLE_RUN", "1") };
-        let res = spawn_updater(&tmp, "999.0.0", 8281, false);
+        let res = spawn_updater(&st, &tmp, "999.0.0", 8281, false);
         unsafe { std::env::remove_var("MOBUX_UPDATE_DISABLE_RUN") };
         assert!(matches!(res, Err(RunError::NotSystemd { .. })));
         // No updater script should have been written (guard runs first).
         assert!(!tmp.join("mobux-update.sh").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_cargo_prefers_sibling_of_binary() {
+        // A `cargo` next to the mobux binary (the rustup proxy under <root>/bin)
+        // is resolved to its absolute path.
+        let tmp = std::env::temp_dir().join(format!("mobux-cargo-test-{}", std::process::id()));
+        let bindir = tmp.join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let bin = bindir.join("mobux");
+        std::fs::write(&bin, b"binary").unwrap();
+        let cargo = bindir.join("cargo");
+        std::fs::write(&cargo, b"cargo").unwrap();
+
+        let resolved = resolve_cargo_path(&bin);
+        assert_eq!(resolved.as_deref(), Some(cargo.as_path()));
+        assert!(
+            resolved.unwrap().exists(),
+            "resolved path must exist on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_cargo_none_when_no_sibling_or_home_cargo() {
+        // No `cargo` sibling and (assuming the test host has no ~/.cargo/bin/cargo)
+        // → None, so the script keeps its bare-`cargo` default. We only assert the
+        // sibling branch is skipped; the home branch depends on the host, so guard
+        // on it actually being absent.
+        let tmp = std::env::temp_dir().join(format!("mobux-nocargo-test-{}", std::process::id()));
+        let bindir = tmp.join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let bin = bindir.join("mobux");
+        std::fs::write(&bin, b"binary").unwrap();
+
+        let home_cargo = directories::BaseDirs::new()
+            .map(|d| d.home_dir().join(".cargo").join("bin").join("cargo"));
+        let resolved = resolve_cargo_path(&bin);
+        match (resolved, home_cargo) {
+            (Some(p), Some(home)) => assert_eq!(p, home, "only the home fallback may match"),
+            (Some(_), None) => panic!("resolved a path with no sibling and no home dir"),
+            (None, _) => {}
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn augmented_path_prepends_bin_and_cargo_dirs() {
+        let bin = Path::new("/opt/mobux/bin/mobux");
+        let path = augmented_path(bin);
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        // The binary's directory is first.
+        assert_eq!(
+            dirs.first().map(|p| p.as_path()),
+            Some(Path::new("/opt/mobux/bin"))
+        );
+        // ~/.cargo/bin appears among the prepended entries (when a home dir exists).
+        if let Some(base) = directories::BaseDirs::new() {
+            let cargo_bin = base.home_dir().join(".cargo").join("bin");
+            assert!(dirs.contains(&cargo_bin), "~/.cargo/bin must be on PATH");
+        }
+        // The inherited PATH is preserved (not clobbered).
+        if let Some(inherited) = std::env::var_os("PATH") {
+            for p in std::env::split_paths(&inherited) {
+                assert!(dirs.contains(&p), "inherited PATH entry {p:?} must be kept");
+            }
+        }
     }
 
     #[test]

@@ -116,6 +116,19 @@ main() {
     exit 1
   fi
 
+  # Defense-in-depth: the spawning Rust code resolves cargo and augments PATH,
+  # but if cargo still isn't on PATH (stripped systemd --user env), fall back to
+  # the standard rustup locations before giving up.
+  if ! command -v "$CARGO_BIN" >/dev/null 2>&1; then
+    log "cargo ('$CARGO_BIN') not found; trying ~/.cargo fallbacks"
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+    PATH="$HOME/.cargo/bin:$PATH"
+    if ! command -v "$CARGO_BIN" >/dev/null 2>&1; then
+      log "ERROR: cargo not found on PATH ('$CARGO_BIN'); cannot install; binary unchanged, no restart needed"
+      exit 1
+    fi
+  fi
+
   log "cargo install ${CRATE} --locked --version ${VERSION} --root ${ROOT}"
   if ! "$CARGO_BIN" install "$CRATE" --locked --version "$VERSION" --root "$ROOT" --force; then
     log "ERROR: cargo install failed; binary unchanged, no restart needed"

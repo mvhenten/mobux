@@ -176,6 +176,63 @@ else
   echo "ok   - flock: SKIP (flock not installed)"
 fi
 
+# ── Test 6: cargo not on PATH → ~/.cargo/bin fallback resolves it ──────────
+# Simulate the stripped systemd --user env: MOBUX_UPDATE_CARGO names a bare
+# `cargo` that isn't on PATH, but a working stub lives in $HOME/.cargo/bin. The
+# script's fallback must find it and complete the install.
+ROOT6="$WORK/root6"; mkdir -p "$ROOT6/bin"
+BIN6="$ROOT6/bin/mobux"
+printf 'OLD-V0' > "$BIN6"
+printf 'NEW-V6' > "$WORK/payload-v6"
+printf '{"app":"mobux","version":"6.0.0"}' > "$WORK/identify.json"
+FAKE_HOME="$WORK/home6"; mkdir -p "$FAKE_HOME/.cargo/bin"
+# Put a working stub cargo at $HOME/.cargo/bin/cargo (the fallback location).
+CARGO_HOME_STUB="$(make_stub_cargo success "$WORK/payload-v6")"
+cp "$CARGO_HOME_STUB" "$FAKE_HOME/.cargo/bin/cargo"
+chmod +x "$FAKE_HOME/.cargo/bin/cargo"
+
+# Run with a PATH that does NOT include the fallback, and CARGO=bare `cargo`.
+rc=0
+env \
+  MOBUX_UPDATE_VERSION="6.0.0" \
+  MOBUX_UPDATE_BIN="$BIN6" \
+  MOBUX_UPDATE_ROOT="$ROOT6" \
+  MOBUX_UPDATE_SERVICE="ignored" \
+  MOBUX_UPDATE_PORT="$HC_PORT" \
+  MOBUX_UPDATE_SCHEME="http" \
+  MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
+  MOBUX_UPDATE_CARGO="cargo" \
+  MOBUX_UPDATE_CRATE="mobux" \
+  MOBUX_UPDATE_LOG="$WORK/update.log" \
+  HOME="$FAKE_HOME" \
+  PATH="/usr/bin:/bin" \
+  bash "$UPDATER" --no-systemd || rc=$?
+[ "$rc" -eq 0 ] && ok "cargo-fallback: exit 0 via ~/.cargo/bin" || bad "cargo-fallback: exit $rc (expected 0)"
+[ "$(cat "$BIN6")" = "NEW-V6" ] && ok "cargo-fallback: binary replaced" || bad "cargo-fallback: binary not replaced"
+
+# ── Test 7: cargo nowhere → clear error, binary unchanged ──────────────────
+ROOT7="$WORK/root7"; mkdir -p "$ROOT7/bin"
+BIN7="$ROOT7/bin/mobux"
+printf 'OLD-V0' > "$BIN7"
+FAKE_HOME7="$WORK/home7"; mkdir -p "$FAKE_HOME7"  # no .cargo at all
+rc=0
+env \
+  MOBUX_UPDATE_VERSION="7.0.0" \
+  MOBUX_UPDATE_BIN="$BIN7" \
+  MOBUX_UPDATE_ROOT="$ROOT7" \
+  MOBUX_UPDATE_SERVICE="ignored" \
+  MOBUX_UPDATE_PORT="$HC_PORT" \
+  MOBUX_UPDATE_SCHEME="http" \
+  MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
+  MOBUX_UPDATE_CARGO="definitely-not-cargo-xyz" \
+  MOBUX_UPDATE_CRATE="mobux" \
+  MOBUX_UPDATE_LOG="$WORK/update.log" \
+  HOME="$FAKE_HOME7" \
+  PATH="/usr/bin:/bin" \
+  bash "$UPDATER" --no-systemd || rc=$?
+[ "$rc" -eq 1 ] && ok "cargo-missing: exit 1 (clear error)" || bad "cargo-missing: exit $rc (expected 1)"
+[ "$(cat "$BIN7")" = "OLD-V0" ] && ok "cargo-missing: binary unchanged" || bad "cargo-missing: binary changed"
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
