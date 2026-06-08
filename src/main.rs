@@ -1410,26 +1410,64 @@ async fn serve_sw(State(state): State<AppState>) -> impl axum::response::IntoRes
     )
 }
 
-// Serve a frontend asset embedded in the binary (see `StaticAssets`). The
-// `?v=<cache_bust>` query param the HTML appends to every asset URL is for
-// browser cache-busting only and is ignored here (the wildcard match is on the
-// path, not the query). Assets carry a far-future immutable Cache-Control:
-// because the `?v=` changes on every restart, a stale cached body can never be
-// served for a fresh deploy.
-async fn serve_static(Path(path): Path<String>) -> Response {
+// Serve a frontend asset embedded in the binary (see `StaticAssets`).
+//
+// mobux is a single-user app served desktop→phone over LAN, so aggressive
+// caching buys nothing — and it actively broke us: assets used to be served
+// `immutable` for a year, and the only cache-busting was the `?v=<cache_bust>`
+// query param the HTML appends to `<script src>`/`<link href>` tags. But ES
+// module `import` statements use bare specifiers with no `?v=`, so every
+// import-only module (input-bar.js, reader-view.js, …) was frozen in the
+// browser cache forever and never picked up new deploys.
+//
+// Fix: serve `no-cache` (the browser must revalidate before reuse) plus a
+// content-based `ETag` so unchanged files revalidate cheaply with a 304. The
+// `?v=` query is harmless and left in place; it's ignored here (the wildcard
+// match is on the path, not the query).
+fn etag_for(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    // Weak-ish strong ETag: first 16 bytes of the SHA-256 of the body is
+    // plenty to distinguish revisions of a single-user app's assets.
+    format!("\"{}\"", hex::encode(&digest[..16]))
+}
+
+async fn serve_static(headers_in: HeaderMap, Path(path): Path<String>) -> Response {
     use axum::http::header;
     match StaticAssets::get(&path) {
         Some(file) => {
+            let etag = etag_for(&file.data);
+
+            // Conditional request: if the client's cached copy matches, 304.
+            if let Some(inm) = headers_in
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+            {
+                // If-None-Match may carry a comma-separated list of tags.
+                if inm.split(',').any(|t| t.trim() == etag) {
+                    let mut resp = StatusCode::NOT_MODIFIED.into_response();
+                    let h = resp.headers_mut();
+                    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                    if let Ok(v) = HeaderValue::from_str(&etag) {
+                        h.insert(header::ETAG, v);
+                    }
+                    return resp;
+                }
+            }
+
             let mime = file.metadata.mimetype();
             let mut resp = (StatusCode::OK, file.data).into_response();
-            let headers = resp.headers_mut();
+            let h = resp.headers_mut();
             if let Ok(v) = HeaderValue::from_str(mime) {
-                headers.insert(header::CONTENT_TYPE, v);
+                h.insert(header::CONTENT_TYPE, v);
             }
-            headers.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=31536000, immutable"),
-            );
+            // `no-cache` = cacheable but must revalidate before reuse. Combined
+            // with the ETag this makes repeat loads cheap (304) while never
+            // serving a stale body across a deploy.
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            if let Ok(v) = HeaderValue::from_str(&etag) {
+                h.insert(header::ETAG, v);
+            }
             resp
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -1924,6 +1962,7 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
       <button data-key="/clear\r">/clear</button>
       <button data-key="/quit\r">/quit</button>
     </div>
+    <div id="inputToast" class="input-toast hidden" role="status" aria-live="polite"></div>
     <div class="input-row">
       <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />
       <button id="inputSend" class="input-send" title="Send without Enter">▶</button>
@@ -2004,6 +2043,107 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── serve_static cache headers (regression guard for the frozen-module
+    // bug) ────────────────────────────────────────────────────────────────
+    //
+    // Static assets must NOT be served `immutable`: ES-module `import`
+    // statements use bare specifiers with no `?v=` cache-buster, so an
+    // immutable year-long cache froze every import-only module in the browser
+    // forever. Assets must be `no-cache` (revalidate) + carry an ETag, and a
+    // matching `If-None-Match` must yield 304.
+    #[tokio::test]
+    async fn serve_static_is_not_immutable_and_has_etag() {
+        use axum::http::header;
+        let resp = serve_static(HeaderMap::new(), Path("index.js".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let cc = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            !cc.contains("immutable"),
+            "static assets must not be immutable, got Cache-Control: {cc:?}"
+        );
+        assert!(
+            cc.contains("no-cache"),
+            "static assets must be no-cache (revalidate), got Cache-Control: {cc:?}"
+        );
+        assert!(
+            resp.headers().get(header::ETAG).is_some(),
+            "static assets must carry an ETag for cheap revalidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_static_honors_if_none_match() {
+        use axum::http::header;
+        // First request: capture the ETag.
+        let resp = serve_static(HeaderMap::new(), Path("index.js".to_string())).await;
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .expect("etag present")
+            .to_string();
+
+        // Conditional request with the same ETag must 304.
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
+        let resp = serve_static(req_headers, Path("index.js".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+        // A stale ETag must still serve 200.
+        let mut stale = HeaderMap::new();
+        stale.insert(header::IF_NONE_MATCH, HeaderValue::from_static("\"stale\""));
+        let resp = serve_static(stale, Path("index.js".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Guard: if any web/static JS calls getUserMedia (mic access), the TWA
+    // must declare RECORD_AUDIO, otherwise Chrome (which delegates the OS
+    // permission prompt to the host app in a TWA) denies it. The committed
+    // source of truth for the generated AndroidManifest.xml is twa/init.js,
+    // which injects the permission on every `make twa`.
+    #[test]
+    fn twa_declares_record_audio_when_web_uses_getusermedia() {
+        use std::fs;
+        let static_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static");
+        let mut uses_mic = false;
+        let mut stack = vec![static_dir];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                    if let Ok(src) = fs::read_to_string(&path) {
+                        if src.contains("getUserMedia") {
+                            uses_mic = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if uses_mic {
+            let init_js = fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("twa/init.js"),
+            )
+            .expect("twa/init.js must exist");
+            assert!(
+                init_js.contains("android.permission.RECORD_AUDIO"),
+                "web/static uses getUserMedia but twa/init.js does not inject \
+                 android.permission.RECORD_AUDIO — the TWA mic prompt will be \
+                 denied at the OS layer"
+            );
+        }
+    }
 
     #[test]
     fn base64url_round_trip_p256_point() {

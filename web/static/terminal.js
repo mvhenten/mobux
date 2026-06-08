@@ -225,19 +225,13 @@ createGestureRecognizer(overlay, {
     }
   },
 
-  onDoubleTap(x, y) {
-    if (inputBar) {
-      inputBar.show();
-      return;
-    }
-    overlay.style.pointerEvents = 'none';
-    setTimeout(() => { overlay.style.pointerEvents = 'auto'; }, 500);
-    const el = document.elementFromPoint(x, y);
-    if (el) {
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
-    }
+  onDoubleTap() {
+    // This handler is wired on the touch overlay, so a double-tap here always
+    // comes from a touch device — exactly the case that wants the on-screen
+    // input bar. Lazily create it on first activation so a device that loaded
+    // as non-mobile (or just rotated into touch mode) still gets the bar
+    // instead of being stuck with no keyboard affordance.
+    ensureInputBar().show();
   },
 
   onHSwipe: (dir) => core.switchWindow(dir),
@@ -264,7 +258,7 @@ function mountReaderGestures() {
     // cursor / no live editing affordance — opening the keyboard
     // there is confusing. Drop back to xterm first, then show the
     // input bar so the keystrokes have somewhere to land.
-    onDoubleTap: () => { swapView('xterm'); if (inputBar) inputBar.show(); },
+    onDoubleTap: () => { swapView('xterm'); ensureInputBar().show(); },
     onScroll: (dy) => reader.scrollBy(dy),
     onTwoPullMove(pull, vh) {
       if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
@@ -301,10 +295,36 @@ function scheduleReveal() {
 core.addEventListener('data', scheduleReveal);
 
 // ── Mobile input bar ────────────────────────────────────────────────
+// `isMobile` is a one-shot guess at load time. It can be wrong: a device
+// may load as non-mobile and later become touch-primary (rotation, an
+// attached/detached input device, a misreported initial pointer query). So
+// we don't gate creation on it — we create the bar lazily on first use
+// (double-tap / activate), and also (re)evaluate when the pointer modality
+// changes. Either path funnels through `ensureInputBar()`, which is
+// idempotent.
 let inputBar = null;
-if (isMobile) {
-  inputBar = createInputBar(core.term, (d) => core.send(d));
+function ensureInputBar() {
+  if (!inputBar) {
+    inputBar = createInputBar(core.term, (d) => core.send(d));
+  }
+  return inputBar;
 }
+
+// If we already look like a touch device, mount eagerly so the existing
+// auto-hide / viewport plumbing is wired from the start.
+if (isMobile) {
+  ensureInputBar();
+}
+
+// Re-evaluate when the primary pointer flips to coarse (e.g. a 2-in-1
+// switching to tablet mode). matchMedia change fires on modality changes;
+// once coarse, make sure the bar exists.
+try {
+  const coarse = window.matchMedia('(pointer: coarse)');
+  const onPointerChange = (e) => { if (e.matches) ensureInputBar(); };
+  if (coarse.addEventListener) coarse.addEventListener('change', onPointerChange);
+  else if (coarse.addListener) coarse.addListener(onPointerChange);
+} catch (_) { /* matchMedia unsupported: lazy creation on tap still covers us */ }
 
 // ── View swap (xterm <-> reader) ────────────────────────────────────
 const reader = new ReaderView({ host: readerEl, core, overlay });
