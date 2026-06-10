@@ -77,8 +77,8 @@
 
   // After a successful run we poll /api/identify until the reported version is
   // no longer the one we started on (or we give up), then prompt a reload.
-  async function watchForNewVersion(fromVersion) {
-    const deadline = Date.now() + 180000; // 3 min — covers a cargo install build
+  async function watchForNewVersion(fromVersion, logPath) {
+    const deadline = Date.now() + 600000; // 10 min — cargo install builds take minutes
     showStatus('Updating… the service will restart. Watching for the new version.', 'ok');
     runBtn.disabled = true;
     checkBtn.disabled = true;
@@ -103,8 +103,9 @@
       }
     }
     showStatus(
-      'Timed out waiting for the new version. It may still be building, or it ' +
-        'rolled back — check the update log on the host (mobux-update.log).',
+      'Timed out after 10 minutes waiting for the new version. It may still be ' +
+        'building, or it rolled back — check the update log on the host: ' +
+        (logPath || 'mobux-update.log'),
       'error'
     );
     runBtn.disabled = false;
@@ -118,8 +119,8 @@
     try {
       const res = await fetchPath('/api/update/run', { method: 'POST' });
       if (res.status === 202) {
-        await res.json().catch(() => ({}));
-        watchForNewVersion(fromVersion);
+        const body = await res.json().catch(() => ({}));
+        watchForNewVersion(fromVersion, body.log);
         return;
       }
       // Structured error: {error: {kind, message}}

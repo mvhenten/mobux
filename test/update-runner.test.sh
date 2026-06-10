@@ -176,6 +176,33 @@ else
   echo "ok   - flock: SKIP (flock not installed)"
 fi
 
+# ── Test 6: cargo unresolvable → abort with a clear log line ───────────────
+# Point CARGO_BIN at a nonexistent command and HOME at a dir without
+# .cargo/bin/cargo, so both resolution steps fail. Binary must be untouched.
+ROOT6="$WORK/root6"; mkdir -p "$ROOT6/bin"
+BIN6="$ROOT6/bin/mobux"
+printf 'OLD-V0' > "$BIN6"
+OUT6="$(env \
+  HOME="$WORK" \
+  MOBUX_UPDATE_VERSION="6.0.0" \
+  MOBUX_UPDATE_BIN="$BIN6" \
+  MOBUX_UPDATE_ROOT="$ROOT6" \
+  MOBUX_UPDATE_SERVICE="ignored" \
+  MOBUX_UPDATE_PORT="$HC_PORT" \
+  MOBUX_UPDATE_SCHEME="http" \
+  MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
+  MOBUX_UPDATE_CARGO="cargo-definitely-not-installed" \
+  MOBUX_UPDATE_CRATE="mobux" \
+  MOBUX_UPDATE_LOG="$WORK/update.log" \
+  bash "$UPDATER" --no-systemd)"
+rc=$?
+[ "$rc" -eq 1 ] && ok "no-cargo: exit 1 (abort)" || bad "no-cargo: exit $rc (expected 1)"
+case "$OUT6" in
+  *"ABORT: cargo not found"*) ok "no-cargo: clear log line" ;;
+  *) bad "no-cargo: missing ABORT log line" ;;
+esac
+[ "$(cat "$BIN6")" = "OLD-V0" ] && ok "no-cargo: binary unchanged" || bad "no-cargo: binary changed"
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

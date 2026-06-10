@@ -436,6 +436,25 @@ fn cargo_root(bin: &Path) -> String {
         })
 }
 
+/// Resolve a usable `cargo` for the updater: search PATH, then fall back to
+/// `~/.cargo/bin/cargo` (the systemd unit PATH usually lacks it). Returned as
+/// `MOBUX_UPDATE_CARGO` so the script doesn't have to repeat the search. `None`
+/// means an update run would be a guaranteed no-op — refuse before the 202.
+fn resolve_cargo() -> Option<PathBuf> {
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("cargo");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let fallback = directories::BaseDirs::new()?
+        .home_dir()
+        .join(".cargo/bin/cargo");
+    fallback.is_file().then_some(fallback)
+}
+
 /// Write the updater script into `data_dir` (mode 0700) and return its path.
 fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
     let path = data_dir.join("mobux-update.sh");
@@ -485,6 +504,17 @@ pub fn spawn_updater(
         });
     };
 
+    // Preflight: without a resolvable cargo the script would fail on its first
+    // real step, leaving the UI to poll a version that never changes. Refuse
+    // here so the caller gets an immediate, actionable error instead.
+    let Some(cargo) = resolve_cargo() else {
+        return Err(RunError::SpawnFailed {
+            message: "cargo not found on PATH or at ~/.cargo/bin/cargo; add \
+                      ~/.cargo/bin to the unit's Environment=PATH (see DEPLOY.md)"
+                .to_string(),
+        });
+    };
+
     let bin = current_exe()?;
     let root = cargo_root(&bin);
     let script = write_updater_script(data_dir)?;
@@ -511,6 +541,7 @@ pub fn spawn_updater(
         .env("MOBUX_UPDATE_VERSION", version)
         .env("MOBUX_UPDATE_BIN", &bin)
         .env("MOBUX_UPDATE_ROOT", &root)
+        .env("MOBUX_UPDATE_CARGO", &cargo)
         .env("MOBUX_UPDATE_SERVICE", &service)
         .env("MOBUX_UPDATE_PORT", port.to_string())
         .env("MOBUX_UPDATE_SCHEME", scheme)
