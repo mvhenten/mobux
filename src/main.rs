@@ -1054,9 +1054,9 @@ async fn api_shell_integration_uninstall(
     Ok(Json(s))
 }
 
-async fn settings_page(State(state): State<AppState>) -> Html<String> {
+async fn settings_page(State(state): State<AppState>) -> Response {
     let v = &state.cache_bust;
-    Html(format!(
+    html_no_store(format!(
         r##"<!doctype html>
 <html lang="en">
 <head>
@@ -1412,62 +1412,32 @@ async fn serve_sw(State(state): State<AppState>) -> impl axum::response::IntoRes
 
 // Serve a frontend asset embedded in the binary (see `StaticAssets`).
 //
-// mobux is a single-user app served desktop→phone over LAN, so aggressive
-// caching buys nothing — and it actively broke us: assets used to be served
+// mobux is a single-user app served over a tailnet — bandwidth is irrelevant
+// and caching buys nothing. It actively broke us: assets used to be served
 // `immutable` for a year, and the only cache-busting was the `?v=<cache_bust>`
 // query param the HTML appends to `<script src>`/`<link href>` tags. But ES
 // module `import` statements use bare specifiers with no `?v=`, so every
 // import-only module (input-bar.js, reader-view.js, …) was frozen in the
 // browser cache forever and never picked up new deploys.
 //
-// Fix: serve `no-cache` (the browser must revalidate before reuse) plus a
-// content-based `ETag` so unchanged files revalidate cheaply with a 304. The
-// `?v=` query is harmless and left in place; it's ignored here (the wildcard
-// match is on the path, not the query).
-fn etag_for(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(bytes);
-    // Weak-ish strong ETag: first 16 bytes of the SHA-256 of the body is
-    // plenty to distinguish revisions of a single-user app's assets.
-    format!("\"{}\"", hex::encode(&digest[..16]))
-}
-
-async fn serve_static(headers_in: HeaderMap, Path(path): Path<String>) -> Response {
+// Fix: `no-store`, same as the HTML pages and sw.js — nothing is ever cached,
+// every load fetches the current bytes. The `?v=` query is harmless and left
+// in place; it's ignored here (the wildcard match is on the path, not the
+// query).
+async fn serve_static(Path(path): Path<String>) -> Response {
     use axum::http::header;
     match StaticAssets::get(&path) {
         Some(file) => {
-            let etag = etag_for(&file.data);
-
-            // Conditional request: if the client's cached copy matches, 304.
-            if let Some(inm) = headers_in
-                .get(header::IF_NONE_MATCH)
-                .and_then(|v| v.to_str().ok())
-            {
-                // If-None-Match may carry a comma-separated list of tags.
-                if inm.split(',').any(|t| t.trim() == etag) {
-                    let mut resp = StatusCode::NOT_MODIFIED.into_response();
-                    let h = resp.headers_mut();
-                    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-                    if let Ok(v) = HeaderValue::from_str(&etag) {
-                        h.insert(header::ETAG, v);
-                    }
-                    return resp;
-                }
-            }
-
             let mime = file.metadata.mimetype();
             let mut resp = (StatusCode::OK, file.data).into_response();
             let h = resp.headers_mut();
             if let Ok(v) = HeaderValue::from_str(mime) {
                 h.insert(header::CONTENT_TYPE, v);
             }
-            // `no-cache` = cacheable but must revalidate before reuse. Combined
-            // with the ETag this makes repeat loads cheap (304) while never
-            // serving a stale body across a deploy.
-            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-            if let Ok(v) = HeaderValue::from_str(&etag) {
-                h.insert(header::ETAG, v);
-            }
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, must-revalidate"),
+            );
             resp
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -1510,7 +1480,7 @@ fn qr_svg(data: &str) -> String {
     }
 }
 
-async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html<String> {
+async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Response {
     let host = host_from_headers(&headers);
     let host_esc = html_escape::encode_text(&host);
 
@@ -1570,7 +1540,7 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     };
 
     let v = &state.cache_bust;
-    Html(format!(
+    html_no_store(format!(
         r##"<!doctype html>
 <html lang="en">
 <head>
@@ -2047,15 +2017,15 @@ mod tests {
     // ── serve_static cache headers (regression guard for the frozen-module
     // bug) ────────────────────────────────────────────────────────────────
     //
-    // Static assets must NOT be served `immutable`: ES-module `import`
-    // statements use bare specifiers with no `?v=` cache-buster, so an
-    // immutable year-long cache froze every import-only module in the browser
-    // forever. Assets must be `no-cache` (revalidate) + carry an ETag, and a
-    // matching `If-None-Match` must yield 304.
+    // Static assets must be `no-store`: ES-module `import` statements use
+    // bare specifiers with no `?v=` cache-buster, so any browser caching
+    // (a year of `immutable` in the worst historical case) leaves stale
+    // modules running after a deploy. mobux runs over a tailnet — bandwidth
+    // is irrelevant, nothing should ever be cached.
     #[tokio::test]
-    async fn serve_static_is_not_immutable_and_has_etag() {
+    async fn serve_static_is_no_store() {
         use axum::http::header;
-        let resp = serve_static(HeaderMap::new(), Path("index.js".to_string())).await;
+        let resp = serve_static(Path("index.js".to_string())).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let cc = resp
@@ -2064,42 +2034,13 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(
+            cc.contains("no-store"),
+            "static assets must be no-store, got Cache-Control: {cc:?}"
+        );
+        assert!(
             !cc.contains("immutable"),
-            "static assets must not be immutable, got Cache-Control: {cc:?}"
+            "static assets must never be immutable, got Cache-Control: {cc:?}"
         );
-        assert!(
-            cc.contains("no-cache"),
-            "static assets must be no-cache (revalidate), got Cache-Control: {cc:?}"
-        );
-        assert!(
-            resp.headers().get(header::ETAG).is_some(),
-            "static assets must carry an ETag for cheap revalidation"
-        );
-    }
-
-    #[tokio::test]
-    async fn serve_static_honors_if_none_match() {
-        use axum::http::header;
-        // First request: capture the ETag.
-        let resp = serve_static(HeaderMap::new(), Path("index.js".to_string())).await;
-        let etag = resp
-            .headers()
-            .get(header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .expect("etag present")
-            .to_string();
-
-        // Conditional request with the same ETag must 304.
-        let mut req_headers = HeaderMap::new();
-        req_headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
-        let resp = serve_static(req_headers, Path("index.js".to_string())).await;
-        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
-
-        // A stale ETag must still serve 200.
-        let mut stale = HeaderMap::new();
-        stale.insert(header::IF_NONE_MATCH, HeaderValue::from_static("\"stale\""));
-        let resp = serve_static(stale, Path("index.js".to_string())).await;
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // Guard: if any web/static JS calls getUserMedia (mic access), the TWA
