@@ -17,7 +17,18 @@ deliberately `cargo install` a new version and restart the service.
 
 ## Install
 
-From crates.io (released versions):
+Prebuilt Linux x86_64 binary from the GitHub release (seconds, no compile;
+every release ships `mobux-x86_64-unknown-linux-gnu.tar.gz` + a `.sha256`
+checksum file as assets):
+
+```bash
+curl -fsSLO https://github.com/mvhenten/mobux/releases/latest/download/mobux-x86_64-unknown-linux-gnu.tar.gz
+curl -fsSLO https://github.com/mvhenten/mobux/releases/latest/download/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c mobux-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf mobux-x86_64-unknown-linux-gnu.tar.gz -C ~/.cargo/bin mobux
+```
+
+From crates.io (released versions; 5-10 min release-mode compile):
 
 ```bash
 cargo install mobux --locked
@@ -117,7 +128,11 @@ and **no commit back to `main`** (branch protection forbids it). The pipeline is
    `workflow_run` on CI) runs `npx semantic-release`. It computes the next
    version from the conventional commits since the latest `v*` tag, then:
    creates the **git tag** (`vX.Y.Z`), a **GitHub Release** with generated
-   notes, and **publishes to crates.io**.
+   notes plus a **prebuilt Linux x86_64 binary**
+   (`mobux-x86_64-unknown-linux-gnu.tar.gz` + `.sha256`, built by
+   `scripts/build-release-asset.sh` after the version is patched in), and
+   **publishes to crates.io**. The in-app self-updater consumes that asset, so
+   updates take seconds instead of a 5-10 min compile.
 
 ### The tag is the version truth
 
@@ -163,8 +178,13 @@ The only secret needed is **`CARGO_REGISTRY_TOKEN`** (crates.io publish);
 "Allow GitHub Actions to create and approve pull requests" repo setting are **no
 longer used** and can be removed.
 
-Deploying to hosts stays a separate, manual concern (see above; in-app
-self-update is issue #130).
+Deploying to hosts stays a separate concern: manual (see above) or the in-app
+self-updater (issue #130). The updater downloads the release's prebuilt binary
+asset, verifies its sha256, and atomically replaces the binary `ExecStart`
+points at (`~/.cargo/bin/mobux`), then restarts the unit and health-checks the
+new version (rollback on failure). Releases without the asset (≤ v0.1.10) fall
+back to `cargo install`, which is why the unit PATH should still include
+`~/.cargo/bin`.
 
 ## Development (never touch `:5151`)
 

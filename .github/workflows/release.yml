@@ -3,10 +3,13 @@ name: Release
 # Tag-based releasing (semantic-release). Runs only after the CI workflow
 # completes successfully on main: computes the next version from conventional
 # commits since the latest v* tag, then tags + creates a GitHub release with
-# generated notes + publishes to crates.io. No release PR, no commit back to
-# main — the git tag is the version truth (in-repo Cargo.toml stays at the last
-# committed version; the publish step patches the real version in the workflow
-# workspace only). See DEPLOY.md → "Release & publish".
+# generated notes + a prebuilt Linux x86_64 binary asset (built by
+# scripts/build-release-asset.sh, consumed by the in-app self-updater) +
+# publishes to crates.io. No release PR, no commit back to main — the git tag
+# is the version truth (in-repo Cargo.toml stays at the last committed
+# version; the prepare step patches the real version in the workflow workspace
+# only, so the built binary and the crates.io artifact carry it). See
+# DEPLOY.md → "Release & publish".
 
 on:
   workflow_run:
@@ -38,6 +41,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+      # The prepare step builds the release binary (scripts/build-release-asset.sh).
+      - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - name: Run semantic-release
         run: npx semantic-release

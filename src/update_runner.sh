@@ -5,7 +5,10 @@
 #
 # Steps:
 #   1. snapshot the current binary  (cp mobux mobux.prev)
-#   2. cargo install mobux --locked --version <VERSION> --root <ROOT>
+#   2. install the new version: download the prebuilt release asset from
+#      GitHub releases (curl + sha256 verify + atomic rename over <BIN>);
+#      when the asset is missing (older releases) or fails verification,
+#      fall back to `cargo install mobux --locked --version <VERSION>`
 #   3. restart the systemd unit     (systemctl --user restart <SERVICE>)
 #   4. health-check /api/identify on <PORT> for the new version, up to N s
 #   5. on failure: restore mobux.prev, restart again, log the rollback
@@ -18,8 +21,17 @@
 #   MOBUX_UPDATE_PORT      port the instance serves on (for health check)
 #   MOBUX_UPDATE_SCHEME    http|https (default https)
 #   MOBUX_UPDATE_LOG       log file path
-#   MOBUX_UPDATE_CARGO     cargo to run (default "cargo", with a fallback to
-#                          ~/.cargo/bin/cargo when that's not on PATH)
+#   MOBUX_UPDATE_CARGO     cargo to run for the fallback (default "cargo",
+#                          with a fallback to ~/.cargo/bin/cargo when that's
+#                          not on PATH)
+#   MOBUX_UPDATE_ASSET_BASE  release-asset base URL (default
+#                          https://github.com/mvhenten/mobux/releases/download;
+#                          the asset is fetched from
+#                          <BASE>/v<VERSION>/<ASSET>). Tests point this at a
+#                          file:// dir to stay off the network.
+#   MOBUX_UPDATE_ASSET     asset file name (default
+#                          mobux-x86_64-unknown-linux-gnu.tar.gz, matching
+#                          what scripts/build-release-asset.sh uploads)
 #
 # Flags:
 #   --no-systemd   skip all systemctl calls (test mode); steps 1,2,4,5 only,
@@ -43,6 +55,8 @@ SCHEME="${MOBUX_UPDATE_SCHEME:-https}"
 HEALTH_TIMEOUT="${MOBUX_UPDATE_HEALTH_TIMEOUT:-90}"
 CARGO_BIN="${MOBUX_UPDATE_CARGO:-cargo}"
 CRATE="${MOBUX_UPDATE_CRATE:-mobux}"
+ASSET_BASE="${MOBUX_UPDATE_ASSET_BASE:-https://github.com/mvhenten/mobux/releases/download}"
+ASSET="${MOBUX_UPDATE_ASSET:-${CRATE}-x86_64-unknown-linux-gnu.tar.gz}"
 
 PREV="${BIN}.prev"
 
@@ -64,6 +78,49 @@ resolve_cargo() {
   fi
   log "ABORT: cargo not found on PATH or at $HOME/.cargo/bin/cargo — set MOBUX_UPDATE_CARGO or add ~/.cargo/bin to the unit's PATH"
   return 1
+}
+
+# Primary install path: download the prebuilt release asset + its .sha256,
+# verify, and atomically rename the extracted binary over $BIN (the staging
+# dir lives under $ROOT, same filesystem as $BIN, so mv is an atomic rename).
+# Any failure returns 1 and the caller falls back to `cargo install` — the
+# asset is simply missing on releases that predate prebuilt binaries.
+install_from_release() {
+  local url="${ASSET_BASE}/v${VERSION}/${ASSET}"
+  local work
+  work="$(mktemp -d "${ROOT}/mobux-update-dl.XXXXXX")" || {
+    log "could not create staging dir under ${ROOT}"
+    return 1
+  }
+  log "downloading prebuilt binary ${url}"
+  if ! curl -fsSL --retry 2 --max-time 300 -o "${work}/${ASSET}" "$url"; then
+    log "prebuilt asset unavailable for ${VERSION}; falling back to cargo install"
+    rm -rf "$work"
+    return 1
+  fi
+  if ! curl -fsSL --retry 2 --max-time 60 -o "${work}/${ASSET}.sha256" "${url}.sha256"; then
+    log "checksum file unavailable for ${VERSION}; falling back to cargo install"
+    rm -rf "$work"
+    return 1
+  fi
+  if ! (cd "$work" && sha256sum -c "${ASSET}.sha256" >/dev/null 2>&1); then
+    log "sha256 verification FAILED for ${ASSET}; falling back to cargo install"
+    rm -rf "$work"
+    return 1
+  fi
+  if ! tar -xzf "${work}/${ASSET}" -C "$work" "$CRATE"; then
+    log "could not extract ${CRATE} from ${ASSET}; falling back to cargo install"
+    rm -rf "$work"
+    return 1
+  fi
+  chmod +x "${work}/${CRATE}"
+  if ! mv -f "${work}/${CRATE}" "$BIN"; then
+    log "could not move new binary into place at ${BIN}; falling back to cargo install"
+    rm -rf "$work"
+    return 1
+  fi
+  rm -rf "$work"
+  log "installed prebuilt binary ${VERSION} -> ${BIN} (sha256 verified)"
 }
 
 restart_service() {
@@ -108,8 +165,6 @@ rollback() {
 main() {
   log "self-update start: crate=${CRATE} version=${VERSION} bin=${BIN} root=${ROOT} service=${SERVICE} port=${PORT}"
 
-  resolve_cargo || exit 1
-
   # Cross-process lock (belt-and-braces with the in-process guard in mobux):
   # even two independently spawned scripts can't race the snapshot/install. The
   # lock fd stays open for the whole run; flock releases it when the process
@@ -136,13 +191,18 @@ main() {
     exit 1
   fi
 
-  log "cargo install ${CRATE} --locked --version ${VERSION} --root ${ROOT}"
-  if ! "$CARGO_BIN" install "$CRATE" --locked --version "$VERSION" --root "$ROOT" --force; then
-    log "ERROR: cargo install failed; binary unchanged, no restart needed"
-    # cargo install is atomic-ish: a failed build leaves the old binary. No
-    # rollback needed, but make sure the snapshot is in place anyway.
-    cp -f "$PREV" "$BIN" 2>/dev/null || true
-    exit 1
+  if ! install_from_release; then
+    # Fallback: releases without a prebuilt asset install via cargo, the
+    # original (slow, 5-10 min compile) path. cargo is only required here.
+    resolve_cargo || exit 1
+    log "cargo install ${CRATE} --locked --version ${VERSION} --root ${ROOT}"
+    if ! "$CARGO_BIN" install "$CRATE" --locked --version "$VERSION" --root "$ROOT" --force; then
+      log "ERROR: cargo install failed; binary unchanged, no restart needed"
+      # cargo install is atomic-ish: a failed build leaves the old binary. No
+      # rollback needed, but make sure the snapshot is in place anyway.
+      cp -f "$PREV" "$BIN" 2>/dev/null || true
+      exit 1
+    fi
   fi
 
   restart_service

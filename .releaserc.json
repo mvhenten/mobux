@@ -27,10 +27,20 @@
     ],
     "@semantic-release-cargo/semantic-release-cargo",
     [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "bash scripts/build-release-asset.sh ${nextRelease.version}"
+      }
+    ],
+    [
       "@semantic-release/github",
       {
         "successComment": false,
-        "failComment": false
+        "failComment": false,
+        "assets": [
+          { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz" },
+          { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256" }
+        ]
       }
     ]
   ]
