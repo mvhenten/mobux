@@ -63,8 +63,13 @@ ExecStart=%h/.cargo/bin/mobux
 Environment=PORT=5151
 Environment=MOBUX_AUTH_USER=changeme
 Environment=MOBUX_PIN=changeme
+# The self-updater runs `cargo install`; the default unit PATH lacks ~/.cargo/bin.
+Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 RestartSec=5
+# Only kill the mobux process itself — the tmux server it spawned lives in the
+# same cgroup, and the default would kill it (and every session) on restart.
+KillMode=process
 
 [Install]
 WantedBy=default.target

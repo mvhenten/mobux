@@ -18,6 +18,8 @@
 #   MOBUX_UPDATE_PORT      port the instance serves on (for health check)
 #   MOBUX_UPDATE_SCHEME    http|https (default https)
 #   MOBUX_UPDATE_LOG       log file path
+#   MOBUX_UPDATE_CARGO     cargo to run (default "cargo", with a fallback to
+#                          ~/.cargo/bin/cargo when that's not on PATH)
 #
 # Flags:
 #   --no-systemd   skip all systemctl calls (test mode); steps 1,2,4,5 only,
@@ -46,6 +48,22 @@ PREV="${BIN}.prev"
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+# Resolve a usable cargo. Under systemd the unit PATH usually lacks
+# ~/.cargo/bin, so a bare `cargo` fails instantly — fall back to the rustup
+# default install location before giving up with a clear log line.
+resolve_cargo() {
+  if command -v "$CARGO_BIN" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    log "cargo not on PATH; falling back to $HOME/.cargo/bin/cargo"
+    CARGO_BIN="$HOME/.cargo/bin/cargo"
+    return 0
+  fi
+  log "ABORT: cargo not found on PATH or at $HOME/.cargo/bin/cargo — set MOBUX_UPDATE_CARGO or add ~/.cargo/bin to the unit's PATH"
+  return 1
 }
 
 restart_service() {
@@ -89,6 +107,8 @@ rollback() {
 
 main() {
   log "self-update start: crate=${CRATE} version=${VERSION} bin=${BIN} root=${ROOT} service=${SERVICE} port=${PORT}"
+
+  resolve_cargo || exit 1
 
   # Cross-process lock (belt-and-braces with the in-process guard in mobux):
   # even two independently spawned scripts can't race the snapshot/install. The
