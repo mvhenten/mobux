@@ -43,10 +43,48 @@ const twaManifest = new TwaManifest(json);
 
 const log = new ConsoleLog('twa-init');
 
+// Permissions Bubblewrap can't express via twa-manifest.json. In a TWA, Chrome
+// delegates OS permission prompts (mic, camera, …) to the host app, so
+// getUserMedia({audio:true}) is denied unless the APK itself holds the
+// permission. Bubblewrap only emits permissions for its known features
+// (notifications, location, …); there is no manifest field for an arbitrary
+// uses-permission. So we patch the rendered AndroidManifest.xml here. This
+// runs on every `make twa` (which does `rm -rf twa/app` first), so a manifest
+// regen can never silently drop it. Idempotent: skips perms already present.
+const EXTRA_PERMISSIONS = ['android.permission.RECORD_AUDIO'];
+
+function injectPermissions(targetDir, log) {
+  const manifestXmlPath = path.join(targetDir, 'app/src/main/AndroidManifest.xml');
+  if (!fs.existsSync(manifestXmlPath)) {
+    throw new Error(`[twa-init] expected generated manifest at ${manifestXmlPath}`);
+  }
+  let xml = fs.readFileSync(manifestXmlPath, 'utf8');
+  const missing = EXTRA_PERMISSIONS.filter(
+    (p) => !xml.includes(`android:name="${p}"`),
+  );
+  if (missing.length === 0) {
+    log.info('Extra permissions already present in AndroidManifest.xml');
+    return;
+  }
+  const lines = missing
+    .map((p) => `    <uses-permission android:name="${p}"/>`)
+    .join('\n');
+  // Insert right after the opening <manifest ...> tag.
+  const re = /(<manifest\b[^>]*>)/;
+  if (!re.test(xml)) {
+    throw new Error('[twa-init] could not locate <manifest> tag to inject permissions');
+  }
+  xml = xml.replace(re, `$1\n\n${lines}`);
+  fs.writeFileSync(manifestXmlPath, xml);
+  log.info(`Injected permissions into AndroidManifest.xml: ${missing.join(', ')}`);
+}
+
 (async () => {
   fs.mkdirSync(targetDir, { recursive: true });
   const generator = new TwaGenerator();
   await generator.createTwaProject(targetDir, twaManifest, log);
+
+  injectPermissions(targetDir, log);
 
   // createTwaProject saves the manifest into the target dir as part of its
   // template processing. Re-write it from our source-of-truth so any

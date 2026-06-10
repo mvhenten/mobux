@@ -22,14 +22,14 @@ pub fn detect_session_shell() -> (Shell, String) {
             return parse_shell_path(&override_shell);
         }
     }
-    
+
     // Honor $SHELL
     if let Ok(shell_path) = env::var("SHELL") {
         if !shell_path.is_empty() {
             return parse_shell_path(&shell_path);
         }
     }
-    
+
     // Fallback to bash
     (Shell::Bash, "/bin/bash".to_string())
 }
@@ -502,7 +502,10 @@ mod tests {
         );
         fs::write(&rc, &v1).unwrap();
         let st = shell_state(home.path(), Shell::Bash);
-        assert!(matches!(st, ShellState::Outdated { version: 1 }), "got {st:?}");
+        assert!(
+            matches!(st, ShellState::Outdated { version: 1 }),
+            "got {st:?}"
+        );
     }
 
     #[test]

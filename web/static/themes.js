@@ -66,6 +66,51 @@ export const THEMES = [
       '#839496', '#6c71c4', '#93a1a1', '#fdf6e3',
     ],
   },
+  {
+    id: 'solarized-light',
+    label: 'Solarized Light',
+    aceTheme: 'ace/theme/solarized_light',
+    // solarized (Ethan Schoonover). Same 16 accents as solarized-dark;
+    // only bg/fg flip — bg = base3 (#fdf6e3), fg = base00.
+    background: '#fdf6e3',
+    foreground: '#657b83',
+    palette: [
+      '#073642', '#dc322f', '#859900', '#b58900',
+      '#268bd2', '#d33682', '#2aa198', '#eee8d5',
+      '#002b36', '#cb4b16', '#586e75', '#657b83',
+      '#839496', '#6c71c4', '#93a1a1', '#fdf6e3',
+    ],
+  },
+  {
+    id: 'gruvbox-light',
+    label: 'Gruvbox Light',
+    aceTheme: 'ace/theme/gruvbox_light_hard',
+    // gruvbox light (Pavel Pertsev). bg = bg0_h (#f9f5d7), fg = fg1.
+    // ANSI black kept dark so color-0 text stays visible on the light bg.
+    background: '#f9f5d7',
+    foreground: '#3c3836',
+    palette: [
+      '#3c3836', '#cc241d', '#98971a', '#d79921',
+      '#458588', '#b16286', '#689d6a', '#7c6f64',
+      '#928374', '#9d0006', '#79740e', '#b57614',
+      '#076678', '#8f3f71', '#427b58', '#282828',
+    ],
+  },
+  {
+    id: 'github-light',
+    label: 'GitHub Light',
+    aceTheme: 'ace/theme/github_light_default',
+    // GitHub Light Default. Softened off-white bg (#f6f8fa) per the
+    // project's muted/low-contrast preference; fg = #24292e.
+    background: '#f6f8fa',
+    foreground: '#24292e',
+    palette: [
+      '#24292e', '#d73a49', '#28a745', '#dbab09',
+      '#0366d6', '#5a32a3', '#1b7c83', '#6a737d',
+      '#959da5', '#cb2431', '#22863a', '#b08800',
+      '#005cc5', '#5a32a3', '#3192aa', '#d1d5da',
+    ],
+  },
 ];
 
 const BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
@@ -96,6 +141,8 @@ export function applyReaderVars(theme) {
   for (let i = 0; i < 16; i++) {
     reader.style.setProperty(`--ansi-${i}`, theme.palette[i]);
   }
+  reader.style.background = theme.background || theme.palette[0];
+  reader.style.color = theme.foreground || theme.palette[7] || '#c5c8c6';
 }
 
 // Push the bundle's palette onto the active terminal renderer.
@@ -108,6 +155,8 @@ export function applyTerminalColors(theme) {
   const sterk = window.__sterk;
   if (sterk && sterk.options && sterk.options.theme && Array.isArray(sterk.options.theme.palette)) {
     sterk.options.theme.palette = theme.palette.slice(0, 16);
+    sterk.options.theme.background = theme.background || theme.palette[0];
+    sterk.options.theme.foreground = theme.foreground || theme.palette[7] || '#c5c8c6';
     return true;
   }
 
@@ -119,8 +168,8 @@ export function applyTerminalColors(theme) {
   if (xterm && xterm.options) {
     const p = theme.palette;
     xterm.options.theme = {
-      background: p[0],
-      foreground: p[7] || '#c5c8c6',
+      background: theme.background || p[0],
+      foreground: theme.foreground || p[7] || '#c5c8c6',
       black: p[0],   red: p[1],     green: p[2],   yellow: p[3],
       blue:  p[4],   magenta: p[5], cyan:  p[6],   white: p[7],
       brightBlack: p[8],  brightRed: p[9],     brightGreen: p[10], brightYellow: p[11],

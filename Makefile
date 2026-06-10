@@ -9,10 +9,19 @@ MOBUX_SMOKE_PORT ?= 8281
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
+
+# TWA build identity (overridable so `twa-dev` can produce a coexisting app).
+# Prod defaults must keep current behavior exactly.
+MOBUX_PACKAGE_ID  ?= io.github.mvhenten.mobux
+MOBUX_APP_NAME    ?= Mobux
+TWA_INSTALL_DIR   ?= web/static/install
+TWA_WELLKNOWN_DIR ?= web/static/.well-known
+MOBUX_DEV_DOMAIN  ?= sandbox:5152
 PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
-.PHONY: build run clean start stop restart status logs test web setup setup-twa twa \
+.PHONY: build run clean start stop restart status logs test web setup setup-twa twa twa-dev \
+        transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
         podman-build podman-run podman-stop podman-test stt-model
 
@@ -27,11 +36,35 @@ PODMAN_IMAGE     ?= localhost/mobux:dev
 PODMAN_PORT      ?= 8381
 PODMAN_NAME      ?= mobux-podman
 
+# Local speech-to-text (whisper.cpp) for transcribing uploaded recordings.
+# Host-side tooling — NOT bundled into the mobux binary. Lives under
+# $(WHISPER_DIR); `transcribe` is capability-gated and no-ops gracefully if
+# whisper isn't installed (run `make setup-transcribe`).
+WHISPER_DIR        ?= $(HOME)/.local/whisper.cpp
+WHISPER_MODEL_NAME ?= base.en
+
 setup:
 	./bin/setup
 
 setup-twa:
 	./bin/setup-twa
+
+# Transcribe an uploaded audio/video file with local whisper.cpp.
+#   make transcribe FILE=/tmp/mobux-uploads/<file>
+transcribe:
+	@if [ -z "$(FILE)" ]; then echo "usage: make transcribe FILE=<audio-or-video-file>" >&2; exit 2; fi
+	@WHISPER_DIR="$(WHISPER_DIR)" ./bin/transcribe "$(FILE)"
+
+# Build whisper.cpp + download the model into $(WHISPER_DIR). Idempotent.
+setup-transcribe:
+	@command -v ffmpeg >/dev/null 2>&1 || { echo "ffmpeg is required (apt install ffmpeg)"; exit 1; }
+	@if [ ! -d "$(WHISPER_DIR)" ]; then \
+		git clone --depth 1 https://github.com/ggerganov/whisper.cpp "$(WHISPER_DIR)"; \
+	fi
+	cmake -B "$(WHISPER_DIR)/build" -S "$(WHISPER_DIR)" -DCMAKE_BUILD_TYPE=Release
+	cmake --build "$(WHISPER_DIR)/build" -j --config Release
+	bash "$(WHISPER_DIR)/models/download-ggml-model.sh" "$(WHISPER_MODEL_NAME)" "$(WHISPER_DIR)/models"
+	@echo "whisper.cpp ready at $(WHISPER_DIR) (model: $(WHISPER_MODEL_NAME))"
 
 web:
 	node web/build.js
@@ -94,6 +127,9 @@ smoke-start: build
 	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
 		HOME=/tmp/mobux-smoke/home HISTFILE=/dev/null \
 		MOBUX_TMUX_SOCKET=mobux-test \
+		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
+		MOBUX_UPDATE_CHECK_URL=http://localhost:$(MOBUX_SMOKE_PORT)/api/update/test-index \
+		MOBUX_UPDATE_DISABLE_RUN=1 \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
@@ -133,6 +169,26 @@ test-critical-path:
 		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
+
+# Mesh relay flow: smoke instance is the relay node, the spec spins up a
+# second TLS instance (the peer) on its own port/data-dir/tmux socket and
+# drives it through the relay. Proves peer selection → relay → upstream-auth
+# → TOFU pin → pin-mismatch recovery end to end.
+.PHONY: test-mesh
+test-mesh:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/mesh-relay.spec.cjs
+
+# Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
+# against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,
+# no network, no prod anything). See test/update-runner.test.sh.
+.PHONY: test-update-runner
+test-update-runner:
+	@command -v shellcheck >/dev/null 2>&1 && shellcheck src/update_runner.sh test/update-runner.test.sh || echo "shellcheck not installed; skipping lint"
+	@bash test/update-runner.test.sh
 
 .PHONY: test-e2e
 test-e2e:
@@ -244,9 +300,11 @@ twa:
 			"$${ANDROID_HOME:-$$HOME/.android}" \
 			> "$$HOME/.bubblewrap/config.json"; \
 	fi; \
-	echo "Rendering twa/twa-manifest.json (MOBUX_DOMAIN=$$MOBUX_DOMAIN)"; \
+	echo "Rendering twa/twa-manifest.json (MOBUX_DOMAIN=$$MOBUX_DOMAIN, packageId=$(MOBUX_PACKAGE_ID), name=$(MOBUX_APP_NAME))"; \
 	sed -e "s|__MOBUX_DOMAIN__|$$MOBUX_DOMAIN|g" \
 		-e "s|__MOBUX_KEYSTORE_PATH__|$$KEYSTORE|g" \
+		-e "s|__MOBUX_PACKAGE_ID__|$(MOBUX_PACKAGE_ID)|g" \
+		-e "s|__MOBUX_APP_NAME__|$(MOBUX_APP_NAME)|g" \
 		twa/twa-manifest.json.template > twa/twa-manifest.json; \
 	if [ -d twa/app ]; then \
 		echo "Regenerating TWA project from manifest (twa/app/)"; \
@@ -263,9 +321,9 @@ twa:
 		echo "Expected signed APK at $$APK_SRC but it is missing." >&2; \
 		exit 1; \
 	fi; \
-	mkdir -p web/static/install; \
-	cp "$$APK_SRC" web/static/install/mobux.apk; \
-	echo "Wrote web/static/install/mobux.apk"; \
+	mkdir -p $(TWA_INSTALL_DIR); \
+	cp "$$APK_SRC" $(TWA_INSTALL_DIR)/mobux.apk; \
+	echo "Wrote $(TWA_INSTALL_DIR)/mobux.apk"; \
 	FINGERPRINT="$$(keytool -list -v \
 		-keystore "$$KEYSTORE" \
 		-alias mobux \
@@ -275,10 +333,21 @@ twa:
 		echo "Could not extract SHA-256 fingerprint from keystore." >&2; \
 		exit 1; \
 	fi; \
-	mkdir -p web/static/.well-known; \
-	printf '[{\n  "relation": ["delegate_permission/common.handle_all_urls"],\n  "target": {\n    "namespace": "android_app",\n    "package_name": "io.github.mvhenten.mobux",\n    "sha256_cert_fingerprints": ["%s"]\n  }\n}]\n' "$$FINGERPRINT" > web/static/.well-known/assetlinks.json; \
-	echo "Wrote web/static/.well-known/assetlinks.json (fingerprint $$FINGERPRINT)"; \
+	mkdir -p $(TWA_WELLKNOWN_DIR); \
+	printf '[{\n  "relation": ["delegate_permission/common.handle_all_urls"],\n  "target": {\n    "namespace": "android_app",\n    "package_name": "$(MOBUX_PACKAGE_ID)",\n    "sha256_cert_fingerprints": ["%s"]\n  }\n}]\n' "$$FINGERPRINT" > $(TWA_WELLKNOWN_DIR)/assetlinks.json; \
+	echo "Wrote $(TWA_WELLKNOWN_DIR)/assetlinks.json (fingerprint $$FINGERPRINT)"; \
 	if [ "$$FRESH_KEY" = "1" ]; then \
 		echo ""; \
 		echo "Reminder: back up $$KEYSTORE and $$PASSFILE before you forget."; \
 	fi
+
+# twa-dev: build the coexisting "Mobux Dev" app (package id ...mobux.dev, host
+# sandbox:5152) into the repo-local staging dir twa/dist-dev/ so it never
+# clobbers the prod web/static/install/mobux.apk. Reuses the same signing key.
+twa-dev:
+	@$(MAKE) twa \
+		MOBUX_DOMAIN=$(MOBUX_DEV_DOMAIN) \
+		MOBUX_PACKAGE_ID=io.github.mvhenten.mobux.dev \
+		MOBUX_APP_NAME="Mobux Dev" \
+		TWA_INSTALL_DIR=twa/dist-dev/install \
+		TWA_WELLKNOWN_DIR=twa/dist-dev/.well-known

@@ -28,6 +28,9 @@ import 'ace-builds/src-noconflict/theme-tomorrow_night';
 import 'ace-builds/src-noconflict/theme-gruvbox';
 import 'ace-builds/src-noconflict/theme-nord_dark';
 import 'ace-builds/src-noconflict/theme-solarized_dark';
+import 'ace-builds/src-noconflict/theme-solarized_light';
+import 'ace-builds/src-noconflict/theme-gruvbox_light_hard';
+import 'ace-builds/src-noconflict/theme-github_light_default';
 
 // Pin to window so terminal-core.js can reach it from the classic script
 window.Sterk = { createTerminal };

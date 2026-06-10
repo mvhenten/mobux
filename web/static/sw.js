@@ -1,6 +1,9 @@
 // Minimal push-only service worker.
 // No fetch handler, no precache — mobux relies on the cache_bust query param
 // for static asset versioning instead.
+// The Rust handler at /sw.js appends a per-restart version comment so this
+// file's bytes differ on every release, forcing Chrome to re-install the
+// SW and run skipWaiting + clients.claim.
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -39,10 +42,22 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const url = event.notification.data?.url || '/';
+  // Match an open client by session pathname (the `?w=N` query holds
+  // the originating tmux window). On a hit, focus the existing tab and
+  // post `mobux-navigate` so it can switch windows internally — no
+  // duplicate tab, no full reload.
+  let target;
+  try { target = new URL(url, self.location.origin); }
+  catch (_) { target = new URL('/', self.location.origin); }
   event.waitUntil(
-    clients.matchAll({ type: 'window' }).then((all) => {
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((all) => {
       for (const client of all) {
-        if (client.url.includes(url)) return client.focus();
+        let cu;
+        try { cu = new URL(client.url); } catch (_) { continue; }
+        if (cu.pathname === target.pathname) {
+          client.postMessage({ type: 'mobux-navigate', url });
+          return client.focus();
+        }
       }
       return clients.openWindow(url);
     })

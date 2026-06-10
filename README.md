@@ -13,7 +13,8 @@
 - **Full terminal** — xterm.js v6 with scrollback, colors, and links
 - **Touch-native input** — bottom input bar with control key ribbon (^C, arrows, backspace, etc.) and native text field with autocomplete/voice support
 - **Two send modes** — keyboard Enter executes; ▶ button injects text without Enter for readline editing
-- **Image upload** — 📷 button uploads photos from camera/gallery, injects the file path into the terminal
+- **Attach any file** — 📎 button uploads anything (gallery photo, video, audio, PDF, logs…) and injects the saved path into the terminal
+- **Audio record** — 🎤 button records mic audio in-browser and uploads it; transcribe it locally with `make transcribe FILE=<path>` (offline whisper.cpp — `make setup-transcribe` to install). No on-device STT bundled in the binary; nothing leaves the host
 - **Swipe gestures** — swipe sessions to rename/kill, swipe terminal to switch tmux windows, pinch to zoom, long-press for tmux commands
 - **Session management** — create, rename, kill sessions from a mobile-native home screen
 - **Secure** — self-signed TLS by default, HTTP Basic auth with PIN
@@ -70,9 +71,15 @@ make run
 └──────────────┘                    └──────────────┘
 ```
 
-- **Server**: Rust (axum) — serves static files, WebSocket terminal proxy, REST API for session/pane management, file upload
+- **Server**: Rust (axum) — serves the frontend (embedded in the binary), WebSocket terminal proxy, REST API for session/pane management, file upload
 - **Client**: vanilla JS modules — xterm.js (patched, bundled with esbuild), touch gesture recognizer, mobile input bar
 - **Build**: `node web/build.js` applies a diff patch to xterm.js's `CompositionHelper` and bundles with esbuild
+
+### Embedded frontend / `cargo install`
+
+The entire `web/static` tree is compiled into the binary with [`rust-embed`](https://crates.io/crates/rust-embed) and served from memory at `/static/*` — there is no runtime dependency on a `web/` directory next to the executable. This makes `cargo install mobux` produce a self-contained binary that runs from anywhere.
+
+For this to work, the generated vendor bundles (`web/static/vendor/*.bundle.js`, `xterm.css`, `fonts/*.woff2`) are committed to git so the published crate embeds the real frontend. They are build artifacts — regenerate them with `make build` (which runs `node web/build.js`) whenever the frontend or its dependencies change, then commit the result. Only the dev-only source maps (`*.map`) stay gitignored and are excluded from the embed.
 
 ## Patched xterm.js
 
@@ -120,10 +127,29 @@ On mobile, the xterm.js hidden textarea is bypassed. Instead:
 ## Development
 
 ```bash
-make build      # patch xterm + esbuild + cargo build
-make run        # build + run
-make test       # playwright smoke tests (mobile Chrome)
-make restart    # stop + start as background daemon
+make build         # patch xterm + esbuild + cargo build
+make test          # playwright smoke tests (mobile Chrome)
+make smoke-start   # throwaway instance on :8281 (isolated, for testing)
+make smoke-stop
+```
+
+> On a host already running mobux as a service (see **[DEPLOY.md](DEPLOY.md)**),
+> don't use `make run` / `make start` / `make restart` — they bind `:5151`
+> directly and collide with the systemd service. Run dev builds on a different
+> port (`make smoke-start` → `:8281`, or an installable dev instance on
+> `:5152` — see DEPLOY.md).
+
+## Deploying
+
+mobux is a single self-contained binary (the frontend is embedded), so
+deployment is just `cargo install`. The production instance runs as a
+boot-persistent systemd user service. Full runbook — install, the service
+unit, releasing to crates.io, and running an isolated dev instance — is in
+**[DEPLOY.md](DEPLOY.md)**.
+
+```bash
+cargo install mobux --locked     # or: cargo install --git https://github.com/mvhenten/mobux --locked
+systemctl --user restart mobux   # if running as the service
 ```
 
 Building requires **`cmake`** on `PATH` (the speech-to-text crate `sherpa-rs`
@@ -228,6 +254,16 @@ If you're running mobux behind a publicly-trusted cert (Let's Encrypt — set
 `MOBUX_ACME_DOMAINS` and `MOBUX_ACME_EMAIL`), the CA install step is skipped
 entirely; the install page won't even render that section.
 
+## Third-Party Code
+
+mobux includes vendored code from third parties. Full attribution and license texts are in [`THIRD_PARTY-LICENSES.md`](./THIRD_PARTY-LICENSES.md).
+
+**⚠️ License Compliance Notice**: The current terminal emulator stack (`web/static/vendor/aceterm/`) is vendored from the now-discontinued AWS Cloud9 SDK (c9/core). This code is licensed under the **Cloud9 SDK Non-Commercial License Agreement**, which is **incompatible with mobux's MIT license**. These files are scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk), a clean-room MIT-licensed terminal emulator. See the tracking issue for migration progress: [#68](https://github.com/mvhenten/mobux/issues/68)
+
+Other vendored components:
+- **Ace Editor** (`web/static/vendor/ace.js`) — BSD-3-Clause ✅
+- **wc.js** (`web/static/vendor/aceterm/wc.js`) — Permissive (Markus Kuhn's public-domain-like license) ✅
+
 ## License
 
-ISC
+MIT

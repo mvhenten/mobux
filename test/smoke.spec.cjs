@@ -48,11 +48,58 @@ test('index loads', async ({ page }) => {
   await expect(page).toHaveTitle(/Mobux/);
 });
 
+// Per-host link pinning (issue #123): a session link must carry the selected
+// peer as a path segment (/s/<host>/<name>) so the terminal page binds to the
+// host the session lives on; with no peer selected (current node) it stays
+// plain (/s/<name>) so same-origin behaviour is byte-identical to before.
+test('sessionRow pins /s/<host>/<name> when a peer is selected, plain when not', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  const hrefs = await page.evaluate(() => {
+    const row = window.__mobuxSessionRow;
+    const hrefOf = (html) => {
+      const el = document.createElement('div');
+      el.innerHTML = html;
+      return el.querySelector('a.session-item').getAttribute('href');
+    };
+    // No peer selected → plain link.
+    window.MobuxMesh.setPeer('');
+    const plain = hrefOf(row({ name: 'demo', windows: 1, attached: 0 }));
+    // Peer selected → host as a leading path segment.
+    window.MobuxMesh.setPeer('box:8443');
+    const pinned = hrefOf(row({ name: 'demo', windows: 1, attached: 0 }));
+    window.MobuxMesh.setPeer('');
+    return { plain, pinned };
+  });
+  expect(hrefs.plain).toBe('/s/demo');
+  expect(hrefs.pinned).toBe('/s/box%3A8443/demo');
+});
+
 test('sessions API works', async ({ page }) => {
   const res = await page.request.get(`${BASE}/api/sessions`);
   expect(res.ok()).toBeTruthy();
   const sessions = await res.json();
   expect(sessions.length).toBeGreaterThan(0);
+});
+
+// Regression: tmux rewrites '.' to '_' in session names, so a created
+// "my.app" became "my_app" while the API reported it as "my.app" — every
+// later op then failed with "can't find session". Names with tmux
+// target-spec separators must be rejected, not silently mangled.
+test('create rejects session names with tmux-unsafe characters', async ({ page }) => {
+  for (const name of ['my.app', 'a:b']) {
+    const res = await page.request.post(`${BASE}/api/sessions`, {
+      data: { name },
+    });
+    expect(res.status(), `"${name}" must be rejected, not mangled`).toBe(400);
+  }
+  // A clean name still creates and reports back the exact name tmux used.
+  const ok = await page.request.post(`${BASE}/api/sessions`, {
+    data: { name: 'regress_dot' },
+  });
+  expect(ok.status()).toBe(200);
+  const sessions = await (await page.request.get(`${BASE}/api/sessions`)).json();
+  expect(sessions.some((s) => s.name === 'regress_dot')).toBeTruthy();
+  await page.request.post(`${BASE}/api/sessions/regress_dot/kill`);
 });
 
 test('terminal renders and connects', async ({ page }) => {
@@ -262,29 +309,26 @@ test('URLs in terminal output are tappable', async ({ page }, testInfo) => {
   expect(detected).toContain('https://example.com');
 });
 
-test('tapping a URL opens via anchor click (TWA Custom Tabs path), not window.open', async ({ page }) => {
-  // In a TWA shell, `window.open(url, '_blank')` keeps navigation
-  // inside the underlying Chrome (visually still "in mobux"). A
-  // synthesised <a target="_blank" rel="noopener noreferrer"> click
-  // is the documented escape hatch that triggers Chrome Custom Tabs
-  // for out-of-scope URLs. Verify our handler uses the anchor path.
+test('external links: anchor-click in regular browser, intent:// in TWA', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
   await page.waitForFunction(() => typeof window.__mobuxOpenExternal === 'function', { timeout: 5000 });
 
-  const result = await page.evaluate(async () => {
-    const url = 'https://example.com/twa-link-test';
+  // Test non-TWA context: should use anchor-click fallback
+  const nonTwaResult = await page.evaluate(async () => {
+    const url = 'https://example.com/regular-browser-test';
 
-    // Stub out the actual navigation: capture anchor clicks (the
-    // browser would follow `target="_blank"` and pop a tab/Custom
-    // Tab; we just need to assert the handler's mechanism).
     let anchorTarget = null;
     let anchorRel = null;
     let anchorHref = null;
     let windowOpenCalled = false;
+    let locationAssigned = null;
 
     const origWindowOpen = window.open;
+    const origLocationAssign = window.location.assign;
+    
     window.open = (...args) => { windowOpenCalled = true; return null; };
+    window.location.assign = (url) => { locationAssigned = url; };
 
     const onClick = (e) => {
       const a = e.target.closest('a');
@@ -297,22 +341,68 @@ test('tapping a URL opens via anchor click (TWA Custom Tabs path), not window.op
     document.addEventListener('click', onClick, true);
 
     try {
-      // Call the helper directly — same path the tap handler takes
-      // once a URL is matched. Exposed on window for tests.
       window.__mobuxOpenExternal(url);
     } finally {
       document.removeEventListener('click', onClick, true);
       window.open = origWindowOpen;
+      window.location.assign = origLocationAssign;
     }
 
-    return { anchorTarget, anchorRel, anchorHref, windowOpenCalled };
+    return { anchorTarget, anchorRel, anchorHref, windowOpenCalled, locationAssigned };
   });
 
-  expect(result.anchorHref).toBe('https://example.com/twa-link-test');
-  expect(result.anchorTarget).toBe('_blank');
-  expect(result.anchorRel).toContain('noopener');
-  expect(result.anchorRel).toContain('noreferrer');
-  expect(result.windowOpenCalled).toBe(false);
+  expect(nonTwaResult.anchorHref).toBe('https://example.com/regular-browser-test');
+  expect(nonTwaResult.anchorTarget).toBe('_blank');
+  expect(nonTwaResult.anchorRel).toContain('noopener');
+  expect(nonTwaResult.anchorRel).toContain('noreferrer');
+  expect(nonTwaResult.windowOpenCalled).toBe(false);
+  expect(nonTwaResult.locationAssigned).toBeNull();
+
+  // Test TWA context: should use intent:// URL
+  const twaResult = await page.evaluate(async () => {
+    const url = 'https://example.com/twa-test';
+
+    // Stub document.referrer to simulate TWA environment
+    Object.defineProperty(document, 'referrer', {
+      configurable: true,
+      get: () => 'android-app://io.github.mvhenten.mobux',
+    });
+
+    let navigatedToUrl = null;
+    let anchorClicked = false;
+
+    // Stub the navigation helper function
+    const origNavigate = window.__mobuxNavigateToUrl;
+    window.__mobuxNavigateToUrl = (url) => { navigatedToUrl = url; };
+
+    const onClick = (e) => {
+      anchorClicked = true;
+      e.preventDefault();
+    };
+    document.addEventListener('click', onClick, true);
+
+    try {
+      window.__mobuxOpenExternal(url);
+    } finally {
+      document.removeEventListener('click', onClick, true);
+      window.__mobuxNavigateToUrl = origNavigate;
+      // Restore original referrer behavior
+      Object.defineProperty(document, 'referrer', {
+        configurable: true,
+        get: () => '',
+      });
+    }
+
+    return { navigatedToUrl, anchorClicked };
+  });
+
+  expect(twaResult.navigatedToUrl).toBeTruthy();
+  expect(twaResult.navigatedToUrl).toContain('intent://');
+  expect(twaResult.navigatedToUrl).toContain('action=android.intent.action.VIEW');
+  expect(twaResult.navigatedToUrl).toContain('scheme=https');
+  expect(twaResult.navigatedToUrl).toContain('S.browser_fallback_url=');
+  expect(twaResult.navigatedToUrl).toContain('example.com/twa-test');
+  expect(twaResult.anchorClicked).toBe(false);
 });
 
 test('reader view renders buffer text', async ({ page }) => {
@@ -429,6 +519,54 @@ async function fireTouch(page, selector, type, x, y) {
     }));
   }, { selector, type, x, y });
 }
+
+test('swipe-up from bottom edge opens the command menu', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // Make sure overlay is interactive (touch UAs do this automatically).
+  await page.evaluate(() => {
+    document.getElementById('touchOverlay').style.pointerEvents = 'auto';
+    document.getElementById('cmdPickList').classList.remove('visible');
+  });
+
+  const vh = await page.evaluate(() => window.innerHeight);
+  const xMid = await page.evaluate(() => window.innerWidth / 2);
+
+  // Edge-swipe-up: start within bottom 80px, travel ~100px upward.
+  await fireTouch(page, '#touchOverlay', 'touchstart', xMid, vh - 20);
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, vh - 60);
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, vh - 100);
+  await fireTouch(page, '#touchOverlay', 'touchend',   xMid, vh - 100);
+  await page.waitForTimeout(150);
+
+  await expect(page.locator('#cmdPickList')).toHaveClass(/visible/);
+});
+
+test('mid-screen upward drag does not trigger the command menu', async ({ page }) => {
+  await page.goto(`${BASE}/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  await page.evaluate(() => {
+    document.getElementById('touchOverlay').style.pointerEvents = 'auto';
+    document.getElementById('cmdPickList').classList.remove('visible');
+  });
+
+  const vh = await page.evaluate(() => window.innerHeight);
+  const xMid = await page.evaluate(() => window.innerWidth / 2);
+
+  // Start mid-screen, drag upward. This is normal scroll; it must NOT
+  // open the menu.
+  await fireTouch(page, '#touchOverlay', 'touchstart', xMid, Math.round(vh / 2));
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, Math.round(vh / 2) - 40);
+  await fireTouch(page, '#touchOverlay', 'touchmove',  xMid, Math.round(vh / 2) - 100);
+  await fireTouch(page, '#touchOverlay', 'touchend',   xMid, Math.round(vh / 2) - 100);
+  await page.waitForTimeout(150);
+
+  await expect(page.locator('#cmdPickList')).not.toHaveClass(/visible/);
+});
 
 test('reader view disables terminal touch overlay', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
@@ -1194,12 +1332,17 @@ test('synthetic viewport: clamps at max with overflowing content', async ({ page
   expect(sy).toBe(max);
 });
 
-// TODO(mvhenten/mobux#85): Brittle — content-marker wait races with sterk's
-// alt-screen reset on CI. Test passes locally (incl. x20 CPU throttle) but
-// times out reliably on CI runners under V8 cell-grid timing. Skipping
-// until we add proper render-quiesce observables or rework to drive sterk's
-// public refresh() API. See PR #83 for context.
-test.skip('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
+// Fix for mobux#85: use injectLinesPlain (no \x1b[?1049l alt-screen exit)
+// and await the reader's render-quiesce signal instead of polling DOM text.
+//
+// Root cause of the old flake: injectLines() prefixes content with
+// \x1b[?1049l, which sterk treats as a buffer reset. That wipes the buffer
+// right when the waitForFunction probe was running, so maxScroll > prev
+// was a race. The new approach:
+//   1. injectLinesPlain — no alt-screen escape, buffer grows monotonically.
+//   2. readerAwaitRender() — resolves after the reader's next _render()
+//      has committed scroll geometry. No waitForFunction polling.
+test('synthetic viewport: sticky-to-bottom on new output', async ({ page }) => {
   await bootReader(page);
   await fillReader(page, 200, 'sticky');
 
@@ -1211,19 +1354,14 @@ test.skip('synthetic viewport: sticky-to-bottom on new output', async ({ page })
   expect(before.sy).toBe(before.max);
   expect(before.max).toBeGreaterThan(0);
 
-  await page.evaluate(() => window.__mobuxView.test.injectLines(80, 'sticky2'));
-  // Wait for the new content to render into the DOM. Use a content
-  // marker rather than `maxScroll > prev`: `injectLines` issues
-  // `\x1b[?1049l`, which sterk treats as a buffer reset, so the
-  // post-inject maxScroll can be lower than the baseline if the
-  // baseline render had already captured large pre-inject content.
-  // Matching on text is deterministic across CI render-timing
-  // variance.
-  await page.waitForFunction(
-    () => /sticky2/.test(document.querySelector('#reader .reader-inner')?.textContent || ''),
-    null,
-    { timeout: 5000 },
-  );
+  // Register the render-quiesce observer BEFORE writing so we can't
+  // miss the render that fires from the write. Then write the new
+  // content (no alt-screen reset → buffer grows, not resets).
+  await page.evaluate(async () => {
+    const renderDone = window.__mobuxView.test.readerAwaitRender();
+    window.__mobuxView.test.injectLinesPlain(80, 'sticky2');
+    await renderDone;
+  });
 
   const after = await page.evaluate(() => ({
     sy: window.__mobuxView.test.readerScrollY(),
@@ -1852,6 +1990,48 @@ test('listen settings visible in settings page when speechSynthesis available', 
   }
 });
 
+// Self-update panel (#130). The smoke instance is started with
+// MOBUX_UPDATE_CHECK_URL pointing at its own test-index fixture
+// (latest = 999.0.0), so no live crates.io call happens and the "Update now"
+// button is offered. Verifies the panel renders current/latest and the
+// check button works.
+test('settings page shows current version and update check button', async ({ page }) => {
+  await page.goto(`${BASE}/settings`);
+  await page.waitForTimeout(300);
+
+  // Section + controls present.
+  await expect(page.locator('#update')).toHaveCount(1);
+  await expect(page.locator('#updateCheckBtn')).toBeVisible();
+
+  // Current version is a real semver, populated from /api/update/status.
+  await expect
+    .poll(async () => (await page.locator('#updateCurrent').textContent())?.trim())
+    .toMatch(/^\d+\.\d+\.\d+/);
+
+  // Force a check; the mocked index reports 999.0.0 as the latest, so the
+  // "Update now" button becomes visible.
+  await page.locator('#updateCheckBtn').click();
+  await expect
+    .poll(async () => (await page.locator('#updateLatest').textContent())?.trim())
+    .toBe('999.0.0');
+  await expect(page.locator('#updateRunBtn')).toBeVisible();
+});
+
+// POST /api/update/run must refuse with a structured error rather than ever
+// spawning a real updater in the test harness. The smoke instance runs with
+// MOBUX_UPDATE_DISABLE_RUN=1 (a hard off-switch) so the response is a 412
+// structured refusal regardless of whether the check has populated a latest
+// version — and no `cargo install` is ever launched.
+test('update run refuses with a structured error (never spawns in tests)', async ({ request }) => {
+  const res = await request.post(`${BASE}/api/update/run`);
+  // 412 Precondition Failed (disabled / not systemd) — or 409 if no latest is
+  // known yet in this worker; both are structured refusals, never a 202.
+  expect([409, 412]).toContain(res.status());
+  const body = await res.json();
+  expect(body.error).toBeTruthy();
+  expect(body.error.kind).toMatch(/not_systemd|no_update_available/);
+});
+
 test('rb-speaking survives a buffer-change re-render mid-speech', async ({ page }) => {
   await page.goto(`${BASE}/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== 'undefined', { timeout: 5000 });
@@ -1916,4 +2096,147 @@ test('rb-speaking survives a buffer-change re-render mid-speech', async ({ page 
   expect(after.hasClass).toBe(true);
   // No accidental duplicate "speaking" icons after re-render.
   expect(after.speakingCount).toBe(1);
+});
+
+// ── Host picker (mesh EDD phase 3) ──────────────────────────────────
+// These run against the single smoke instance: tailscale is typically
+// unavailable in the test env, which exercises the error-surfacing path
+// (a structured 502, never an empty picker). The current node ("This
+// host") is always the first option and the zero-config default.
+
+test('host picker: trigger renders, current node listed first', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await expect(page.locator('.host-trigger')).toBeVisible();
+  // Default selection is the current node — no peer stored.
+  const peer = await page.evaluate(() => window.MobuxMesh.getPeer());
+  expect(peer).toBe('');
+  await expect(page.locator('.host-trigger .host-label')).toHaveText('This host');
+
+  await page.locator('.host-trigger').click();
+  await expect(page.locator('.host-dropdown.open')).toBeVisible();
+  // First option is always the current node and starts selected.
+  const first = page.locator('.peer-option').first();
+  await expect(first).toHaveClass(/selected/);
+  await expect(first.locator('.peer-name')).toHaveText('This host');
+});
+
+test('host picker: never shows an empty picker (error or hint)', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.locator('.host-trigger').click();
+  await expect(page.locator('.host-dropdown.open')).toBeVisible();
+  // Wait for the async /api/peers load to settle (loading hint gone).
+  await expect(page.locator('.peer-list .hint', { hasText: 'Loading' })).toHaveCount(0);
+  // The current-node option always exists; plus either peers, a
+  // "no other hosts" hint, or a structured tailscale error — never blank.
+  await expect(page.locator('.peer-option')).not.toHaveCount(0);
+  const bodyText = await page.locator('.host-dropdown').textContent();
+  expect(bodyText.trim().length).toBeGreaterThan(0);
+});
+
+test('host picker: selecting current node changes nothing (same-origin)', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.locator('.host-trigger').click();
+  // Click the current-node option explicitly.
+  await page.locator('.peer-option', { hasText: 'This host' }).first().click();
+  // Still same-origin: no peer stored, API paths stay non-relayed.
+  const state = await page.evaluate(() => ({
+    peer: window.MobuxMesh.getPeer(),
+    apiPath: window.MobuxMesh.apiPath('/api/sessions'),
+    ws: window.MobuxMesh.wsUrl('demo'),
+  }));
+  expect(state.peer).toBe('');
+  expect(state.apiPath).toBe('/api/sessions');
+  expect(state.ws).not.toContain('/r/');
+  expect(state.ws).not.toContain('upstream_auth');
+  // Sessions still load over the plain path.
+  const res = await page.request.get(`${BASE}/api/sessions`);
+  expect(res.ok()).toBeTruthy();
+});
+
+test('mesh client: peer selection rewrites API + WS paths and carries creds', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  const out = await page.evaluate(() => {
+    const m = window.MobuxMesh;
+    m.setPeer('peerhost:5151');
+    m.setPeerCred('peerhost:5151', 'bob', '12345');
+    const result = {
+      apiPath: m.apiPath('/api/sessions'),
+      ws: m.wsUrl('demo'),
+      cred: m.getPeerCred('peerhost:5151'),
+    };
+    // Clean up so other tests start from the current node.
+    m.setPeer('');
+    m.clearPeerCred('peerhost:5151');
+    return result;
+  });
+  expect(out.apiPath).toBe('/r/peerhost%3A5151/api/sessions');
+  expect(out.ws).toContain('/r/peerhost%3A5151/ws/demo');
+  expect(out.ws).toContain('upstream_auth=');
+  // base64("bob:12345")
+  expect(out.cred).toBe(btoa('bob:12345'));
+});
+
+test('session list: relayed error body renders as text, not HTML (XSS)', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.waitForFunction(() => typeof window.refreshSessions === 'function');
+  // Force refreshSessions() down its catch branch with a peer-controlled
+  // error message that contains markup. It must land as text, not nodes.
+  await page.evaluate(() => {
+    window.MobuxMesh.apiFetchJSON = async () => {
+      throw new Error('<img src=x onerror=window.__xss=1>');
+    };
+    return window.refreshSessions();
+  });
+  const list = page.locator('#sessionList');
+  // The payload appears verbatim as text…
+  await expect(list.locator('.hint')).toContainText('<img src=x onerror=');
+  // …and did NOT parse into an element or fire the handler.
+  expect(await list.locator('img').count()).toBe(0);
+  expect(await page.evaluate(() => window.__xss)).toBeUndefined();
+});
+
+test('session list: peer-controlled session names are escaped', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  await page.waitForFunction(() => typeof window.refreshSessions === 'function');
+  await page.evaluate(() => {
+    window.MobuxMesh.apiFetchJSON = async () => [
+      { name: '<b>pwn</b>', windows: 1, attached: 0 },
+    ];
+    return window.refreshSessions();
+  });
+  const list = page.locator('#sessionList');
+  await expect(list.locator('.session-name')).toHaveText('<b>pwn</b>');
+  // No injected <b> element from the name.
+  expect(await list.locator('.session-name b').count()).toBe(0);
+});
+
+test('host picker: manual add host merges, selects, and removes', async ({ page }) => {
+  await page.goto(`${BASE}/`);
+  // Add via the mesh API directly (the dialog flow is covered by selection).
+  const added = await page.evaluate(() => {
+    const m = window.MobuxMesh;
+    m.removeManualPeer('manualbox:7000'); // start clean
+    return { id: m.addManualPeer('manualbox:7000'), list: m.getManualPeers() };
+  });
+  expect(added.id).toBe('manualbox:7000');
+  expect(added.list).toContain('manualbox:7000');
+
+  // It shows up in the picker, labelled "manual", with a remove control.
+  await page.locator('.host-trigger').click();
+  await expect(page.locator('.peer-list .hint', { hasText: 'Loading' })).toHaveCount(0);
+  const manualOpt = page.locator('.peer-option', { hasText: 'manualbox:7000' });
+  await expect(manualOpt).toBeVisible();
+  await expect(manualOpt.locator('.peer-sub')).toHaveText('manual');
+  await expect(manualOpt.locator('.peer-remove')).toBeVisible();
+
+  // normalize bare host → host:port using the page port.
+  const norm = await page.evaluate(() => window.MobuxMesh.normalizeManualPeer('barehost'));
+  expect(norm).toMatch(/^barehost:\d+$/);
+
+  // Remove it and confirm it's gone from storage.
+  const after = await page.evaluate(() => {
+    window.MobuxMesh.removeManualPeer('manualbox:7000');
+    return window.MobuxMesh.getManualPeers();
+  });
+  expect(after).not.toContain('manualbox:7000');
 });

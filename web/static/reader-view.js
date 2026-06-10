@@ -71,11 +71,32 @@ export class ReaderView {
     this._resizeObserver = null;
     this._onWindowResize = () => this._handleResize();
     this._onWriteParsed = () => this._scheduleRender();
+
+    // One-shot callbacks drained at the end of each _render() call.
+    // Used by awaitNextRender() — tests register here to know when
+    // scroll geometry (maxScroll, scrollY) has been committed.
+    this._postRenderCallbacks = [];
   }
 
   get scrollY() { return this._scrollY; }
   get maxScroll() { return this._maxScroll; }
   get innerHeight() { return this._inner ? this._inner.scrollHeight : 0; }
+
+  /**
+   * Returns a Promise that resolves after the next _render() call
+   * has committed scroll geometry (maxScroll, scrollY). If the reader
+   * is not mounted (or never renders), the promise still resolves on
+   * the next render — callers should only await this when they know
+   * a render is incoming (e.g. after writing content to the terminal).
+   *
+   * Renderer-agnostic: works for both xterm and sterk because it hooks
+   * the reader's own render cycle, not the underlying renderer's rAF.
+   */
+  awaitNextRender() {
+    return new Promise((resolve) => {
+      this._postRenderCallbacks.push(resolve);
+    });
+  }
 
   mount() {
     if (this.mounted) return;
@@ -242,6 +263,12 @@ export class ReaderView {
     if (wasAtBottom) this._scrollY = this._maxScroll;
     else this._scrollY = Math.min(this._scrollY, this._maxScroll);
     this._applyTransform();
+
+    // Drain one-shot post-render callbacks (see awaitNextRender()).
+    // Snapshot and clear first so callbacks registered during drain
+    // wait for the NEXT render, not the current one.
+    const cbs = this._postRenderCallbacks.splice(0);
+    for (const cb of cbs) cb();
   }
 }
 

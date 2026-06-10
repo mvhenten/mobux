@@ -74,6 +74,31 @@ body {
   margin-left: -6px;
 }
 
+.install-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.install-hint-link {
+  flex: 1;
+  color: var(--accent);
+  text-decoration: none;
+}
+.install-hint-link:hover,
+.install-hint-link:active { background: rgba(255,255,255,0.05); }
+.install-hint-x {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.install-hint-x:active { background: rgba(255,255,255,0.05); }
+
 /* ── Settings page ─────────────────────────────────────────────────── */
 .settings-page {
   padding: 16px;
@@ -96,6 +121,18 @@ body {
   font-size: 13px;
   margin: 0 0 16px;
 }
+.settings-link-btn {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+}
+.settings-link-btn:active { background: rgba(255,255,255,0.05); }
 .settings-row {
   display: flex;
   gap: 12px;
@@ -144,6 +181,14 @@ body {
   margin-top: 12px;
   font-size: 13px;
   color: var(--muted);
+}
+.settings-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.settings-value--new {
+  color: var(--accent, #6ee7b7);
 }
 .settings-detail {
   margin-top: 12px;
@@ -394,6 +439,97 @@ body {
   padding: 12px 16px;
   font-size: 14px;
 }
+
+/* ── Host picker (mesh) ────────────────────────────────────────────── */
+.host-trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-family: var(--mono);
+  cursor: pointer;
+  max-width: 50vw;
+}
+.host-trigger:active { background: rgba(255,255,255,0.05); }
+.host-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.host-caret { color: var(--muted); font-size: 10px; }
+
+.host-dropdown { display: none; }
+.host-dropdown.open {
+  display: block;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.peer-list { display: flex; flex-direction: column; }
+.peer-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  padding: 12px 16px;
+  font-size: 15px;
+  cursor: pointer;
+}
+.peer-option:active { background: rgba(255,255,255,0.05); }
+.peer-option.selected { background: rgba(122,138,158,0.12); }
+.peer-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.peer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.peer-sub { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.peer-check { color: var(--accent); font-size: 14px; }
+.peer-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.peer-up { background: #4caf72; }
+.peer-down { background: var(--danger); }
+.peer-error {
+  color: #ffd0d0;
+  background: #2a1515;
+  padding: 12px 16px;
+  font-size: 13px;
+}
+.peer-remove {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 4px 8px;
+  margin-left: 4px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.peer-remove:active { color: var(--danger); }
+.peer-add {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  padding: 12px 16px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.peer-add:active { background: rgba(255,255,255,0.05); }
 
 h1, h2, h3 { margin: 0; }
 
@@ -738,13 +874,16 @@ h1, h2, h3 { margin: 0; }
   text-align: center;
 }
 
-/* ── Command pick list bottom sheet ─────────────────────────────── */
+/* ── Command pick list (tmux tool menu) ───────────────────────────
+   A plain bottom sheet: monospaced text labels, muted palette, no
+   emoji, no decorative icon column. Triggered by long-press on the
+   terminal or a swipe-up from the bottom edge. */
 #cmdOverlayBg {
   display: none;
   position: fixed;
   inset: 0;
   z-index: 99;
-  background: rgba(0,0,0,0.5);
+  background: rgba(0,0,0,0.35);
 }
 #cmdOverlayBg.visible { display: block; }
 
@@ -757,74 +896,65 @@ h1, h2, h3 { margin: 0; }
   z-index: 100;
   background: var(--panel);
   border-top: 1px solid var(--border);
-  border-radius: 16px 16px 0 0;
   max-height: 70dvh;
   overflow-y: auto;
-  padding: 8px 0 env(safe-area-inset-bottom, 12px);
-  animation: cmdSlideUp 0.25s ease-out;
+  padding: 4px 0 env(safe-area-inset-bottom, 8px);
+  font-family: var(--mono);
 }
 #cmdPickList.visible { display: block; }
-
-@keyframes cmdSlideUp {
-  from { transform: translateY(100%); }
-  to   { transform: translateY(0); }
-}
 
 .cmd-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 16px 6px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
 }
 .cmd-header h3 {
   margin: 0;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 12px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
+  font-family: var(--mono);
 }
 .cmd-close {
   background: none;
-  border: none;
+  border: 1px solid var(--border);
   color: var(--muted);
-  font-size: 20px;
+  font-size: 12px;
+  font-family: var(--mono);
   cursor: pointer;
-  padding: 4px 8px;
+  padding: 4px 10px;
   touch-action: manipulation;
+}
+.cmd-close:active {
+  color: var(--text);
+  border-color: var(--muted);
 }
 
 .cmd-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  display: block;
   width: 100%;
-  padding: 14px 16px;
+  padding: 12px 16px;
   background: none;
   border: none;
-  border-left: 3px solid transparent;
   color: var(--text);
-  font-size: 16px;
+  font-family: var(--mono);
+  font-size: 14px;
   cursor: pointer;
   touch-action: manipulation;
   text-align: left;
 }
 .cmd-item:active {
   background: var(--bg);
-  border-left-color: var(--primary);
-}
-.cmd-icon {
-  width: 24px;
-  text-align: center;
-  font-size: 18px;
-  flex-shrink: 0;
-}
-.cmd-label {
-  flex: 1;
+  color: var(--text);
 }
 .cmd-separator {
   height: 1px;
   background: var(--border);
-  margin: 4px 16px;
+  margin: 4px 0;
 }
 
 @media (max-width: 620px) {
@@ -899,6 +1029,34 @@ h1, h2, h3 { margin: 0; }
 @keyframes mic-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.6); }
   50%      { box-shadow: 0 0 0 4px rgba(231, 76, 60, 0); }
+}
+
+/* Failure state for the attach button — clearly noticeable tint. */
+#uploadBtn.rec-error {
+  border-color: #ff6b6b;
+  background: #5a1f1f;
+  color: #ffd2d2;
+  animation: recErrorFlash 0.5s ease-in-out 2;
+}
+@keyframes recErrorFlash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 80, 80, 0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(255, 80, 80, 0.55); }
+}
+
+/* Transient status/error message shown in the input bar. */
+.input-toast {
+  margin: 0 6px 4px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: monospace;
+  line-height: 1.3;
+  background: #5a1f1f;
+  color: #ffd2d2;
+  border: 1px solid #ff6b6b;
+}
+.input-toast.hidden {
+  display: none;
 }
 
 .input-row {

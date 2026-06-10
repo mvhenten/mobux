@@ -15,7 +15,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, delete, get, post},
     Extension, Json, Router,
 };
 use base64::{
@@ -28,14 +28,28 @@ use rand::{distr::Alphanumeric, Rng};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
-use tower_http::services::ServeDir;
+
+/// Frontend assets compiled into the binary so `cargo install mobux` yields a
+/// self-contained executable that serves the UI from memory — no `web/` dir
+/// next to the binary required. Source maps are excluded (dev-only, large) and
+/// the optional install/well-known files are served by their own disk-based
+/// handlers, so they're excluded here too.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "web/static"]
+#[exclude = "vendor/*.map"]
+#[exclude = "install/*"]
+#[exclude = ".well-known/*"]
+struct StaticAssets;
 
 mod db;
+mod mesh;
 mod push;
+mod relay;
 mod shell_integration;
 mod ssl;
 mod tmux;
 mod transcribe;
+mod update;
 
 #[derive(Clone)]
 struct AppState {
@@ -44,6 +58,20 @@ struct AppState {
     cache_bust: String,
     db: Arc<db::Db>,
     stt: Arc<transcribe::SpeechToText>,
+    /// Bearer-equivalent secret that the tmux `alert-bell` hook posts back
+    /// with on the internal trigger endpoint. Generated fresh on every
+    /// startup; the hook is reinstalled with the new value.
+    internal_token: Arc<String>,
+    /// The TCP port this instance serves on. Mesh peer probing dials peers on
+    /// the same port (the EDD assumes a homogeneous mobux port across nodes).
+    port: u16,
+    /// Where mobux persists state — used to write/spawn the detached updater.
+    data_dir: PathBuf,
+    /// Whether this instance serves over TLS — the updater health-checks
+    /// `/api/identify` on the matching scheme.
+    use_tls: bool,
+    /// In-memory cache of the latest crates.io version (self-update, #130).
+    update: update::UpdateState,
 }
 
 #[derive(Clone)]
@@ -92,8 +120,32 @@ async fn main() -> Result<()> {
         );
     }
 
+    let internal_token: String = (&mut rand::rng())
+        .sample_iter(Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
+
+    let use_tls = env::var("MOBUX_TLS")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true);
+
+    let update_state = update::UpdateState::new();
+    // Kick off the background crates.io poller (polls now, then every ~6h).
+    update::spawn_checker(update_state.clone());
+
     let state = AppState {
-        session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9._-]+$")?),
+        // tmux forbids '.' and ':' in session names (they're target-spec
+        // separators) and silently rewrites '.' to '_'. Allowing '.' here let
+        // a name like "my.app" pass validation while tmux created "my_app",
+        // so every later op targeting "my.app" failed with "can't find
+        // session". Keep '.' out of the allowed set.
+        session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$")?),
         auth,
         cache_bust: format!(
             "{}",
@@ -104,11 +156,38 @@ async fn main() -> Result<()> {
         ),
         db,
         stt,
+        internal_token: Arc::new(internal_token),
+        port,
+        data_dir: data_dir.clone(),
+        use_tls,
+        update: update_state,
     };
+
+    // Stand up the internal hook-callback listener on a 127.0.0.1 port
+    // (separate from the public listener — no TLS, no auth middleware).
+    // Bind first so we know the assigned port before installing the
+    // tmux hook that targets it.
+    let internal_app = Router::new()
+        .route("/internal/trigger", post(api_internal_trigger))
+        .with_state(state.clone());
+    let internal_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let internal_port = internal_listener.local_addr()?.port();
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(internal_listener, internal_app).await {
+            eprintln!("internal listener error: {e:#}");
+        }
+    });
+    if let Err(e) = tmux::install_bell_hook(internal_port, &state.internal_token).await {
+        eprintln!("warning: failed to install tmux alert-bell hook: {e:#}");
+    } else {
+        println!("tmux alert-bell hook installed (internal port {internal_port})");
+    }
 
     let state_for_mw = state.clone();
     let app = Router::new()
         .route("/", get(index))
+        .route("/api/identify", get(api_identify))
+        .route("/api/peers", get(api_peers))
         .route("/api/sessions", get(api_sessions).post(api_create_session))
         .route("/api/sessions/{name}/kill", post(api_kill_session))
         .route("/api/sessions/{name}/rename", post(api_rename_session))
@@ -120,7 +199,10 @@ async fn main() -> Result<()> {
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route("/api/debug", post(api_debug_log))
-        .route("/api/upload", post(api_upload))
+        .route(
+            "/api/upload",
+            post(api_upload).layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024)),
+        )
         // 60 s of 16 kHz mono 16-bit PCM is ~1.9 MB; the default 2 MB body
         // limit is too tight once the multipart envelope is added. Allow 8 MB
         // for this route only (the 70 s sample cap is enforced after decode).
@@ -151,15 +233,43 @@ async fn main() -> Result<()> {
             "/api/shell-integration/uninstall",
             post(api_shell_integration_uninstall),
         )
+        // Self-update (#130). Plain /api routes so they ride the mesh relay —
+        // any node is updatable from one UI.
+        .route("/api/update/status", get(api_update_status))
+        .route("/api/update/check", post(api_update_check))
+        .route("/api/update/run", post(api_update_run))
+        // Mesh relay (EDD phase 2). The WS route is more specific than the
+        // catch-all HTTP relay so the upgrade lands on the right handler.
+        .route("/r/{peer}/ws/{*rest}", get(relay::relay_ws))
+        .route("/r/{peer}/{*rest}", any(relay::relay_http))
+        .route("/api/peers/{peer}/pin", delete(relay::delete_peer_pin))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
+        // Host-pinned terminal page (issue #123): the peer the session lives
+        // on is canonical in the path so the page binds to the right host
+        // regardless of the global host-picker selection. The server does NOT
+        // route by host (the relay still does) — it only surfaces the host to
+        // the client so it can pin the peer. One- vs two-segment patterns
+        // disambiguate cleanly in axum.
+        .route("/s/{host}/{name}", get(terminal_page_pinned))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
         .route("/install", get(install_page))
         .route("/install/mobux.apk", get(serve_install_apk))
         .route("/install/mobux-ca.crt", get(serve_install_ca))
         .route("/.well-known/assetlinks.json", get(serve_assetlinks))
-        .nest_service("/static", ServeDir::new("web/static"))
+        .route("/static/{*path}", get(serve_static));
+
+    // Test-only: serve a fixed sparse-index body so the update checker can be
+    // exercised hermetically (no live crates.io). Registered only when
+    // MOBUX_UPDATE_TEST_INDEX is set; never present in a normal/prod run.
+    let app = if std::env::var_os("MOBUX_UPDATE_TEST_INDEX").is_some() {
+        app.route("/api/update/test-index", get(api_update_test_index))
+    } else {
+        app
+    };
+
+    let app = app
         .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -167,10 +277,6 @@ async fn main() -> Result<()> {
             auth_middleware,
         ));
 
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     if state.auth.is_some() {
@@ -178,10 +284,6 @@ async fn main() -> Result<()> {
     } else {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
     }
-
-    let use_tls = env::var("MOBUX_TLS")
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(true);
 
     if use_tls {
         let extra_hosts: Vec<String> = env::var("MOBUX_TLS_HOSTS")
@@ -366,8 +468,17 @@ fn load_auth_config() -> Option<AuthConfig> {
 /// them over HTTPS from the running server), and the service worker
 /// must be reachable for the SW registration request — some Android
 /// browsers fetch /sw.js without page credentials.
+///
+/// `/api/identify` is intentionally unauthenticated (mesh EDD): peers probe
+/// it for app+version discovery before any credentials exist. It leaks
+/// nothing beyond "this is mobux, version X".
 fn is_public_path(path: &str) -> bool {
-    path == "/install"
+    path == "/api/identify"
+        // Test-only update-index fixture: the background poller fetches it
+        // without credentials, so it must bypass auth. Only ever routed when
+        // MOBUX_UPDATE_TEST_INDEX is set (see router construction).
+        || path == "/api/update/test-index"
+        || path == "/install"
         || path.starts_with("/install/")
         || path.starts_with("/.well-known/")
         || path.starts_with("/static/icon-")
@@ -440,14 +551,124 @@ async fn auth_middleware(
     resp
 }
 
-async fn index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+async fn index(State(state): State<AppState>) -> Result<axum::response::Response, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
-    Ok(Html(render_index(&sessions, None, &state.cache_bust)))
+    Ok(html_no_store(render_index(
+        &sessions,
+        None,
+        &state.cache_bust,
+    )))
 }
 
 async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
     Ok(Json(sessions))
+}
+
+/// Unauthenticated mesh discovery probe. Returns only the app name and crate
+/// version — nothing else leaks. Bypasses auth via `is_public_path`.
+async fn api_identify() -> Json<mesh::Identify> {
+    Json(mesh::Identify {
+        app: "mobux".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// Authenticated tailnet peer enumeration. On tailscale failure, returns a
+/// structured error (HTTP 502) the UI can show — never a silent empty list.
+/// An empty `peers` array means "tailscale fine, nothing found"; the error
+/// path means "tailscale unavailable".
+async fn api_peers(State(state): State<AppState>) -> Response {
+    match mesh::enumerate(state.port).await {
+        Ok(peers) => Json(json!({ "peers": peers })).into_response(),
+        Err(err) => {
+            // 502: this node is up, but the upstream dependency (tailscaled)
+            // it relies on to enumerate peers is not cooperating.
+            (StatusCode::BAD_GATEWAY, Json(json!({ "error": err }))).into_response()
+        }
+    }
+}
+
+// ── self-update (#130) ─────────────────────────────────────────────────────
+
+/// Cached update status: current version, latest known, availability,
+/// last-checked timestamp. Reads the in-memory cache the background poller
+/// maintains — no network call here.
+async fn api_update_status(State(state): State<AppState>) -> Json<update::UpdateStatus> {
+    Json(state.update.status().await)
+}
+
+/// Force an immediate crates.io poll and return the refreshed status.
+async fn api_update_check(State(state): State<AppState>) -> Json<update::UpdateStatus> {
+    Json(state.update.refresh().await)
+}
+
+/// Spawn the detached updater toward the latest known version. Returns 202 when
+/// started; a structured 4xx/5xx otherwise (not systemd, nothing to update,
+/// spawn failed).
+async fn api_update_run(State(state): State<AppState>) -> Response {
+    let status = state.update.status().await;
+    let Some(latest) = status.latest.clone() else {
+        let err = update::RunError::NoUpdateAvailable {
+            message: "no latest version known yet; run a check first".to_string(),
+        };
+        return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
+    };
+    if !status.available {
+        let err = update::RunError::NoUpdateAvailable {
+            message: format!(
+                "already on the latest version ({})",
+                update::UpdateState::current_version()
+            ),
+        };
+        return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
+    }
+
+    // In-process lock: only one updater may be in flight. A concurrent second
+    // request is rejected here (409) so the two scripts never race the binary
+    // snapshot. The script's flock is the cross-process backstop.
+    if !state.update.try_begin_run() {
+        let err = update::RunError::AlreadyRunning {
+            message: "an update is already in progress".to_string(),
+        };
+        return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
+    }
+
+    match update::spawn_updater(&state.data_dir, &latest, state.port, state.use_tls) {
+        Ok(log_path) => {
+            // Keep the flag set: a successful update restarts the process, and
+            // until then no second run should start.
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "started": true,
+                    "version": latest,
+                    "log": log_path.to_string_lossy(),
+                })),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            // We claimed the lock but never spawned — release it so a later
+            // retry isn't permanently blocked.
+            state.update.end_run();
+            let status = match err {
+                // 412 Precondition Failed: the environment can't support in-app
+                // update (no systemd unit / disabled on this host).
+                update::RunError::NotSystemd { .. } => StatusCode::PRECONDITION_FAILED,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, Json(json!({ "error": err }))).into_response()
+        }
+    }
+}
+
+/// Test-only handler: echoes `MOBUX_UPDATE_TEST_INDEX` as a sparse-index body
+/// so the update checker can be driven hermetically. Only routed when that env
+/// var is set.
+async fn api_update_test_index() -> impl IntoResponse {
+    let body = std::env::var("MOBUX_UPDATE_TEST_INDEX").unwrap_or_default();
+    ([(axum::http::header::CONTENT_TYPE, "text/plain")], body)
 }
 
 #[derive(Deserialize)]
@@ -807,6 +1028,45 @@ async fn api_push_notify(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct InternalTriggerQuery {
+    kind: String,
+    session: String,
+    window: Option<String>,
+}
+
+/// Internal endpoint hit by the `tmux alert-bell` hook. Bound to 127.0.0.1
+/// only and authenticated by `state.internal_token`, so an attacker who
+/// can't already run code on the host can't push fake notifications.
+/// tmux is the source of truth for whether a bell happened — this handler
+/// just routes the event to the push pipeline.
+async fn api_internal_trigger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<InternalTriggerQuery>,
+) -> StatusCode {
+    let token = headers
+        .get("X-Mobux-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if token != state.internal_token.as_str() {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if !state.session_name_re.is_match(&q.session) {
+        return StatusCode::BAD_REQUEST;
+    }
+    match q.kind.as_str() {
+        "bell" => {
+            let prefs = state.db.notification_prefs().unwrap_or_default();
+            if prefs.bell {
+                push::fire_bell(state.db.clone(), &q.session, q.window.as_deref());
+            }
+        }
+        _ => return StatusCode::BAD_REQUEST,
+    }
+    StatusCode::NO_CONTENT
+}
+
 #[derive(serde::Serialize, Deserialize)]
 struct NotifPrefsJson {
     bell: bool,
@@ -882,9 +1142,9 @@ async fn api_shell_integration_uninstall(
     Ok(Json(s))
 }
 
-async fn settings_page(State(state): State<AppState>) -> Html<String> {
+async fn settings_page(State(state): State<AppState>) -> Response {
     let v = &state.cache_bust;
-    Html(format!(
+    html_no_store(format!(
         r##"<!doctype html>
 <html lang="en">
 <head>
@@ -902,6 +1162,36 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
   </header>
 
   <main class="settings-page">
+    <section class="settings-card" id="update">
+      <h2>Software update</h2>
+      <p class="settings-lede">mobux checks crates.io for newer published versions. Updating installs the new version with <code>cargo install</code>, restarts the systemd service, health-checks it, and rolls back automatically if the new version doesn't come up. This acts on <strong>this host only</strong> — to update a peer, open its own settings page.</p>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Current version</strong>
+          <small id="updateHost">This running binary.</small>
+        </span>
+        <span id="updateCurrent" class="settings-value">…</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Latest version</strong>
+          <small id="updateCheckedAt">Checking crates.io…</small>
+        </span>
+        <span id="updateLatest" class="settings-value">…</span>
+      </div>
+      <div class="shell-card-actions">
+        <button type="button" id="updateCheckBtn">Check for updates</button>
+        <button type="button" id="updateRunBtn" hidden>Update now</button>
+      </div>
+      <div class="settings-status" id="updateStatus" hidden></div>
+    </section>
+
+    <section class="settings-card" id="install-app">
+      <h2>Install app</h2>
+      <p class="settings-lede">Add Mobux to your home screen as a standalone Android app. The install page has the CA certificate and APK with step-by-step instructions.</p>
+      <a href="/install" class="settings-link-btn">Open install page →</a>
+    </section>
+
     <section class="settings-card">
       <h2>Notifications</h2>
       <p class="settings-lede">Pick what fires a push to subscribed devices. Everything is detected by parsing the PTY stream — no shell hooks needed except the OSC-133 prompt for the exit toggles.</p>
@@ -1100,6 +1390,9 @@ end</code></pre>
     }}
   </script>
   <script src="/static/settings.js?v={v}"></script>
+  <!-- mesh-client first so update.js can relay update calls to a selected peer. -->
+  <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/update.js?v={v}"></script>
   <script type="module" src="/static/settings-theme.js?v={v}"></script>
   <script src="/static/settings-renderer.js?v={v}"></script>
   <script src="/static/shell-integration.js?v={v}"></script>
@@ -1113,17 +1406,130 @@ end</code></pre>
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Html<String>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     validate_session_name(&state, &name)?;
-    Ok(Html(render_terminal_page(&name, &state.cache_bust)))
+    // No host segment → current node / same-origin, no peer pinned.
+    Ok(html_no_store(render_terminal_page(
+        &name,
+        "",
+        &state.cache_bust,
+    )))
 }
 
-async fn serve_sw() -> impl axum::response::IntoResponse {
+// Host-pinned variant: `/s/{host}/{name}`. Renders the SAME terminal page but
+// surfaces the host so the client pins that peer for the page's lifetime. The
+// server itself does not route by host — the relay does — so `host` is only
+// echoed back to the client, never used to resolve the session here.
+async fn terminal_page_pinned(
+    State(state): State<AppState>,
+    Path((host, name)): Path<(String, String)>,
+) -> Result<axum::response::Response, AppError> {
+    validate_session_name(&state, &name)?;
+    // `host` is reflected into an inline <script> as window.MOBUX_PEER, and
+    // serde_json does NOT escape `<`/`>`/`</script>` — an unvalidated host is a
+    // reflected-XSS breakout. Gate it to the legal peer shape (canonical_peer
+    // rejects slashes/spaces/bad ports) AND a strict charset so no markup
+    // metacharacter can survive. Reject anything else as 400, mirroring
+    // validate_session_name.
+    let peer = validate_pinned_host(&host)?;
+    Ok(html_no_store(render_terminal_page(
+        &name,
+        &peer,
+        &state.cache_bust,
+    )))
+}
+
+/// Validate + canonicalize a `host` path segment for the pinned terminal route.
+///
+/// Reuses the relay's `canonical_peer` (legal `host[:port]` shape) and then
+/// enforces the conservative peer charset `[A-Za-z0-9.:_-]`. `canonical_peer`
+/// alone rejects slashes and spaces but still admits markup metacharacters
+/// (e.g. `<img>` → `<img>:8080`), which would break out of the inline
+/// `window.MOBUX_PEER` script — so the charset gate is the load-bearing
+/// defence here. Returns the canonical `host:port`, or a 400 on reject.
+fn validate_pinned_host(host: &str) -> Result<String, AppError> {
+    let peer = relay::canonical_peer(host)
+        .map_err(|e| AppError::bad_request(anyhow::anyhow!("invalid host: {e}")))?;
+    if !peer
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_' | '-'))
+    {
+        return Err(AppError::bad_request(anyhow::anyhow!("invalid host")));
+    }
+    Ok(peer)
+}
+
+// Same payload as Html<String> but with Cache-Control: no-store.
+// The HTML embeds the per-restart cache_bust query param on every
+// /static asset URL; if the HTML itself is cached the embedded
+// version IDs go stale and the page ends up loading a mismatched
+// mix of old→new JS. no-store guarantees the browser always sees a
+// fresh document and therefore a fresh set of asset version pins.
+fn html_no_store(body: String) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let mut resp = Html(body).into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, must-revalidate"),
+    );
+    resp
+}
+
+// Serve sw.js with the per-restart cache_bust appended as a comment.
+// Chrome considers a service worker "updated" when its bytes differ
+// from the cached copy; without this, a release that only changes JS
+// bundles (not sw.js itself) leaves the old SW installed indefinitely.
+// Appending cache_bust forces a fresh install on every restart so the
+// SW's lifecycle (skipWaiting + clients.claim) runs and any stale state
+// is cleared.
+async fn serve_sw(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     use axum::http::header;
-    (
-        [(header::CONTENT_TYPE, "text/javascript")],
+    let body = format!(
+        "{}\n// sw-version: {}\n",
         include_str!("../web/static/sw.js"),
+        state.cache_bust,
+    );
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript"),
+            (header::CACHE_CONTROL, "no-store, must-revalidate"),
+        ],
+        body,
     )
+}
+
+// Serve a frontend asset embedded in the binary (see `StaticAssets`).
+//
+// mobux is a single-user app served over a tailnet — bandwidth is irrelevant
+// and caching buys nothing. It actively broke us: assets used to be served
+// `immutable` for a year, and the only cache-busting was the `?v=<cache_bust>`
+// query param the HTML appends to `<script src>`/`<link href>` tags. But ES
+// module `import` statements use bare specifiers with no `?v=`, so every
+// import-only module (input-bar.js, reader-view.js, …) was frozen in the
+// browser cache forever and never picked up new deploys.
+//
+// Fix: `no-store`, same as the HTML pages and sw.js — nothing is ever cached,
+// every load fetches the current bytes. The `?v=` query is harmless and left
+// in place; it's ignored here (the wildcard match is on the path, not the
+// query).
+async fn serve_static(Path(path): Path<String>) -> Response {
+    use axum::http::header;
+    match StaticAssets::get(&path) {
+        Some(file) => {
+            let mime = file.metadata.mimetype();
+            let mut resp = (StatusCode::OK, file.data).into_response();
+            let h = resp.headers_mut();
+            if let Ok(v) = HeaderValue::from_str(mime) {
+                h.insert(header::CONTENT_TYPE, v);
+            }
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, must-revalidate"),
+            );
+            resp
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
 }
 
 // ── /install: TWA install page (APK + CA download, with QR codes) ────
@@ -1162,7 +1568,7 @@ fn qr_svg(data: &str) -> String {
     }
 }
 
-async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html<String> {
+async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Response {
     let host = host_from_headers(&headers);
     let host_esc = html_escape::encode_text(&host);
 
@@ -1222,7 +1628,7 @@ async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Html
     };
 
     let v = &state.cache_bust;
-    Html(format!(
+    html_no_store(format!(
         r##"<!doctype html>
 <html lang="en">
 <head>
@@ -1312,9 +1718,8 @@ async fn terminal_ws(
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_session_name(&state, &name)?;
-    let db = state.db.clone();
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_ws(socket, name, db).await {
+        if let Err(err) = handle_ws(socket, name).await {
             eprintln!("ws error: {err:#}");
         }
     }))
@@ -1328,11 +1733,7 @@ struct ResizeMsg {
     rows: u16,
 }
 
-async fn handle_ws(
-    socket: axum::extract::ws::WebSocket,
-    session_name: String,
-    db: Arc<db::Db>,
-) -> Result<()> {
+async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -1399,15 +1800,11 @@ async fn handle_ws(
             maybe_out = rx.recv() => {
                 match maybe_out {
                     Some(chunk) => {
-                        let prefs = db.notification_prefs().unwrap_or_default();
-                        for trigger in push::scan_pty_chunk(&chunk) {
-                            push::handle_trigger(
-                                db.clone(),
-                                &session_name,
-                                trigger,
-                                prefs,
-                            );
-                        }
+                        // Notification triggers no longer come from this
+                        // path — bells flow through the tmux `alert-bell`
+                        // hook (see `tmux::install_bell_hook`), which
+                        // tmux fires exactly once per real bell. Repaint
+                        // chunks here are just rendering, never events.
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
                             break;
@@ -1537,8 +1934,11 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     </form>
   </dialog>
 
+  <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/host-picker.js?v={v}"></script>
   <script src="/static/index.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
+  <script src="/static/install-hint.js?v={v}"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </body>
 </html>
@@ -1546,8 +1946,12 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     )
 }
 
-fn render_terminal_page(session: &str, v: &str) -> String {
+fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
+    // Peer the page is pinned to ("" for the same-origin/current-node route).
+    // JSON-encoded so the client can read it verbatim and decide whether to
+    // override the global host-picker selection for this page.
+    let peer_json = serde_json::to_string(peer).unwrap_or_else(|_| "\"\"".to_string());
     let session_title = html_escape::encode_text(session);
 
     format!(
@@ -1575,27 +1979,27 @@ fn render_terminal_page(session: &str, v: &str) -> String {
   <div id="cmdPickList">
     <div class="cmd-header">
       <h3>tmux</h3>
-      <button class="cmd-close" id="cmdCloseBtn">✕</button>
+      <button class="cmd-close" id="cmdCloseBtn" aria-label="Close">Close</button>
     </div>
-    <button class="cmd-item" data-cmd="new-window"><span class="cmd-icon">➕</span><span class="cmd-label">New Window</span></button>
-    <button class="cmd-item" data-cmd="kill-window"><span class="cmd-icon">❌</span><span class="cmd-label">Close Window</span></button>
+    <button class="cmd-item" data-cmd="new-window">New window</button>
+    <button class="cmd-item" data-cmd="kill-window">Close window</button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="split-h"><span class="cmd-icon">│</span><span class="cmd-label">Split Horizontal</span></button>
-    <button class="cmd-item" data-cmd="split-v"><span class="cmd-icon">─</span><span class="cmd-label">Split Vertical</span></button>
-    <button class="cmd-item" data-cmd="kill-pane"><span class="cmd-icon">🗑</span><span class="cmd-label">Close Pane</span></button>
+    <button class="cmd-item" data-cmd="split-h">Split horizontal</button>
+    <button class="cmd-item" data-cmd="split-v">Split vertical</button>
+    <button class="cmd-item" data-cmd="kill-pane">Close pane</button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="next-window"><span class="cmd-icon">▶</span><span class="cmd-label">Next Window</span></button>
-    <button class="cmd-item" data-cmd="prev-window"><span class="cmd-icon">◀</span><span class="cmd-label">Previous Window</span></button>
-    <button class="cmd-item" data-cmd="next-pane"><span class="cmd-icon">↻</span><span class="cmd-label">Next Pane</span></button>
-    <button class="cmd-item" data-cmd="prev-pane"><span class="cmd-icon">↺</span><span class="cmd-label">Previous Pane</span></button>
+    <button class="cmd-item" data-cmd="next-window">Next window</button>
+    <button class="cmd-item" data-cmd="prev-window">Previous window</button>
+    <button class="cmd-item" data-cmd="next-pane">Next pane</button>
+    <button class="cmd-item" data-cmd="prev-pane">Previous pane</button>
     <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="zoom-pane"><span class="cmd-icon">🔍</span><span class="cmd-label">Zoom Pane</span></button>
+    <button class="cmd-item" data-cmd="zoom-pane">Zoom pane</button>
   </div>
 
   <div id="inputBar" class="input-bar hidden">
     <div id="inputRibbon" class="input-ribbon">
       <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
-      <button id="uploadBtn">📷</button>
+      <button id="uploadBtn" title="Attach file">📎</button>
       <button id="micBtn" title="Dictate (speech to text)">🎤</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
@@ -1613,7 +2017,10 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       <button data-key="\x1b[F">End</button>
       <button data-key="\x15">^U</button>
       <button data-key="\x0c">^L</button>
+      <button data-key="/clear\r">/clear</button>
+      <button data-key="/quit\r">/quit</button>
     </div>
+    <div id="inputToast" class="input-toast hidden" role="status" aria-live="polite"></div>
     <div class="input-row">
       <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />
       <button id="inputSend" class="input-send" title="Send without Enter">▶</button>
@@ -1622,6 +2029,9 @@ fn render_terminal_page(session: &str, v: &str) -> String {
 
   <script>
     window.MOBUX_SESSION = {session_json};
+    // Host this page is pinned to (issue #123). Empty string = current node
+    // (no override); terminal.js binds MobuxMesh to this peer before connect.
+    window.MOBUX_PEER = {peer_json};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <!-- Renderer picker: reads `mobux:renderer` from localStorage and
@@ -1645,6 +2055,13 @@ fn render_terminal_page(session: &str, v: &str) -> String {
       }}
     }})();
   </script>
+  <!-- mesh-client (global) must be present before the terminal module so the
+       renderer cores can resolve relayed API/WS paths for a selected peer.
+       host-picker supplies the cred prompt the page reuses when it's pinned to
+       a peer (?MOBUX_PEER) whose creds aren't stored yet; its mount() no-ops
+       here since the terminal page has no .app-header. -->
+  <script src="/static/mesh-client.js?v={v}"></script>
+  <script src="/static/host-picker.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
@@ -1685,6 +2102,78 @@ impl IntoResponse for AppError {
 mod tests {
     use super::*;
 
+    // ── serve_static cache headers (regression guard for the frozen-module
+    // bug) ────────────────────────────────────────────────────────────────
+    //
+    // Static assets must be `no-store`: ES-module `import` statements use
+    // bare specifiers with no `?v=` cache-buster, so any browser caching
+    // (a year of `immutable` in the worst historical case) leaves stale
+    // modules running after a deploy. mobux runs over a tailnet — bandwidth
+    // is irrelevant, nothing should ever be cached.
+    #[tokio::test]
+    async fn serve_static_is_no_store() {
+        use axum::http::header;
+        let resp = serve_static(Path("index.js".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let cc = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            cc.contains("no-store"),
+            "static assets must be no-store, got Cache-Control: {cc:?}"
+        );
+        assert!(
+            !cc.contains("immutable"),
+            "static assets must never be immutable, got Cache-Control: {cc:?}"
+        );
+    }
+
+    // Guard: if any web/static JS calls getUserMedia (mic access), the TWA
+    // must declare RECORD_AUDIO, otherwise Chrome (which delegates the OS
+    // permission prompt to the host app in a TWA) denies it. The committed
+    // source of truth for the generated AndroidManifest.xml is twa/init.js,
+    // which injects the permission on every `make twa`.
+    #[test]
+    fn twa_declares_record_audio_when_web_uses_getusermedia() {
+        use std::fs;
+        let static_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static");
+        let mut uses_mic = false;
+        let mut stack = vec![static_dir];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                    if let Ok(src) = fs::read_to_string(&path) {
+                        if src.contains("getUserMedia") {
+                            uses_mic = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if uses_mic {
+            let init_js = fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("twa/init.js"),
+            )
+            .expect("twa/init.js must exist");
+            assert!(
+                init_js.contains("android.permission.RECORD_AUDIO"),
+                "web/static uses getUserMedia but twa/init.js does not inject \
+                 android.permission.RECORD_AUDIO — the TWA mic prompt will be \
+                 denied at the OS layer"
+            );
+        }
+    }
+
     #[test]
     fn base64url_round_trip_p256_point() {
         // Real-world payload shape: 65-byte uncompressed P-256 point.
@@ -1718,6 +2207,47 @@ mod tests {
             err.message.contains("p256dh"),
             "error mentions field name: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn session_name_regex_rejects_tmux_unsafe_chars() {
+        let re = Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
+        // Accepted: plain names, underscores, hyphens, digits.
+        for ok in ["foo", "my_app", "build-2", "ABC", "0"] {
+            assert!(re.is_match(ok), "should accept {ok:?}");
+        }
+        // Rejected: '.' and ':' are tmux target-spec separators (tmux
+        // rewrites '.' to '_', which previously caused "can't find session"),
+        // plus whitespace and empty.
+        for bad in ["my.app", "a:b", "with space", ""] {
+            assert!(!re.is_match(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn pinned_host_rejects_script_breakout() {
+        // Reflected-XSS guard for /s/{host}/{name}: the host is echoed into an
+        // inline <script> as window.MOBUX_PEER, and serde_json does not escape
+        // markup metacharacters. A host carrying </script>, '<' or '>' (or
+        // quotes) must be rejected as 400, never rendered.
+        for bad in [
+            "</script><script>alert(1)</script>",
+            "<img src=x onerror=alert(1)>",
+            "<svg",
+            "a>b",
+            "a\"b",
+            "a'b",
+            "",
+        ] {
+            let err = validate_pinned_host(bad).expect_err(&format!("should reject {bad:?}"));
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "for {bad:?}");
+        }
+        // Legal peers still pass and canonicalize to host:port.
+        assert_eq!(validate_pinned_host("box:8443").unwrap(), "box:8443");
+        assert_eq!(
+            validate_pinned_host("host-1.tailnet.ts.net").unwrap(),
+            "host-1.tailnet.ts.net:8080"
         );
     }
 }

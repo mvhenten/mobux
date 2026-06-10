@@ -1,6 +1,6 @@
 [package]
 name = "mobux"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 description = "A touch-friendly tmux web UI for unhinged people who run terminal sessions from their phone while walking the dog"
 license = "MIT"
@@ -21,7 +21,7 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs"] }
+rust-embed = { version = "8", features = ["include-exclude", "mime-guess"] }
 portable-pty = "0.8"
 rand = "0.9"
 rcgen = { version = "0.13", features = ["x509-parser"] }
@@ -40,7 +40,7 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 instant-acme = "0.8"
 time = "0.3"
 web-push-native = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Local CPU speech-to-text. sherpa-rs (sherpa-onnx bindings) runs an NVIDIA
 # Parakeet TDT transducer entirely on CPU; `download-binaries` (default) fetches
@@ -48,6 +48,10 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # parses the 16 kHz mono 16-bit WAV the client uploads into f32 samples.
 sherpa-rs = "0.6"
 hound = "3"
+# Relay (mesh phase 2): forward WS upgrades to peers over the pinned-TLS path.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

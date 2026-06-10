@@ -1,0 +1,47 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "releaseRules": [
+          { "type": "feat", "release": "minor" },
+          { "type": "fix", "release": "patch" },
+          { "type": "perf", "release": "patch" },
+          { "type": "chore", "release": false },
+          { "type": "docs", "release": false },
+          { "type": "ci", "release": false },
+          { "type": "test", "release": false },
+          { "type": "refactor", "release": false },
+          { "type": "style", "release": false }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "conventionalcommits"
+      }
+    ],
+    "@semantic-release-cargo/semantic-release-cargo",
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "bash scripts/build-release-asset.sh ${nextRelease.version}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "successComment": false,
+        "failComment": false,
+        "assets": [
+          { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz" },
+          { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256" }
+        ]
+      }
+    ]
+  ]
+}

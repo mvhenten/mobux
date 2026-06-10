@@ -12,7 +12,9 @@ export function createInputBar(term, send) {
   const ribbon = document.getElementById('inputRibbon');
   const input = document.getElementById('inputText');
   const sendBtn = document.getElementById('inputSend');
-  if (!bar || !input) return { destroy() {} };
+  // Complete no-op shape: callers invoke .show()/.hide(), so a partial stub
+  // would throw. Mirror the real public API below.
+  if (!bar || !input) return { show() {}, hide() {}, destroy() {} };
 
   // ── Disable xterm.js textarea on mobile ───────────────────────────
   // We own input now. Prevent xterm's textarea from stealing focus.
@@ -153,11 +155,48 @@ export function createInputBar(term, send) {
     }
   });
 
-  // ── Image upload ───────────────────────────────────────────────
+  // ── Visible failure feedback ──────────────────────────────────────
+  // The old `.rec-error` tint was near-invisible and the attach path gave
+  // no UI feedback at all. Show a brief, clearly visible state on the
+  // relevant button plus a short, accessible message in the input bar.
+  const toast = document.getElementById('inputToast');
+  let toastTimer = null;
+  function showError(msg, btn) {
+    if (toast) {
+      toast.textContent = msg;
+      toast.classList.remove('hidden');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.add('hidden'), 4000);
+    }
+    if (btn) {
+      btn.classList.add('rec-error');
+      setTimeout(() => btn.classList.remove('rec-error'), 1500);
+    }
+  }
+
+  // ── Shared upload helper ──────────────────────────────────────────
+  // POSTs a File/Blob to /api/upload and drops the returned path into
+  // the terminal via send(). Used by both the attach button and the
+  // audio record button.
+  async function uploadFile(file) {
+    const form = new FormData();
+    form.append('file', file);
+
+    // Upload to whichever host drives the terminal: the returned path is only
+    // meaningful on that host's filesystem, so it must go through the relay.
+    const res = await window.MobuxMesh.apiFetch('/api/upload', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const { path } = await res.json();
+
+    // Send path directly to terminal, ready to use
+    send(path);
+  }
+
+  // ── File attach (any file type) ───────────────────────────────────
   const uploadBtn = document.getElementById('uploadBtn');
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
-  fileInput.accept = 'image/*';
+  fileInput.accept = '*/*';
   fileInput.style.display = 'none';
   document.body.appendChild(fileInput);
 
@@ -174,18 +213,11 @@ export function createInputBar(term, send) {
     const file = fileInput.files?.[0];
     if (!file) return;
 
-    const form = new FormData();
-    form.append('file', file);
-
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
-      if (!res.ok) throw new Error(await res.text());
-      const { path } = await res.json();
-
-      // Send path directly to terminal, ready to use
-      send(path);
+      await uploadFile(file);
     } catch (err) {
       console.error('Upload failed:', err);
+      showError('Attach failed: upload error', uploadBtn);
     }
 
     // Reset so the same file can be re-selected

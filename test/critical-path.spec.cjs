@@ -457,6 +457,90 @@ test('reader view: real PTY output reaches the reader pane', async ({ page }) =>
   assertNoFailures(captured);
 });
 
+test('auto-reconnect: unexpected socket drop re-establishes the WS via onclose backoff', async ({ page }) => {
+  // Regression for the "tap-to-reconnect only" behaviour. The core's
+  // ws.onclose now arms a capped exponential backoff (min 500ms) that
+  // reconnects after an *unexpected* close. We simulate the drop with
+  // the `forceDrop` test hook (closes the socket WITHOUT marking the
+  // close intentional — i.e. what a real server/network blip looks
+  // like to the client) and assert the WS comes back on its own, with
+  // NO user gesture and NO page-level visibility/online/pageshow event.
+  //
+  // Fails without the new code: the old `ws.onclose = () => {}` left the
+  // socket closed forever, so wsReady() would never return true again.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  // Sanity: we start connected.
+  expect(await page.evaluate(() => window.__mobuxView.test.wsReady())).toBe(true);
+
+  // Drop the socket as if the server hung up.
+  await page.evaluate(() => window.__mobuxView.test.forceDrop());
+
+  // It must transition to closed first (proves the drop took effect),
+  // then the onclose backoff must bring it back without intervention.
+  await expect.poll(
+    () => page.evaluate(() => window.__mobuxView.test.wsReady()),
+    { timeout: 8000, intervals: [100, 200, 400, 800] },
+  ).toBe(true);
+
+  // And the resumed session is live: a real PTY roundtrip still works.
+  const marker = `RECON_CRIT_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect.poll(
+    () => visibleTerminalText(page),
+    { timeout: 10000, intervals: [200, 400, 800] },
+  ).toContain(marker);
+
+  assertNoFailures(captured);
+});
+
+test('auto-reconnect: visibilitychange to visible while disconnected triggers a reconnect', async ({ page }) => {
+  // The primary "screen is open again → reconnect" path. We mark the
+  // close intentional first so the onclose backoff is DISARMED — this
+  // isolates the page-level visibilitychange listener as the sole thing
+  // that can bring the socket back. If the listener is missing (i.e.
+  // without the new code), wsReady() stays false and the poll times
+  // out → the test fails.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  expect(await page.evaluate(() => window.__mobuxView.test.wsReady())).toBe(true);
+
+  // Close with the backoff disarmed so nothing else can reconnect.
+  await page.evaluate(() => {
+    // __mobuxView.test.inject sets intentionalClose=true then closes;
+    // reuse that exact path to get a disarmed close, but we don't need
+    // its injected content — we just want the socket down with no
+    // pending backoff.
+    return window.__mobuxView.test.inject('');
+  });
+  // Confirm it's actually down (and stays down — backoff is disarmed).
+  await expect.poll(
+    () => page.evaluate(() => window.__mobuxView.test.wsReady()),
+    { timeout: 3000, intervals: [100, 200, 400] },
+  ).toBe(false);
+
+  // Now fire the visibility path. Playwright can't toggle the real
+  // document.visibilityState, so we stub it to 'visible' and dispatch
+  // the event the listener keys off — the same shape the browser emits
+  // when the app is foregrounded.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+
+  await expect.poll(
+    () => page.evaluate(() => window.__mobuxView.test.wsReady()),
+    { timeout: 8000, intervals: [100, 200, 400, 800] },
+  ).toBe(true);
+
+  assertNoFailures(captured);
+});
+
 test('soft keyboard: terminal bottom stays visible when visualViewport shrinks', async ({ page }, testInfo) => {
   // Regression for the "bottom rows hidden behind Android soft keyboard"
   // bug. On Android Chrome the soft keyboard does NOT shrink
@@ -593,6 +677,130 @@ test('soft keyboard: terminal bottom stays visible when visualViewport shrinks',
   await page.waitForTimeout(400);
   const afterRestore = await page.evaluate(() => document.body.style.height);
   expect(afterRestore, 'body inline height should clear after vv grows back').toBe('');
+
+  assertNoFailures(captured);
+});
+
+test('tap-to-snap: a tap snaps to bottom, a swipe does not', async ({ page }, testInfo) => {
+  // Regression for issue #99 — re-attempt after PR #100 was reverted in
+  // #102. When the user is parked mid-scrollback and TAPS the terminal
+  // to type, the soft keyboard comes up but the viewport stays in
+  // scrollback, so typed text lands where they can't see it. A genuine
+  // tap on #terminal must snap the viewport to the bottom.
+  //
+  // The critical regression that #100 shipped (and the reason it was
+  // reverted): it hooked `focusin`, which fires on tap-to-scroll too,
+  // so swiping up to read scrollback immediately snapped back to
+  // bottom and broke incremental scrolling. #100's test used a
+  // synthetic `page.focus()` — no swipe context — so it never caught
+  // this. This test drives REAL pointer events (pointerdown → move →
+  // pointerup) and asserts BOTH:
+  //   * TAP (no movement)        → snaps to bottom   (the fix)
+  //   * SWIPE (movement > thresh) → does NOT snap     (the regression guard)
+  //
+  // Setup uses the synthetic `injectLines()` helper (closes the WS
+  // first so tmux can't clobber the injected content). Both backends
+  // grow scrollback identically through their VT parsers on a
+  // newline-rich write — what we test is the page-level pointer
+  // handler in terminal.js, not tmux's redraw protocol.
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  const rows = await page.evaluate(() => window.__mobuxView.test.rows());
+  expect(rows, 'terminal must report a row count').toBeGreaterThan(5);
+
+  // Inject rows + 20 lines so there's real scrollback to park in.
+  const totalLines = rows + 20;
+  const marker = `TAP_SNAP_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate(({ n, m }) => window.__mobuxView.test.injectLines(n, m), { n: totalLines, m: marker });
+  await page.waitForTimeout(200);
+
+  // Pin to bottom and capture the "bottom" viewportY for this backend.
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  await page.waitForTimeout(50);
+  const bottomViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+
+  // Dispatch a sequence of pointer events on the #terminal host with
+  // the given total travel. Returns nothing — caller reads viewportY.
+  // We hit the host element directly (renderer-agnostic) at its centre.
+  const pointerGesture = async (dxTotal, dyTotal, durationMs) => {
+    await page.evaluate(({ dx, dy, dur }) => {
+      const t = document.getElementById('terminal');
+      const r = t.getBoundingClientRect();
+      const startX = r.left + r.width / 2;
+      const startY = r.top + r.height / 2;
+      const fire = (type, x, y) => t.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        pointerType: 'touch',
+        pointerId: 1,
+        isPrimary: true,
+      }));
+      fire('pointerdown', startX, startY);
+      // A couple of intermediate moves so a swipe accumulates travel.
+      const steps = 4;
+      for (let i = 1; i <= steps; i++) {
+        fire('pointermove', startX + (dx * i) / steps, startY + (dy * i) / steps);
+      }
+      // The handler reads e.timeStamp; PointerEvent.timeStamp is set by
+      // the engine at construction, so back-to-back dispatch is well
+      // under the 250ms tap window. Long-press is covered by the
+      // movement guard plus the duration guard in the handler; we keep
+      // the test deterministic by only varying movement here.
+      void dur;
+      fire('pointerup', startX + dx, startY + dy);
+    }, { dx: dxTotal, dy: dyTotal, dur: durationMs });
+  };
+
+  // ── Case 1: SWIPE first (regression guard) ──────────────────────
+  // Scroll up off the bottom, then swipe (large vertical travel). The
+  // viewport must STAY in scrollback — a swipe is not a tap.
+  await page.evaluate(() => {
+    const t = window.__xterm || window.__sterk;
+    t.scrollLines(-5);
+  });
+  await page.waitForTimeout(100);
+  const preSwipeViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    preSwipeViewportY,
+    `pre-condition: viewportY (${preSwipeViewportY}) should be < bottom (${bottomViewportY}) after scrollLines(-5)`,
+  ).toBeLessThan(bottomViewportY);
+
+  await pointerGesture(0, -120, 120); // 120px upward swipe
+  await page.waitForTimeout(150);
+  const postSwipeViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    postSwipeViewportY,
+    `SWIPE must NOT snap to bottom: viewportY (${postSwipeViewportY}) should stay < bottom (${bottomViewportY})`,
+  ).toBeLessThan(bottomViewportY);
+
+  // ── Case 2: TAP (the fix) ───────────────────────────────────────
+  // Re-park in scrollback, then tap (no movement). Must snap to bottom.
+  await page.evaluate(() => {
+    window.__mobuxView.test.scrollToBottom();
+    const t = window.__xterm || window.__sterk;
+    t.scrollLines(-5);
+  });
+  await page.waitForTimeout(100);
+  const preTapViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    preTapViewportY,
+    `pre-condition: viewportY (${preTapViewportY}) should be < bottom (${bottomViewportY}) before tap`,
+  ).toBeLessThan(bottomViewportY);
+
+  await pointerGesture(0, 0, 60); // genuine tap: no movement
+  await page.waitForTimeout(150);
+
+  const screenshotPath = `.tmp/tap-snap-${testInfo.project.name}.png`;
+  await page.screenshot({ path: screenshotPath, fullPage: false });
+
+  const postTapViewportY = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  expect(
+    postTapViewportY,
+    `TAP must snap to bottom: viewportY should be ${bottomViewportY}, got ${postTapViewportY}; screenshot: ${screenshotPath}`,
+  ).toBe(bottomViewportY);
 
   assertNoFailures(captured);
 });

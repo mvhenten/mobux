@@ -5,6 +5,18 @@ import { createInputBar } from './input-bar.js';
 import { applyTheme, getStoredThemeId } from './themes.js';
 
 const session = window.MOBUX_SESSION;
+
+// ── Pin this page to the session's host (issue #123) ─────────────────
+// The host the session lives on is canonical in the URL path (/s/<host>/<name>)
+// and the server injects it as window.MOBUX_PEER. Bind routing to that peer for
+// the whole lifetime of this page BEFORE the terminal core constructs its WS /
+// fetches, so the very first WS + history + panes — and every later reconnect,
+// which calls wsUrl() again — target the host the session actually lives on,
+// regardless of what the global host picker is set to. Empty (same-origin /
+// current node) → no override, behaviour unchanged.
+const pinnedHost = window.MOBUX_PEER || '';
+if (pinnedHost) window.MobuxMesh.usePeerForPage(pinnedHost);
+
 const termEl = document.getElementById("terminal");
 const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");
@@ -52,32 +64,55 @@ const quotes = [
 
 // ── External links ──────────────────────────────────────────────────
 // In a TWA (Trusted Web Activity, package id `io.github.mvhenten.mobux`),
-// `window.open(url, '_blank')` from JS keeps the navigation inside the
-// underlying Chrome that powers the TWA — visually it still looks like
-// the user is "in mobux". Clicking a synthesised anchor with
-// `target="_blank" rel="noopener noreferrer"` triggers Chrome Custom
-// Tabs handoff for out-of-scope URLs (i.e. anything not on the trusted
-// origin), which is the documented escape hatch.
+// external links should open in the user's system default browser (e.g.
+// Firefox, Chrome, whatever the user has configured), not Chrome Custom
+// Tabs. Android's intent:// URL scheme with action=VIEW and no package=
+// attribute forces the system to resolve through the default browser.
 //
-// On the desktop / regular browser this is identical to a normal
-// new-tab open.
+// TWA detection: document.referrer starts with 'android-app://' when
+// running inside the TWA shell.
+//
+// On desktop / regular browsers, this uses the standard anchor-click
+// new-tab behavior.
+
+// Helper for navigation - exposed for test stubbing
+function navigateToUrl(url) {
+  window.location.assign(url);
+}
+
 function openExternal(url) {
+  const isTWA = document.referrer.startsWith('android-app://');
+  
+  if (isTWA && /^https?:\/\//.test(url)) {
+    // Build an intent:// URL that opens the link in the system default
+    // browser. Format:
+    // intent://<url>#Intent;action=android.intent.action.VIEW;scheme=<scheme>;S.browser_fallback_url=<url>;end;
+    const urlObj = new URL(url);
+    const intentUrl = `intent://${urlObj.host}${urlObj.pathname}${urlObj.search}${urlObj.hash}#Intent;action=android.intent.action.VIEW;scheme=${urlObj.protocol.replace(':', '')};S.browser_fallback_url=${encodeURIComponent(url)};end;`;
+    window.__mobuxNavigateToUrl(intentUrl);
+    return;
+  }
+  
+  // Non-TWA or non-http(s) URLs: use anchor-click fallback
   const a = document.createElement('a');
   a.href = url;
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
-  // Anchor must be in the DOM for the synthetic click to navigate
-  // reliably across browsers.
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   a.remove();
 }
+// Expose for tests
+window.__mobuxNavigateToUrl = navigateToUrl;
 // Expose for smoke tests (mirrors `window.__mobuxView` etc.).
 window.__mobuxOpenExternal = openExternal;
 
 // ── Core ────────────────────────────────────────────────────────────
-const isMobile = window.innerWidth < 620;
+// `coarse` pointer = touch primary (phones + tablets). Width fallback
+// catches devices that misreport pointer capability. Desktops with a
+// mouse stay `false` and skip the on-screen input bar.
+const isMobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
 
 // Apply the stored theme to all three layers. terminal-core.js already
@@ -190,24 +225,19 @@ createGestureRecognizer(overlay, {
     }
   },
 
-  onDoubleTap(x, y) {
-    if (inputBar) {
-      inputBar.show();
-      return;
-    }
-    overlay.style.pointerEvents = 'none';
-    setTimeout(() => { overlay.style.pointerEvents = 'auto'; }, 500);
-    const el = document.elementFromPoint(x, y);
-    if (el) {
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
-    }
+  onDoubleTap() {
+    // This handler is wired on the touch overlay, so a double-tap here always
+    // comes from a touch device — exactly the case that wants the on-screen
+    // input bar. Lazily create it on first activation so a device that loaded
+    // as non-mobile (or just rotated into touch mode) still gets the bar
+    // instead of being stuck with no keyboard affordance.
+    ensureInputBar().show();
   },
 
   onHSwipe: (dir) => core.switchWindow(dir),
 
   onLongPress: showCmdList,
+  onSwipeUp: showCmdList,
 });
 
 // ReaderView uses fully synthetic scroll: native overflow scrolling
@@ -221,13 +251,14 @@ function mountReaderGestures() {
   readerGestures = createGestureRecognizer(readerEl, {
     onReconnect: () => core.reconnect(),
     onLongPress: showCmdList,
+    onSwipeUp: showCmdList,
     onHSwipe: (dir) => core.switchWindow(dir),
     onTap: () => {},
     // Double-tap in reader mode is for typing, but the reader has no
     // cursor / no live editing affordance — opening the keyboard
     // there is confusing. Drop back to xterm first, then show the
     // input bar so the keystrokes have somewhere to land.
-    onDoubleTap: () => { swapView('xterm'); if (inputBar) inputBar.show(); },
+    onDoubleTap: () => { swapView('xterm'); ensureInputBar().show(); },
     onScroll: (dy) => reader.scrollBy(dy),
     onTwoPullMove(pull, vh) {
       if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
@@ -264,10 +295,36 @@ function scheduleReveal() {
 core.addEventListener('data', scheduleReveal);
 
 // ── Mobile input bar ────────────────────────────────────────────────
+// `isMobile` is a one-shot guess at load time. It can be wrong: a device
+// may load as non-mobile and later become touch-primary (rotation, an
+// attached/detached input device, a misreported initial pointer query). So
+// we don't gate creation on it — we create the bar lazily on first use
+// (double-tap / activate), and also (re)evaluate when the pointer modality
+// changes. Either path funnels through `ensureInputBar()`, which is
+// idempotent.
 let inputBar = null;
-if (isMobile) {
-  inputBar = createInputBar(core.term, (d) => core.send(d));
+function ensureInputBar() {
+  if (!inputBar) {
+    inputBar = createInputBar(core.term, (d) => core.send(d));
+  }
+  return inputBar;
 }
+
+// If we already look like a touch device, mount eagerly so the existing
+// auto-hide / viewport plumbing is wired from the start.
+if (isMobile) {
+  ensureInputBar();
+}
+
+// Re-evaluate when the primary pointer flips to coarse (e.g. a 2-in-1
+// switching to tablet mode). matchMedia change fires on modality changes;
+// once coarse, make sure the bar exists.
+try {
+  const coarse = window.matchMedia('(pointer: coarse)');
+  const onPointerChange = (e) => { if (e.matches) ensureInputBar(); };
+  if (coarse.addEventListener) coarse.addEventListener('change', onPointerChange);
+  else if (coarse.addListener) coarse.addListener(onPointerChange);
+} catch (_) { /* matchMedia unsupported: lazy creation on tap still covers us */ }
 
 // ── View swap (xterm <-> reader) ────────────────────────────────────
 const reader = new ReaderView({ host: readerEl, core, overlay });
@@ -375,16 +432,37 @@ window.__mobuxView = {
     // Test injections close the WS first so tmux can't race/clobber
     // the injected content (e.g. by re-asserting alt-screen mode).
     inject: (str) => {
+      // Mark the close intentional so auto-reconnect doesn't reopen the
+      // WS and let tmux clobber the injected content.
+      core.intentionalClose = true;
       try { core.ws?.close(); } catch (_) {}
       return new Promise((resolve) =>
         core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve));
     },
     injectLines: (n, prefix = 'inject') => {
+      core.intentionalClose = true;
       try { core.ws?.close(); } catch (_) {}
       let s = '\x1b[?1049l';
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
     },
+    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit)
+    // prefix. Use this in tests that care about sticky-to-bottom
+    // behaviour after incremental content growth: the alt-screen exit
+    // sequence causes sterk to reset the buffer, which races with the
+    // test's scroll-geometry probe.
+    injectLinesPlain: (n, prefix = 'inject') => {
+      try { core.ws?.close(); } catch (_) {}
+      let s = '';
+      for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
+      return new Promise((resolve) => core.term.write(s, resolve));
+    },
+    // Returns a Promise that resolves after the reader's next _render()
+    // call has committed updated scroll geometry (maxScroll, scrollY).
+    // Safe to call from page.evaluate() — Playwright serialises the
+    // resolved value via structured-clone, so callers should not await
+    // a non-serialisable payload.
+    readerAwaitRender: () => reader.awaitNextRender(),
     bufferLength: () => core.getActiveBuffer().length,
     isAlternate: () => {
       // sterk: compare alternate vs active buffer references
@@ -403,6 +481,14 @@ window.__mobuxView = {
     viewportY: () => core.getActiveBuffer().viewportY,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
+    // Simulate an *unexpected* server-side drop: close the socket
+    // WITHOUT marking the close intentional, so the core's onclose
+    // backoff fires exactly as it would for a real network/server blip.
+    // Used by the auto-reconnect test.
+    forceDrop: () => {
+      core.intentionalClose = false;
+      try { core.ws?.close(); } catch (_) {}
+    },
     oscDetected: () => !!core.oscDetected,
     readerScrollY: () => reader.scrollY,
     readerMaxScroll: () => reader.maxScroll,
@@ -430,15 +516,112 @@ if (bootDefault === 'reader') {
 
 updateToggleLabel();
 
+// ── Notification deep-link ─────────────────────────────────────────
+// A push notification's URL embeds ?w={window_index} for the tmux
+// window that fired the alert-bell hook. On boot we honor that, and
+// on a click into an already-open tab the SW posts `mobux-navigate`
+// so we can switch without a reload.
+function selectWindow(windowIndex) {
+  if (windowIndex == null || windowIndex === '') return;
+  window.MobuxMesh.apiFetch(
+    `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select`,
+    { method: 'POST' },
+  ).then(() => {
+    core.clear();
+    core.scrollToBottom();
+    setTimeout(() => { core.refreshPanes(); core.reloadHistory(); }, 300);
+  }).catch(() => {});
+}
+
+function windowFromUrl(href) {
+  try { return new URL(href, location.origin).searchParams.get('w'); }
+  catch (_) { return null; }
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    if (ev.data?.type === 'mobux-navigate') {
+      selectWindow(windowFromUrl(ev.data.url));
+    }
+  });
+}
+
 // ── Boot ────────────────────────────────────────────────────────────
+// `booted` gates the page-level auto-reconnect listeners below: until
+// boot's own connect() has run there's nothing to reconnect, and firing
+// reconnect() while `core.ws` is still null would open a competing
+// socket that boot then immediately replaces.
+let booted = false;
 (async () => {
+  // When pinned to a peer (deep-linked /s/<host>/<name>) whose creds aren't
+  // stored on this device yet, the relayed WS would 401 → close-loop and the
+  // panes/history fetches would .catch() silently, leaving a blank
+  // "reconnecting" terminal. Prompt for the host's creds first so the very
+  // first connect carries them; if the prompt is unavailable or declined,
+  // surface a visible note instead of wedging.
+  if (pinnedHost && !window.MobuxMesh.getPeerCred(pinnedHost)) {
+    const picker = window.MobuxHostPicker;
+    let signedIn = false;
+    if (picker && typeof picker.promptPeerCred === 'function') {
+      try { signedIn = await picker.promptPeerCred(pinnedHost); } catch (_) {}
+    }
+    if (!signedIn) {
+      if (loadquote) {
+        const q = document.getElementById('quote');
+        const a = document.getElementById('qauthor');
+        if (q) q.textContent = `Sign in to ${pinnedHost} to open this session.`;
+        if (a) a.textContent = '';
+      }
+      return; // don't connect with no creds — avoids the silent close-loop
+    }
+  }
   await core.reloadHistory();
   core.connect();
+  booted = true;
+  const w = windowFromUrl(location.href);
+  if (w != null) {
+    // Brief wait so the WS attach completes before we ask tmux to
+    // switch windows; refreshPanes after the switch then sees the new
+    // active window.
+    setTimeout(() => selectWindow(w), 500);
+  }
 })();
 
 window.addEventListener("resize", () => core.resize());
 setTimeout(() => core.resize(), 100);
 setInterval(() => core.refreshPanes(), 5000);
+
+// ── Auto-reconnect ──────────────────────────────────────────────────
+// Renderer-agnostic. The tmux session persists server-side, so
+// re-establishing the WS resumes cleanly. `core.reconnect()` is
+// idempotent (no-ops if the socket is already OPEN), so wiring several
+// triggers is safe — whichever fires first reconnects, the rest no-op.
+//
+// The core's own `ws.onclose` handler does capped exponential backoff
+// for the "server bounced / network blip" case; these page-level
+// listeners are the "user came back to the app" fast paths that
+// reconnect immediately instead of waiting out the backoff window. The
+// existing touch-based reconnect (touch.js onTouchStart → onReconnect)
+// stays as a manual fallback.
+
+function autoReconnect() {
+  if (!booted) return;
+  core.reconnect();
+}
+
+// Primary path: screen/tab is visible again → reconnect now.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') autoReconnect();
+});
+// Network came back.
+window.addEventListener('online', autoReconnect);
+// Android bfcache restore (app swapped back into the foreground).
+window.addEventListener('pageshow', autoReconnect);
+
+// A real navigation away / unload is an intentional teardown — mark it
+// so the socket's onclose doesn't arm a (pointless) backoff retry on a
+// page that's going away.
+window.addEventListener('pagehide', () => { core.intentionalClose = true; });
 
 // ── Soft keyboard (visualViewport) handler ──────────────────────────
 // Renderer-agnostic. On Android Chrome (the TWA target) the soft
@@ -472,4 +655,55 @@ if (window.visualViewport) {
   };
   vv.addEventListener('resize', trackKeyboard);
   vv.addEventListener('scroll', trackKeyboard);
+}
+
+// ── Tap-to-snap-to-bottom ───────────────────────────────────────────
+// Renderer-agnostic. When the user is parked mid-scrollback and TAPS
+// the terminal to type, the soft keyboard comes up but the viewport
+// stays parked in scrollback — so what they type lands somewhere they
+// can't see (issue #99). Snap to the live screen on a genuine tap so
+// keystrokes always land in view.
+//
+// We discriminate a TAP from a SWIPE using pointer events, NOT focus.
+// PR #100 hooked `focusin` and snapped on every touch — but focusin
+// fires on tap-to-scroll too, so swiping up to read scrollback
+// immediately snapped back to bottom and broke incremental scrolling.
+// That PR was reverted in #102. Here we only snap when the pointer
+// barely moved (< TAP_MOVE_PX) and was down only briefly
+// (< TAP_MAX_MS): a real tap, not a swipe or a long-press-drag.
+//
+// Both backends mount under `#terminal` (xterm: `.xterm-helper-textarea`,
+// sterk: `.ace_text-input`), so listening on the host element keeps
+// this renderer-agnostic. This coexists with the visualViewport
+// handler above (PR #98) — that one tracks keyboard height, this one
+// tracks the viewport scroll position. Both stay.
+{
+  const TAP_MOVE_PX = 10; // max pointer travel for a tap (vs. swipe)
+  const TAP_MAX_MS = 250; // max press duration for a tap (vs. drag)
+  let downX = 0;
+  let downY = 0;
+  let downT = 0;
+  let tracking = false;
+
+  termEl.addEventListener('pointerdown', (e) => {
+    downX = e.clientX;
+    downY = e.clientY;
+    downT = e.timeStamp;
+    tracking = true;
+  });
+
+  termEl.addEventListener('pointerup', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+    const elapsed = e.timeStamp - downT;
+    if (moved < TAP_MOVE_PX && elapsed < TAP_MAX_MS) {
+      core.scrollToBottom();
+    }
+  });
+
+  // A canceled pointer (e.g. the gesture recogniser claims it for a
+  // scroll/pinch) is never a tap — drop tracking so the next pointerup
+  // can't be misread.
+  termEl.addEventListener('pointercancel', () => { tracking = false; });
 }
