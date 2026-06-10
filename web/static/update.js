@@ -4,9 +4,10 @@
 // and "Update now" (POST /api/update/run), then watches /api/identify until the
 // version changes (or times out) and prompts a reload.
 //
-// Mesh-aware: when mesh-client.js is present and a peer is selected, requests
-// ride the relay so a peer node is updatable from this UI. Falls back to plain
-// same-origin fetch otherwise.
+// Deliberately NOT mesh-aware: settings/update always act on the host that
+// served this page. Multi-host routing (MobuxMesh.apiFetch) is for terminal
+// pages only — routing updates through the selected peer showed the wrong
+// version and updated the wrong host.
 
 (function () {
   'use strict';
@@ -17,14 +18,16 @@
   const checkBtn = document.getElementById('updateCheckBtn');
   const runBtn = document.getElementById('updateRunBtn');
   const statusEl = document.getElementById('updateStatus');
+  const hostEl = document.getElementById('updateHost');
   if (!currentEl) return; // section not on this page
 
-  // Use the mesh fetch wrapper when available so peer-relayed requests carry
-  // upstream creds and hit /r/<peer>/api/...; otherwise plain same-origin.
+  // Make it unambiguous which host this panel acts on (the page's own origin,
+  // regardless of the host picker).
+  if (hostEl) hostEl.textContent = `This running binary on ${location.hostname}.`;
+
+  // Plain same-origin fetch: this panel must always talk to the page's own
+  // host, never the peer selected in the host picker.
   function fetchPath(path, opts) {
-    if (window.MobuxMesh && typeof window.MobuxMesh.apiFetch === 'function') {
-      return window.MobuxMesh.apiFetch(path, opts || {});
-    }
     return fetch(path, { credentials: 'same-origin', ...(opts || {}) });
   }
 

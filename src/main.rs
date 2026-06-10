@@ -1076,11 +1076,11 @@ async fn settings_page(State(state): State<AppState>) -> Html<String> {
   <main class="settings-page">
     <section class="settings-card" id="update">
       <h2>Software update</h2>
-      <p class="settings-lede">mobux checks crates.io for newer published versions. Updating installs the new version with <code>cargo install</code>, restarts the systemd service, health-checks it, and rolls back automatically if the new version doesn't come up. This acts on <strong>the node you're connected to</strong> — pick a host first to update a peer.</p>
+      <p class="settings-lede">mobux checks crates.io for newer published versions. Updating installs the new version with <code>cargo install</code>, restarts the systemd service, health-checks it, and rolls back automatically if the new version doesn't come up. This acts on <strong>this host only</strong> — to update a peer, open its own settings page.</p>
       <div class="settings-row">
         <span class="settings-label">
           <strong>Current version</strong>
-          <small>This running binary.</small>
+          <small id="updateHost">This running binary.</small>
         </span>
         <span id="updateCurrent" class="settings-value">…</span>
       </div>
