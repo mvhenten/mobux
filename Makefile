@@ -5,6 +5,7 @@
 # (port-keyed) or kill the PID you captured from `$!` directly.
 
 MOBUX_PORT       ?= 5151
+MOBUX_DEV_PORT   ?= 5152
 MOBUX_SMOKE_PORT ?= 8281
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
@@ -20,7 +21,7 @@ MOBUX_DEV_DOMAIN  ?= sandbox:5152
 PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
-.PHONY: build run clean start stop restart status logs test web setup setup-twa twa twa-dev \
+.PHONY: build run dev clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
         podman-build podman-run podman-stop podman-test stt-model
@@ -92,6 +93,14 @@ build: web
 
 run: build
 	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) PORT=$(MOBUX_PORT) \
+		$(CARGO) run
+
+# Foreground dev instance with the client telemetry channel live (MOBUX_DEV=1).
+# Runs on MOBUX_DEV_PORT (5152) so it never touches the long-running :5151
+# lifeline. Hit it at http(s)://<host>:5152/?telemetry=1 for the on-screen log
+# overlay; telemetry lines also print to this terminal (stderr). Ctrl-C to stop.
+dev: build
+	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 PORT=$(MOBUX_DEV_PORT) \
 		$(CARGO) run
 
 start: build

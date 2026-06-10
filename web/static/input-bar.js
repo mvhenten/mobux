@@ -7,6 +7,9 @@
 // - Text input: native keyboard with autocomplete/voice. Enter sends + clears.
 // - Bar appears on tap, hides when keyboard dismisses.
 
+import telemetry from '/static/telemetry.js';
+import { createMicOverlay } from '/static/mic-overlay.js';
+
 export function createInputBar(term, send) {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
@@ -244,19 +247,25 @@ export function createInputBar(term, send) {
     inputRate: 0,
     timer: null,
     deadline: null,
+    startedAt: 0,
   };
 
   function micLabel(text) {
     if (micBtn) micBtn.textContent = text;
   }
 
-  function flashMicError() {
-    micBtn?.classList.add('mic-error');
-    micLabel('⚠️');
-    setTimeout(() => {
-      micBtn?.classList.remove('mic-error');
-      micLabel('🎤');
-    }, 1500);
+  // Full-viewport overlay (recording indicator + fault state). Tapping the
+  // recording overlay routes back through stopRecording (stop & send).
+  const micOverlay = createMicOverlay(() => {
+    if (mic.recording) stopRecording();
+  });
+
+  // Show a fault: emit telemetry AND render the overlay so logs and UI agree.
+  function micFault(kind, extra) {
+    telemetry.log('mic.fault', extra ? { kind, extra } : { kind });
+    micBtn?.classList.remove('mic-recording');
+    micLabel('🎤');
+    micOverlay.showFault(kind, extra);
   }
 
   // Merge captured Float32 chunks, downsample to 16 kHz, and PCM-encode a WAV.
@@ -321,13 +330,32 @@ export function createInputBar(term, send) {
 
   async function startRecording() {
     if (mic.busy) return;
-    if (!navigator.mediaDevices?.getUserMedia) { flashMicError(); return; }
-    try {
-      mic.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (_) {
-      flashMicError();
+    // Secure-context / mediaDevices availability. getUserMedia is undefined on
+    // http: (non-localhost) and in unsupported webviews.
+    const secure = window.isSecureContext !== false;
+    const hasGUM = !!navigator.mediaDevices?.getUserMedia;
+    telemetry.log('mic.secure.check', { secure, hasGetUserMedia: hasGUM });
+    if (!hasGUM) {
+      micFault('insecure');
       return;
     }
+    telemetry.log('mic.getusermedia.req');
+    try {
+      mic.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      const name = err?.name || 'Error';
+      telemetry.log('mic.getusermedia.denied', { name, message: err?.message || '' });
+      // Map the DOMException to a fault kind.
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        micFault('notfound', name);
+      } else if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+        micFault('denied', name);
+      } else {
+        micFault('mic', name + ': ' + (err?.message || ''));
+      }
+      return;
+    }
+    telemetry.log('mic.getusermedia.ok');
     const AC = window.AudioContext || window.webkitAudioContext;
     mic.ctx = new AC();
     mic.inputRate = mic.ctx.sampleRate;
@@ -341,7 +369,10 @@ export function createInputBar(term, send) {
     mic.processor.connect(mic.ctx.destination);
 
     mic.recording = true;
+    mic.startedAt = Date.now();
     micBtn?.classList.add('mic-recording');
+    micOverlay.showRecording();
+    telemetry.log('mic.recording.start', { inputRate: mic.inputRate });
     mic.deadline = Date.now() + MAX_SECONDS * 1000;
     const tick = () => {
       const left = Math.max(0, Math.ceil((mic.deadline - Date.now()) / 1000));
@@ -361,29 +392,58 @@ export function createInputBar(term, send) {
 
     const chunks = mic.chunks;
     const inputRate = mic.inputRate;
+    const durationMs = mic.startedAt ? Date.now() - mic.startedAt : 0;
     stopTracks();
     mic.chunks = [];
+    telemetry.log('mic.recording.stop', { durationMs, chunkCount: chunks.length });
 
     try {
       const wav = encodeWav(chunks, inputRate);
       const form = new FormData();
       form.append('audio', wav, 'speech.wav');
-      const res = await fetch('/transcribe', { method: 'POST', body: form });
-      if (!res.ok) throw new Error('transcribe ' + res.status);
+      telemetry.log('mic.transcribe.req', { bytes: wav.size, durationMs });
+
+      let res;
+      try {
+        res = await fetch('/transcribe', { method: 'POST', body: form });
+      } catch (netErr) {
+        telemetry.log('mic.transcribe.err', { stage: 'network', message: netErr?.message || '' });
+        micFault('network', netErr?.message || 'network error');
+        return;
+      }
+      telemetry.log('mic.transcribe.resp', { status: res.status });
+
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        telemetry.log('mic.transcribe.err', { stage: 'http', status: res.status, body: bodyText.slice(0, 200) });
+        // 503 = STT model not loaded on this host; everything else is generic.
+        if (res.status === 503) {
+          micFault('model', '503 ' + bodyText.slice(0, 120));
+        } else {
+          micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText));
+        }
+        return;
+      }
+
       const { text } = await res.json();
       if (text && text.trim()) {
+        telemetry.log('mic.transcribe.ok', { textLength: text.trim().length });
+        micOverlay.dismiss();
         // Inject without Enter, same path as the green send button.
         send(text.trim());
         input.focus();
         micLabel('🎤');
       } else {
+        telemetry.log('mic.transcribe.empty');
+        micOverlay.dismiss();
         // Empty transcription: brief neutral state, no injection.
         micLabel('∅');
         setTimeout(() => micLabel('🎤'), 1200);
       }
     } catch (err) {
       console.error('Transcription failed:', err);
-      flashMicError();
+      telemetry.log('mic.transcribe.err', { stage: 'exception', message: err?.message || String(err) });
+      micFault('mic', err?.message || 'encode/transcribe error');
     } finally {
       mic.busy = false;
     }
@@ -393,6 +453,8 @@ export function createInputBar(term, send) {
     micBtn.addEventListener('mousedown', (e) => e.preventDefault());
     micBtn.addEventListener('click', (e) => {
       e.preventDefault();
+      const starting = !mic.recording;
+      telemetry.log('mic.click', { action: starting ? 'start' : 'stop' });
       if (mic.recording) stopRecording();
       else startRecording();
     });
