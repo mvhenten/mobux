@@ -72,6 +72,11 @@ struct AppState {
     use_tls: bool,
     /// In-memory cache of the latest crates.io version (self-update, #130).
     update: update::UpdateState,
+    /// Dev-mode flag (set via `MOBUX_DEV=1`). OFF in production. Gates the
+    /// dev-only client telemetry channel: when false, `/api/telemetry` is a
+    /// no-op 404 and the frontend is told (`window.MOBUX_DEV=false`) not to
+    /// post or render its overlay.
+    dev_mode: bool,
 }
 
 #[derive(Clone)]
@@ -135,6 +140,13 @@ async fn main() -> Result<()> {
         .map(|v| v != "0" && v.to_lowercase() != "false")
         .unwrap_or(true);
 
+    // Dev-mode toggle. OFF unless MOBUX_DEV is set to a truthy value (the
+    // `mobux-dev.service` unit sets `MOBUX_DEV=1`). Gates the dev-only client
+    // telemetry channel; absent/inert in production.
+    let dev_mode = env::var("MOBUX_DEV")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     let update_state = update::UpdateState::new();
     // Kick off the background crates.io poller (polls now, then every ~6h).
     update::spawn_checker(update_state.clone());
@@ -161,6 +173,7 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
         use_tls,
         update: update_state,
+        dev_mode,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -198,7 +211,10 @@ async fn main() -> Result<()> {
         )
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
-        .route("/api/debug", post(api_debug_log))
+        .route(
+            "/api/telemetry",
+            post(api_telemetry).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/upload",
             post(api_upload).layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024)),
@@ -283,6 +299,10 @@ async fn main() -> Result<()> {
         println!("auth: enabled (HTTP Basic)");
     } else {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
+    }
+
+    if state.dev_mode {
+        println!("dev mode: ON (MOBUX_DEV) — /api/telemetry active, logs to stderr");
     }
 
     if use_tls {
@@ -557,6 +577,7 @@ async fn index(State(state): State<AppState>) -> Result<axum::response::Response
         &sessions,
         None,
         &state.cache_bust,
+        state.dev_mode,
     )))
 }
 
@@ -767,15 +788,23 @@ async fn api_tmux_command(
     Ok(Json(json!({"ok": true, "output": result})))
 }
 
-async fn api_debug_log(body: String) -> StatusCode {
-    use std::fs::OpenOptions;
-    use std::io::Write as _;
-    let path = "debug-input.log";
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
-        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
-        let _ = writeln!(f, "--- {ts} ---");
-        let _ = writeln!(f, "{body}");
+/// Dev-only client telemetry sink. A general-purpose channel for the frontend
+/// to forward diagnostic lines into the server journal during development.
+///
+/// Gated on `state.dev_mode` (`MOBUX_DEV=1`): when dev mode is OFF — i.e. in
+/// production — this returns 404 and logs nothing, so the route is inert.
+/// It stays behind the normal auth middleware (the page is same-origin, so the
+/// session cookie carries fine); it is NOT auth-exempt. Body is capped at 64KB
+/// by the route's `DefaultBodyLimit`. Lines land in the journal via `eprintln!`
+/// (matching the repo's existing logging convention) prefixed `[telemetry]`.
+async fn api_telemetry(State(state): State<AppState>, body: String) -> StatusCode {
+    if !state.dev_mode {
+        return StatusCode::NOT_FOUND;
     }
+    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+    // Single line per event keeps `journalctl`/`grep` friendly; the client
+    // already JSON-encodes structured payloads onto one line.
+    eprintln!("[telemetry {ts}] {body}");
     StatusCode::NO_CONTENT
 }
 
@@ -1413,6 +1442,7 @@ async fn terminal_page(
         &name,
         "",
         &state.cache_bust,
+        state.dev_mode,
     )))
 }
 
@@ -1436,6 +1466,7 @@ async fn terminal_page_pinned(
         &name,
         &peer,
         &state.cache_bust,
+        state.dev_mode,
     )))
 }
 
@@ -1861,7 +1892,7 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> String {
+fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str, dev: bool) -> String {
     let mut cards = String::new();
     if sessions.is_empty() {
         cards.push_str(r#"<p class="hint">No tmux sessions. Tap + to create one.</p>"#);
@@ -1934,11 +1965,13 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     </form>
   </dialog>
 
+  <script>window.MOBUX_DEV = {dev};</script>
   <script src="/static/mesh-client.js?v={v}"></script>
   <script src="/static/host-picker.js?v={v}"></script>
   <script src="/static/index.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
   <script src="/static/install-hint.js?v={v}"></script>
+  <script type="module" src="/static/telemetry.js?v={v}"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </body>
 </html>
@@ -1946,7 +1979,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     )
 }
 
-fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
+fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String {
     let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
     // Peer the page is pinned to ("" for the same-origin/current-node route).
     // JSON-encoded so the client can read it verbatim and decide whether to
@@ -2032,6 +2065,8 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     // Host this page is pinned to (issue #123). Empty string = current node
     // (no override); terminal.js binds MobuxMesh to this peer before connect.
     window.MOBUX_PEER = {peer_json};
+    // Dev-mode flag (MOBUX_DEV). Gates the dev-only telemetry module below.
+    window.MOBUX_DEV = {dev};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <!-- Renderer picker: reads `mobux:renderer` from localStorage and
@@ -2063,6 +2098,7 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
   <script src="/static/mesh-client.js?v={v}"></script>
   <script src="/static/host-picker.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
+  <script type="module" src="/static/telemetry.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
 </html>
@@ -2249,5 +2285,57 @@ mod tests {
             validate_pinned_host("host-1.tailnet.ts.net").unwrap(),
             "host-1.tailnet.ts.net:8080"
         );
+    }
+
+    /// Minimal AppState backed by a throwaway temp db, with `dev_mode`
+    /// configurable. Only the fields the telemetry handler touches matter.
+    fn test_state(dev_mode: bool) -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(db::Db::open(&dir.path().join("mobux.db")).expect("open db"));
+        let stt = Arc::new(transcribe::SpeechToText::new(
+            transcribe::resolve_model_dir(dir.path()),
+        ));
+        let state = AppState {
+            session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap()),
+            auth: None,
+            cache_bust: "test".to_string(),
+            db,
+            stt,
+            internal_token: Arc::new("test-token".to_string()),
+            port: 8080,
+            data_dir: dir.path().to_path_buf(),
+            use_tls: false,
+            update: update::UpdateState::new(),
+            dev_mode,
+        };
+        (state, dir)
+    }
+
+    // /api/telemetry is inert (404, logs nothing) when dev mode is OFF — the
+    // production default. Holding the TempDir alive for the call's duration.
+    #[tokio::test]
+    async fn telemetry_endpoint_inert_when_dev_off() {
+        let (state, _dir) = test_state(false);
+        let status = api_telemetry(State(state), "hello".to_string()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // /api/telemetry accepts the body (204) when dev mode is ON (MOBUX_DEV=1).
+    #[tokio::test]
+    async fn telemetry_endpoint_active_when_dev_on() {
+        let (state, _dir) = test_state(true);
+        let status = api_telemetry(State(state), "hello".to_string()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    // The dev flag is reflected verbatim into the page so the client can gate
+    // itself on `window.MOBUX_DEV`.
+    #[test]
+    fn render_index_injects_dev_flag() {
+        let on = render_index(&[], None, "v1", true);
+        assert!(on.contains("window.MOBUX_DEV = true"));
+        assert!(on.contains("/static/telemetry.js"));
+        let off = render_index(&[], None, "v1", false);
+        assert!(off.contains("window.MOBUX_DEV = false"));
     }
 }
