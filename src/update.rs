@@ -8,13 +8,16 @@
 //!     Version comparison is real semver, not string compare.
 //!   * **Detached updater** — an embedded bash script is written to
 //!     `MOBUX_DATA_DIR` and spawned fully detached (setsid + stdio to a log
-//!     file). It snapshots the current binary, `cargo install`s the new
-//!     version, restarts the systemd unit, health-checks the new version on
-//!     `/api/identify`, and rolls back on failure. Everything is parameterized
-//!     — no hardcoded prod port or unit name.
+//!     file). It snapshots the current binary, installs the new version
+//!     (prebuilt GitHub release asset with sha256 verification, falling back
+//!     to `cargo install` for releases without one), restarts the systemd
+//!     unit, health-checks the new version on `/api/identify`, and rolls back
+//!     on failure. Everything is parameterized — no hardcoded prod port or
+//!     unit name.
 //!
 //! Design decisions (from #130 + mesh-edd):
-//!   * v1 installs via `cargo install` (no prebuilt binaries).
+//!   * Installs the prebuilt Linux x86_64 release asset (seconds instead of a
+//!     5-10 min release compile); `cargo install` remains the fallback.
 //!   * Rollback runs in a process that outlives the server, since the restart
 //!     kills the server mid-update.
 //!   * The crates.io URL is overridable via `MOBUX_UPDATE_CHECK_URL` so CI /
@@ -436,10 +439,11 @@ fn cargo_root(bin: &Path) -> String {
         })
 }
 
-/// Resolve a usable `cargo` for the updater: search PATH, then fall back to
-/// `~/.cargo/bin/cargo` (the systemd unit PATH usually lacks it). Returned as
-/// `MOBUX_UPDATE_CARGO` so the script doesn't have to repeat the search. `None`
-/// means an update run would be a guaranteed no-op — refuse before the 202.
+/// Resolve a usable `cargo` for the updater's fallback path: search PATH, then
+/// fall back to `~/.cargo/bin/cargo` (the systemd unit PATH usually lacks it).
+/// Returned as `MOBUX_UPDATE_CARGO` so the script doesn't have to repeat the
+/// search. `None` is fine — the primary install path downloads the prebuilt
+/// release asset and needs no cargo at all.
 fn resolve_cargo() -> Option<PathBuf> {
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
@@ -504,16 +508,10 @@ pub fn spawn_updater(
         });
     };
 
-    // Preflight: without a resolvable cargo the script would fail on its first
-    // real step, leaving the UI to poll a version that never changes. Refuse
-    // here so the caller gets an immediate, actionable error instead.
-    let Some(cargo) = resolve_cargo() else {
-        return Err(RunError::SpawnFailed {
-            message: "cargo not found on PATH or at ~/.cargo/bin/cargo; add \
-                      ~/.cargo/bin to the unit's Environment=PATH (see DEPLOY.md)"
-                .to_string(),
-        });
-    };
+    // cargo is only needed for the fallback path (releases without a prebuilt
+    // asset). Resolve it when possible so the script skips its own search; a
+    // missing cargo no longer blocks the run.
+    let cargo = resolve_cargo();
 
     let bin = current_exe()?;
     let root = cargo_root(&bin);
@@ -541,7 +539,6 @@ pub fn spawn_updater(
         .env("MOBUX_UPDATE_VERSION", version)
         .env("MOBUX_UPDATE_BIN", &bin)
         .env("MOBUX_UPDATE_ROOT", &root)
-        .env("MOBUX_UPDATE_CARGO", &cargo)
         .env("MOBUX_UPDATE_SERVICE", &service)
         .env("MOBUX_UPDATE_PORT", port.to_string())
         .env("MOBUX_UPDATE_SCHEME", scheme)
@@ -549,6 +546,9 @@ pub fn spawn_updater(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err));
+    if let Some(cargo) = &cargo {
+        cmd.env("MOBUX_UPDATE_CARGO", cargo);
+    }
 
     cmd.spawn().map_err(|e| RunError::SpawnFailed {
         message: format!("spawning updater (setsid bash {}): {e}", script.display()),

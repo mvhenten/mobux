@@ -81,6 +81,9 @@ done
 if [ -z "${HC_PORT:-}" ]; then echo "could not start health server"; exit 1; fi
 
 run_updater() {
+  # ASSET_BASE defaults to a nonexistent file:// dir so the prebuilt-asset
+  # download always fails and tests exercise the cargo fallback — hermetic, no
+  # network. Download tests override it with a populated file:// dir.
   # shellcheck disable=SC2086
   env \
     MOBUX_UPDATE_VERSION="$1" \
@@ -92,6 +95,7 @@ run_updater() {
     MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
     MOBUX_UPDATE_CARGO="$4" \
     MOBUX_UPDATE_CRATE="mobux" \
+    MOBUX_UPDATE_ASSET_BASE="${ASSET_BASE:-file://$WORK/no-assets}" \
     MOBUX_UPDATE_LOG="$WORK/update.log" \
     bash "$UPDATER" --no-systemd
 }
@@ -184,6 +188,7 @@ BIN6="$ROOT6/bin/mobux"
 printf 'OLD-V0' > "$BIN6"
 OUT6="$(env \
   HOME="$WORK" \
+  MOBUX_UPDATE_ASSET_BASE="file://$WORK/no-assets" \
   MOBUX_UPDATE_VERSION="6.0.0" \
   MOBUX_UPDATE_BIN="$BIN6" \
   MOBUX_UPDATE_ROOT="$ROOT6" \
@@ -202,6 +207,69 @@ case "$OUT6" in
   *) bad "no-cargo: missing ABORT log line" ;;
 esac
 [ "$(cat "$BIN6")" = "OLD-V0" ] && ok "no-cargo: binary unchanged" || bad "no-cargo: binary changed"
+
+# ── Test 7: prebuilt release asset → installed without cargo ───────────────
+# A valid tar.gz + matching .sha256 served from a file:// "release"; cargo is
+# the FAILING stub, proving the prebuilt path never touches it.
+ROOT7="$WORK/root7"; mkdir -p "$ROOT7/bin"
+BIN7="$ROOT7/bin/mobux"
+printf 'OLD-V0' > "$BIN7"
+ASSET_NAME="mobux-x86_64-unknown-linux-gnu.tar.gz"
+ASSETS7="$WORK/assets/v7.0.0"; mkdir -p "$ASSETS7"
+PAYDIR7="$WORK/pay7"; mkdir -p "$PAYDIR7"
+printf 'NEW-V7-PREBUILT' > "$PAYDIR7/mobux"
+tar -C "$PAYDIR7" -czf "$ASSETS7/$ASSET_NAME" mobux
+( cd "$ASSETS7" && sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256" )
+printf '{"app":"mobux","version":"7.0.0"}' > "$WORK/identify.json"
+CARGO_FAIL7="$(make_stub_cargo fail "")"
+
+ASSET_BASE="file://$WORK/assets" run_updater "7.0.0" "$BIN7" "$ROOT7" "$CARGO_FAIL7"
+rc=$?
+[ "$rc" -eq 0 ] && ok "prebuilt: exit 0 (cargo never needed)" || bad "prebuilt: exit $rc"
+[ "$(cat "$BIN7")" = "NEW-V7-PREBUILT" ] && ok "prebuilt: binary replaced from asset" || bad "prebuilt: binary not replaced ($(cat "$BIN7"))"
+[ "$(cat "$BIN7.prev")" = "OLD-V0" ] && ok "prebuilt: snapshot holds old binary" || bad "prebuilt: snapshot wrong"
+ls "$ROOT7"/mobux-update-dl.* >/dev/null 2>&1 && bad "prebuilt: staging dir left behind" || ok "prebuilt: staging dir cleaned up"
+
+# ── Test 8: corrupt asset checksum → falls back to cargo install ───────────
+# Same asset layout but the .sha256 doesn't match; the updater must refuse the
+# download and complete via the (succeeding) cargo stub instead.
+ROOT8="$WORK/root8"; mkdir -p "$ROOT8/bin"
+BIN8="$ROOT8/bin/mobux"
+printf 'OLD-V0' > "$BIN8"
+ASSETS8="$WORK/assets/v8.0.0"; mkdir -p "$ASSETS8"
+PAYDIR8="$WORK/pay8"; mkdir -p "$PAYDIR8"
+printf 'TAMPERED-V8' > "$PAYDIR8/mobux"
+tar -C "$PAYDIR8" -czf "$ASSETS8/$ASSET_NAME" mobux
+printf '%s  %s\n' "$(printf 'x%.0s' {1..64})" "$ASSET_NAME" > "$ASSETS8/$ASSET_NAME.sha256"
+printf 'NEW-V8-CARGO' > "$WORK/payload-v8"
+printf '{"app":"mobux","version":"8.0.0"}' > "$WORK/identify.json"
+CARGO_OK8="$(make_stub_cargo success "$WORK/payload-v8")"
+
+OUT8="$(ASSET_BASE="file://$WORK/assets" run_updater "8.0.0" "$BIN8" "$ROOT8" "$CARGO_OK8")"
+rc=$?
+[ "$rc" -eq 0 ] && ok "bad-sha: exit 0 via cargo fallback" || bad "bad-sha: exit $rc"
+case "$OUT8" in
+  *"sha256 verification FAILED"*) ok "bad-sha: refused the corrupt asset" ;;
+  *) bad "bad-sha: missing verification-failure log line" ;;
+esac
+[ "$(cat "$BIN8")" = "NEW-V8-CARGO" ] && ok "bad-sha: installed via cargo, not the asset" || bad "bad-sha: wrong binary content ($(cat "$BIN8"))"
+
+# ── Test 9: asset missing → logs the fallback and cargo installs ────────────
+ROOT9="$WORK/root9"; mkdir -p "$ROOT9/bin"
+BIN9="$ROOT9/bin/mobux"
+printf 'OLD-V0' > "$BIN9"
+printf 'NEW-V9' > "$WORK/payload-v9"
+printf '{"app":"mobux","version":"9.0.0"}' > "$WORK/identify.json"
+CARGO_OK9="$(make_stub_cargo success "$WORK/payload-v9")"
+
+OUT9="$(run_updater "9.0.0" "$BIN9" "$ROOT9" "$CARGO_OK9")"
+rc=$?
+[ "$rc" -eq 0 ] && ok "no-asset: exit 0 via cargo fallback" || bad "no-asset: exit $rc"
+case "$OUT9" in
+  *"falling back to cargo install"*) ok "no-asset: logged the fallback" ;;
+  *) bad "no-asset: missing fallback log line" ;;
+esac
+[ "$(cat "$BIN9")" = "NEW-V9" ] && ok "no-asset: installed via cargo" || bad "no-asset: wrong binary content"
 
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
