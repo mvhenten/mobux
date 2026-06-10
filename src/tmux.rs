@@ -77,13 +77,29 @@ pub async fn list_sessions() -> Result<Vec<Session>> {
     Ok(out)
 }
 
+/// Build the `tmux new-session` arguments. Sessions start in the user's
+/// home directory (when resolvable) rather than wherever the mobux server
+/// happens to run; new windows inherit this start directory from the
+/// session, so they are covered too.
+fn new_session_args(name: &str, shell_cmd: &str, home: Option<&Path>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["new-session".into(), "-d".into()];
+    if let Some(home) = home {
+        args.push("-c".into());
+        args.push(home.display().to_string());
+    }
+    args.extend(["-s".into(), name.into(), shell_cmd.into()]);
+    args
+}
+
 pub async fn new_session(name: &str) -> Result<()> {
     let (shell_type, shell_path) = detect_session_shell();
     let shell_cmd = prepare_shell_with_osc133(shell_type, &shell_path)?;
 
-    // Create the session with our OSC 133-enabled shell command
+    // Create the session with our OSC 133-enabled shell command,
+    // starting in the user's home directory.
+    let home = home_dir().ok();
     let output = tmux_command()
-        .args(["new-session", "-d", "-s", name, &shell_cmd])
+        .args(new_session_args(name, &shell_cmd, home.as_deref()))
         .output()
         .await
         .context("failed to execute tmux")?;
@@ -464,5 +480,28 @@ mod tests {
         ));
         // Real failures must still propagate
         assert!(!is_no_server_error("unknown command: list-sessionz"));
+    }
+
+    #[test]
+    fn new_session_starts_in_home_directory() {
+        let args = new_session_args("work", "bash", Some(Path::new("/home/alice")));
+        assert_eq!(
+            args,
+            vec![
+                "new-session",
+                "-d",
+                "-c",
+                "/home/alice",
+                "-s",
+                "work",
+                "bash"
+            ]
+        );
+    }
+
+    #[test]
+    fn new_session_without_home_omits_start_directory() {
+        let args = new_session_args("work", "bash", None);
+        assert_eq!(args, vec!["new-session", "-d", "-s", "work", "bash"]);
     }
 }
