@@ -902,16 +902,9 @@ async fn api_transcribe(
     .map_err(AppError::internal)?;
 
     let provider_cfg = transcribe::ProviderConfig {
-        kind: match db_cfg.kind.as_str() {
-            "openai" => transcribe::ProviderKind::Openai,
-            "network" => transcribe::ProviderKind::Network,
-            _ => transcribe::ProviderKind::Local,
-        },
         url: db_cfg.url,
         model: db_cfg.model,
         api_key: db_cfg.api_key,
-        install_cmd: db_cfg.install_cmd,
-        start_cmd: db_cfg.start_cmd,
     };
 
     match transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await {
@@ -1493,7 +1486,10 @@ end</code></pre>
       kindEl.value  = cfg.kind  || 'local';
       urlEl.value   = cfg.url   || '';
       modelEl.value = cfg.model || '';
-      keyEl.value   = cfg.api_key || '';
+      // Never populate the key field — the server does not return the secret.
+      // Show a placeholder so the user knows a key is already stored.
+      keyEl.value = '';
+      keyEl.placeholder = cfg.has_key ? '•••• stored' : 'sk-…';
       updateVisibility();
     }}).catch(() => updateVisibility());
 
@@ -2227,22 +2223,38 @@ fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SttConfigJson {
+/// Shape returned by GET /api/settings/stt.
+/// The api_key is never returned; instead `has_key` indicates whether one is stored.
+#[derive(serde::Serialize)]
+struct SttConfigGetJson {
     kind: String,
     url: String,
     model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key: Option<String>,
+    has_key: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     install_cmd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     start_cmd: Option<String>,
 }
 
+/// Shape accepted by PUT /api/settings/stt.
+/// api_key is optional; if absent or empty the existing stored key is preserved.
+#[derive(serde::Deserialize)]
+struct SttConfigPutJson {
+    kind: String,
+    url: String,
+    model: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    install_cmd: Option<String>,
+    #[serde(default)]
+    start_cmd: Option<String>,
+}
+
 async fn api_get_stt_config(
     State(state): State<AppState>,
-) -> Result<Json<SttConfigJson>, AppError> {
+) -> Result<Json<SttConfigGetJson>, AppError> {
     let cfg = tokio::task::spawn_blocking({
         let db = state.db.clone();
         move || db.stt_config()
@@ -2250,11 +2262,11 @@ async fn api_get_stt_config(
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
-    Ok(Json(SttConfigJson {
+    Ok(Json(SttConfigGetJson {
         kind: cfg.kind,
         url: cfg.url,
         model: cfg.model,
-        api_key: cfg.api_key,
+        has_key: cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
         install_cmd: cfg.install_cmd,
         start_cmd: cfg.start_cmd,
     }))
@@ -2262,13 +2274,28 @@ async fn api_get_stt_config(
 
 async fn api_set_stt_config(
     State(state): State<AppState>,
-    Json(req): Json<SttConfigJson>,
+    Json(req): Json<SttConfigPutJson>,
 ) -> Result<StatusCode, AppError> {
+    // Read the existing config so we can preserve the stored api_key when
+    // the request doesn't supply a new one.
+    let existing = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let api_key = match req.api_key.as_deref() {
+        Some(k) if !k.is_empty() => Some(k.to_string()),
+        _ => existing.api_key,
+    };
+
     let cfg = db::SttConfig {
         kind: req.kind,
         url: req.url,
         model: req.model,
-        api_key: req.api_key,
+        api_key,
         install_cmd: req.install_cmd,
         start_cmd: req.start_cmd,
     };

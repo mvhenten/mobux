@@ -347,8 +347,16 @@ impl Db {
     /// Read STT provider config. Seeds defaults and persists them on first call.
     pub fn stt_config(&self) -> Result<SttConfig> {
         let conn = self.lock_conn()?;
-        let row: Option<(String, String, String, Option<String>, Option<String>, Option<String>)> =
-            conn.query_row(
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let row: Option<Row> = conn
+            .query_row(
                 "SELECT kind, url, model, api_key, install_cmd, start_cmd FROM stt_config WHERE id = 1",
                 [],
                 |row| {

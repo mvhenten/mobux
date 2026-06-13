@@ -8,42 +8,22 @@ use std::time::Duration;
 use anyhow::Result;
 use reqwest::multipart;
 
-/// Which provider kind is configured.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ProviderKind {
-    Local,
-    Network,
-    Openai,
-}
-
-impl Default for ProviderKind {
-    fn default() -> Self {
-        Self::Local
-    }
-}
-
 /// Provider configuration stored in db (mirrors db::SttConfig).
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
-    pub kind: ProviderKind,
     pub url: String,
     pub model: String,
     pub api_key: Option<String>,
-    pub install_cmd: Option<String>,
-    pub start_cmd: Option<String>,
 }
 
 impl ProviderConfig {
     /// Default local config — points at a faster-whisper server on port 5200.
+    #[cfg(test)]
     pub fn default_local() -> Self {
         Self {
-            kind: ProviderKind::Local,
             url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
             model: "Systran/faster-whisper-base.en".to_string(),
             api_key: None,
-            install_cmd: Some("bin/stt-install".to_string()),
-            start_cmd: Some("bin/stt-serve".to_string()),
         }
     }
 }
@@ -139,14 +119,17 @@ pub async fn transcribe_with_provider(
 
 /// Check if the provider URL is reachable (HEAD or GET with short timeout).
 pub async fn probe_provider(url: &str) -> bool {
-    // Extract base URL for the health probe (strip path back to /health or just /)
-    let base = url
-        .trim_end_matches('/')
-        .rsplitn(2, '/')
-        .last()
-        .unwrap_or(url);
-    // Try a GET on /health; many whisper-compatible servers expose it
-    let health_url = format!("{base}/health");
+    // Build the health URL by replacing only the path component, keeping
+    // scheme/host/port intact (avoids the rsplitn trick that yields "http:" on
+    // multi-segment paths like /v1/audio/transcriptions).
+    let health_url = match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_path("/health");
+            u.set_query(None);
+            u.to_string()
+        }
+        Err(_) => format!("{}/health", url.trim_end_matches('/')),
+    };
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -180,7 +163,7 @@ mod tests {
     fn default_local_config_has_expected_url() {
         let cfg = ProviderConfig::default_local();
         assert!(cfg.url.contains("5200"));
-        assert_eq!(cfg.kind, ProviderKind::Local);
+        assert!(cfg.api_key.is_none());
     }
 
     #[tokio::test]
