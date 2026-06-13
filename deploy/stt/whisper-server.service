@@ -1,0 +1,19 @@
+[Unit]
+Description=Whisper.cpp OpenAI-compatible speech-to-text server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/whisper.cpp
+# The Vulkan build is a shared-lib build: whisper-server loads libwhisper.so /
+# libggml*.so (including libggml-vulkan.so) from the same dir as the binary.
+# Its RUNPATH points at the build host's paths, so make the libs findable here.
+Environment=LD_LIBRARY_PATH=/home/ubuntu/whisper.cpp/build/bin
+ExecStart=/home/ubuntu/whisper.cpp/build/bin/whisper-server -m /home/ubuntu/whisper.cpp/models/ggml-small.en.bin --host 127.0.0.1 --port 8082 --convert
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
