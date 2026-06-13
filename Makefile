@@ -24,14 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        podman-build podman-run podman-stop podman-test stt-model
-
-# Speech-to-text (Parakeet via sherpa-rs). The int8 model is ~480 MB to
-# download and is NOT committed. `make stt-model` fetches+extracts it into
-# ./models/, and the server reads it via MOBUX_STT_MODEL_DIR (see .envrc.example).
-STT_MODELS_DIR   ?= models
-STT_MODEL_NAME   ?= sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8
-STT_MODEL_URL    ?= https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$(STT_MODEL_NAME).tar.bz2
+        podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
 PODMAN_PORT      ?= 8381
@@ -70,20 +63,9 @@ setup-transcribe:
 web:
 	node web/build.js
 
-# Download + extract the Parakeet int8 model into $(STT_MODELS_DIR)/. Idempotent:
-# skips the download if the model dir already has its files.
-stt-model:
-	@if [ -f "$(STT_MODELS_DIR)/$(STT_MODEL_NAME)/encoder.int8.onnx" ]; then \
-		echo "model already present at $(STT_MODELS_DIR)/$(STT_MODEL_NAME)"; exit 0; \
-	fi
-	@mkdir -p "$(STT_MODELS_DIR)"
-	@echo "Downloading $(STT_MODEL_NAME) (~480 MB)..."
-	@curl -fL --retry 3 -o "$(STT_MODELS_DIR)/$(STT_MODEL_NAME).tar.bz2" "$(STT_MODEL_URL)"
-	@echo "Extracting..."
-	@tar -xjf "$(STT_MODELS_DIR)/$(STT_MODEL_NAME).tar.bz2" -C "$(STT_MODELS_DIR)"
-	@rm -f "$(STT_MODELS_DIR)/$(STT_MODEL_NAME).tar.bz2"
-	@echo "Model ready at $(STT_MODELS_DIR)/$(STT_MODEL_NAME)"
-	@echo "Set MOBUX_STT_MODEL_DIR=\$$(pwd)/$(STT_MODELS_DIR)/$(STT_MODEL_NAME) (see .envrc.example)"
+# Speech-to-text provider setup. Installs a local OpenAI-compatible server.
+stt-install:
+	@bin/stt-install
 
 clean:
 	$(CARGO) clean -p mobux

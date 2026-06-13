@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Start the faster-whisper STT server on port 5200.
+set -euo pipefail
+STT_DIR="${MOBUX_DATA_DIR:-$HOME/.local/share/mobux}/stt"
+exec "$STT_DIR/.venv/bin/speaches" --host 127.0.0.1 --port 5200
