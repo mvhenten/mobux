@@ -1,284 +1,232 @@
-// ── Speech-to-text: local CPU Parakeet via sherpa-rs ──────────────────
-//
-// `POST /transcribe` accepts a 16 kHz mono 16-bit PCM WAV (multipart, same
-// pattern as `/api/upload`), runs it through an NVIDIA Parakeet TDT 0.6b-v2
-// (int8) offline transducer entirely on CPU, and returns `{ "text": "..." }`.
-//
-// The recognizer is expensive to construct (~4 s to load three ONNX graphs),
-// so it is built ONCE on first use and reused for every request behind a
-// mutex. The model is large (~620 MB encoder) and is NOT bundled — if the
-// model files are absent the endpoint reports `503` and mobux still boots
-// normally (so CI / model-less dev environments are unaffected).
-//
-// Engine: `sherpa-rs` (sherpa-onnx bindings), in-process — no subprocess, no
-// temp files. Samples are fed straight from the parsed WAV to the recognizer.
+//! STT provider abstraction — forwards audio to an OpenAI-compatible endpoint.
+//!
+//! No model is loaded in-process. The active provider is read from db config
+//! on each request (no restart needed after config change).
 
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::time::Duration;
 
-use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
+use anyhow::Result;
+use reqwest::multipart;
 
-/// Subdirectory (under the resolved model dir) name as published by the
-/// k2-fsa sherpa-onnx model zoo. The Makefile `stt-model` target extracts the
-/// release tarball to exactly this layout.
-pub const MODEL_SUBDIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8";
+/// Which provider kind is configured.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Local,
+    Network,
+    Openai,
+}
 
-/// Reject anything longer than this many seconds of 16 kHz audio. Defence in
-/// depth behind the client-side 60 s cap; a little headroom above 60 s.
-const MAX_AUDIO_SECONDS: f32 = 70.0;
-const TARGET_SAMPLE_RATE: u32 = 16_000;
-const MAX_SAMPLES: usize = (MAX_AUDIO_SECONDS as usize) * (TARGET_SAMPLE_RATE as usize);
+impl Default for ProviderKind {
+    fn default() -> Self {
+        Self::Local
+    }
+}
 
-/// Errors a transcription request can fail with, mapped to HTTP status by the
-/// caller in main.rs.
+/// Provider configuration stored in db (mirrors db::SttConfig).
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    pub kind: ProviderKind,
+    pub url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub install_cmd: Option<String>,
+    pub start_cmd: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Default local config — points at a faster-whisper server on port 5200.
+    pub fn default_local() -> Self {
+        Self {
+            kind: ProviderKind::Local,
+            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
+            model: "Systran/faster-whisper-base.en".to_string(),
+            api_key: None,
+            install_cmd: Some("bin/stt-install".to_string()),
+            start_cmd: Some("bin/stt-serve".to_string()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TranscribeError {
-    /// Model files are not installed; the endpoint is unavailable (503).
-    ModelUnavailable(String),
-    /// The uploaded bytes are not a WAV we can decode, or violate the audio
-    /// constraints (400).
-    BadAudio(String),
-    /// The recognizer failed to initialise or run (500).
-    Engine(String),
+    /// No provider configured or provider unreachable (503).
+    ProviderUnavailable(String),
+    /// The provider returned an error (500).
+    ProviderError(String),
+    /// Network error reaching the provider.
+    NetworkError(String),
 }
 
 impl std::fmt::Display for TranscribeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TranscribeError::ModelUnavailable(m) => {
-                write!(f, "speech-to-text model unavailable: {m}")
-            }
-            TranscribeError::BadAudio(m) => write!(f, "invalid audio: {m}"),
-            TranscribeError::Engine(m) => write!(f, "transcription engine error: {m}"),
+            Self::ProviderUnavailable(s) => write!(f, "provider unavailable: {s}"),
+            Self::ProviderError(s) => write!(f, "provider error: {s}"),
+            Self::NetworkError(s) => write!(f, "network error: {s}"),
         }
     }
 }
 
-/// Resolve where the Parakeet model lives. `MOBUX_STT_MODEL_DIR` overrides;
-/// otherwise it defaults to `<data_dir>/models/<MODEL_SUBDIR>`.
-pub fn resolve_model_dir(data_dir: &Path) -> PathBuf {
-    if let Some(override_dir) = std::env::var_os("MOBUX_STT_MODEL_DIR") {
-        if !override_dir.is_empty() {
-            return PathBuf::from(override_dir);
+/// Forward `audio_bytes` to the configured provider and return the transcript.
+///
+/// `filename` is sent as the multipart filename (e.g. "speech.wav").
+/// The provider must speak POST /v1/audio/transcriptions (OpenAI-compatible).
+pub async fn transcribe_with_provider(
+    config: &ProviderConfig,
+    audio_bytes: Vec<u8>,
+    filename: &str,
+) -> Result<String, TranscribeError> {
+    if audio_bytes.is_empty() {
+        return Ok(String::new());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| TranscribeError::NetworkError(e.to_string()))?;
+
+    let file_part = multipart::Part::bytes(audio_bytes)
+        .file_name(filename.to_string())
+        .mime_str("audio/wav")
+        .map_err(|e| TranscribeError::NetworkError(e.to_string()))?;
+
+    let form = multipart::Form::new()
+        .part("file", file_part)
+        .text("model", config.model.clone());
+
+    let mut req = client.post(&config.url).multipart(form);
+
+    if let Some(key) = &config.api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            TranscribeError::ProviderUnavailable(e.to_string())
+        } else {
+            TranscribeError::NetworkError(e.to_string())
         }
-    }
-    data_dir.join("models").join(MODEL_SUBDIR)
-}
+    })?;
 
-/// Holds the lazily-constructed recognizer plus the directory it loads from.
-/// Construction is deferred to the first request so startup stays fast and a
-/// missing model never blocks boot.
-pub struct SpeechToText {
-    model_dir: PathBuf,
-    recognizer: Mutex<Option<TransducerRecognizer>>,
-}
-
-impl SpeechToText {
-    pub fn new(model_dir: PathBuf) -> Self {
-        Self {
-            model_dir,
-            recognizer: Mutex::new(None),
-        }
-    }
-
-    /// True if all four model files are present on disk.
-    pub fn model_present(&self) -> bool {
-        [
-            "encoder.int8.onnx",
-            "decoder.int8.onnx",
-            "joiner.int8.onnx",
-            "tokens.txt",
-        ]
-        .iter()
-        .all(|f| self.model_dir.join(f).is_file())
-    }
-
-    pub fn model_dir(&self) -> &Path {
-        &self.model_dir
-    }
-
-    fn build_recognizer(&self) -> Result<TransducerRecognizer, TranscribeError> {
-        if !self.model_present() {
-            return Err(TranscribeError::ModelUnavailable(format!(
-                "model files not found in {}; run `make stt-model` or set MOBUX_STT_MODEL_DIR",
-                self.model_dir.display()
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        if status.as_u16() == 503 || status.as_u16() == 502 || status.as_u16() == 504 {
+            return Err(TranscribeError::ProviderUnavailable(format!(
+                "{} {body}",
+                status.as_u16()
             )));
         }
-
-        let dir = &self.model_dir;
-        let path = |f: &str| dir.join(f).to_string_lossy().into_owned();
-
-        // Exact config validated in the spike: Parakeet TDT is a NeMo
-        // transducer, greedy decoding, 80-dim features at 16 kHz. Thread count
-        // is bounded so a single transcription cannot monopolise a small
-        // phone-tethered box.
-        let num_threads = std::thread::available_parallelism()
-            .map(|n| (n.get() as i32).clamp(1, 4))
-            .unwrap_or(2);
-
-        let config = TransducerConfig {
-            encoder: path("encoder.int8.onnx"),
-            decoder: path("decoder.int8.onnx"),
-            joiner: path("joiner.int8.onnx"),
-            tokens: path("tokens.txt"),
-            model_type: "nemo_transducer".into(),
-            num_threads,
-            sample_rate: TARGET_SAMPLE_RATE as i32,
-            feature_dim: 80,
-            decoding_method: "greedy_search".into(),
-            ..Default::default()
-        };
-
-        TransducerRecognizer::new(config).map_err(|e| TranscribeError::Engine(e.to_string()))
+        return Err(TranscribeError::ProviderError(format!(
+            "{} {body}",
+            status.as_u16()
+        )));
     }
 
-    /// Decode a WAV blob and return the recognised text. Empty / silent audio
-    /// yields `Ok(String::new())` (no error), matching the spike behaviour.
-    pub fn transcribe_wav(&self, wav_bytes: &[u8]) -> Result<String, TranscribeError> {
-        let samples = decode_wav_to_mono_f32(wav_bytes)?;
-        if samples.is_empty() {
-            return Ok(String::new());
-        }
-
-        let mut guard = self
-            .recognizer
-            .lock()
-            .map_err(|_| TranscribeError::Engine("recognizer mutex poisoned".into()))?;
-        if guard.is_none() {
-            *guard = Some(self.build_recognizer()?);
-        }
-        let rec = guard.as_mut().expect("recognizer just constructed");
-        let text = rec.transcribe(TARGET_SAMPLE_RATE, &samples);
-        Ok(text.trim().to_string())
+    #[derive(serde::Deserialize)]
+    struct TranscribeResponse {
+        text: String,
     }
+
+    let body: TranscribeResponse = resp
+        .json()
+        .await
+        .map_err(|e| TranscribeError::ProviderError(format!("invalid json: {e}")))?;
+
+    Ok(body.text.trim().to_string())
 }
 
-/// Parse a 16-bit PCM WAV into mono f32 samples in [-1, 1] at 16 kHz.
-///
-/// We only accept what the client sends (16 kHz mono 16-bit PCM). If a
-/// stereo file slips through we downmix to mono; non-16 kHz rates are
-/// rejected rather than silently resampled (the client guarantees 16 kHz).
-fn decode_wav_to_mono_f32(wav_bytes: &[u8]) -> Result<Vec<f32>, TranscribeError> {
-    let mut reader = hound::WavReader::new(Cursor::new(wav_bytes))
-        .map_err(|e| TranscribeError::BadAudio(format!("not a readable WAV: {e}")))?;
-    let spec = reader.spec();
-
-    if spec.sample_rate != TARGET_SAMPLE_RATE {
-        return Err(TranscribeError::BadAudio(format!(
-            "expected {TARGET_SAMPLE_RATE} Hz, got {} Hz",
-            spec.sample_rate
-        )));
-    }
-    let channels = spec.channels.max(1) as usize;
-
-    // Collect interleaved samples normalised to f32 [-1, 1].
-    let interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .map(|s| s.map(|v| v as f32 / max))
-                .collect::<Result<Vec<f32>, _>>()
-                .map_err(|e| TranscribeError::BadAudio(format!("corrupt PCM data: {e}")))?
-        }
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<Result<Vec<f32>, _>>()
-            .map_err(|e| TranscribeError::BadAudio(format!("corrupt float data: {e}")))?,
+/// Check if the provider URL is reachable (HEAD or GET with short timeout).
+pub async fn probe_provider(url: &str) -> bool {
+    // Extract base URL for the health probe (strip path back to /health or just /)
+    let base = url
+        .trim_end_matches('/')
+        .rsplitn(2, '/')
+        .last()
+        .unwrap_or(url);
+    // Try a GET on /health; many whisper-compatible servers expose it
+    let health_url = format!("{base}/health");
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
     };
-
-    // Downmix to mono if needed.
-    let mono: Vec<f32> = if channels <= 1 {
-        interleaved
-    } else {
-        interleaved
-            .chunks(channels)
-            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-            .collect()
-    };
-
-    if mono.len() > MAX_SAMPLES {
-        return Err(TranscribeError::BadAudio(format!(
-            "audio too long: {:.1}s exceeds {MAX_AUDIO_SECONDS:.0}s cap",
-            mono.len() as f32 / TARGET_SAMPLE_RATE as f32
-        )));
+    // Try /health first; fall back to checking the transcribe URL with HEAD
+    if client
+        .get(&health_url)
+        .send()
+        .await
+        .map(|r| r.status().as_u16() < 500)
+        .unwrap_or(false)
+    {
+        return true;
     }
-
-    Ok(mono)
+    client
+        .head(url)
+        .send()
+        .await
+        .map(|r| r.status().as_u16() < 500)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_wav(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
-        let spec = hound::WavSpec {
-            channels,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut buf = Vec::new();
-        {
-            let mut w = hound::WavWriter::new(Cursor::new(&mut buf), spec).unwrap();
-            for &s in samples {
-                w.write_sample(s).unwrap();
-            }
-            w.finalize().unwrap();
+    #[test]
+    fn default_local_config_has_expected_url() {
+        let cfg = ProviderConfig::default_local();
+        assert!(cfg.url.contains("5200"));
+        assert_eq!(cfg.kind, ProviderKind::Local);
+    }
+
+    #[tokio::test]
+    async fn transcribe_with_empty_bytes_returns_empty_string() {
+        // Should short-circuit without making any network call
+        let cfg = ProviderConfig::default_local();
+        let result = transcribe_with_provider(&cfg, vec![], "speech.wav").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn transcribe_unreachable_provider_returns_unavailable() {
+        let mut cfg = ProviderConfig::default_local();
+        cfg.url = "http://127.0.0.1:19999/v1/audio/transcriptions".to_string();
+        // tiny audio bytes just to get past the empty check
+        let result = transcribe_with_provider(&cfg, vec![0u8; 100], "speech.wav").await;
+        assert!(matches!(
+            result,
+            Err(TranscribeError::ProviderUnavailable(_) | TranscribeError::NetworkError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn transcribe_mock_server() {
+        // Spin up a tiny mock HTTP server with axum
+        use axum::{routing::post, Json as AxumJson, Router};
+        use std::net::SocketAddr;
+
+        async fn mock_handler() -> AxumJson<serde_json::Value> {
+            AxumJson(serde_json::json!({ "text": "hello world" }))
         }
-        buf
-    }
 
-    #[test]
-    fn decodes_mono_16k() {
-        let wav = make_wav(16_000, 1, &[0, 16384, -16384, 32767, -32768]);
-        let out = decode_wav_to_mono_f32(&wav).unwrap();
-        assert_eq!(out.len(), 5);
-        assert!((out[1] - 0.5).abs() < 0.01);
-        assert!(out[3] > 0.99);
-        assert!(out[4] < -0.99);
-    }
+        let app = Router::new().route("/v1/audio/transcriptions", post(mock_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
 
-    #[test]
-    fn downmixes_stereo() {
-        // L=1.0, R=-1.0 averages to 0; L=R=0.5 stays 0.5.
-        let wav = make_wav(16_000, 2, &[32767, -32768, 16384, 16384]);
-        let out = decode_wav_to_mono_f32(&wav).unwrap();
-        assert_eq!(out.len(), 2);
-        assert!(out[0].abs() < 0.01);
-        assert!((out[1] - 0.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn rejects_wrong_sample_rate() {
-        let wav = make_wav(44_100, 1, &[0, 1, 2]);
-        let err = decode_wav_to_mono_f32(&wav).unwrap_err();
-        assert!(matches!(err, TranscribeError::BadAudio(_)));
-    }
-
-    #[test]
-    fn rejects_too_long() {
-        // One sample over the cap (mono 16k). Build a header-consistent WAV
-        // with MAX_SAMPLES + 1 silent samples.
-        let n = MAX_SAMPLES + 1;
-        let samples = vec![0i16; n];
-        let wav = make_wav(16_000, 1, &samples);
-        let err = decode_wav_to_mono_f32(&wav).unwrap_err();
-        assert!(matches!(err, TranscribeError::BadAudio(_)));
-    }
-
-    #[test]
-    fn rejects_non_wav() {
-        let err = decode_wav_to_mono_f32(b"not a wav at all").unwrap_err();
-        assert!(matches!(err, TranscribeError::BadAudio(_)));
-    }
-
-    #[test]
-    fn resolve_model_dir_default() {
-        // Ensure no env override leaks from another test/process.
-        std::env::remove_var("MOBUX_STT_MODEL_DIR");
-        let dir = resolve_model_dir(Path::new("/data"));
-        assert_eq!(dir, PathBuf::from("/data/models").join(MODEL_SUBDIR));
+        let mut cfg = ProviderConfig::default_local();
+        cfg.url = format!("http://{addr}/v1/audio/transcriptions");
+        // Provide minimal WAV header bytes (44 bytes)
+        let audio = vec![0u8; 100];
+        let result = transcribe_with_provider(&cfg, audio, "speech.wav").await;
+        assert!(result.is_ok(), "mock server should return ok: {result:?}");
+        assert_eq!(result.unwrap(), "hello world");
     }
 }
