@@ -128,6 +128,16 @@ impl Db {
                 peer TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS stt_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                kind TEXT NOT NULL,
+                url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_key TEXT,
+                install_cmd TEXT,
+                start_cmd TEXT
             );",
         )
         .context("initializing sqlite schema")?;
@@ -334,10 +344,109 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Read STT provider config. Seeds defaults and persists them on first call.
+    pub fn stt_config(&self) -> Result<SttConfig> {
+        let conn = self.lock_conn()?;
+        let row: Option<(String, String, String, Option<String>, Option<String>, Option<String>)> =
+            conn.query_row(
+                "SELECT kind, url, model, api_key, install_cmd, start_cmd FROM stt_config WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("reading stt_config")?;
+
+        if let Some((kind, url, model, api_key, install_cmd, start_cmd)) = row {
+            return Ok(SttConfig {
+                kind,
+                url,
+                model,
+                api_key,
+                install_cmd,
+                start_cmd,
+            });
+        }
+
+        let defaults = SttConfig::default();
+        conn.execute(
+            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                defaults.kind,
+                defaults.url,
+                defaults.model,
+                defaults.api_key,
+                defaults.install_cmd,
+                defaults.start_cmd
+            ],
+        )
+        .context("inserting default stt_config")?;
+        Ok(defaults)
+    }
+
+    /// Overwrite STT provider config. Upserts the single row.
+    pub fn set_stt_config(&self, cfg: SttConfig) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                 kind = excluded.kind,
+                 url = excluded.url,
+                 model = excluded.model,
+                 api_key = excluded.api_key,
+                 install_cmd = excluded.install_cmd,
+                 start_cmd = excluded.start_cmd",
+            params![
+                cfg.kind,
+                cfg.url,
+                cfg.model,
+                cfg.api_key,
+                cfg.install_cmd,
+                cfg.start_cmd
+            ],
+        )
+        .context("upserting stt_config")?;
+        Ok(())
+    }
+
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
             .map_err(|_| anyhow!("db connection mutex poisoned"))
+    }
+}
+
+/// STT provider configuration. Single row, id=1.
+#[derive(Debug, Clone)]
+pub struct SttConfig {
+    pub kind: String, // "local", "network", "openai"
+    pub url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub install_cmd: Option<String>,
+    pub start_cmd: Option<String>,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            kind: "local".to_string(),
+            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
+            model: "Systran/faster-whisper-base.en".to_string(),
+            api_key: None,
+            install_cmd: Some("bin/stt-install".to_string()),
+            start_cmd: Some("bin/stt-serve".to_string()),
+        }
     }
 }
 

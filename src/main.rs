@@ -57,7 +57,8 @@ struct AppState {
     auth: Option<AuthConfig>,
     cache_bust: String,
     db: Arc<db::Db>,
-    stt: Arc<transcribe::SpeechToText>,
+    /// Handle to a locally-spawned STT server process (local provider only).
+    stt_child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
     /// Bearer-equivalent secret that the tmux `alert-bell` hook posts back
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
@@ -108,23 +109,6 @@ async fn main() -> Result<()> {
     // endpoints can rely on it being present. Idempotent on later starts.
     let _ = db.vapid_keys()?;
 
-    // Speech-to-text (Parakeet via sherpa-rs). The recognizer is built lazily
-    // on the first /transcribe request (~4 s to load the ONNX graphs), so a
-    // missing model never blocks startup — the endpoint just reports 503.
-    let stt_model_dir = transcribe::resolve_model_dir(&data_dir);
-    let stt = Arc::new(transcribe::SpeechToText::new(stt_model_dir));
-    if stt.model_present() {
-        println!(
-            "speech-to-text: model found at {}",
-            stt.model_dir().display()
-        );
-    } else {
-        println!(
-            "speech-to-text: model NOT found at {} (run `make stt-model` or set MOBUX_STT_MODEL_DIR); /transcribe will return 503",
-            stt.model_dir().display()
-        );
-    }
-
     let internal_token: String = (&mut rand::rng())
         .sample_iter(Alphanumeric)
         .take(32)
@@ -167,7 +151,7 @@ async fn main() -> Result<()> {
                 .as_secs()
         ),
         db,
-        stt,
+        stt_child: Arc::new(tokio::sync::Mutex::new(None)),
         internal_token: Arc::new(internal_token),
         port,
         data_dir: data_dir.clone(),
@@ -237,6 +221,17 @@ async fn main() -> Result<()> {
             "/api/settings/notifications",
             get(api_get_notification_prefs).put(api_set_notification_prefs),
         )
+        .route(
+            "/api/settings/stt",
+            get(api_get_stt_config).put(api_set_stt_config),
+        )
+        .route("/api/stt/status", get(api_stt_status))
+        .route(
+            "/api/stt/install",
+            post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
+        )
+        .route("/api/stt/start", post(api_stt_start))
+        .route("/api/stt/stop", post(api_stt_stop))
         .route(
             "/api/shell-integration/status",
             get(api_shell_integration_status),
@@ -861,62 +856,71 @@ async fn api_upload(
 
 // ── Speech-to-text: POST /transcribe ──────────────────────────────────
 //
-// Accepts a 16 kHz mono 16-bit PCM WAV as multipart/form-data (field name
-// `audio`, mirroring the `/api/upload` pattern) and returns `{ "text": "..." }`.
-//
-// An optional `context` field (recent terminal text) is accepted for forward
-// compatibility but currently IGNORED — sherpa-rs hotword biasing wants a
-// pre-built hotwords file, not free-form context, so wiring it up is not worth
-// the complexity for this first cut. The field is read and dropped so clients
-// can send it without error.
+// Accepts audio as multipart/form-data (field name `audio`) and forwards it
+// to the configured OpenAI-compatible STT provider. Returns `{ "text": "..." }`.
+// Provider config is read from db on each request — no restart needed after change.
 async fn api_transcribe(
     State(state): State<AppState>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let mut audio: Option<Vec<u8>> = None;
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    let mut filename = "speech.wav".to_string();
 
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(e.into()))?
+        .map_err(|e| anyhow::anyhow!("multipart: {e}"))
+        .map_err(AppError::bad_request)?
     {
-        match field.name() {
-            Some("audio") => {
-                let bytes = field
+        if field.name() == Some("audio") {
+            if let Some(fname) = field.file_name() {
+                filename = fname.to_string();
+            }
+            audio_bytes = Some(
+                field
                     .bytes()
                     .await
-                    .map_err(|e| AppError::bad_request(e.into()))?;
-                audio = Some(bytes.to_vec());
-            }
-            // `context` is accepted but intentionally unused (see fn docs).
-            _ => {
-                let _ = field.bytes().await;
-            }
+                    .map_err(|e| anyhow::anyhow!("read field: {e}"))
+                    .map_err(AppError::bad_request)?
+                    .to_vec(),
+            );
+        } else {
+            let _ = field.bytes().await;
         }
     }
 
-    let Some(audio) = audio else {
-        return Err(AppError::bad_request(anyhow::anyhow!(
-            "no `audio` field in multipart body"
-        )));
+    let audio = audio_bytes
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("missing 'audio' field")))?;
+
+    // Read config per-request — no restart needed after config change
+    let db_cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let provider_cfg = transcribe::ProviderConfig {
+        kind: match db_cfg.kind.as_str() {
+            "openai" => transcribe::ProviderKind::Openai,
+            "network" => transcribe::ProviderKind::Network,
+            _ => transcribe::ProviderKind::Local,
+        },
+        url: db_cfg.url,
+        model: db_cfg.model,
+        api_key: db_cfg.api_key,
+        install_cmd: db_cfg.install_cmd,
+        start_cmd: db_cfg.start_cmd,
     };
 
-    let stt = state.stt.clone();
-    // Inference is CPU-bound and blocking; keep it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || stt.transcribe_wav(&audio))
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("transcription task failed: {e}")))?;
-
-    match result {
+    match transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await {
         Ok(text) => Ok(Json(json!({ "text": text }))),
-        Err(transcribe::TranscribeError::ModelUnavailable(m)) => Err(AppError {
+        Err(transcribe::TranscribeError::ProviderUnavailable(msg)) => Err(AppError {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            message: m,
+            message: msg,
         }),
-        Err(transcribe::TranscribeError::BadAudio(m)) => {
-            Err(AppError::bad_request(anyhow::anyhow!(m)))
-        }
-        Err(transcribe::TranscribeError::Engine(m)) => Err(AppError::internal(anyhow::anyhow!(m))),
+        Err(e) => Err(AppError::internal(anyhow::anyhow!("{e}"))),
     }
 }
 
@@ -1373,6 +1377,46 @@ end</code></pre>
       <p class="settings-foot">Reload the shell after installing. The fenced block is the contract — mobux only ever modifies what's between the fences. A timestamped <code>.mobux.bak.&lt;ts&gt;</code> is written next to the rc file before any change.</p>
     </section>
 
+    <section class="settings-card" id="stt-provider">
+      <h2>Speech provider</h2>
+      <p class="settings-lede">Dictation forwards audio to an OpenAI-compatible <code>/v1/audio/transcriptions</code> endpoint. Use Local to run a <a href="https://github.com/speaches-ai/speaches" target="_blank" rel="noopener">speaches</a> server on port 5200, Network for a self-hosted instance, or OpenAI for the cloud API.</p>
+
+      <label class="settings-row">
+        <span class="settings-label"><strong>Provider</strong></span>
+        <select id="sttKind" class="settings-select">
+          <option value="local">Local (port 5200)</option>
+          <option value="network">Network (self-hosted)</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </label>
+
+      <label class="settings-row">
+        <span class="settings-label"><strong>Endpoint URL</strong></span>
+        <input type="url" id="sttUrl" class="settings-input" placeholder="http://127.0.0.1:5200/v1/audio/transcriptions" />
+      </label>
+
+      <label class="settings-row">
+        <span class="settings-label"><strong>Model</strong></span>
+        <input type="text" id="sttModel" class="settings-input" placeholder="Systran/faster-whisper-base.en" />
+      </label>
+
+      <label class="settings-row" id="sttApiKeyRow">
+        <span class="settings-label"><strong>API key</strong></span>
+        <input type="password" id="sttApiKey" class="settings-input" placeholder="sk-…" autocomplete="off" />
+      </label>
+
+      <div id="sttStatus" class="settings-status" hidden></div>
+
+      <div class="shell-card-actions">
+        <button type="button" id="sttSaveBtn">Save</button>
+        <button type="button" id="sttProbeBtn">Check status</button>
+        <button type="button" id="sttInstallBtn">Install local server</button>
+        <button type="button" id="sttStartBtn">Start</button>
+        <button type="button" id="sttStopBtn">Stop</button>
+      </div>
+      <div class="settings-status" id="sttActionStatus" hidden></div>
+    </section>
+
     <section class="settings-card" id="listen-settings">
       <h2>Listen</h2>
       <p class="settings-lede">Make reader-view bubbles tappable to be spoken aloud via the Web Speech API. Settings are stored locally and apply to all sessions.</p>
@@ -1417,6 +1461,81 @@ end</code></pre>
       document.getElementById('listenCapable').hidden = true;
       document.getElementById('listenUnavailable').hidden = false;
     }}
+  </script>
+  <script>
+  (function() {{
+    const kindEl    = document.getElementById('sttKind');
+    const urlEl     = document.getElementById('sttUrl');
+    const modelEl   = document.getElementById('sttModel');
+    const keyEl     = document.getElementById('sttApiKey');
+    const keyRow    = document.getElementById('sttApiKeyRow');
+    const statusEl  = document.getElementById('sttStatus');
+    const actionEl  = document.getElementById('sttActionStatus');
+
+    function showStatus(el, msg, ok) {{
+      el.textContent = msg;
+      el.hidden = false;
+      el.style.color = ok ? '#7ec87e' : '#c87e7e';
+    }}
+
+    function updateVisibility() {{
+      const isLocal  = kindEl.value === 'local';
+      const isOpenai = kindEl.value === 'openai';
+      keyRow.hidden  = !isOpenai;
+      document.getElementById('sttInstallBtn').hidden = !isLocal;
+      document.getElementById('sttStartBtn').hidden   = !isLocal;
+      document.getElementById('sttStopBtn').hidden    = !isLocal;
+    }}
+    kindEl.addEventListener('change', updateVisibility);
+
+    // Load current config on page open
+    fetch('/api/settings/stt').then(r => r.json()).then(cfg => {{
+      kindEl.value  = cfg.kind  || 'local';
+      urlEl.value   = cfg.url   || '';
+      modelEl.value = cfg.model || '';
+      keyEl.value   = cfg.api_key || '';
+      updateVisibility();
+    }}).catch(() => updateVisibility());
+
+    document.getElementById('sttSaveBtn').addEventListener('click', () => {{
+      const body = {{ kind: kindEl.value, url: urlEl.value, model: modelEl.value }};
+      if (kindEl.value === 'openai' && keyEl.value) body.api_key = keyEl.value;
+      fetch('/api/settings/stt', {{
+        method: 'PUT',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body),
+      }}).then(r => showStatus(statusEl, r.ok ? 'Saved.' : 'Save failed.', r.ok))
+        .catch(() => showStatus(statusEl, 'Save failed.', false));
+    }});
+
+    document.getElementById('sttProbeBtn').addEventListener('click', () => {{
+      fetch('/api/stt/status').then(r => r.json()).then(s => {{
+        const msg = s.reachable
+          ? `Provider reachable (kind: ${{s.kind}})`
+          : `Provider NOT reachable (${{s.url}})`;
+        showStatus(statusEl, msg, s.reachable);
+      }}).catch(() => showStatus(statusEl, 'Status check failed.', false));
+    }});
+
+    document.getElementById('sttInstallBtn').addEventListener('click', () => {{
+      showStatus(actionEl, 'Installing… (this may take a minute)', true);
+      fetch('/api/stt/install', {{ method: 'POST' }})
+        .then(r => r.text()).then(t => showStatus(actionEl, t || 'Done.', true))
+        .catch(() => showStatus(actionEl, 'Install failed.', false));
+    }});
+
+    document.getElementById('sttStartBtn').addEventListener('click', () => {{
+      fetch('/api/stt/start', {{ method: 'POST' }})
+        .then(r => showStatus(actionEl, r.ok ? 'Server started.' : 'Start failed.', r.ok))
+        .catch(() => showStatus(actionEl, 'Start failed.', false));
+    }});
+
+    document.getElementById('sttStopBtn').addEventListener('click', () => {{
+      fetch('/api/stt/stop', {{ method: 'POST' }})
+        .then(r => showStatus(actionEl, r.ok ? 'Server stopped.' : 'Stop failed.', r.ok))
+        .catch(() => showStatus(actionEl, 'Stop failed.', false));
+    }});
+  }})();
   </script>
   <script src="/static/settings.js?v={v}"></script>
   <!-- mesh-client first so update.js can relay update calls to a selected peer. -->
@@ -2106,6 +2225,150 @@ fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String
     )
 }
 
+// ── STT provider settings + lifecycle endpoints ───────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SttConfigJson {
+    kind: String,
+    url: String,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_cmd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_cmd: Option<String>,
+}
+
+async fn api_get_stt_config(
+    State(state): State<AppState>,
+) -> Result<Json<SttConfigJson>, AppError> {
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(Json(SttConfigJson {
+        kind: cfg.kind,
+        url: cfg.url,
+        model: cfg.model,
+        api_key: cfg.api_key,
+        install_cmd: cfg.install_cmd,
+        start_cmd: cfg.start_cmd,
+    }))
+}
+
+async fn api_set_stt_config(
+    State(state): State<AppState>,
+    Json(req): Json<SttConfigJson>,
+) -> Result<StatusCode, AppError> {
+    let cfg = db::SttConfig {
+        kind: req.kind,
+        url: req.url,
+        model: req.model,
+        api_key: req.api_key,
+        install_cmd: req.install_cmd,
+        start_cmd: req.start_cmd,
+    };
+    tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.set_stt_config(cfg)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_stt_status(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let reachable = transcribe::probe_provider(&cfg.url).await;
+
+    let child_running = {
+        let guard = state.stt_child.lock().await;
+        guard.is_some()
+    };
+
+    Ok(Json(json!({
+        "kind": cfg.kind,
+        "url": cfg.url,
+        "reachable": reachable,
+        "local_process_running": child_running,
+    })))
+}
+
+async fn api_stt_install(State(state): State<AppState>) -> Result<String, AppError> {
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let cmd_str = cfg
+        .install_cmd
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no install_cmd configured")))?;
+
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd_str)
+        .output()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn install: {e}")))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(format!("{stdout}{stderr}"))
+}
+
+async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppError> {
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let cmd_str = cfg
+        .start_cmd
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no start_cmd configured")))?;
+
+    let mut guard = state.stt_child.lock().await;
+    if guard.is_some() {
+        return Ok(StatusCode::NO_CONTENT); // already running
+    }
+
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd_str)
+        .spawn()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?;
+
+    *guard = Some(child);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppError> {
+    let mut guard = state.stt_child.lock().await;
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill().await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -2292,15 +2555,12 @@ mod tests {
     fn test_state(dev_mode: bool) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Arc::new(db::Db::open(&dir.path().join("mobux.db")).expect("open db"));
-        let stt = Arc::new(transcribe::SpeechToText::new(
-            transcribe::resolve_model_dir(dir.path()),
-        ));
         let state = AppState {
             session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap()),
             auth: None,
             cache_bust: "test".to_string(),
             db,
-            stt,
+            stt_child: Arc::new(tokio::sync::Mutex::new(None)),
             internal_token: Arc::new("test-token".to_string()),
             port: 8080,
             data_dir: dir.path().to_path_buf(),
