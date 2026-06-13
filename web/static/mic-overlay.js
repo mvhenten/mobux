@@ -32,8 +32,8 @@ export function faultMessage(kind, extra) {
       return { title: 'No microphone found.', detail: extra || 'NotFoundError' };
     case 'model': // /transcribe 503
       return {
-        title: 'Speech model not installed on this host.',
-        detail: 'Run `make stt-model` on the server, then retry.',
+        title: 'Speech provider not available.',
+        detail: extra || 'Configure a provider in settings, or install a local server.',
       };
     case 'http': // other non-200
       return { title: 'Transcription failed.', detail: extra || 'server error' };
@@ -97,6 +97,15 @@ function ensureStyles() {
 @keyframes moPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(176, 106, 106, 0.5); }
   50%      { box-shadow: 0 0 0 9px rgba(176, 106, 106, 0); }
+}
+#mobux-mic-overlay .mo-action {
+  display: inline-block;
+  padding: 8px 20px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.08);
+  color: #c8ccc9;
+  text-decoration: none;
+  font-size: 14px;
 }`;
   const el = document.createElement('style');
   el.id = STYLE_ID;
@@ -169,10 +178,14 @@ export function createMicOverlay(onStop) {
       '<div class="mo-status"><span class="mo-dot"></span>Dictation failed</div>' +
       '<div class="mo-title"></div>' +
       '<div class="mo-detail"></div>' +
+      (kind === 'model'
+        ? '<a class="mo-action" href="/settings">Open settings</a>'
+        : '') +
       '<div class="mo-hint">Tap to dismiss</div>';
     root.querySelector('.mo-title').textContent = title;
     root.querySelector('.mo-detail').textContent = detail;
     root.addEventListener('click', (e) => {
+      if (e.target.tagName === 'A') return;
       e.preventDefault();
       e.stopPropagation();
       dismiss();
