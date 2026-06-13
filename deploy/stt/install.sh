@@ -17,7 +17,7 @@ RUN_USER=ubuntu
 # Build backend. Defaults to Vulkan/GPU: on `lab` (AMD RX 5700, RADV NAVI10) the
 # server picks the Vulkan device and transcribes on the GPU (~0.3s for the jfk
 # sample vs ~3-4s on CPU). Set to 0 to force a CPU-only build in place.
-GGML_VULKAN=0
+GGML_VULKAN=1
 
 REPO_URL=https://github.com/ggml-org/whisper.cpp.git
 MODEL_BIN="${INSTALL_DIR}/models/ggml-${MODEL}.bin"
