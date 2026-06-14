@@ -269,10 +269,16 @@ export function createMicOverlay(onStop, retryTranscription) {
   }
 
   async function runInstallFlow(btn, hint, log) {
+    let cancelled = false;
     btn.disabled = true;
     hint.textContent = 'Installing… this can take a few minutes';
     log.style.display = '';
     log.textContent = '';
+
+    // Set cancelled if the overlay is dismissed while installing
+    const origDismiss = dismiss;
+    const cancelPoll = () => { cancelled = true; };
+    root && root.addEventListener('click', cancelPoll, { once: true });
 
     try {
       const r = await fetch('/api/stt/install', { method: 'POST' });
@@ -287,7 +293,7 @@ export function createMicOverlay(onStop, retryTranscription) {
       return;
     }
 
-    const phase = await pollInstall(log, hint);
+    const phase = await pollInstall(log, hint, () => cancelled);
     if (phase === 'success') {
       hint.textContent = 'Install complete. Starting server…';
       log.style.display = 'none';
@@ -298,14 +304,21 @@ export function createMicOverlay(onStop, retryTranscription) {
     }
   }
 
-  async function pollInstall(log, hint) {
+  async function pollInstall(log, hint, isCancelled) {
+    let errCount = 0;
     for (;;) {
       await new Promise((r) => setTimeout(r, 2000));
+      if (isCancelled && isCancelled()) return 'cancelled';
       let data;
       try {
         const r = await fetch('/api/stt/install/status');
         data = await r.json();
+        errCount = 0;
       } catch (_) {
+        if (++errCount >= 5) {
+          hint.textContent = 'Install status unavailable after repeated errors.';
+          return 'failed';
+        }
         continue;
       }
       if (data.output && data.output.length) {

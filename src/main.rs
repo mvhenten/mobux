@@ -1533,11 +1533,67 @@ end</code></pre>
       }}).catch(() => showStatus(statusEl, 'Status check failed.', false));
     }});
 
-    document.getElementById('sttInstallBtn').addEventListener('click', () => {{
+    function updateSttButtons(s) {{
+      const installBtn = document.getElementById('sttInstallBtn');
+      const startBtn   = document.getElementById('sttStartBtn');
+      const stopBtn    = document.getElementById('sttStopBtn');
+      if (installBtn) installBtn.textContent = s.installed ? 'Reinstall' : 'Install local server';
+      if (startBtn)   startBtn.disabled  = !(s.installed && !s.local_process_running);
+      if (stopBtn)    stopBtn.disabled   = !s.local_process_running;
+    }}
+
+    document.getElementById('sttInstallBtn').addEventListener('click', function installClick() {{
+      let cancelled = false;
+      document.getElementById('sttInstallBtn').disabled = true;
       showStatus(actionEl, 'Installing… (this may take a minute)', true);
       fetch('/api/stt/install', {{ method: 'POST' }})
-        .then(r => r.text()).then(t => showStatus(actionEl, t || 'Done.', true))
-        .catch(() => showStatus(actionEl, 'Install failed.', false));
+        .then(r => {{
+          if (!r.ok && r.status !== 202 && r.status !== 409) {{
+            showStatus(actionEl, 'Install request failed: ' + r.status, false);
+            document.getElementById('sttInstallBtn').disabled = false;
+            cancelled = true;
+          }}
+        }})
+        .catch(() => {{
+          showStatus(actionEl, 'Install failed (network).', false);
+          document.getElementById('sttInstallBtn').disabled = false;
+          cancelled = true;
+        }})
+        .then(async () => {{
+          if (cancelled) return;
+          let errCount = 0;
+          for (;;) {{
+            await new Promise(res => setTimeout(res, 2000));
+            if (cancelled) break;
+            let s;
+            try {{
+              const r = await fetch('/api/stt/status');
+              s = await r.json();
+              errCount = 0;
+            }} catch (_) {{
+              if (++errCount >= 5) {{
+                showStatus(actionEl, 'Install status unavailable.', false);
+                document.getElementById('sttInstallBtn').disabled = false;
+                break;
+              }}
+              continue;
+            }}
+            const tail = Array.isArray(s.install_output) ? s.install_output.slice(-3).join(' | ') : '';
+            if (s.install_phase === 'success') {{
+              showStatus(actionEl, 'Installed.' + (tail ? ' ' + tail : ''), true);
+              document.getElementById('sttInstallBtn').disabled = false;
+              updateSttButtons(s);
+              break;
+            }} else if (s.install_phase === 'failed') {{
+              showStatus(actionEl, 'Install failed: ' + (s.install_error || 'unknown'), false);
+              document.getElementById('sttInstallBtn').textContent = 'Retry install';
+              document.getElementById('sttInstallBtn').disabled = false;
+              break;
+            }} else if (s.install_phase === 'running') {{
+              showStatus(actionEl, 'Installing… ' + (tail || ''), true);
+            }}
+          }}
+        }});
     }});
 
     document.getElementById('sttStartBtn').addEventListener('click', () => {{
@@ -2347,7 +2403,7 @@ async fn api_stt_status(
         guard.is_some()
     };
 
-    let installed = state.data_dir.join("stt").join(".venv").exists();
+    let installed = state.data_dir.join("stt").join(".installed").exists();
 
     let (install_phase, install_error, install_output) = {
         let guard = state.stt_install.lock().await;
@@ -2377,17 +2433,13 @@ async fn api_stt_status(
 
 async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     {
-        let guard = state.stt_install.lock().await;
+        let mut guard = state.stt_install.lock().await;
         if guard.phase == InstallPhase::Running {
             return Ok((
                 StatusCode::CONFLICT,
                 Json(json!({"status": "already_running"})),
             ));
         }
-    }
-
-    {
-        let mut guard = state.stt_install.lock().await;
         guard.phase = InstallPhase::Running;
         guard.output_tail.clear();
     }
@@ -2804,13 +2856,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stt_status_installed_reflects_venv_path() {
+    async fn stt_status_installed_reflects_sentinel() {
         let (state, dir) = test_state(false);
         let resp = api_stt_status(State(state.clone())).await.unwrap();
         assert_eq!(resp.0["installed"], false);
 
-        let venv_path = dir.path().join("stt").join(".venv");
-        std::fs::create_dir_all(&venv_path).unwrap();
+        let stt_dir = dir.path().join("stt");
+        std::fs::create_dir_all(&stt_dir).unwrap();
+        std::fs::File::create(stt_dir.join(".installed")).unwrap();
         let resp2 = api_stt_status(State(state)).await.unwrap();
         assert_eq!(resp2.0["installed"], true);
     }

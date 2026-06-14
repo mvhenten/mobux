@@ -11,3 +11,4 @@ echo "Installing speaches (faster-whisper server)..."
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install speaches
 echo "Done. Run bin/stt-serve to start."
+touch "$STT_DIR/.installed"
