@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stop and remove the speaches STT container.
+set -euo pipefail
+podman stop mobux-stt 2>/dev/null || true
+podman rm mobux-stt 2>/dev/null || true

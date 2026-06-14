@@ -70,8 +70,6 @@ struct AppState {
     auth: Option<AuthConfig>,
     cache_bust: String,
     db: Arc<db::Db>,
-    /// Handle to a locally-spawned STT server process (local provider only).
-    stt_child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
     /// Bearer-equivalent secret that the tmux `alert-bell` hook posts back
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
@@ -166,7 +164,6 @@ async fn main() -> Result<()> {
                 .as_secs()
         ),
         db,
-        stt_child: Arc::new(tokio::sync::Mutex::new(None)),
         internal_token: Arc::new(internal_token),
         port,
         data_dir: data_dir.clone(),
@@ -2311,6 +2308,8 @@ struct SttConfigGetJson {
     install_cmd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     start_cmd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_cmd: Option<String>,
 }
 
 /// Shape accepted by PUT /api/settings/stt.
@@ -2326,6 +2325,8 @@ struct SttConfigPutJson {
     install_cmd: Option<String>,
     #[serde(default)]
     start_cmd: Option<String>,
+    #[serde(default)]
+    stop_cmd: Option<String>,
 }
 
 async fn api_get_stt_config(
@@ -2345,6 +2346,7 @@ async fn api_get_stt_config(
         has_key: cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
         install_cmd: cfg.install_cmd,
         start_cmd: cfg.start_cmd,
+        stop_cmd: cfg.stop_cmd,
     }))
 }
 
@@ -2374,6 +2376,7 @@ async fn api_set_stt_config(
         api_key,
         install_cmd: req.install_cmd,
         start_cmd: req.start_cmd,
+        stop_cmd: req.stop_cmd,
     };
     tokio::task::spawn_blocking({
         let db = state.db.clone();
@@ -2398,10 +2401,21 @@ async fn api_stt_status(
 
     let reachable = transcribe::probe_provider(&cfg.url).await;
 
-    let child_running = {
-        let guard = state.stt_child.lock().await;
-        guard.is_some()
-    };
+    // Check whether the mobux-stt podman container is running.
+    let local_process_running = tokio::process::Command::new("podman")
+        .args([
+            "ps",
+            "--filter",
+            "name=^mobux-stt$",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .await
+        .map(|o| !o.stdout.trim_ascii().is_empty())
+        .unwrap_or(false);
 
     let installed = state.data_dir.join("stt").join(".installed").exists();
 
@@ -2420,7 +2434,7 @@ async fn api_stt_status(
         "kind": cfg.kind,
         "url": cfg.url,
         "reachable": reachable,
-        "local_process_running": child_running,
+        "local_process_running": local_process_running,
         "installed": installed,
         "install_phase": install_phase,
         "install_output": install_output,
@@ -2581,26 +2595,40 @@ async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppE
         .start_cmd
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no start_cmd configured")))?;
 
-    let mut guard = state.stt_child.lock().await;
-    if guard.is_some() {
-        return Ok(StatusCode::NO_CONTENT); // already running
-    }
-
-    let child = tokio::process::Command::new("sh")
+    tokio::process::Command::new("sh")
         .arg("-c")
         .arg(&cmd_str)
         .spawn()
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?;
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?
+        .wait()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("start cmd failed: {e}")))?;
 
-    *guard = Some(child);
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppError> {
-    let mut guard = state.stt_child.lock().await;
-    if let Some(mut child) = guard.take() {
-        let _ = child.kill().await;
-    }
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let cmd_str = cfg
+        .stop_cmd
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no stop_cmd configured")))?;
+
+    tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd_str)
+        .spawn()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn stop: {e}")))?
+        .wait()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("stop cmd failed: {e}")))?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2795,7 +2823,6 @@ mod tests {
             auth: None,
             cache_bust: "test".to_string(),
             db,
-            stt_child: Arc::new(tokio::sync::Mutex::new(None)),
             internal_token: Arc::new("test-token".to_string()),
             port: 8080,
             data_dir: dir.path().to_path_buf(),

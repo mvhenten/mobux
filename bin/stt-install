@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Install a faster-whisper OpenAI-compatible server (Speaches).
-# Requires: python3, pip. Writes to ~/.local/share/mobux/stt/
+# Install the speaches STT container image (CPU variant).
+# Requires: podman
 set -euo pipefail
 STT_DIR="${MOBUX_DATA_DIR:-$HOME/.local/share/mobux}/stt"
 mkdir -p "$STT_DIR"
-cd "$STT_DIR"
-echo "Creating Python venv..."
-python3 -m venv .venv
-echo "Installing speaches (faster-whisper server)..."
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install speaches
-echo "Done. Run bin/stt-serve to start."
+MOBUX_STT_IMAGE="${MOBUX_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu}"
+echo "Pulling $MOBUX_STT_IMAGE ..."
+podman pull "$MOBUX_STT_IMAGE"
+echo "Done."
 touch "$STT_DIR/.installed"

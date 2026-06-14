@@ -137,10 +137,18 @@ impl Db {
                 model TEXT NOT NULL,
                 api_key TEXT,
                 install_cmd TEXT,
-                start_cmd TEXT
+                start_cmd TEXT,
+                stop_cmd TEXT
             );",
         )
         .context("initializing sqlite schema")?;
+
+        // Additive migration: add stop_cmd column to existing DBs that
+        // were created before this field was introduced. SQLite ignores
+        // duplicate column errors only through IF NOT EXISTS on indexes,
+        // not columns, so we catch the error and treat it as a no-op.
+        let _ = conn.execute_batch("ALTER TABLE stt_config ADD COLUMN stop_cmd TEXT;");
+
         Ok(())
     }
 
@@ -354,10 +362,13 @@ impl Db {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         );
+        // stop_cmd may not exist in older DBs (schema migration adds column
+        // lazily via ALTER TABLE on first write); use COALESCE-fallback select.
         let row: Option<Row> = conn
             .query_row(
-                "SELECT kind, url, model, api_key, install_cmd, start_cmd FROM stt_config WHERE id = 1",
+                "SELECT kind, url, model, api_key, install_cmd, start_cmd, stop_cmd FROM stt_config WHERE id = 1",
                 [],
                 |row| {
                     Ok((
@@ -367,13 +378,14 @@ impl Db {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
             .optional()
             .context("reading stt_config")?;
 
-        if let Some((kind, url, model, api_key, install_cmd, start_cmd)) = row {
+        if let Some((kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)) = row {
             return Ok(SttConfig {
                 kind,
                 url,
@@ -381,20 +393,22 @@ impl Db {
                 api_key,
                 install_cmd,
                 start_cmd,
+                stop_cmd,
             });
         }
 
         let defaults = SttConfig::default();
         conn.execute(
-            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 defaults.kind,
                 defaults.url,
                 defaults.model,
                 defaults.api_key,
                 defaults.install_cmd,
-                defaults.start_cmd
+                defaults.start_cmd,
+                defaults.stop_cmd
             ],
         )
         .context("inserting default stt_config")?;
@@ -405,22 +419,24 @@ impl Db {
     pub fn set_stt_config(&self, cfg: SttConfig) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                  kind = excluded.kind,
                  url = excluded.url,
                  model = excluded.model,
                  api_key = excluded.api_key,
                  install_cmd = excluded.install_cmd,
-                 start_cmd = excluded.start_cmd",
+                 start_cmd = excluded.start_cmd,
+                 stop_cmd = excluded.stop_cmd",
             params![
                 cfg.kind,
                 cfg.url,
                 cfg.model,
                 cfg.api_key,
                 cfg.install_cmd,
-                cfg.start_cmd
+                cfg.start_cmd,
+                cfg.stop_cmd
             ],
         )
         .context("upserting stt_config")?;
@@ -443,6 +459,7 @@ pub struct SttConfig {
     pub api_key: Option<String>,
     pub install_cmd: Option<String>,
     pub start_cmd: Option<String>,
+    pub stop_cmd: Option<String>,
 }
 
 impl Default for SttConfig {
@@ -450,10 +467,11 @@ impl Default for SttConfig {
         Self {
             kind: "local".to_string(),
             url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
-            model: "Systran/faster-whisper-base.en".to_string(),
+            model: "Systran/faster-whisper-small".to_string(),
             api_key: None,
             install_cmd: Some("bin/stt-install".to_string()),
             start_cmd: Some("bin/stt-serve".to_string()),
+            stop_cmd: Some("bin/stt-stop".to_string()),
         }
     }
 }

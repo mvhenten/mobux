@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Start the faster-whisper STT server on port 5200.
+# Start the speaches STT container on port 5200 (host) → 8000 (container).
+# Uses --replace so re-running is idempotent.
 set -euo pipefail
-STT_DIR="${MOBUX_DATA_DIR:-$HOME/.local/share/mobux}/stt"
-exec "$STT_DIR/.venv/bin/speaches" --host 127.0.0.1 --port 5200
+MOBUX_STT_IMAGE="${MOBUX_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu}"
+MOBUX_STT_PORT="${MOBUX_STT_PORT:-5200}"
+podman run -d \
+  --replace \
+  --name mobux-stt \
+  -p "${MOBUX_STT_PORT}:8000" \
+  -v mobux-stt-models:/home/ubuntu/.cache/huggingface \
+  "$MOBUX_STT_IMAGE"
