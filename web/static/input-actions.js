@@ -370,8 +370,8 @@ export function createDictateAction({ send, button, onText } = {}) {
 
   function submitText(text) {
     telemetry.log('mic.submit');
-    // send without newline — text is already trimmed by the review state
     send(text.trim());
+    send('\r');
     onText?.();
     mic.busy = false;
     micLabel('🎤');

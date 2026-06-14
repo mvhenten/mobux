@@ -59,6 +59,11 @@ function ensureStyles() {
   background: rgba(20, 22, 24, 0.92);
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+  overflow: hidden;
+}
+#mobux-mic-overlay.review {
+  justify-content: flex-start;
+  padding-top: 48px;
 }
 #mobux-mic-overlay .mo-dot {
   width: 14px; height: 14px; border-radius: 50%;
@@ -158,13 +163,14 @@ function ensureStyles() {
   font-family: monospace;
   font-size: 12px;
   color: #a9b0ac;
-  max-height: 8em;
+  max-height: 40vh;
   overflow-y: auto;
   background: rgba(0,0,0,0.2);
   padding: 8px;
   border-radius: 4px;
   max-width: 26em;
   white-space: pre-wrap;
+  word-wrap: break-word;
   word-break: break-word;
 }
 /* Transcribing spinner */
