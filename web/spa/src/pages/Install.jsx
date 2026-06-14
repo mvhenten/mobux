@@ -1,15 +1,34 @@
-// Install / onboarding page. Ports the content of the Rust-rendered `/install`
-// page (install_page in src/main.rs): the CA-certificate step and the APK
-// install step, with the same download links and Android instructions.
+// Install / onboarding page. Ports the Rust-rendered /install page with
+// client-side QR codes (uqr → inline SVG), so a desktop visitor can scan
+// download URLs from a phone without switching to the server /install page.
 //
-// The server page also renders QR codes (built from the request Host) so a
-// desktop visitor can scan from a phone. QR generation is server-side only; the
-// SPA's audience is the phone itself (where the download buttons are what's
-// used), so we link to the server `/install` page for the scan-from-desktop
-// case rather than bundle a QR encoder. The download endpoints are unchanged:
-// /install/mobux-ca.crt and /install/mobux.apk (both public, served from disk).
+// QR codes encode the absolute download URL derived from window.location,
+// matching what the server does from the request Host header.
+
+import { useEffect, useState } from 'preact/hooks';
+import { renderSVG } from 'uqr';
+
+function QrCode({ url }) {
+  const svg = renderSVG(url, { pixelSize: 4, whiteColor: '#ffffff', blackColor: '#0f1115' });
+  return (
+    <div
+      class="install-qr"
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: trusted SVG from uqr encoding a same-host URL
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+function origin() {
+  if (typeof window === 'undefined') return 'https://localhost';
+  return window.location.origin;
+}
 
 export function InstallPage() {
+  const base = origin();
+  const apkUrl = base + '/install/mobux.apk';
+  const caUrl = base + '/install/mobux-ca.crt';
+
   return (
     <main class="install-page">
       <section class="install-card">
@@ -22,6 +41,7 @@ export function InstallPage() {
           <a class="install-btn" href="/install/mobux-ca.crt" download>
             Download CA certificate
           </a>
+          <QrCode url={caUrl} />
         </div>
         <p class="install-hint">After downloading, install it through Android Settings:</p>
         <ol class="install-steps">
@@ -40,27 +60,16 @@ export function InstallPage() {
 
       <section class="install-card">
         <h2>2. Install the app</h2>
-        <p class="install-lede">Download the Android APK to install Mobux as a standalone app.</p>
+        <p class="install-lede">Download the Android APK, or scan the QR with your phone.</p>
         <div class="install-grid">
           <a class="install-btn" href="/install/mobux.apk" download>
             Download APK
           </a>
+          <QrCode url={apkUrl} />
         </div>
         <p class="install-hint">
           If the APK isn't built yet, run <code>make twa</code> on the server.
         </p>
-      </section>
-
-      <section class="install-card">
-        <h2>Scan from a desktop?</h2>
-        <p class="install-lede">
-          To scan a QR with your phone instead of downloading here, open the server's install page.
-        </p>
-        <div class="install-grid">
-          <a class="install-btn" href="/install">
-            Open install page (with QR codes) →
-          </a>
-        </div>
       </section>
     </main>
   );

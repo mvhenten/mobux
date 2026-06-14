@@ -8,6 +8,27 @@ the migration — nothing here removes or changes them.
 **Stack:** Vite + Preact + Wouter (`wouter-preact`) + `@preact/signals`, JSX via
 `@preact/preset-vite`.
 
+## Status (phase 3)
+
+Phase 3 completes Settings parity (Listen + Build-info cards) and adds
+client-side QR codes to the Install page.
+
+Phase 3 done:
+
+- **Listen card** (`components/settings/Listen.jsx`) — Voice/Rate/Pitch
+  controls, Test button, Web Speech API capability gate. Reads/writes the same
+  `mobux.listen.prefs` localStorage key as the old `listen-prefs.js` module.
+- **Build-info card** (`components/settings/BuildInfo.jsx`) — Backend version +
+  server bundle hash from a new `/api/build-info` endpoint; loaded bundle hash
+  from `/static/build-info.json`; stale-UI warning when they diverge.
+- **Install QR codes** — `uqr` renders inline SVG QR codes for the CA-cert and
+  APK download URLs (derived from `window.location.origin`) directly in the SPA
+  Install page. The server `/install` page and its Rust-side QR renderer are
+  untouched.
+- Headless Playwright verification (7 tests, all green): all phase-2 checks
+  plus Listen card localStorage persistence, Build-info version/hash display,
+  and Install page QR SVG rendering.
+
 ## Status (phase 2)
 
 Phase 2 made the SPA loadable on a real phone from the Rust binary (no Vite),
@@ -65,6 +86,8 @@ web/spa/
         Theme.jsx           theme picker (imports /static/themes.js)
         ShellIntegration.jsx OSC-133 installer per shell
         Stt.jsx             speech provider (phase 1, moved here)
+        Listen.jsx          Web Speech voice/rate/pitch + test (phase 3)
+        BuildInfo.jsx       version + bundle-hash display (phase 3)
     pages/
       Home.jsx            session list: create/kill/rename + FAB
       Terminal.jsx        full-bleed route → TerminalIsland
@@ -236,15 +259,7 @@ Ported in phase 2 (one component per card, in `components/settings/`):
    terminal island, so Home/Settings only talk to the page's own host. Bring the
    picker UI into the SPA shell (or port it natively) and load `mesh-client.js`
    app-wide so the host selection drives the session list too.
-2. **Two remaining Settings cards.** The **Listen** (Web Speech API) card and the
-   **Build info** card aren't ported yet. Listen depends on the backend
-   `listen-prefs.js` module (Voice/Rate/Pitch + Test); Build info is read-only
-   version/bundle-hash display. Both still live on the inline `/settings`.
-3. **Install page QR codes.** The server `/install` renders host-derived QR
-   codes (scan-from-desktop). The SPA Install page ports the download buttons +
-   instructions and links to `/install` for the QR case; a client-side QR
-   encoder would close the gap.
-4. **Old-UI teardown (operator's call).** Nothing here removes the inline pages.
+2. **Old-UI teardown (operator's call).** Nothing here removes the inline pages.
    Once `/app` is reviewed and trusted, cut `/` (and friends) over to the SPA and
    delete the Rust-rendered `index`/`settings`/`install`/terminal templates and
    the now-dead `*.js` (`index.js`, `settings.js`, `update.js`,

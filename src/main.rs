@@ -214,6 +214,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/identify", get(api_identify))
+        .route("/api/build-info", get(api_build_info))
         .route("/api/peers", get(api_peers))
         .route("/api/sessions", get(api_sessions).post(api_create_session))
         .route("/api/sessions/{name}/kill", post(api_kill_session))
@@ -629,6 +630,16 @@ async fn api_identify() -> Json<mesh::Identify> {
         app: "mobux".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Build-info for the SPA's Build card. Returns the same data the inline
+/// settings page injects as window globals (`MOBUX_BUILD_SERVER`, `MOBUX_VERSION`),
+/// so the SPA can fetch it without needing server-side HTML injection.
+async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "version": PKG_VERSION,
+        "build_hash": state.build_hash,
+    }))
 }
 
 /// Authenticated tailnet peer enumeration. On tailscale failure, returns a
