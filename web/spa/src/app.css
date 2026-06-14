@@ -1,0 +1,29 @@
+/* SPA shell chrome. The ported pages reuse the backend's style.css (loaded in
+   index.html via the proxy); this file only styles the migration skeleton's
+   nav + layout, kept deliberately minimal and muted. */
+.spa-shell {
+  min-height: 100dvh;
+}
+.spa-nav {
+  display: flex;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  background: #161922;
+  border-bottom: 1px solid #232733;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.spa-nav a {
+  color: #9aa4b2;
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+.spa-nav a:hover {
+  color: #c7d0dc;
+}
+.spa-main {
+  padding: 1rem;
+  max-width: 640px;
+  margin: 0 auto;
+}
