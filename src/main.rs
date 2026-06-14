@@ -301,6 +301,15 @@ async fn main() -> Result<()> {
         .route("/install/mobux.apk", get(serve_install_apk))
         .route("/install/mobux-ca.crt", get(serve_install_ca))
         .route("/.well-known/assetlinks.json", get(serve_assetlinks))
+        // New client SPA (web/spa, built to web/static/spa/). Served at /app and
+        // /app/* with an SPA history fallback: every sub-path returns the SPA's
+        // index.html so client routing (hash router today, history-safe for the
+        // future) works when served straight from the binary. Built assets live
+        // under /static/spa/ and are handled by serve_static. The old
+        // Rust-rendered pages (/, /s/:name, /settings, /install) are untouched —
+        // both UIs coexist; the SPA is shadow-mounted at /app.
+        .route("/app", get(serve_spa_index))
+        .route("/app/{*rest}", get(serve_spa_index))
         .route("/static/{*path}", get(serve_static));
 
     // Test-only: serve a fixed sparse-index body so the update checker can be
@@ -2100,6 +2109,39 @@ async fn serve_static(Path(path): Path<String>) -> Response {
             resp
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// Serve the client SPA's `index.html` for `/app` and any `/app/*` sub-path
+/// (SPA history fallback). The SPA's own assets (JS/CSS, referenced from
+/// index.html at `/static/spa/...`) are served by `serve_static`, so this
+/// handler only ever returns the entry document. Behind the global auth layer
+/// and `no-store`, exactly like the inline HTML pages.
+///
+/// `spa/index.html` is emitted by `web/spa`'s Vite build into `web/static/spa/`
+/// and embedded by RustEmbed. If the SPA wasn't built (asset missing), return a
+/// clear 404 hint rather than a blank page.
+async fn serve_spa_index() -> Response {
+    use axum::http::header;
+    match StaticAssets::get("spa/index.html") {
+        Some(file) => {
+            let mut resp = (StatusCode::OK, file.data).into_response();
+            let h = resp.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, must-revalidate"),
+            );
+            resp
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            "SPA not built — run `node web/build.js` (or `make build`).",
+        )
+            .into_response(),
     }
 }
 
