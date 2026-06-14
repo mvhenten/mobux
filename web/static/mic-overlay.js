@@ -426,6 +426,7 @@ export function createMicOverlay(handlers) {
       actionBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         dismiss();
+        if (typeof handlers.onDismiss === 'function') handlers.onDismiss();
       });
     } else {
       actionBtn.textContent = '✓ Submit';
@@ -486,6 +487,7 @@ export function createMicOverlay(handlers) {
       e.preventDefault();
       e.stopPropagation();
       dismiss();
+      if (typeof handlers.onDismiss === 'function') handlers.onDismiss();
     });
     document.body.appendChild(root);
 

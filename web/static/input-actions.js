@@ -108,6 +108,16 @@ export function createDictateAction({ send, button, onText } = {}) {
       telemetry.log('mic.resume');
     },
     onCancel: () => { cancelRecording(); },
+    onDismiss: () => {
+      // Overlay already removed itself; just reset mic state so the next tap works.
+      mic.recording = false;
+      mic.busy = false;
+      mic.paused = false;
+      mic.pendingChunks = null;
+      stopTracks();
+      button?.classList.remove('mic-recording');
+      micLabel('🎤');
+    },
     onRetry: () => { retryFresh(); },
     onSubmit: (text) => { submitText(text); },
     retryTranscription: async () => {
