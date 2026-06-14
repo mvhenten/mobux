@@ -1462,6 +1462,7 @@ end</code></pre>
       <div class="shell-card-actions">
         <button type="button" id="sttSaveBtn">Save</button>
         <button type="button" id="sttProbeBtn">Check status</button>
+        <button type="button" id="sttResetBtn" style="opacity:0.6">Reset</button>
         <button type="button" id="sttInstallBtn">Install local server</button>
         <button type="button" id="sttStartBtn">Start</button>
         <button type="button" id="sttStopBtn">Stop</button>
@@ -1604,7 +1605,7 @@ end</code></pre>
     }}
 
     modelEl.addEventListener('change', () => {{
-      customModelRow.hidden = modelEl.value !== '__custom__';
+      updateVisibility();
     }});
 
     function showStatus(el, msg, ok) {{
@@ -1615,11 +1616,15 @@ end</code></pre>
 
     // Parse host+port out of a full URL string and write into the fields.
     // Returns true if parse succeeded.
+    // Uses new URL() for robust parsing — no regex splits that can truncate hostnames.
     function parseUrlIntoFields(raw) {{
       if (!raw) return false;
+      // Normalise: if no scheme, prepend http:// so new URL() doesn't mangle the hostname.
+      let normalised = raw.trim();
+      if (!/^https?:\/\//i.test(normalised)) normalised = 'http://' + normalised;
       let u;
-      try {{ u = new URL(raw); }} catch (_) {{ return false; }}
-      // scheme+hostname only — no port in the Host field.
+      try {{ u = new URL(normalised); }} catch (_) {{ return false; }}
+      // scheme+hostname only — no port suffix in the Host field.
       hostEl.value = u.protocol + '//' + u.hostname;
       if (u.port) {{
         portEl.value = u.port;
@@ -1630,21 +1635,28 @@ end</code></pre>
     }}
 
     // Build the full URL to send to the backend.
+    // host field must contain scheme+hostname (e.g. "http://lab.tailfa81e6.ts.net").
+    // port field is appended as ":port"; path is always /v1/audio/transcriptions.
     function buildUrl() {{
       const host = hostEl.value.trim().replace(/\/$/, '');
       const port = portEl.value.trim();
       if (!host) return '';
-      return host + (port ? ':' + port : '') + '/v1/audio/transcriptions';
+      // Guard: ensure host has a scheme; add http:// if bare hostname slipped through.
+      const hasScheme = /^https?:\/\//i.test(host);
+      const base = hasScheme ? host : 'http://' + host;
+      return base + (port ? ':' + port : '') + '/v1/audio/transcriptions';
     }}
 
     // Paste / blur handler on Host field — if user pastes a full URL, split it.
     function handleHostInput() {{
       const raw = hostEl.value.trim();
       if (!raw) return;
-      // Only parse if it looks like a URL with a path or explicit port beyond origin.
+      // Normalise for URL test: add scheme if missing.
+      let normalised = raw;
+      if (!/^https?:\/\//i.test(normalised)) normalised = 'http://' + normalised;
       try {{
-        const u = new URL(raw);
-        // If there's a path beyond '/' or an explicit port, extract and rewrite.
+        const u = new URL(normalised);
+        // Re-parse into fields if there's a path beyond '/' or an explicit port.
         if (u.port || (u.pathname && u.pathname !== '/')) {{
           parseUrlIntoFields(raw);
         }}
@@ -1676,11 +1688,23 @@ end</code></pre>
     }}
 
     function updateVisibility() {{
-      const isLocal  = kindEl.value === 'local';
-      const isOpenai = kindEl.value === 'openai';
+      const kind     = kindEl.value;
+      const isLocal  = kind === 'local';
+      const isNetwork = kind === 'network';
+      const isOpenai = kind === 'openai';
+      const isCustomModel = modelEl.value === '__custom__';
+
+      // Host + Port: hidden for local (always 127.0.0.1:5200), shown for network/openai.
       hostRow.hidden = isLocal;
-      portRow.hidden = false;
-      keyRow.hidden  = !isOpenai;
+      portRow.hidden = isLocal;
+
+      // API key: only for openai.
+      keyRow.hidden = !isOpenai;
+
+      // Custom model row: only when model dropdown is set to "custom…".
+      customModelRow.hidden = !isCustomModel;
+
+      // Install/Start/Stop: local only.
       document.getElementById('sttInstallBtn').hidden = !isLocal;
       document.getElementById('sttStartBtn').hidden   = !isLocal;
       document.getElementById('sttStopBtn').hidden    = !isLocal;
@@ -1730,6 +1754,28 @@ end</code></pre>
           : `Provider NOT reachable (${{s.url}})`;
         showStatus(statusEl, msg, s.reachable);
       }}).catch(() => showStatus(statusEl, 'Status check failed.', false));
+    }});
+
+    document.getElementById('sttResetBtn').addEventListener('click', () => {{
+      const kind = kindEl.value;
+      if (kind === 'local') {{
+        hostEl.value = 'http://127.0.0.1';
+        portEl.value = '5200';
+        fetchModels(MODELS.local[0]);
+      }} else if (kind === 'openai') {{
+        hostEl.value = 'https://api.openai.com';
+        portEl.value = '443';
+        keyEl.value  = '';
+        keyEl.placeholder = 'sk-…';
+        fetchModels('whisper-1');
+      }} else {{
+        // network
+        hostEl.value = '';
+        portEl.value = '';
+        fetchModels(MODELS.network[0]);
+      }}
+      updateVisibility();
+      showStatus(statusEl, 'Fields reset to defaults (not saved).', true);
     }});
 
     function updateSttButtons(s) {{
