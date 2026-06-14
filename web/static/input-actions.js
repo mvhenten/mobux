@@ -143,6 +143,8 @@ export function createDictateAction({ send, button, onText } = {}) {
   function micFault(kind, extra) {
     telemetry.log('mic.fault', extra ? { kind, extra } : { kind });
     button?.classList.remove('mic-recording');
+    mic.recording = false;
+    mic.busy = false;
     micLabel('🎤');
     micOverlay.showFault(kind, extra);
   }

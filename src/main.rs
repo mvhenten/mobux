@@ -1561,7 +1561,7 @@ end</code></pre>
 
     const MODELS = {{
       openai:  ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'],
-      local:   ['Systran/faster-whisper-base.en', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
+      local:   ['Systran/faster-whisper-small', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
       network: ['Systran/faster-whisper-base.en', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
     }};
 
@@ -2860,7 +2860,7 @@ async fn api_stt_models(
             ]
         } else {
             vec![
-                "Systran/faster-whisper-base.en".to_string(),
+                "Systran/faster-whisper-small".to_string(),
                 "Systran/faster-whisper-small.en".to_string(),
                 "Systran/faster-whisper-medium.en".to_string(),
             ]
