@@ -1558,6 +1558,7 @@ end</code></pre>
     const hostRow   = document.getElementById('sttHostRow');
     const portRow   = document.getElementById('sttPortRow');
     const modelEl        = document.getElementById('sttModel');
+    const modelRow       = document.getElementById('sttModelRow');
     const customModelEl  = document.getElementById('sttCustomModel');
     const customModelRow = document.getElementById('sttCustomModelRow');
     const keyEl     = document.getElementById('sttApiKey');
@@ -1579,24 +1580,41 @@ end</code></pre>
         opt.textContent = id;
         modelEl.appendChild(opt);
       }});
+      // If the saved model isn't in the list, add it as a real selectable option
+      // rather than silently falling to the "custom…" free-text box.
+      if (selectedModel && !models.includes(selectedModel)) {{
+        const extra = document.createElement('option');
+        extra.value = selectedModel;
+        extra.textContent = selectedModel;
+        modelEl.insertBefore(extra, modelEl.firstChild);
+      }}
       const customOpt = document.createElement('option');
       customOpt.value = '__custom__';
       customOpt.textContent = 'custom…';
       modelEl.appendChild(customOpt);
 
-      if (models.includes(selectedModel)) {{
+      if (selectedModel) {{
         modelEl.value = selectedModel;
-        customModelRow.hidden = true;
-      }} else {{
-        modelEl.value = '__custom__';
+      }}
+      customModelRow.hidden = modelEl.value !== '__custom__';
+      if (modelEl.value === '__custom__' && selectedModel) {{
         customModelEl.value = selectedModel;
-        customModelRow.hidden = false;
       }}
     }}
 
+    // Normalize a host string to always include a scheme (default http://).
+    // Accepts bare hostname like "lab", returns "http://lab".
+    function normalizeHost(h) {{
+      h = h.trim().replace(/\/$/, '');
+      if (!h) return h;
+      if (!/^https?:\/\//i.test(h)) return 'http://' + h;
+      return h;
+    }}
+
     async function fetchModels(selectedModel) {{
+      const host = normalizeHost(hostEl.value);
       const query = '?kind=' + encodeURIComponent(kindEl.value) +
-                    '&host=' + encodeURIComponent(hostEl.value) +
+                    '&host=' + encodeURIComponent(host) +
                     '&port=' + encodeURIComponent(portEl.value);
       try {{
         const resp = await fetch('/api/stt/models' + query);
@@ -1607,6 +1625,16 @@ end</code></pre>
       }} catch (_) {{
         populateModelSelect(MODELS[kindEl.value] || MODELS.local, selectedModel);
       }}
+    }}
+
+    // Debounced re-fetch when host/port change.
+    let _fetchDebounce;
+    function schedFetchModels() {{
+      clearTimeout(_fetchDebounce);
+      _fetchDebounce = setTimeout(() => {{
+        const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+        fetchModels(cur);
+      }}, 600);
     }}
 
     modelEl.addEventListener('change', () => {{
@@ -1652,7 +1680,9 @@ end</code></pre>
       return base + (port ? ':' + port : '') + '/v1/audio/transcriptions';
     }}
 
-    // Paste / blur handler on Host field — if user pastes a full URL, split it.
+    // Paste / blur handler on Host field.
+    // - If the user pasted a full URL with path/port, split it into fields.
+    // - Always ensure a scheme is present so bare hostnames are stored as "http://lab".
     function handleHostInput() {{
       const raw = hostEl.value.trim();
       if (!raw) return;
@@ -1664,14 +1694,19 @@ end</code></pre>
         // Re-parse into fields if there's a path beyond '/' or an explicit port.
         if (u.port || (u.pathname && u.pathname !== '/')) {{
           parseUrlIntoFields(raw);
+        }} else {{
+          // Ensure field always stores scheme+hostname (not a bare name).
+          hostEl.value = u.protocol + '//' + u.hostname;
         }}
       }} catch (_) {{
         // Not a valid URL — leave as-is.
       }}
+      schedFetchModels();
     }}
 
     hostEl.addEventListener('paste', () => setTimeout(handleHostInput, 0));
     hostEl.addEventListener('blur', handleHostInput);
+    portEl.addEventListener('change', schedFetchModels);
 
     function setDefaults(kind) {{
       let defaultModel;
@@ -1703,11 +1738,12 @@ end</code></pre>
       hostRow.hidden = isLocal;
       portRow.hidden = isLocal;
 
+      // Model picker: hidden for local (auto-selected, no user choice needed).
+      modelRow.hidden     = isLocal;
+      customModelRow.hidden = isLocal || !isCustomModel;
+
       // API key: only for openai.
       keyRow.hidden = !isOpenai;
-
-      // Custom model row: only when model dropdown is set to "custom…".
-      customModelRow.hidden = !isCustomModel;
 
       // Install/Start/Stop: local only.
       document.getElementById('sttInstallBtn').hidden = !isLocal;
@@ -1787,23 +1823,13 @@ end</code></pre>
 
     document.getElementById('sttResetBtn').addEventListener('click', () => {{
       const kind = kindEl.value;
-      if (kind === 'local') {{
-        hostEl.value = 'http://127.0.0.1';
-        portEl.value = '5200';
-        fetchModels(MODELS.local[0]);
-      }} else if (kind === 'openai') {{
-        hostEl.value = 'https://api.openai.com';
-        portEl.value = '443';
-        keyEl.value  = '';
-        keyEl.placeholder = 'sk-…';
-        fetchModels('whisper-1');
-      }} else {{
-        // network
-        hostEl.value = '';
-        portEl.value = '';
-        fetchModels(MODELS.network[0]);
-      }}
+      const def = kindDefaults(kind);
+      hostEl.value = def.host;
+      portEl.value = def.port;
+      keyEl.value  = '';
+      keyEl.placeholder = 'sk-…';
       updateVisibility();
+      fetchModels(def.model);
       showStatus(statusEl, 'Fields reset to defaults (not saved).', true);
     }});
 
@@ -1880,6 +1906,12 @@ end</code></pre>
       fetch('/api/stt/stop', {{ method: 'POST' }})
         .then(r => showStatus(actionEl, r.ok ? 'Server stopped.' : 'Stop failed.', r.ok))
         .catch(() => showStatus(actionEl, 'Stop failed.', false));
+    }});
+
+    // bfcache guard: Chrome restores the page without re-running scripts.
+    // Force a reload so settings are always fresh from the server.
+    window.addEventListener('pageshow', (e) => {{
+      if (e.persisted) location.reload();
     }});
   }})();
   </script>
@@ -2980,10 +3012,16 @@ async fn api_stt_models(
     let (base_url, api_key, kind) = if q.host.as_deref().map(|h| !h.is_empty()).unwrap_or(false) {
         // Front-end supplied explicit host+port — use them.  The api_key comes
         // from the per-kind stored row so the frontend doesn't need to round-trip it.
-        let host = q.host.as_deref().unwrap_or("").trim_end_matches('/');
+        let raw_host = q.host.as_deref().unwrap_or("").trim_end_matches('/');
+        // Normalize: add http:// if no scheme so reqwest gets a valid URL.
+        let host = if raw_host.contains("://") {
+            raw_host.to_string()
+        } else {
+            format!("http://{}", raw_host)
+        };
         let port = q.port.as_deref().unwrap_or("");
         let base = if port.is_empty() {
-            host.to_string()
+            host
         } else {
             format!("{}:{}", host, port)
         };
@@ -3013,9 +3051,15 @@ async fn api_stt_models(
                     .stt_provider(&kind)?
                     .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
                 let base = {
-                    let h = row.host.trim_end_matches('/');
+                    let raw = row.host.trim_end_matches('/');
+                    // Normalize: add http:// if no scheme so reqwest gets a valid URL.
+                    let h = if raw.contains("://") {
+                        raw.to_string()
+                    } else {
+                        format!("http://{}", raw)
+                    };
                     if row.port.is_empty() {
-                        h.to_string()
+                        h
                     } else {
                         format!("{}:{}", h, row.port)
                     }

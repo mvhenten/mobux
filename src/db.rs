@@ -696,15 +696,22 @@ impl SttProviderRow {
 }
 
 /// Build a full transcription URL from scheme+host and port strings.
+/// Accepts a bare hostname (no scheme) and defaults to http://.
 fn build_url(host: &str, port: &str) -> String {
     let host = host.trim_end_matches('/');
     if host.is_empty() {
         return String::new();
     }
-    let base = if port.is_empty() {
+    // Ensure a scheme is present; default to http:// for bare hostnames.
+    let host_with_scheme = if host.contains("://") {
         host.to_string()
     } else {
-        format!("{}:{}", host, port)
+        format!("http://{}", host)
+    };
+    let base = if port.is_empty() {
+        host_with_scheme
+    } else {
+        format!("{}:{}", host_with_scheme, port)
     };
     format!("{}/v1/audio/transcriptions", base)
 }
@@ -1025,6 +1032,12 @@ mod tests {
             "https://api.openai.com:443/v1/audio/transcriptions"
         );
         assert_eq!(build_url("", ""), "");
+        // Bare hostname (no scheme) — should default to http://.
+        assert_eq!(
+            build_url("lab", "8081"),
+            "http://lab:8081/v1/audio/transcriptions"
+        );
+        assert_eq!(build_url("lab", ""), "http://lab/v1/audio/transcriptions");
     }
 
     #[test]
