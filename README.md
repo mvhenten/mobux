@@ -1,6 +1,6 @@
 # mobux
 
-**tmux on your phone.** Access your tmux sessions from a mobile browser over Tailscale with HTTPS.
+**Your development machine in your pocket.** mobux is a touch-native web UI for tmux: open any terminal session on your server straight from your phone, over your own private network.
 
 <p align="center">
   <img src="docs/screenshots/home.png" width="220" alt="Session list" />
@@ -8,262 +8,104 @@
   <img src="docs/screenshots/input-bar.png" width="220" alt="Input bar with control ribbon" />
 </p>
 
-## Features
+## The problem
 
-- **Full terminal** — xterm.js v6 with scrollback, colors, and links
-- **Touch-native input** — bottom input bar with control key ribbon (^C, arrows, backspace, etc.) and native text field with autocomplete/voice support
-- **Two send modes** — keyboard Enter executes; ▶ button injects text without Enter for readline editing
-- **Attach any file** — 📎 button uploads anything (gallery photo, video, audio, PDF, logs…) and injects the saved path into the terminal
-- **Audio record** — 🎤 button records mic audio in-browser and uploads it; transcribe it locally with `make transcribe FILE=<path>` (offline whisper.cpp — `make setup-transcribe` to install). No on-device STT bundled in the binary; nothing leaves the host
-- **Swipe gestures** — swipe sessions to rename/kill, swipe terminal to switch tmux windows, pinch to zoom, long-press for tmux commands
-- **Session management** — create, rename, kill sessions from a mobile-native home screen
-- **Secure** — self-signed TLS by default, HTTP Basic auth with PIN
-- **PWA** — installable as a home screen app
-- **TWA** — `make twa` builds a signed Android APK that mobux serves at `/install`; install once, get a real launcher icon and OS-level push notifications
-- **Push on bell** — terminal `\x07` (BEL) fires a Web Push notification to every subscribed device, deep-linked back to the source session
+Your real work lives on a server: builds, training runs, deploys, the long-lived shell with all your context in it. But you are not always at your desk. You are walking, commuting, away from the keyboard — and the thing you actually have on you is a phone.
 
-## Quick Start
+A phone is a terrible terminal. Tiny keys, no control keys, no scrollback you can trust, browsers that fight you over the keyboard, and SSH apps that treat the screen like a 1980s VT100. So the work waits until you are back at a real machine.
+
+mobux closes that gap. It puts your tmux sessions on the phone in a form built for a phone — touch gestures instead of key combos, a control-key ribbon where a keyboard would be, a reader view for scrollback, and a push notification when the long job finishes. The session keeps running on the server the whole time. The phone is just a good window into it.
+
+## What it does
+
+- **Full terminal, touch-first.** Attach to any tmux session and drive it by touch. A bottom input bar carries the keys a phone keyboard lacks — `^C`, arrows, `Tab`, `Esc`, and more — on a scrollable ribbon. Two send modes: Enter executes; a separate inject button drops text into the line for readline editing without running it.
+- **Built for reading on a phone.** A dedicated reader view renders scrollback with smooth, synthetic scrolling tuned for mobile WebViews, so long output is actually browsable. Pinch to zoom, swipe to switch windows.
+- **Gestures, not chords.** Swipe a session to rename or kill it. Swipe the terminal to move between tmux windows. Long-press for tmux commands. The things you'd reach for a key combo for become a gesture.
+- **Notified when it matters.** A long job finishing rings the terminal bell; mobux turns that into a Web Push notification on your phone — even with the screen locked — deep-linked back to the exact session. It hooks tmux's own bell event, so a notification means a real bell fired, not a guess scraped off the screen.
+- **Voice capture.** Record a voice note from the input bar; mobux uploads the audio and transcribes it through a speech-to-text backend you run on your own network. The backend speaks the OpenAI audio API, so it can be self-hosted whisper.cpp on your tailnet, a fully offline local transcriber, or OpenAI's own endpoint — your choice. A ready-to-run, tailnet-only whisper.cpp recipe ships in [`deploy/stt/`](deploy/stt/README.md).
+- **Reads output aloud.** An optional listen mode speaks terminal output through the device's voice, with selectable voice, rate, and pitch — useful when you're not looking at the screen.
+- **Themed for night use.** Muted, low-contrast color themes (Gruvbox Soft, Tomorrow Night Soft, Nord, Solarized, and more) chosen for a phone screen in a dark room, not a desktop in daylight.
+- **Shell integration, one tap.** Install OSC 133 prompt markers for bash, zsh, or fish from the settings page, so mobux can tell prompts from output and mark command boundaries cleanly under tmux.
+- **A real app, not just a tab.** Installable as a PWA, or build a signed Android app (Trusted Web Activity, package id `io.github.mvhenten.mobux`) that mobux serves from `/install` — full-screen, a launcher icon, and OS-level push.
+
+## Security posture
+
+mobux is meant to live on your private network, not the open internet.
+
+- **Private by network.** The intended deployment is behind [Tailscale](https://tailscale.com/): mobux is reachable only on your tailnet, never exposed publicly. The voice transcription recipe is the same — tailnet-only, no public surface.
+- **HTTPS always.** mobux serves TLS by default. It generates and manages its own CA so phones can trust it (the `/install` page walks you through adding the cert), or it can obtain a real Let's Encrypt certificate via ACME if you give it a public domain.
+- **PIN / Basic auth.** Access is gated by HTTP Basic auth with a user and PIN you set via environment variables.
+
+## Quick start
 
 ```bash
-# Prerequisites: Rust, Node.js, tmux
+# Prerequisites: Rust, Node.js, tmux  (run `make setup` to install the toolchain)
 git clone https://github.com/mvhenten/mobux.git
 cd mobux
-npm install          # installs deps, patches xterm.js, bundles
-make run             # starts on https://0.0.0.0:5151
-```
+npm install                 # installs deps and bundles the frontend
 
-## Setup scripts
-
-Two idempotent setup scripts provision everything needed to build mobux and
-(optionally) the Trusted Web Activity APK. Both prefer user-local installs and
-never use `sudo`. Run them as many times as you like — they detect existing
-tools and skip them.
-
-| Script | Make target | What it installs |
-|---|---|---|
-| `bin/setup` | `make setup` | Rust toolchain (rustup, cargo, rustc), `clippy`, `rustfmt`, and `npm install` for the web build. After this, `cargo build` and `node web/build.js` work. |
-| `bin/setup-twa` | `make setup-twa` | TWA build toolchain: JDK 17 via SDKMAN (`~/.sdkman`), Node LTS via nvm (`~/.nvm`), Android command-line tools (`~/.android/cmdline-tools/latest`), platform-tools / build-tools / `android-34`, and `@bubblewrap/cli` (npm prefix `~/.local`). Accepts SDK licenses non-interactively. |
-
-```bash
-make setup        # rust + clippy + rustfmt + npm deps
-make setup-twa    # JDK + node + android sdk + bubblewrap (only if you build the APK)
-```
-
-`bin/setup-twa` prints PATH/env hints at the end — paste them into your
-shell rc so the user-local tools are visible in new shells.
-
-Set auth credentials via environment:
-```bash
 export MOBUX_AUTH_USER=me
 export MOBUX_PIN=12345
-make run
+make run                    # builds and starts on https://0.0.0.0:5151
 ```
 
-## Architecture
+Then open `https://<your-host>:5151` from a phone on the same tailnet.
+
+Common targets:
+
+```bash
+make setup        # install Rust toolchain + npm deps
+make build        # bundle frontend + cargo build
+make run          # build and run on :5151
+make test         # Playwright smoke tests (mobile Chrome)
+make twa MOBUX_DOMAIN=mobux.example.com:5151   # build the signed Android app
+```
+
+Deploying to a phone (CA cert install, APK download, QR handoff) is self-service from the `/install` page. The full production runbook — systemd service, releasing, isolated dev instances — is in **[DEPLOY.md](DEPLOY.md)**.
+
+## Architecture at a glance
 
 ```
-┌──────────────┐     WebSocket      ┌──────────────┐
-│  Phone       │◄──────────────────►│  mobux (Rust) │
-│  xterm.js    │     /ws/:session   │  axum + PTY   │
-│  input-bar   │                    │  tmux attach  │
-│  touch.js    │     REST API       │               │
-│              │◄──────────────────►│  /api/*       │
-└──────────────┘                    └──────────────┘
+┌──────────────┐     WebSocket      ┌───────────────┐
+│  Phone        │◄──────────────────►│  mobux (Rust)  │
+│  terminal     │     /ws/:session   │  axum + PTY    │
+│  input bar    │                    │  tmux attach   │
+│  reader view  │     REST API       │                │
+│               │◄──────────────────►│  /api/*        │
+└──────────────┘                    └───────────────┘
 ```
 
-- **Server**: Rust (axum) — serves the frontend (embedded in the binary), WebSocket terminal proxy, REST API for session/pane management, file upload
-- **Client**: vanilla JS modules — xterm.js (patched, bundled with esbuild), touch gesture recognizer, mobile input bar
-- **Build**: `node web/build.js` applies a diff patch to xterm.js's `CompositionHelper` and bundles with esbuild
+- **Backend — Rust.** An [axum](https://github.com/tokio-rs/axum) server proxies a PTY-attached tmux session over a WebSocket and exposes a small REST API for session, pane, upload, and push management. The whole frontend is compiled into the binary, so the result is a single self-contained executable that runs from anywhere — `cargo install mobux` and go.
+- **Frontend — JavaScript.** A touch gesture recogniser, the mobile input bar, and the terminal view ship as bundled JS modules. The terminal renderer is pluggable: [xterm.js](https://xtermjs.org/) is the stable default; an experimental clean-room renderer ([sterk](https://github.com/kattebak/sterk)) can be switched on in settings as we modernize the rendering path.
+- **Notifications.** Web Push (VAPID) driven by tmux's native `alert-bell` hook.
 
-### Embedded frontend / `cargo install`
+## Project status
 
-The entire `web/static` tree is compiled into the binary with [`rust-embed`](https://crates.io/crates/rust-embed) and served from memory at `/static/*` — there is no runtime dependency on a `web/` directory next to the executable. This makes `cargo install mobux` produce a self-contained binary that runs from anywhere.
+mobux started as a personal tool and is being hardened into something others can run. It works today — it is the author's daily way to reach a dev box from a phone. It is open source under the MIT license. There is no hosted service, no accounts, and nothing phones home; you run it on your own machine.
 
-For this to work, the generated vendor bundles (`web/static/vendor/*.bundle.js`, `xterm.css`, `fonts/*.woff2`) are committed to git so the published crate embeds the real frontend. They are build artifacts — regenerate them with `make build` (which runs `node web/build.js`) whenever the frontend or its dependencies change, then commit the result. Only the dev-only source maps (`*.map`) stay gitignored and are excluded from the embed.
+The UI is being modernized toward a component-based single-page app. That migration is in progress; the current frontend described above is what ships today.
 
-## Patched xterm.js
-
-xterm.js has [known issues](https://github.com/xtermjs/xterm.js/issues/2403) with mobile keyboard input. We apply a source-level patch (`patches/xterm-composition-helper.patch`) that fixes:
-
-1. **Composition-based autocomplete** — mobile keyboards replace text via composition, not `insertReplacementText`. The original code computes wrong substring offsets.
-2. **Broken diff algorithm** — `_handleAnyTextareaChanges` used `String.replace()` which fails when autocorrect changes characters.
-3. **Backspace flood** — textarea clearing on Enter caused massive backspace sequences.
-
-See [issue #9](https://github.com/mvhenten/mobux/issues/9) for the full investigation.
-
-## Mobile Input
-
-On mobile, the xterm.js hidden textarea is bypassed. Instead:
-
-- **Input bar** appears on double-tap with a scrollable control key ribbon and a native text input
-- **Keyboard Enter** sends text + carriage return (executes)
-- **▶ button** sends text without Enter (injects into readline for further editing)
-- **Ribbon keys** send control sequences directly (^C, arrows, Tab, Esc, etc.)
-- **📷 button** uploads images to `/tmp/mobux-uploads/` and sends the path to the terminal
-- **🎤 button** dictates: records mic audio (hard 60 s cap with a countdown, tap again to stop early), transcribes it on the server with a local CPU model, and injects the text into the input (see [Speech-to-text](#speech-to-text))
+A short product overview for the curious is in **[OVERVIEW.md](OVERVIEW.md)**.
 
 ## API
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/sessions` | GET | List tmux sessions |
-| `/api/sessions` | POST | Create session `{"name": "..."}` |
-| `/api/sessions/:name/kill` | POST | Kill session |
-| `/api/sessions/:name/rename` | POST | Rename session `{"name": "..."}` |
-| `/api/sessions/:name/panes` | GET | List panes/windows |
-| `/api/sessions/:name/command` | POST | Run tmux command |
+| `/api/sessions` | GET / POST | List or create tmux sessions |
+| `/api/sessions/:name/kill` | POST | Kill a session |
+| `/api/sessions/:name/rename` | POST | Rename a session |
+| `/api/sessions/:name/panes` | GET | List panes / windows |
+| `/api/sessions/:name/command` | POST | Run a tmux command |
 | `/api/sessions/:name/history` | GET | Capture scrollback |
-| `/api/upload` | POST | Upload file (multipart) |
-| `/transcribe` | POST | Speech-to-text. Multipart `audio` field = 16 kHz mono 16-bit WAV → `{"text": "..."}`. Optional `context` field is accepted but ignored. Returns `503` if no model is installed |
-| `/api/push/vapid-public-key` | GET | VAPID public key (base64url) for client `pushManager.subscribe` |
-| `/api/push/subscribe` | POST / DELETE | Register / unregister a Web Push subscription |
+| `/api/upload` | POST | Upload a file (multipart) |
+| `/transcribe` | POST | Speech-to-text (OpenAI-compatible audio endpoint) |
+| `/api/push/vapid-public-key` | GET | VAPID public key for push subscription |
+| `/api/push/subscribe` | POST / DELETE | Register or unregister a push subscription |
 | `/api/push/devices` | GET | List subscribed devices |
+| `/api/push/notify` | POST | Send a push notification |
 | `/ws/:name` | WS | Terminal WebSocket |
-| `/install` | GET | Self-service install page (CA cert, APK, QR codes) — no auth |
-| `/install/mobux.apk` | GET | Built APK download — no auth |
-| `/install/mobux-ca.crt` | GET | Local CA cert for Android trust store — no auth |
-| `/.well-known/assetlinks.json` | GET | Digital Asset Links file proving the APK owns the domain — no auth |
-
-## Development
-
-```bash
-make build         # patch xterm + esbuild + cargo build
-make test          # playwright smoke tests (mobile Chrome)
-make smoke-start   # throwaway instance on :8281 (isolated, for testing)
-make smoke-stop
-```
-
-> On a host already running mobux as a service (see **[DEPLOY.md](DEPLOY.md)**),
-> don't use `make run` / `make start` / `make restart` — they bind `:5151`
-> directly and collide with the systemd service. Run dev builds on a different
-> port (`make smoke-start` → `:8281`, or an installable dev instance on
-> `:5152` — see DEPLOY.md).
-
-## Deploying
-
-mobux is a single self-contained binary (the frontend is embedded), so
-deployment is just `cargo install`. The production instance runs as a
-boot-persistent systemd user service. Full runbook — install, the service
-unit, releasing to crates.io, and running an isolated dev instance — is in
-**[DEPLOY.md](DEPLOY.md)**.
-
-```bash
-cargo install mobux --locked     # or: cargo install --git https://github.com/mvhenten/mobux --locked
-systemctl --user restart mobux   # if running as the service
-```
-
-Building requires **`cmake`** on `PATH` (the speech-to-text crate `sherpa-rs`
-builds sherpa-onnx + onnxruntime natively). `apt install cmake` on Debian/Ubuntu.
-
-## Speech-to-text
-
-`POST /transcribe` runs [NVIDIA Parakeet TDT
-0.6b-v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) (int8) fully on CPU
-via the [`sherpa-rs`](https://crates.io/crates/sherpa-rs) (sherpa-onnx) crate —
-no network, no GPU. The 🎤 button in the mobile input bar records mic audio,
-downsamples it to 16 kHz mono 16-bit WAV in the browser, and uploads it here.
-
-```bash
-make stt-model   # download + extract the model (~480 MB) into ./models/
-```
-
-Then point the server at it (the `start`/`run` targets read your environment):
-
-```bash
-export MOBUX_STT_MODEL_DIR="$(pwd)/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
-make start
-```
-
-Notes:
-
-- If `MOBUX_STT_MODEL_DIR` is unset, the server looks under
-  `<data_dir>/models/` (honouring `MOBUX_DATA_DIR`). With no model present the
-  server still boots; `/transcribe` just returns `503`.
-- The recognizer loads once on the first request (~4 s) and is reused; a typical
-  utterance transcribes in well under a second on CPU. Peak RAM ~2 GB.
-- The endpoint decodes the WAV straight to samples in memory — **no temp files**.
-- `sherpa-rs` emits its `libonnxruntime.so` / `libsherpa-onnx-c-api.so` into
-  `target/<profile>/`; the binary carries an `$ORIGIN` rpath so `make start`
-  finds them. Running the binary from elsewhere needs
-  `LD_LIBRARY_PATH=…/target/<profile>` (the container sets this itself).
-
-## Building the TWA
-
-mobux ships its own Trusted Web Activity APK so you can install it as a real
-Android app (full-screen, no browser chrome, push notifications). The APK is
-built per-domain — different domain, different APK.
-
-Prereqs: run `bin/setup-twa` once (installs JDK 17, Node, Android cmdline-tools,
-`@bubblewrap/cli`). Then a single command builds everything:
-
-```bash
-make twa MOBUX_DOMAIN=mobux.example.com:5151   # port included if non-standard
-```
-
-This will:
-
-1. Generate a signing keystore at `~/.config/mobux/twa-signing.keystore` on
-   first run (random password written to `~/.config/mobux/twa-signing.password`,
-   mode 0600). Override the password via `MOBUX_TWA_KEYSTORE_PASSWORD`, override
-   the config dir via `MOBUX_CONFIG_DIR`.
-2. Render `twa/twa-manifest.json` from the template with your domain.
-3. Bootstrap the bubblewrap project skeleton via `node twa/init.js`, which
-   calls `@bubblewrap/core` directly with the rendered manifest. The bundled
-   `bubblewrap init` CLI is interactive-only and treats `--manifest=` as a
-   remote PWA manifest URL — neither fits a one-command build.
-4. Run `bubblewrap build` (passwords passed as `BUBBLEWRAP_KEYSTORE_PASSWORD` /
-   `BUBBLEWRAP_KEY_PASSWORD` env vars).
-5. Copy the signed APK to `web/static/install/mobux.apk`.
-6. Write `web/static/.well-known/assetlinks.json` with the cert fingerprint so
-   Android trusts the TWA → domain link.
-
-The build needs mobux running with TLS during the icon-fetch step (bubblewrap
-fetches `iconUrl` from the live server). If you use mobux's own self-signed CA,
-set `NODE_EXTRA_CA_CERTS=$HOME/.config/mobux/ca.crt` before running `make twa`
-(the target sets it automatically when the file exists).
-
-**BACK UP YOUR KEYSTORE.** `~/.config/mobux/twa-signing.keystore` (and the
-matching password file) are the only thing standing between you and a broken
-upgrade path: lose the key and existing installs cannot upgrade — only fresh
-install with a new package will work, and the package id `io.github.mvhenten.mobux`
-is then burned for those users.
-
-## Install on a phone
-
-Once the APK is built, the rest of the install is self-service from the phone.
-
-1. On the phone, open `https://<your-mobux-host>/install` in Chrome. (You'll
-   get a "Not secure" warning until step 2 completes — tap through.)
-2. **Install the CA certificate first.** Tap "Download CA certificate", then
-   open Android Settings → Security & privacy → Encryption & credentials →
-   Install a certificate → CA certificate → pick `mobux-ca.crt` from
-   Downloads. The page has the exact menu path; follow the steps in order.
-3. Reload `/install` — the address bar padlock should go green.
-4. Tap "Download APK", install. The Mobux app appears in your launcher.
-5. Open the app, attach to a session, tap 🔔 in the input bar, accept the
-   notification permission.
-6. Test it: from any session, run `echo -e '\a'` with the phone locked —
-   the lock screen lights up with `session N: 🔔` and tapping it opens the
-   session.
-
-For a desktop → phone handoff (e.g. you're configuring a fresh phone from
-your laptop), `/install` shows a QR code next to each download button. Scan it
-with the phone camera to jump straight to the right URL.
-
-If you're running mobux behind a publicly-trusted cert (Let's Encrypt — set
-`MOBUX_ACME_DOMAINS` and `MOBUX_ACME_EMAIL`), the CA install step is skipped
-entirely; the install page won't even render that section.
-
-## Third-Party Code
-
-mobux includes vendored code from third parties. Full attribution and license texts are in [`THIRD_PARTY-LICENSES.md`](./THIRD_PARTY-LICENSES.md).
-
-**⚠️ License Compliance Notice**: The current terminal emulator stack (`web/static/vendor/aceterm/`) is vendored from the now-discontinued AWS Cloud9 SDK (c9/core). This code is licensed under the **Cloud9 SDK Non-Commercial License Agreement**, which is **incompatible with mobux's MIT license**. These files are scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk), a clean-room MIT-licensed terminal emulator. See the tracking issue for migration progress: [#68](https://github.com/mvhenten/mobux/issues/68)
-
-Other vendored components:
-- **Ace Editor** (`web/static/vendor/ace.js`) — BSD-3-Clause ✅
-- **wc.js** (`web/static/vendor/aceterm/wc.js`) — Permissive (Markus Kuhn's public-domain-like license) ✅
+| `/install` | GET | Self-service install page (CA cert, APK, QR) |
 
 ## License
 
-MIT
+MIT. Third-party attributions are in [`THIRD_PARTY-LICENSES.md`](./THIRD_PARTY-LICENSES.md).
