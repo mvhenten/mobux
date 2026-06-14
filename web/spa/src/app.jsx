@@ -4,6 +4,7 @@ import { HomePage } from './pages/Home.jsx';
 import { TerminalPage } from './pages/Terminal.jsx';
 import { SettingsPage } from './pages/Settings.jsx';
 import { InstallPage } from './pages/Install.jsx';
+import { HostPicker } from './components/HostPicker.jsx';
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -53,6 +54,7 @@ function Shell({ children }) {
         <Link href="/">Home</Link>
         <Link href="/settings">Settings</Link>
         <Link href="/install">Install</Link>
+        <HostPicker />
       </nav>
       <main class="spa-main">{children}</main>
     </div>

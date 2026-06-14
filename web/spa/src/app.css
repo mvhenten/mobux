@@ -6,6 +6,7 @@
 }
 .spa-nav {
   display: flex;
+  align-items: center;
   gap: 1rem;
   padding: 0.75rem 1rem;
   background: #161922;
@@ -26,4 +27,21 @@
   padding: 1rem;
   max-width: 640px;
   margin: 0 auto;
+}
+
+/* Host picker in the SPA nav. Pushed to the right; dropdown anchors below the nav. */
+.spa-host-picker {
+  margin-left: auto;
+  position: relative;
+}
+.spa-host-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 220px;
+  max-width: 320px;
+  z-index: 20;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }

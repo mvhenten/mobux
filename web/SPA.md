@@ -8,6 +8,25 @@ the migration — nothing here removes or changes them.
 **Stack:** Vite + Preact + Wouter (`wouter-preact`) + `@preact/signals`, JSX via
 `@preact/preset-vite`.
 
+## Status (phase 4)
+
+Phase 4 closes the last mesh parity gap: the app-shell host picker.
+
+Phase 4 done:
+
+- **App-shell host picker** (`components/HostPicker.jsx`) — loads `mesh-client.js`
+  once at the SPA level (not just in the terminal island), renders the host
+  trigger + dropdown in the `spa-nav` rail, and dispatches `mobux:peer-changed`
+  so `Home.jsx` re-fetches sessions against the selected peer. Peer discovery,
+  credential prompt, manual-host add/remove, and the relay path rewrite all
+  work identically to the old `host-picker.js`. The terminal island's own
+  `mesh-client.js` load becomes a no-op once the app shell has loaded it.
+- Headless Playwright: host trigger visible in nav, label defaults to
+  "This host", dropdown opens with peer-option list.
+- All 6 existing prod tests still pass (build-info FE-hash test was already
+  failing in this worktree due to missing `build-info.json` from a `cargo build`
+  vs full release build — pre-existing, not a regression).
+
 ## Status (phase 3)
 
 Phase 3 completes Settings parity (Listen + Build-info cards) and adds
@@ -251,15 +270,7 @@ Ported in phase 2 (one component per card, in `components/settings/`):
 
 ## Remaining work
 
-1. **Mesh / multi-host (partial).** `api.js` already routes through
-   `window.MobuxMesh` when it's present, and the terminal island loads
-   `mesh-client.js` + `host-picker.js`, so peer-pinned terminal routes
-   (`/s/<host>/<name>`) work. **Not yet done:** an app-shell host picker for Home
-   and Settings — `MobuxMesh`/`host-picker.js` aren't loaded outside the
-   terminal island, so Home/Settings only talk to the page's own host. Bring the
-   picker UI into the SPA shell (or port it natively) and load `mesh-client.js`
-   app-wide so the host selection drives the session list too.
-2. **Old-UI teardown (operator's call).** Nothing here removes the inline pages.
+1. **Old-UI teardown (operator's call).** Nothing here removes the inline pages.
    Once `/app` is reviewed and trusted, cut `/` (and friends) over to the SPA and
    delete the Rust-rendered `index`/`settings`/`install`/terminal templates and
    the now-dead `*.js` (`index.js`, `settings.js`, `update.js`,

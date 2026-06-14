@@ -42,6 +42,14 @@ export function HomePage() {
 
   useEffect(() => {
     refresh();
+    // Re-fetch sessions when the host picker switches peers.
+    window.addEventListener('mobux:peer-changed', refresh);
+    // Also expose as a global so the legacy host-picker.js onPeerChange can call it.
+    window.refreshSessions = refresh;
+    return () => {
+      window.removeEventListener('mobux:peer-changed', refresh);
+      if (window.refreshSessions === refresh) delete window.refreshSessions;
+    };
   }, []);
 
   const open = (name) => {
