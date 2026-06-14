@@ -924,20 +924,25 @@ async fn api_transcribe(
     let audio = audio_bytes
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("missing 'audio' field")))?;
 
-    // Read config per-request — no restart needed after config change
-    let db_cfg = tokio::task::spawn_blocking({
+    // Read config per-request — no restart needed after config change.
+    // Use the active kind's per-kind settings.
+    let provider_cfg = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || db.stt_config()
+        move || -> anyhow::Result<transcribe::ProviderConfig> {
+            let kind = db.stt_active_kind()?;
+            let row = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            Ok(transcribe::ProviderConfig {
+                url: row.transcription_url(),
+                model: row.model,
+                api_key: row.api_key,
+            })
+        }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
-
-    let provider_cfg = transcribe::ProviderConfig {
-        url: db_cfg.url,
-        model: db_cfg.model,
-        api_key: db_cfg.api_key,
-    };
 
     match transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await {
         Ok(text) => Ok(Json(json!({ "text": text }))),
@@ -1710,36 +1715,60 @@ end</code></pre>
       document.getElementById('sttStopBtn').hidden    = !isLocal;
     }}
 
+    // In-memory per-kind state cache populated on page load.
+    // Shape: {{ local: {{host, port, model, has_key}}, network: {{...}}, openai: {{...}} }}
+    let providerCache = {{}};
+
+    function populateFromProvider(kind) {{
+      const def = kindDefaults(kind);
+      const p   = providerCache[kind] || {{}};
+      hostEl.value = p.host  || def.host;
+      portEl.value = p.port  || def.port;
+      keyEl.value  = '';
+      keyEl.placeholder = p.has_key ? '•••• stored' : 'sk-…';
+      fetchModels(p.model || def.model);
+    }}
+
+    function kindDefaults(kind) {{
+      if (kind === 'local')  return {{ host: 'http://127.0.0.1', port: '5200', model: MODELS.local[0] }};
+      if (kind === 'openai') return {{ host: 'https://api.openai.com', port: '443', model: 'whisper-1' }};
+      return {{ host: '', port: '', model: MODELS.network[0] }};
+    }}
+
     kindEl.addEventListener('change', () => {{
-      setDefaults(kindEl.value);
+      populateFromProvider(kindEl.value);
       updateVisibility();
     }});
 
     // Load current config on page open
     fetch('/api/settings/stt').then(r => r.json()).then(cfg => {{
-      kindEl.value  = cfg.kind  || 'local';
-      // Never populate the key field — the server does not return the secret.
-      // Show a placeholder so the user knows a key is already stored.
-      keyEl.value = '';
-      keyEl.placeholder = cfg.has_key ? '•••• stored' : 'sk-…';
-      // Parse stored URL into host/port fields, or fall back to defaults.
-      if (!parseUrlIntoFields(cfg.url || '')) {{
-        setDefaults(kindEl.value);
-      }}
+      providerCache = cfg.providers || {{}};
+      const active = cfg.activeKind || 'local';
+      kindEl.value = active;
+      populateFromProvider(active);
       updateVisibility();
-      fetchModels(cfg.model || '');
     }}).catch(() => {{ setDefaults(kindEl.value); updateVisibility(); }});
 
     document.getElementById('sttSaveBtn').addEventListener('click', () => {{
+      const kind  = kindEl.value;
       const model = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
-      const body = {{ kind: kindEl.value, url: buildUrl(), model }};
-      if (kindEl.value === 'openai' && keyEl.value) body.api_key = keyEl.value;
+      const body  = {{ kind, host: hostEl.value.trim(), port: portEl.value.trim(), model }};
+      if (keyEl.value) body.api_key = keyEl.value;
       fetch('/api/settings/stt', {{
         method: 'PUT',
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify(body),
-      }}).then(r => showStatus(statusEl, r.ok ? 'Saved.' : 'Save failed.', r.ok))
-        .catch(() => showStatus(statusEl, 'Save failed.', false));
+      }}).then(r => {{
+        if (r.ok) {{
+          // Update in-memory cache so switching away and back shows saved values.
+          providerCache[kind] = providerCache[kind] || {{}};
+          providerCache[kind].host  = body.host;
+          providerCache[kind].port  = body.port;
+          providerCache[kind].model = model;
+          if (body.api_key) providerCache[kind].has_key = true;
+        }}
+        showStatus(statusEl, r.ok ? 'Saved.' : 'Save failed.', r.ok);
+      }}).catch(() => showStatus(statusEl, 'Save failed.', false));
     }});
 
     document.getElementById('sttRefreshModels').addEventListener('click', () => {{
@@ -2555,14 +2584,23 @@ fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
 
-/// Shape returned by GET /api/settings/stt.
-/// The api_key is never returned; instead `has_key` indicates whether one is stored.
+/// Per-kind provider info returned by GET /api/settings/stt.
+/// api_key is NEVER returned; has_key is a boolean indicator.
 #[derive(serde::Serialize)]
-struct SttConfigGetJson {
-    kind: String,
-    url: String,
+struct SttProviderJson {
+    host: String,
+    port: String,
     model: String,
     has_key: bool,
+}
+
+/// Shape returned by GET /api/settings/stt.
+#[derive(serde::Serialize)]
+struct SttConfigGetJson {
+    #[serde(rename = "activeKind")]
+    active_kind: String,
+    providers: std::collections::HashMap<String, SttProviderJson>,
+    // Legacy/install fields still forwarded for local kind only.
     #[serde(skip_serializing_if = "Option::is_none")]
     install_cmd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2572,40 +2610,53 @@ struct SttConfigGetJson {
 }
 
 /// Shape accepted by PUT /api/settings/stt.
+/// Saves settings for the given kind and makes it the active kind.
 /// api_key is optional; if absent or empty the existing stored key is preserved.
 #[derive(serde::Deserialize)]
 struct SttConfigPutJson {
     kind: String,
-    url: String,
+    host: String,
+    port: String,
     model: String,
     #[serde(default)]
     api_key: Option<String>,
-    #[serde(default)]
-    install_cmd: Option<String>,
-    #[serde(default)]
-    start_cmd: Option<String>,
-    #[serde(default)]
-    stop_cmd: Option<String>,
 }
 
 async fn api_get_stt_config(
     State(state): State<AppState>,
 ) -> Result<Json<SttConfigGetJson>, AppError> {
-    let cfg = tokio::task::spawn_blocking({
+    let (active_kind, providers, legacy) = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || db.stt_config()
+        move || -> anyhow::Result<_> {
+            let active_kind = db.stt_active_kind()?;
+            let rows = db.stt_all_providers()?;
+            let legacy = db.stt_config()?;
+            Ok((active_kind, rows, legacy))
+        }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
+
+    let mut map = std::collections::HashMap::new();
+    for row in &providers {
+        map.insert(
+            row.kind.clone(),
+            SttProviderJson {
+                host: row.host.clone(),
+                port: row.port.clone(),
+                model: row.model.clone(),
+                has_key: row.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            },
+        );
+    }
+
     Ok(Json(SttConfigGetJson {
-        kind: cfg.kind,
-        url: cfg.url,
-        model: cfg.model,
-        has_key: cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()),
-        install_cmd: cfg.install_cmd,
-        start_cmd: cfg.start_cmd,
-        stop_cmd: cfg.stop_cmd,
+        active_kind,
+        providers: map,
+        install_cmd: legacy.install_cmd,
+        start_cmd: legacy.start_cmd,
+        stop_cmd: legacy.stop_cmd,
     }))
 }
 
@@ -2613,33 +2664,37 @@ async fn api_set_stt_config(
     State(state): State<AppState>,
     Json(req): Json<SttConfigPutJson>,
 ) -> Result<StatusCode, AppError> {
-    // Read the existing config so we can preserve the stored api_key when
-    // the request doesn't supply a new one.
-    let existing = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || db.stt_config()
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
-
-    let api_key = match req.api_key.as_deref() {
-        Some(k) if !k.is_empty() => Some(k.to_string()),
-        _ => existing.api_key,
-    };
-
-    let cfg = db::SttConfig {
-        kind: req.kind,
-        url: req.url,
+    let row = db::SttProviderRow {
+        kind: req.kind.clone(),
+        host: req.host,
+        port: req.port,
         model: req.model,
-        api_key,
-        install_cmd: req.install_cmd,
-        start_cmd: req.start_cmd,
-        stop_cmd: req.stop_cmd,
+        // Empty string means "keep existing" — set_stt_provider handles this.
+        api_key: req.api_key,
     };
     tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || db.set_stt_config(cfg)
+        let kind = req.kind.clone();
+        move || -> anyhow::Result<()> {
+            db.set_stt_provider(row)?;
+            db.set_stt_active_kind(&kind)?;
+            // Also update the legacy stt_config row so install/start/stop handlers
+            // continue to work without migration.
+            let provider = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            let legacy = db.stt_config()?;
+            db.set_stt_config(db::SttConfig {
+                kind: kind.clone(),
+                url: provider.transcription_url(),
+                model: provider.model,
+                api_key: provider.api_key,
+                install_cmd: legacy.install_cmd,
+                start_cmd: legacy.start_cmd,
+                stop_cmd: legacy.stop_cmd,
+            })?;
+            Ok(())
+        }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -2650,15 +2705,23 @@ async fn api_set_stt_config(
 async fn api_stt_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let cfg = tokio::task::spawn_blocking({
+    let (cfg, active_url, active_kind_str) = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || db.stt_config()
+        move || -> anyhow::Result<_> {
+            let cfg = db.stt_config()?;
+            let kind = db.stt_active_kind()?;
+            let row = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            let url = row.transcription_url();
+            Ok((cfg, url, kind))
+        }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
 
-    let reachable = transcribe::probe_provider(&cfg.url).await;
+    let reachable = transcribe::probe_provider(&active_url).await;
 
     // Check whether the mobux-stt podman container is running.
     let local_process_running = tokio::process::Command::new("podman")
@@ -2690,14 +2753,15 @@ async fn api_stt_status(
     };
 
     let mut body = json!({
-        "kind": cfg.kind,
-        "url": cfg.url,
+        "kind": active_kind_str,
+        "url": active_url,
         "reachable": reachable,
         "local_process_running": local_process_running,
         "installed": installed,
         "install_phase": install_phase,
         "install_output": install_output,
     });
+    let _ = cfg; // kept for install_cmd/start_cmd/stop_cmd indirectly; suppress unused
     if let Some(err) = install_error {
         body["install_error"] = serde_json::Value::String(err);
     }
@@ -2914,6 +2978,8 @@ async fn api_stt_models(
     };
 
     let (base_url, api_key, kind) = if q.host.as_deref().map(|h| !h.is_empty()).unwrap_or(false) {
+        // Front-end supplied explicit host+port — use them.  The api_key comes
+        // from the per-kind stored row so the frontend doesn't need to round-trip it.
         let host = q.host.as_deref().unwrap_or("").trim_end_matches('/');
         let port = q.port.as_deref().unwrap_or("");
         let base = if port.is_empty() {
@@ -2922,40 +2988,45 @@ async fn api_stt_models(
             format!("{}:{}", host, port)
         };
         let k = q.kind.clone().unwrap_or_default();
-        let cfg = tokio::task::spawn_blocking({
-            let db = state.db.clone();
-            move || db.stt_config()
-        })
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-        .map_err(AppError::internal)?;
         let api_key = if k == "openai" {
-            cfg.api_key.filter(|k| !k.is_empty())
+            let kc = k.clone();
+            tokio::task::spawn_blocking({
+                let db = state.db.clone();
+                move || db.stt_provider(&kc)
+            })
+            .await
+            .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+            .map_err(AppError::internal)?
+            .and_then(|r| r.api_key)
+            .filter(|k| !k.is_empty())
         } else {
             None
         };
         (base, api_key, k)
     } else {
-        let cfg = tokio::task::spawn_blocking({
+        // No explicit host — use the active kind's stored settings.
+        tokio::task::spawn_blocking({
             let db = state.db.clone();
-            move || db.stt_config()
+            move || -> anyhow::Result<_> {
+                let kind = db.stt_active_kind()?;
+                let row = db
+                    .stt_provider(&kind)?
+                    .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+                let base = {
+                    let h = row.host.trim_end_matches('/');
+                    if row.port.is_empty() {
+                        h.to_string()
+                    } else {
+                        format!("{}:{}", h, row.port)
+                    }
+                };
+                let key = row.api_key.filter(|k| !k.is_empty());
+                Ok((base, key, kind))
+            }
         })
         .await
         .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-        .map_err(AppError::internal)?;
-        let base = reqwest::Url::parse(&cfg.url)
-            .ok()
-            .map(|u| {
-                let host = u.host_str().unwrap_or("");
-                if let Some(p) = u.port() {
-                    format!("{}://{}:{}", u.scheme(), host, p)
-                } else {
-                    format!("{}://{}", u.scheme(), host)
-                }
-            })
-            .unwrap_or_default();
-        let key = cfg.api_key.filter(|k| !k.is_empty());
-        (base, key, cfg.kind)
+        .map_err(AppError::internal)?
     };
 
     if base_url.is_empty() {
