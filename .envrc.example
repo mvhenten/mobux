@@ -1,3 +1,13 @@
 export MOBUX_USER=yourname
 export MOBUX_PIN=yourpin
 export MOBUX_PASS=yourpin
+
+# ── Speech-to-text (POST /transcribe, Parakeet via sherpa-rs) ──────────
+# Run `make stt-model` once to download the model into ./models/, then point
+# the server at it. If unset, the server looks under <data_dir>/models/ and the
+# endpoint returns 503 until a model is present.
+export MOBUX_STT_MODEL_DIR="$(pwd)/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
+# sherpa-rs ships the onnxruntime/sherpa-onnx .so files into target/<profile>/.
+# `make start` works without this (the binary has an $ORIGIN rpath), but if you
+# run the binary from elsewhere, add its dir to the library path:
+# export LD_LIBRARY_PATH="$(pwd)/target/debug:$LD_LIBRARY_PATH"

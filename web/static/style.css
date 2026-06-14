@@ -32,6 +32,11 @@
 }
 
 * { box-sizing: border-box; }
+/* The HTML `hidden` attribute hides via the UA `display:none` rule, which has
+   the lowest priority and is silently overridden by author rules such as
+   `.settings-row { display:flex }`. Without this, JS toggling `el.hidden`
+   sets the attribute but the element stays visible. Make `hidden` win. */
+[hidden] { display: none !important; }
 body {
   margin: 0;
   background: var(--bg);
@@ -1013,20 +1018,25 @@ h1, h2, h3 { margin: 0; }
   color: #fff;
 }
 
-/* Audio record button states — calm, low-contrast per project aesthetic. */
-#recBtn.recording {
-  border-color: #6e4046;
-  background: #3a2c2e;
-  color: #c98b8b;
-  animation: recPulse 1.6s ease-in-out infinite;
+/* Mic / dictation states. Recording pulses red; the countdown digit lives in
+   the button label. Error flashes amber briefly. */
+#micBtn.mic-recording {
+  background: #c0392b;
+  color: #fff;
+  border-color: #e74c3c;
+  animation: mic-pulse 1s ease-in-out infinite;
 }
-@keyframes recPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(180, 90, 90, 0.0); }
-  50%      { box-shadow: 0 0 6px 1px rgba(180, 90, 90, 0.35); }
+#micBtn.mic-error {
+  background: #6b5500;
+  color: #ffd54a;
+  border-color: #b8860b;
 }
-/* Failure state — must be clearly noticeable, not the old near-invisible
-   tint. Used for both the record (🎤) and attach (📎) buttons. */
-#recBtn.rec-error,
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.6); }
+  50%      { box-shadow: 0 0 0 4px rgba(231, 76, 60, 0); }
+}
+
+/* Failure state for the attach button — clearly noticeable tint. */
 #uploadBtn.rec-error {
   border-color: #ff6b6b;
   background: #5a1f1f;

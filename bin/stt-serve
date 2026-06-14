@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Start the speaches STT container on port 5200 (host) → 8000 (container).
+# Uses --replace so re-running is idempotent.
+set -euo pipefail
+MOBUX_STT_IMAGE="${MOBUX_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu}"
+MOBUX_STT_PORT="${MOBUX_STT_PORT:-5200}"
+podman run -d \
+  --replace \
+  --name mobux-stt \
+  -p "${MOBUX_STT_PORT}:8000" \
+  -v mobux-stt-models:/home/ubuntu/.cache/huggingface \
+  "$MOBUX_STT_IMAGE"

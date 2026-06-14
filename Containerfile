@@ -20,6 +20,11 @@ RUN npm install --no-audit --no-fund
 # ---- rust build ----------------------------------------------------------
 FROM docker.io/library/rust:1.95-bookworm AS build
 WORKDIR /src
+# `cmake` is required: sherpa-rs-sys builds sherpa-onnx (and fetches a prebuilt
+# onnxruntime) via cmake for the local CPU speech-to-text endpoint.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends cmake \
+ && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY --from=web /src/web ./web
@@ -35,6 +40,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/mobux /usr/local/bin/mobux
+# sherpa-rs emits the onnxruntime + sherpa-onnx shared libs next to the binary
+# in the build stage; the runtime needs them on the library path. `libstdc++` /
+# `libgomp` from the build toolchain are also required by onnxruntime.
+COPY --from=build /src/target/release/*.so /opt/mobux/lib/
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libstdc++6 libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=web /src/web /opt/mobux/web
 COPY scripts/podman-entrypoint.sh /usr/local/bin/podman-entrypoint.sh
 RUN chmod +x /usr/local/bin/podman-entrypoint.sh
@@ -47,7 +59,8 @@ ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     MOBUX_TLS=0 \
     PORT=8080 \
-    MOBUX_DATA_DIR=/data
+    MOBUX_DATA_DIR=/data \
+    LD_LIBRARY_PATH=/opt/mobux/lib
 RUN mkdir -p /data
 EXPOSE 8080
 

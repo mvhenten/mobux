@@ -7,6 +7,8 @@
 // - Text input: native keyboard with autocomplete/voice. Enter sends + clears.
 // - Bar appears on tap, hides when keyboard dismisses.
 
+import { createAttachAction, createDictateAction } from '/static/input-actions.js';
+
 export function createInputBar(term, send) {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
@@ -174,173 +176,42 @@ export function createInputBar(term, send) {
     }
   }
 
-  // ── Shared upload helper ──────────────────────────────────────────
-  // POSTs a File/Blob to /api/upload and drops the returned path into
-  // the terminal via send(). Used by both the attach button and the
-  // audio record button.
-  async function uploadFile(file) {
-    const form = new FormData();
-    form.append('file', file);
-
-    // Upload to whichever host drives the terminal: the returned path is only
-    // meaningful on that host's filesystem, so it must go through the relay.
-    const res = await window.MobuxMesh.apiFetch('/api/upload', { method: 'POST', body: form });
-    if (!res.ok) throw new Error(await res.text());
-    const { path } = await res.json();
-
-    // Send path directly to terminal, ready to use
-    send(path);
-  }
-
   // ── File attach (any file type) ───────────────────────────────────
+  // Shared with the desktop top bar (input-actions.js). The button just
+  // triggers the action; the action owns the hidden file input + upload.
   const uploadBtn = document.getElementById('uploadBtn');
-  const fileInput = document.createElement('input');
-  fileInput.type = 'file';
-  fileInput.accept = '*/*';
-  fileInput.style.display = 'none';
-  document.body.appendChild(fileInput);
-
+  const attach = createAttachAction({
+    send,
+    onError: (msg) => showError(msg, uploadBtn),
+  });
   if (uploadBtn) {
-    uploadBtn.addEventListener('click', (e) => {
-      e.preventDefault();
-      fileInput.click();
-    });
+    uploadBtn.addEventListener('click', (e) => { e.preventDefault(); attach.trigger(); });
     // Prevent focus steal
     uploadBtn.addEventListener('mousedown', (e) => e.preventDefault());
   }
 
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files?.[0];
-    if (!file) return;
-
-    try {
-      await uploadFile(file);
-    } catch (err) {
-      console.error('Upload failed:', err);
-      showError('Attach failed: upload error', uploadBtn);
-    }
-
-    // Reset so the same file can be re-selected
-    fileInput.value = '';
+  // ── Speech-to-text (dictation) ────────────────────────────────────
+  // Shared with the desktop top bar. The action owns capture/transcribe +
+  // overlay + telemetry; here we wire it to the mobile mic button and
+  // re-focus the text input after a successful injection.
+  const micBtn = document.getElementById('micBtn');
+  const dictate = createDictateAction({
+    send,
+    button: micBtn,
+    onText: () => input.focus(),
   });
-
-  // ── Audio record (MediaRecorder → /api/upload) ────────────────────
-  const recBtn = document.getElementById('recBtn');
-  let mediaRecorder = null;
-  let chunks = [];
-  let recStream = null;
-  // Synchronous guard: `mediaRecorder` stays null across the `await
-  // getUserMedia(...)`, so without this two quick taps would each start a
-  // stream and leak the first. Set true at the top of startRecording, before
-  // the await; cleared by recCleanup.
-  let recBusy = false;
-
-  function recCleanup() {
-    if (recStream) {
-      recStream.getTracks().forEach((t) => t.stop());
-      recStream = null;
-    }
-    mediaRecorder = null;
-    recBusy = false;
-    if (recBtn) recBtn.classList.remove('recording');
+  if (micBtn) {
+    micBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    micBtn.addEventListener('click', (e) => { e.preventDefault(); dictate.toggle(); });
   }
 
-  function extForMime(mime) {
-    if (!mime) return 'webm';
-    if (mime.includes('mp4')) return 'm4a';
-    if (mime.includes('ogg')) return 'ogg';
-    if (mime.includes('webm')) return 'webm';
-    return 'webm';
-  }
-
-  function pickMimeType() {
-    const prefs = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
-    for (const t of prefs) {
-      if (MediaRecorder.isTypeSupported(t)) return t;
-    }
-    return ''; // let the browser pick a default
-  }
-
-  async function startRecording() {
-    // Set the guard synchronously, before any await, so a second tap during
-    // the getUserMedia round-trip is a no-op (the click handler also checks).
-    recBusy = true;
-    try {
-      recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (err) {
-      console.error('Microphone access failed:', err);
-      recCleanup();
-      showError('Mic access denied. In the TWA app, allow the Microphone permission.', recBtn);
-      return;
-    }
-
-    chunks = [];
-    const mimeType = pickMimeType();
-    try {
-      mediaRecorder = mimeType
-        ? new MediaRecorder(recStream, { mimeType })
-        : new MediaRecorder(recStream);
-    } catch (err) {
-      console.error('MediaRecorder init failed:', err);
-      recCleanup();
-      showError('Could not start recording on this device.', recBtn);
-      return;
-    }
-
-    mediaRecorder.addEventListener('dataavailable', (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    });
-
-    mediaRecorder.addEventListener('stop', async () => {
-      const type = mediaRecorder?.mimeType || 'audio/webm';
-      const ext = extForMime(type);
-      const blob = new Blob(chunks, { type });
-      chunks = [];
-      // Release the mic before the upload round-trip.
-      recCleanup();
-
-      if (blob.size === 0) return;
-      const file = new File([blob], 'recording-' + Date.now() + '.' + ext, { type });
-      try {
-        await uploadFile(file);
-      } catch (err) {
-        console.error('Upload failed:', err);
-        showError('Recording upload failed.', recBtn);
-      }
-    });
-
-    mediaRecorder.start();
-    if (recBtn) recBtn.classList.add('recording');
-  }
-
-  function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-      mediaRecorder.stop(); // triggers onstop → upload + cleanup
-    } else {
-      recCleanup();
-    }
-  }
-
-  if (recBtn) {
-    const recSupported =
-      !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined';
-    if (!recSupported) {
-      recBtn.style.display = 'none';
-    } else {
-      recBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-          stopRecording();
-        } else if (!recBusy) {
-          // `recBusy` is set synchronously inside startRecording before the
-          // getUserMedia await; guarding here too means a rapid double-tap
-          // can't kick off a second stream while the first is still starting.
-          startRecording();
-        }
-      });
-      // Prevent focus steal
-      recBtn.addEventListener('mousedown', (e) => e.preventDefault());
-    }
+  // Settings gear — direct navigation to /settings. Phones can't always rely
+  // on Back to return here (incognito back-stack is flaky), so the bar needs
+  // its own way in, mirroring the desktop top bar's gear.
+  const settingsBtn = document.getElementById('settingsBtn');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    settingsBtn.addEventListener('click', (e) => { e.preventDefault(); window.location.href = '/settings'; });
   }
 
   // ── Public API ────────────────────────────────────────────────────

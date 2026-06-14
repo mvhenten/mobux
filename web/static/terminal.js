@@ -2,6 +2,7 @@ import { TerminalCore } from './terminal-core.js';
 import { ReaderView } from './reader-view.js';
 import { createGestureRecognizer } from './touch.js';
 import { createInputBar } from './input-bar.js';
+import { createTopBar } from './top-bar.js';
 import { applyTheme, getStoredThemeId } from './themes.js';
 
 const session = window.MOBUX_SESSION;
@@ -403,6 +404,31 @@ if (viewToggleBtn) {
     swapView(currentView === 'xterm' ? 'reader' : 'xterm');
   });
 }
+
+// ── Desktop top bar ─────────────────────────────────────────────────
+// On a non-touch browser xterm.js owns the keyboard, so attach / dictate /
+// reader-toggle have no shortcut. Mount a slim top bar with those three as
+// the desktop counterpart to the mobile input bar. Mirror the isMobile gate
+// so the two surfaces are mutually exclusive, and (re)evaluate cheaply when
+// the pointer modality flips to coarse (a 2-in-1 going tablet → drop it).
+let topBar = null;
+function ensureTopBar() {
+  if (topBar || isMobile) return;
+  topBar = createTopBar({
+    send: (d) => core.send(d),
+    toggleReader: () => swapView(currentView === 'xterm' ? 'reader' : 'xterm'),
+    isReader: () => currentView === 'reader',
+  });
+}
+if (!isMobile) ensureTopBar();
+try {
+  const coarse = window.matchMedia('(pointer: coarse)');
+  const onCoarse = (e) => {
+    if (e.matches && topBar) { topBar.destroy(); topBar = null; }
+  };
+  if (coarse.addEventListener) coarse.addEventListener('change', onCoarse);
+  else if (coarse.addListener) coarse.addListener(onCoarse);
+} catch (_) { /* matchMedia unsupported: static gate still covers us */ }
 
 function applyStoredViewForActiveWindow() {
   const wid = activeWindowId();

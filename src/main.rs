@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{ws::Message, Path, State, WebSocketUpgrade},
+    extract::{ws::Message, Path, Query, State, WebSocketUpgrade},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, HeaderValue, Request, StatusCode,
@@ -48,7 +48,21 @@ mod relay;
 mod shell_integration;
 mod ssl;
 mod tmux;
+mod transcribe;
 mod update;
+
+#[derive(Clone, Debug, PartialEq)]
+enum InstallPhase {
+    Idle,
+    Running,
+    Success,
+    Failed(String),
+}
+
+struct SttInstallState {
+    phase: InstallPhase,
+    output_tail: Vec<String>,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -70,6 +84,18 @@ struct AppState {
     use_tls: bool,
     /// In-memory cache of the latest crates.io version (self-update, #130).
     update: update::UpdateState,
+    /// Dev-mode flag (set via `MOBUX_DEV=1`). OFF in production. Gates the
+    /// dev-only client telemetry channel: when false, `/api/telemetry` is a
+    /// no-op 404 and the frontend is told (`window.MOBUX_DEV=false`) not to
+    /// post or render its overlay.
+    dev_mode: bool,
+    /// SHA-256 prefix of the vendored JS bundles, computed by `web/build.js`
+    /// and written to `web/static/build-info.json` at build time. Injected
+    /// into the settings page so operators can verify whether the bundle on
+    /// disk matches what the browser has loaded.
+    build_hash: String,
+    /// Tracks background STT install state (phase + rolling output tail).
+    stt_install: Arc<tokio::sync::Mutex<SttInstallState>>,
 }
 
 #[derive(Clone)]
@@ -116,6 +142,21 @@ async fn main() -> Result<()> {
         .map(|v| v != "0" && v.to_lowercase() != "false")
         .unwrap_or(true);
 
+    // Dev-mode toggle. OFF unless MOBUX_DEV is set to a truthy value (the
+    // `mobux-dev.service` unit sets `MOBUX_DEV=1`). Gates the dev-only client
+    // telemetry channel; absent/inert in production.
+    let dev_mode = env::var("MOBUX_DEV")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let build_hash = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static/build-info.json"),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v["hash"].as_str().map(str::to_owned))
+    .unwrap_or_else(|| "unknown".to_string());
+
     let update_state = update::UpdateState::new();
     // Kick off the background crates.io poller (polls now, then every ~6h).
     update::spawn_checker(update_state.clone());
@@ -141,6 +182,12 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
         use_tls,
         update: update_state,
+        dev_mode,
+        build_hash,
+        stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
+            phase: InstallPhase::Idle,
+            output_tail: vec![],
+        })),
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -178,10 +225,20 @@ async fn main() -> Result<()> {
         )
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
-        .route("/api/debug", post(api_debug_log))
+        .route(
+            "/api/telemetry",
+            post(api_telemetry).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/upload",
             post(api_upload).layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024)),
+        )
+        // 60 s of 16 kHz mono 16-bit PCM is ~1.9 MB; the default 2 MB body
+        // limit is too tight once the multipart envelope is added. Allow 8 MB
+        // for this route only (the 70 s sample cap is enforced after decode).
+        .route(
+            "/transcribe",
+            post(api_transcribe).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route("/api/push/vapid-public-key", get(api_push_vapid_public_key))
         .route(
@@ -194,6 +251,19 @@ async fn main() -> Result<()> {
             "/api/settings/notifications",
             get(api_get_notification_prefs).put(api_set_notification_prefs),
         )
+        .route(
+            "/api/settings/stt",
+            get(api_get_stt_config).put(api_set_stt_config),
+        )
+        .route("/api/stt/status", get(api_stt_status))
+        .route("/api/stt/models", get(api_stt_models))
+        .route(
+            "/api/stt/install",
+            post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
+        )
+        .route("/api/stt/install/status", get(api_stt_install_status))
+        .route("/api/stt/start", post(api_stt_start))
+        .route("/api/stt/stop", post(api_stt_stop))
         .route(
             "/api/shell-integration/status",
             get(api_shell_integration_status),
@@ -256,6 +326,10 @@ async fn main() -> Result<()> {
         println!("auth: enabled (HTTP Basic)");
     } else {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
+    }
+
+    if state.dev_mode {
+        println!("dev mode: ON (MOBUX_DEV) — /api/telemetry active, logs to stderr");
     }
 
     if use_tls {
@@ -530,6 +604,7 @@ async fn index(State(state): State<AppState>) -> Result<axum::response::Response
         &sessions,
         None,
         &state.cache_bust,
+        state.dev_mode,
     )))
 }
 
@@ -740,15 +815,23 @@ async fn api_tmux_command(
     Ok(Json(json!({"ok": true, "output": result})))
 }
 
-async fn api_debug_log(body: String) -> StatusCode {
-    use std::fs::OpenOptions;
-    use std::io::Write as _;
-    let path = "debug-input.log";
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
-        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
-        let _ = writeln!(f, "--- {ts} ---");
-        let _ = writeln!(f, "{body}");
+/// Dev-only client telemetry sink. A general-purpose channel for the frontend
+/// to forward diagnostic lines into the server journal during development.
+///
+/// Gated on `state.dev_mode` (`MOBUX_DEV=1`): when dev mode is OFF — i.e. in
+/// production — this returns 404 and logs nothing, so the route is inert.
+/// It stays behind the normal auth middleware (the page is same-origin, so the
+/// session cookie carries fine); it is NOT auth-exempt. Body is capped at 64KB
+/// by the route's `DefaultBodyLimit`. Lines land in the journal via `eprintln!`
+/// (matching the repo's existing logging convention) prefixed `[telemetry]`.
+async fn api_telemetry(State(state): State<AppState>, body: String) -> StatusCode {
+    if !state.dev_mode {
+        return StatusCode::NOT_FOUND;
     }
+    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+    // Single line per event keeps `journalctl`/`grep` friendly; the client
+    // already JSON-encodes structured payloads onto one line.
+    eprintln!("[telemetry {ts}] {body}");
     StatusCode::NO_CONTENT
 }
 
@@ -801,6 +884,74 @@ async fn api_upload(
     }
 
     Err(AppError::bad_request(anyhow::anyhow!("no file in upload")))
+}
+
+// ── Speech-to-text: POST /transcribe ──────────────────────────────────
+//
+// Accepts audio as multipart/form-data (field name `audio`) and forwards it
+// to the configured OpenAI-compatible STT provider. Returns `{ "text": "..." }`.
+// Provider config is read from db on each request — no restart needed after change.
+async fn api_transcribe(
+    State(state): State<AppState>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    let mut filename = "speech.wav".to_string();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| anyhow::anyhow!("multipart: {e}"))
+        .map_err(AppError::bad_request)?
+    {
+        if field.name() == Some("audio") {
+            if let Some(fname) = field.file_name() {
+                filename = fname.to_string();
+            }
+            audio_bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("read field: {e}"))
+                    .map_err(AppError::bad_request)?
+                    .to_vec(),
+            );
+        } else {
+            let _ = field.bytes().await;
+        }
+    }
+
+    let audio = audio_bytes
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("missing 'audio' field")))?;
+
+    // Read config per-request — no restart needed after config change.
+    // Use the active kind's per-kind settings.
+    let provider_cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || -> anyhow::Result<transcribe::ProviderConfig> {
+            let kind = db.stt_active_kind()?;
+            let row = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            Ok(transcribe::ProviderConfig {
+                url: row.transcription_url(),
+                model: row.model,
+                api_key: row.api_key,
+            })
+        }
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    match transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await {
+        Ok(text) => Ok(Json(json!({ "text": text }))),
+        Err(transcribe::TranscribeError::ProviderUnavailable(msg)) => Err(AppError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: msg,
+        }),
+        Err(e) => Err(AppError::internal(anyhow::anyhow!("{e}"))),
+    }
 }
 
 // ── Web Push: VAPID public key + subscription endpoints ───────────────
@@ -947,6 +1098,13 @@ struct InternalTriggerQuery {
     window: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct SttModelsQuery {
+    kind: Option<String>,
+    host: Option<String>,
+    port: Option<String>,
+}
+
 /// Internal endpoint hit by the `tmux alert-bell` hook. Bound to 127.0.0.1
 /// only and authenticated by `state.internal_token`, so an attacker who
 /// can't already run code on the host can't push fake notifications.
@@ -1054,8 +1212,12 @@ async fn api_shell_integration_uninstall(
     Ok(Json(s))
 }
 
+const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 async fn settings_page(State(state): State<AppState>) -> Response {
     let v = &state.cache_bust;
+    let build_hash = &state.build_hash;
+    let version = PKG_VERSION;
     html_no_store(format!(
         r##"<!doctype html>
 <html lang="en">
@@ -1068,6 +1230,10 @@ async fn settings_page(State(state): State<AppState>) -> Response {
   <link rel="stylesheet" href="/static/style.css?v={v}" />
 </head>
 <body>
+  <script>
+    window.MOBUX_BUILD_SERVER = "{build_hash}";
+    window.MOBUX_VERSION = "{version}";
+  </script>
   <header class="app-header">
     <a href="/" class="header-back" aria-label="Back">‹</a>
     <h1>settings</h1>
@@ -1256,6 +1422,58 @@ end</code></pre>
       <p class="settings-foot">Reload the shell after installing. The fenced block is the contract — mobux only ever modifies what's between the fences. A timestamped <code>.mobux.bak.&lt;ts&gt;</code> is written next to the rc file before any change.</p>
     </section>
 
+    <section class="settings-card" id="stt-provider">
+      <h2>Speech provider</h2>
+      <p class="settings-lede">Dictation forwards audio to an OpenAI-compatible <code>/v1/audio/transcriptions</code> endpoint. Use Local to run a <a href="https://github.com/speaches-ai/speaches" target="_blank" rel="noopener">speaches</a> server on port 5200, Network for a self-hosted instance, or OpenAI for the cloud API.</p>
+
+      <label class="settings-row">
+        <span class="settings-label"><strong>Provider</strong></span>
+        <select id="sttKind" class="settings-select">
+          <option value="local">Local (port 5200)</option>
+          <option value="network">Network (self-hosted)</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </label>
+
+      <label class="settings-row" id="sttHostRow">
+        <span class="settings-label"><strong>Host</strong></span>
+        <input type="text" id="sttHost" class="settings-input" placeholder="http://127.0.0.1" />
+      </label>
+
+      <label class="settings-row" id="sttPortRow">
+        <span class="settings-label"><strong>Port</strong></span>
+        <input type="number" id="sttPort" class="settings-input" placeholder="5200" min="1" max="65535" />
+      </label>
+
+      <div class="settings-row" id="sttModelRow">
+        <span class="settings-label"><strong>Model</strong></span>
+        <span style="display:flex;gap:4px;flex:1">
+          <select id="sttModel" class="settings-input settings-select" style="flex:1"></select>
+          <button type="button" id="sttRefreshModels" title="Refresh model list" style="flex-shrink:0">↺</button>
+        </span>
+      </div>
+      <label class="settings-row" id="sttCustomModelRow" hidden>
+        <span class="settings-label"><strong>Custom model</strong></span>
+        <input type="text" id="sttCustomModel" class="settings-input" placeholder="enter model id" />
+      </label>
+
+      <label class="settings-row" id="sttApiKeyRow">
+        <span class="settings-label"><strong>API key</strong></span>
+        <input type="password" id="sttApiKey" class="settings-input" placeholder="sk-…" autocomplete="off" />
+      </label>
+
+      <div id="sttStatus" class="settings-status" hidden></div>
+
+      <div class="shell-card-actions">
+        <button type="button" id="sttSaveBtn">Save</button>
+        <button type="button" id="sttProbeBtn">Check status</button>
+        <button type="button" id="sttResetBtn" style="opacity:0.6">Reset</button>
+        <button type="button" id="sttInstallBtn">Install local server</button>
+        <button type="button" id="sttToggleBtn">Start</button>
+      </div>
+      <div class="settings-status" id="sttActionStatus" hidden></div>
+    </section>
+
     <section class="settings-card" id="listen-settings">
       <h2>Listen</h2>
       <p class="settings-lede">Make reader-view bubbles tappable to be spoken aloud via the Web Speech API. Settings are stored locally and apply to all sessions.</p>
@@ -1291,6 +1509,36 @@ end</code></pre>
         Web Speech API not available in this browser.
       </div>
     </section>
+
+    <section class="settings-card" id="build-info">
+      <h2>Build</h2>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Backend version</strong>
+        </span>
+        <span class="settings-value" id="buildVersion">{version}</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Server bundle hash</strong>
+          <small>Hash of the frontend bundle on disk when the server started.</small>
+        </span>
+        <span class="settings-value" id="buildServerHash">{build_hash}</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Loaded bundle hash</strong>
+          <small>Hash of the bundle currently loaded in this browser tab.</small>
+        </span>
+        <span class="settings-value" id="buildFeHash">—</span>
+      </div>
+      <div class="settings-row" id="buildStaleRow" hidden>
+        <span class="settings-label">
+          <strong>Status</strong>
+        </span>
+        <span class="settings-value" style="color:#8a7c5a">stale — hard-reload needed</span>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -1300,6 +1548,415 @@ end</code></pre>
       document.getElementById('listenCapable').hidden = true;
       document.getElementById('listenUnavailable').hidden = false;
     }}
+  </script>
+  <script>
+  (function() {{
+    const kindEl    = document.getElementById('sttKind');
+    const hostEl    = document.getElementById('sttHost');
+    const portEl    = document.getElementById('sttPort');
+    const hostRow   = document.getElementById('sttHostRow');
+    const portRow   = document.getElementById('sttPortRow');
+    const modelEl        = document.getElementById('sttModel');
+    const modelRow       = document.getElementById('sttModelRow');
+    const customModelEl  = document.getElementById('sttCustomModel');
+    const customModelRow = document.getElementById('sttCustomModelRow');
+    const keyEl     = document.getElementById('sttApiKey');
+    const keyRow    = document.getElementById('sttApiKeyRow');
+    const statusEl  = document.getElementById('sttStatus');
+    const actionEl  = document.getElementById('sttActionStatus');
+
+    const MODELS = {{
+      openai:  ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'],
+      local:   ['Systran/faster-whisper-small', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
+      network: ['Systran/faster-whisper-base.en', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
+    }};
+
+    function populateModelSelect(models, selectedModel) {{
+      modelEl.innerHTML = '';
+      models.forEach(id => {{
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = id;
+        modelEl.appendChild(opt);
+      }});
+      // If the saved model isn't in the list, add it as a real selectable option
+      // rather than silently falling to the "custom…" free-text box.
+      if (selectedModel && !models.includes(selectedModel)) {{
+        const extra = document.createElement('option');
+        extra.value = selectedModel;
+        extra.textContent = selectedModel;
+        modelEl.insertBefore(extra, modelEl.firstChild);
+      }}
+      const customOpt = document.createElement('option');
+      customOpt.value = '__custom__';
+      customOpt.textContent = 'custom…';
+      modelEl.appendChild(customOpt);
+
+      if (selectedModel) {{
+        modelEl.value = selectedModel;
+      }}
+      if (modelEl.value === '__custom__' && selectedModel) {{
+        customModelEl.value = selectedModel;
+      }}
+      // updateVisibility() is the single authority for row visibility — call it
+      // so the custom-model row reflects the freshly-set model and the active
+      // provider. Never toggle row .hidden directly here; that re-reveal path is
+      // exactly the bug that left stale fields showing.
+      updateVisibility();
+    }}
+
+    // Normalize a host string to always include a scheme (default http://).
+    // Accepts bare hostname like "lab", returns "http://lab".
+    function normalizeHost(h) {{
+      h = h.trim().replace(/\/$/, '');
+      if (!h) return h;
+      if (!/^https?:\/\//i.test(h)) return 'http://' + h;
+      return h;
+    }}
+
+    async function fetchModels(selectedModel) {{
+      const host = normalizeHost(hostEl.value);
+      const query = '?kind=' + encodeURIComponent(kindEl.value) +
+                    '&host=' + encodeURIComponent(host) +
+                    '&port=' + encodeURIComponent(portEl.value);
+      try {{
+        const resp = await fetch('/api/stt/models' + query);
+        if (!resp.ok) throw new Error('not ok');
+        const data = await resp.json();
+        if (!data.models || !data.models.length) throw new Error('empty');
+        populateModelSelect(data.models, selectedModel);
+      }} catch (_) {{
+        populateModelSelect(MODELS[kindEl.value] || MODELS.local, selectedModel);
+      }}
+    }}
+
+    // Persist the active provider + its fields. Mobile SPA — there is no manual
+    // Save tap; every change auto-saves and the Save button is hidden.
+    function saveProvider() {{
+      const kind  = kindEl.value;
+      const model = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+      const body  = {{ kind, host: hostEl.value.trim(), port: portEl.value.trim(), model }};
+      if (keyEl.value) body.api_key = keyEl.value;
+      fetch('/api/settings/stt', {{
+        method: 'PUT',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body),
+      }}).then(r => {{
+        if (r.ok) {{
+          providerCache[kind] = providerCache[kind] || {{}};
+          providerCache[kind].host  = body.host;
+          providerCache[kind].port  = body.port;
+          providerCache[kind].model = model;
+          if (body.api_key) providerCache[kind].has_key = true;
+        }}
+        showStatus(statusEl, r.ok ? 'Saved ✓' : 'Save failed.', r.ok);
+      }}).catch(() => showStatus(statusEl, 'Save failed.', false));
+    }}
+    let _saveDebounce;
+    function schedSave() {{ clearTimeout(_saveDebounce); _saveDebounce = setTimeout(saveProvider, 700); }}
+
+    // Debounced re-fetch when host/port change, then save with the discovered model.
+    let _fetchDebounce;
+    function schedFetchModels() {{
+      clearTimeout(_fetchDebounce);
+      _fetchDebounce = setTimeout(async () => {{
+        const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+        await fetchModels(cur);
+        saveProvider();
+      }}, 600);
+    }}
+
+    modelEl.addEventListener('change', () => {{
+      updateVisibility();
+      saveProvider();
+    }});
+    keyEl.addEventListener('input', schedSave);
+
+    function showStatus(el, msg, ok) {{
+      el.textContent = msg;
+      el.hidden = false;
+      el.style.color = ok ? '#7ec87e' : '#c87e7e';
+    }}
+
+    // Parse host+port out of a full URL string and write into the fields.
+    // Returns true if parse succeeded.
+    // Uses new URL() for robust parsing — no regex splits that can truncate hostnames.
+    function parseUrlIntoFields(raw) {{
+      if (!raw) return false;
+      // Normalise: if no scheme, prepend http:// so new URL() doesn't mangle the hostname.
+      let normalised = raw.trim();
+      if (!/^https?:\/\//i.test(normalised)) normalised = 'http://' + normalised;
+      let u;
+      try {{ u = new URL(normalised); }} catch (_) {{ return false; }}
+      // scheme+hostname only — no port suffix in the Host field.
+      hostEl.value = u.protocol + '//' + u.hostname;
+      if (u.port) {{
+        portEl.value = u.port;
+      }} else {{
+        portEl.value = u.protocol === 'https:' ? '443' : '80';
+      }}
+      return true;
+    }}
+
+    // Build the full URL to send to the backend.
+    // host field must contain scheme+hostname (e.g. "http://lab.tailfa81e6.ts.net").
+    // port field is appended as ":port"; path is always /v1/audio/transcriptions.
+    function buildUrl() {{
+      const host = hostEl.value.trim().replace(/\/$/, '');
+      const port = portEl.value.trim();
+      if (!host) return '';
+      // Guard: ensure host has a scheme; add http:// if bare hostname slipped through.
+      const hasScheme = /^https?:\/\//i.test(host);
+      const base = hasScheme ? host : 'http://' + host;
+      return base + (port ? ':' + port : '') + '/v1/audio/transcriptions';
+    }}
+
+    // Paste / blur handler on Host field.
+    // - If the user pasted a full URL with path/port, split it into fields.
+    // - Always ensure a scheme is present so bare hostnames are stored as "http://lab".
+    function handleHostInput() {{
+      const raw = hostEl.value.trim();
+      if (!raw) return;
+      // Normalise for URL test: add scheme if missing.
+      let normalised = raw;
+      if (!/^https?:\/\//i.test(normalised)) normalised = 'http://' + normalised;
+      try {{
+        const u = new URL(normalised);
+        // Re-parse into fields if there's a path beyond '/' or an explicit port.
+        if (u.port || (u.pathname && u.pathname !== '/')) {{
+          parseUrlIntoFields(raw);
+        }} else {{
+          // Ensure field always stores scheme+hostname (not a bare name).
+          hostEl.value = u.protocol + '//' + u.hostname;
+        }}
+      }} catch (_) {{
+        // Not a valid URL — leave as-is.
+      }}
+      schedFetchModels();
+    }}
+
+    hostEl.addEventListener('paste', () => setTimeout(handleHostInput, 0));
+    hostEl.addEventListener('blur', handleHostInput);
+    portEl.addEventListener('change', schedFetchModels);
+
+    function setDefaults(kind) {{
+      let defaultModel;
+      if (kind === 'local') {{
+        hostEl.value  = 'http://127.0.0.1';
+        portEl.value  = '5200';
+        defaultModel  = MODELS.local[0];
+      }} else if (kind === 'openai') {{
+        hostEl.value  = 'https://api.openai.com';
+        portEl.value  = '443';
+        defaultModel  = 'whisper-1';
+      }} else {{
+        // network — clear so user types their own
+        hostEl.value = '';
+        portEl.value = '';
+        defaultModel  = MODELS.network[0];
+      }}
+      fetchModels(defaultModel);
+    }}
+
+    function updateVisibility() {{
+      const kind     = kindEl.value;
+      const isLocal  = kind === 'local';
+      const isNetwork = kind === 'network';
+      const isOpenai = kind === 'openai';
+      const isCustomModel = modelEl.value === '__custom__';
+
+      // Host + Port: only the self-hosted Network provider needs a custom
+      // endpoint. Local is baked in (127.0.0.1:5200) and OpenAI is fixed
+      // (api.openai.com:443) — both keep their values but hide the fields.
+      hostRow.hidden = !isNetwork;
+      portRow.hidden = !isNetwork;
+
+      // Model picker: hidden for local (auto-selected, no user choice needed).
+      modelRow.hidden     = isLocal;
+      customModelRow.hidden = isLocal || !isCustomModel;
+
+      // API key: only for openai.
+      keyRow.hidden = !isOpenai;
+
+      // Install + single run toggle: local only. Reset only matters where the
+      // user types host/port/key, so hide it for local too.
+      document.getElementById('sttInstallBtn').hidden = !isLocal;
+      document.getElementById('sttToggleBtn').hidden  = !isLocal;
+      document.getElementById('sttResetBtn').hidden   = isLocal;
+    }}
+
+    // In-memory per-kind state cache populated on page load.
+    // Shape: {{ local: {{host, port, model, has_key}}, network: {{...}}, openai: {{...}} }}
+    let providerCache = {{}};
+
+    function populateFromProvider(kind) {{
+      const def = kindDefaults(kind);
+      const p   = providerCache[kind] || {{}};
+      hostEl.value = p.host  || def.host;
+      portEl.value = p.port  || def.port;
+      keyEl.value  = '';
+      keyEl.placeholder = p.has_key ? '•••• stored' : 'sk-…';
+      fetchModels(p.model || def.model);
+    }}
+
+    function kindDefaults(kind) {{
+      if (kind === 'local')  return {{ host: 'http://127.0.0.1', port: '5200', model: MODELS.local[0] }};
+      if (kind === 'openai') return {{ host: 'https://api.openai.com', port: '443', model: 'whisper-1' }};
+      return {{ host: '', port: '', model: MODELS.network[0] }};
+    }}
+
+    kindEl.addEventListener('change', () => {{
+      populateFromProvider(kindEl.value);
+      updateVisibility();
+      if (kindEl.value === 'local') refreshSttStatus();
+      schedSave();
+    }});
+
+    // Load current config on page open
+    fetch('/api/settings/stt').then(r => r.json()).then(cfg => {{
+      providerCache = cfg.providers || {{}};
+      const active = cfg.activeKind || 'local';
+      kindEl.value = active;
+      populateFromProvider(active);
+      updateVisibility();
+      if (active === 'local') refreshSttStatus();
+    }}).catch(() => {{ setDefaults(kindEl.value); updateVisibility(); }});
+
+    // Saving is automatic (see saveProvider) — hide the manual Save button.
+    const saveBtn = document.getElementById('sttSaveBtn');
+    if (saveBtn) saveBtn.hidden = true;
+
+    document.getElementById('sttRefreshModels').addEventListener('click', () => {{
+      const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+      fetchModels(cur);
+    }});
+
+    document.getElementById('sttProbeBtn').addEventListener('click', () => {{
+      fetch('/api/stt/status').then(r => r.json()).then(s => {{
+        const msg = s.reachable
+          ? `Provider reachable (kind: ${{s.kind}})`
+          : `Provider NOT reachable (${{s.url}})`;
+        showStatus(statusEl, msg, s.reachable);
+      }}).catch(() => showStatus(statusEl, 'Status check failed.', false));
+    }});
+
+    document.getElementById('sttResetBtn').addEventListener('click', () => {{
+      const kind = kindEl.value;
+      const def = kindDefaults(kind);
+      hostEl.value = def.host;
+      portEl.value = def.port;
+      keyEl.value  = '';
+      keyEl.placeholder = 'sk-…';
+      updateVisibility();
+      fetchModels(def.model);
+      showStatus(statusEl, 'Fields reset to defaults (not saved).', true);
+    }});
+
+    // Single source of truth for the local-server controls. The toggle button
+    // is Start when stopped and Stop when running; it is disabled until the
+    // server is installed.
+    function updateSttButtons(s) {{
+      const installBtn = document.getElementById('sttInstallBtn');
+      const toggleBtn  = document.getElementById('sttToggleBtn');
+      if (installBtn) installBtn.textContent = s.installed ? 'Reinstall' : 'Install local server';
+      if (toggleBtn) {{
+        const running = !!s.local_process_running;
+        toggleBtn.textContent = running ? 'Stop' : 'Start';
+        toggleBtn.dataset.running = running ? '1' : '';
+        toggleBtn.disabled = !s.installed;
+      }}
+    }}
+
+    // Refresh local-server status and reflect it in the controls. Cheap enough
+    // to call whenever the local provider becomes active.
+    function refreshSttStatus() {{
+      fetch('/api/stt/status').then(r => r.json()).then(updateSttButtons).catch(() => {{}});
+    }}
+
+    document.getElementById('sttInstallBtn').addEventListener('click', function installClick() {{
+      let cancelled = false;
+      document.getElementById('sttInstallBtn').disabled = true;
+      showStatus(actionEl, 'Installing… (this may take a minute)', true);
+      fetch('/api/stt/install', {{ method: 'POST' }})
+        .then(r => {{
+          if (!r.ok && r.status !== 202 && r.status !== 409) {{
+            showStatus(actionEl, 'Install request failed: ' + r.status, false);
+            document.getElementById('sttInstallBtn').disabled = false;
+            cancelled = true;
+          }}
+        }})
+        .catch(() => {{
+          showStatus(actionEl, 'Install failed (network).', false);
+          document.getElementById('sttInstallBtn').disabled = false;
+          cancelled = true;
+        }})
+        .then(async () => {{
+          if (cancelled) return;
+          let errCount = 0;
+          for (;;) {{
+            await new Promise(res => setTimeout(res, 2000));
+            if (cancelled) break;
+            let s;
+            try {{
+              const r = await fetch('/api/stt/status');
+              s = await r.json();
+              errCount = 0;
+            }} catch (_) {{
+              if (++errCount >= 5) {{
+                showStatus(actionEl, 'Install status unavailable.', false);
+                document.getElementById('sttInstallBtn').disabled = false;
+                break;
+              }}
+              continue;
+            }}
+            const tail = Array.isArray(s.install_output) ? s.install_output.slice(-3).join(' | ') : '';
+            if (s.install_phase === 'success') {{
+              showStatus(actionEl, 'Installed.' + (tail ? ' ' + tail : ''), true);
+              document.getElementById('sttInstallBtn').disabled = false;
+              updateSttButtons(s);
+              break;
+            }} else if (s.install_phase === 'failed') {{
+              showStatus(actionEl, 'Install failed: ' + (s.install_error || 'unknown'), false);
+              document.getElementById('sttInstallBtn').textContent = 'Retry install';
+              document.getElementById('sttInstallBtn').disabled = false;
+              break;
+            }} else if (s.install_phase === 'running') {{
+              showStatus(actionEl, 'Installing… ' + (tail || ''), true);
+            }}
+          }}
+        }});
+    }});
+
+    document.getElementById('sttToggleBtn').addEventListener('click', () => {{
+      const toggleBtn = document.getElementById('sttToggleBtn');
+      const running = !!toggleBtn.dataset.running;
+      const ep = running ? '/api/stt/stop' : '/api/stt/start';
+      const okMsg = running ? 'Server stopped.' : 'Server started.';
+      const failMsg = running ? 'Stop failed.' : 'Start failed.';
+      toggleBtn.disabled = true;
+      fetch(ep, {{ method: 'POST' }})
+        .then(r => showStatus(actionEl, r.ok ? okMsg : failMsg, r.ok))
+        .catch(() => showStatus(actionEl, failMsg, false))
+        .then(refreshSttStatus);
+    }});
+
+    // bfcache guard: Chrome restores the page without re-running scripts.
+    // Force a reload so settings are always fresh from the server.
+    window.addEventListener('pageshow', (e) => {{
+      if (e.persisted) location.reload();
+    }});
+  }})();
+  </script>
+  <script src="/static/build-info.js?v={v}"></script>
+  <script>
+  (function() {{
+    const feHash = window.MOBUX_BUILD_FE;
+    const srvHash = window.MOBUX_BUILD_SERVER;
+    if (feHash) document.getElementById('buildFeHash').textContent = feHash;
+    if (feHash && srvHash && feHash !== srvHash) {{
+      document.getElementById('buildStaleRow').hidden = false;
+    }}
+  }})();
   </script>
   <script src="/static/settings.js?v={v}"></script>
   <!-- mesh-client first so update.js can relay update calls to a selected peer. -->
@@ -1325,6 +1982,7 @@ async fn terminal_page(
         &name,
         "",
         &state.cache_bust,
+        state.dev_mode,
     )))
 }
 
@@ -1348,6 +2006,7 @@ async fn terminal_page_pinned(
         &name,
         &peer,
         &state.cache_bust,
+        state.dev_mode,
     )))
 }
 
@@ -1773,7 +2432,7 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> String {
+fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str, dev: bool) -> String {
     let mut cards = String::new();
     if sessions.is_empty() {
         cards.push_str(r#"<p class="hint">No tmux sessions. Tap + to create one.</p>"#);
@@ -1846,11 +2505,13 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     </form>
   </dialog>
 
+  <script>window.MOBUX_DEV = {dev};</script>
   <script src="/static/mesh-client.js?v={v}"></script>
   <script src="/static/host-picker.js?v={v}"></script>
   <script src="/static/index.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
   <script src="/static/install-hint.js?v={v}"></script>
+  <script type="module" src="/static/telemetry.js?v={v}"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 </body>
 </html>
@@ -1858,7 +2519,7 @@ fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str) -> Str
     )
 }
 
-fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
+fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String {
     let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
     // Peer the page is pinned to ("" for the same-origin/current-node route).
     // JSON-encoded so the client can read it verbatim and decide whether to
@@ -1912,7 +2573,8 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     <div id="inputRibbon" class="input-ribbon">
       <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
       <button id="uploadBtn" title="Attach file">📎</button>
-      <button id="recBtn" title="Record audio">🎤</button>
+      <button id="micBtn" title="Dictate (speech to text)">🎤</button>
+      <button id="settingsBtn" title="Settings">⚙</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
       <button data-key="\x1b[D">←</button>
@@ -1944,6 +2606,8 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
     // Host this page is pinned to (issue #123). Empty string = current node
     // (no override); terminal.js binds MobuxMesh to this peer before connect.
     window.MOBUX_PEER = {peer_json};
+    // Dev-mode flag (MOBUX_DEV). Gates the dev-only telemetry module below.
+    window.MOBUX_DEV = {dev};
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
   </script>
   <!-- Renderer picker: reads `mobux:renderer` from localStorage and
@@ -1975,11 +2639,515 @@ fn render_terminal_page(session: &str, peer: &str, v: &str) -> String {
   <script src="/static/mesh-client.js?v={v}"></script>
   <script src="/static/host-picker.js?v={v}"></script>
   <script type="module" src="/static/terminal.js?v={v}"></script>
+  <script type="module" src="/static/telemetry.js?v={v}"></script>
   <script src="/static/chime.js?v={v}"></script>
 </body>
 </html>
 "##
     )
+}
+
+// ── STT provider settings + lifecycle endpoints ───────────────────────
+
+/// Per-kind provider info returned by GET /api/settings/stt.
+/// api_key is NEVER returned; has_key is a boolean indicator.
+#[derive(serde::Serialize)]
+struct SttProviderJson {
+    host: String,
+    port: String,
+    model: String,
+    has_key: bool,
+}
+
+/// Shape returned by GET /api/settings/stt.
+#[derive(serde::Serialize)]
+struct SttConfigGetJson {
+    #[serde(rename = "activeKind")]
+    active_kind: String,
+    providers: std::collections::HashMap<String, SttProviderJson>,
+    // Legacy/install fields still forwarded for local kind only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_cmd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_cmd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_cmd: Option<String>,
+}
+
+/// Shape accepted by PUT /api/settings/stt.
+/// Saves settings for the given kind and makes it the active kind.
+/// api_key is optional; if absent or empty the existing stored key is preserved.
+#[derive(serde::Deserialize)]
+struct SttConfigPutJson {
+    kind: String,
+    host: String,
+    port: String,
+    model: String,
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+async fn api_get_stt_config(
+    State(state): State<AppState>,
+) -> Result<Json<SttConfigGetJson>, AppError> {
+    let (active_kind, providers, legacy) = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || -> anyhow::Result<_> {
+            let active_kind = db.stt_active_kind()?;
+            let rows = db.stt_all_providers()?;
+            let legacy = db.stt_config()?;
+            Ok((active_kind, rows, legacy))
+        }
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let mut map = std::collections::HashMap::new();
+    for row in &providers {
+        map.insert(
+            row.kind.clone(),
+            SttProviderJson {
+                host: row.host.clone(),
+                port: row.port.clone(),
+                model: row.model.clone(),
+                has_key: row.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            },
+        );
+    }
+
+    Ok(Json(SttConfigGetJson {
+        active_kind,
+        providers: map,
+        install_cmd: legacy.install_cmd,
+        start_cmd: legacy.start_cmd,
+        stop_cmd: legacy.stop_cmd,
+    }))
+}
+
+async fn api_set_stt_config(
+    State(state): State<AppState>,
+    Json(req): Json<SttConfigPutJson>,
+) -> Result<StatusCode, AppError> {
+    let row = db::SttProviderRow {
+        kind: req.kind.clone(),
+        host: req.host,
+        port: req.port,
+        model: req.model,
+        // Empty string means "keep existing" — set_stt_provider handles this.
+        api_key: req.api_key,
+    };
+    tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        let kind = req.kind.clone();
+        move || -> anyhow::Result<()> {
+            db.set_stt_provider(row)?;
+            db.set_stt_active_kind(&kind)?;
+            // Also update the legacy stt_config row so install/start/stop handlers
+            // continue to work without migration.
+            let provider = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            let legacy = db.stt_config()?;
+            db.set_stt_config(db::SttConfig {
+                kind: kind.clone(),
+                url: provider.transcription_url(),
+                model: provider.model,
+                api_key: provider.api_key,
+                install_cmd: legacy.install_cmd,
+                start_cmd: legacy.start_cmd,
+                stop_cmd: legacy.stop_cmd,
+            })?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_stt_status(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let (cfg, active_url, active_kind_str) = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || -> anyhow::Result<_> {
+            let cfg = db.stt_config()?;
+            let kind = db.stt_active_kind()?;
+            let row = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            let url = row.transcription_url();
+            Ok((cfg, url, kind))
+        }
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let reachable = transcribe::probe_provider(&active_url).await;
+
+    // Check whether the mobux-stt podman container is running.
+    let local_process_running = tokio::process::Command::new("podman")
+        .args([
+            "ps",
+            "--filter",
+            "name=^mobux-stt$",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .await
+        .map(|o| !o.stdout.trim_ascii().is_empty())
+        .unwrap_or(false);
+
+    let installed = state.data_dir.join("stt").join(".installed").exists();
+
+    let (install_phase, install_error, install_output) = {
+        let guard = state.stt_install.lock().await;
+        let (phase_str, error) = match &guard.phase {
+            InstallPhase::Idle => ("idle", None),
+            InstallPhase::Running => ("running", None),
+            InstallPhase::Success => ("success", None),
+            InstallPhase::Failed(e) => ("failed", Some(e.clone())),
+        };
+        (phase_str, error, guard.output_tail.clone())
+    };
+
+    let mut body = json!({
+        "kind": active_kind_str,
+        "url": active_url,
+        "reachable": reachable,
+        "local_process_running": local_process_running,
+        "installed": installed,
+        "install_phase": install_phase,
+        "install_output": install_output,
+    });
+    let _ = cfg; // kept for install_cmd/start_cmd/stop_cmd indirectly; suppress unused
+    if let Some(err) = install_error {
+        body["install_error"] = serde_json::Value::String(err);
+    }
+    Ok(Json(body))
+}
+
+async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    {
+        let mut guard = state.stt_install.lock().await;
+        if guard.phase == InstallPhase::Running {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(json!({"status": "already_running"})),
+            ));
+        }
+        guard.phase = InstallPhase::Running;
+        guard.output_tail.clear();
+    }
+
+    let install_state = state.stt_install.clone();
+    let db = state.db.clone();
+
+    tokio::spawn(async move {
+        // Read install_cmd from db.
+        let cfg = tokio::task::spawn_blocking({
+            let db = db.clone();
+            move || db.stt_config()
+        })
+        .await;
+
+        let cmd_str = match cfg {
+            Ok(Ok(c)) => match c.install_cmd {
+                Some(s) => s,
+                None => {
+                    let mut guard = install_state.lock().await;
+                    guard.phase = InstallPhase::Failed("no install_cmd configured".to_string());
+                    return;
+                }
+            },
+            Ok(Err(e)) => {
+                let mut guard = install_state.lock().await;
+                guard.phase = InstallPhase::Failed(format!("db error: {e}"));
+                return;
+            }
+            Err(e) => {
+                let mut guard = install_state.lock().await;
+                guard.phase = InstallPhase::Failed(format!("spawn_blocking error: {e}"));
+                return;
+            }
+        };
+
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut child = match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let mut guard = install_state.lock().await;
+                guard.phase = InstallPhase::Failed(format!("spawn error: {e}"));
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        let state_for_stdout = install_state.clone();
+        let state_for_stderr = install_state.clone();
+
+        let stdout_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut guard = state_for_stdout.lock().await;
+                if guard.output_tail.len() >= 200 {
+                    guard.output_tail.remove(0);
+                }
+                guard.output_tail.push(line);
+            }
+        });
+
+        let stderr_task = tokio::spawn(async move {
+            let mut last_line = String::new();
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut guard = state_for_stderr.lock().await;
+                if guard.output_tail.len() >= 200 {
+                    guard.output_tail.remove(0);
+                }
+                guard.output_tail.push(line.clone());
+                drop(guard);
+                last_line = line;
+            }
+            last_line
+        });
+
+        let _ = stdout_task.await;
+        let stderr_summary = stderr_task.await.unwrap_or_default();
+
+        let exit_status = child.wait().await;
+        let mut guard = install_state.lock().await;
+        match exit_status {
+            Ok(s) if s.success() => {
+                guard.phase = InstallPhase::Success;
+            }
+            Ok(s) => {
+                guard.phase = InstallPhase::Failed(format!(
+                    "exit {}: {}",
+                    s.code().unwrap_or(-1),
+                    stderr_summary
+                ));
+            }
+            Err(e) => {
+                guard.phase = InstallPhase::Failed(format!("wait error: {e}"));
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({"status": "started"}))))
+}
+
+async fn api_stt_install_status(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let guard = state.stt_install.lock().await;
+    let (phase_str, error) = match &guard.phase {
+        InstallPhase::Idle => ("idle", None),
+        InstallPhase::Running => ("running", None),
+        InstallPhase::Success => ("success", None),
+        InstallPhase::Failed(e) => ("failed", Some(e.clone())),
+    };
+    Ok(Json(json!({
+        "phase": phase_str,
+        "output": guard.output_tail,
+        "error": error,
+    })))
+}
+
+async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppError> {
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let cmd_str = cfg
+        .start_cmd
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no start_cmd configured")))?;
+
+    tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd_str)
+        .spawn()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?
+        .wait()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("start cmd failed: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppError> {
+    let cfg = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.stt_config()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let cmd_str = cfg
+        .stop_cmd
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no stop_cmd configured")))?;
+
+    tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd_str)
+        .spawn()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn stop: {e}")))?
+        .wait()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("stop cmd failed: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_stt_models(
+    State(state): State<AppState>,
+    Query(q): Query<SttModelsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use std::time::Duration;
+
+    let fallback_for_kind = |kind: &str| -> Vec<String> {
+        if kind == "openai" {
+            vec![
+                "whisper-1".to_string(),
+                "gpt-4o-transcribe".to_string(),
+                "gpt-4o-mini-transcribe".to_string(),
+            ]
+        } else {
+            vec![
+                "Systran/faster-whisper-small".to_string(),
+                "Systran/faster-whisper-small.en".to_string(),
+                "Systran/faster-whisper-medium.en".to_string(),
+            ]
+        }
+    };
+
+    let (base_url, api_key, kind) = if q.host.as_deref().map(|h| !h.is_empty()).unwrap_or(false) {
+        // Front-end supplied explicit host+port — use them.  The api_key comes
+        // from the per-kind stored row so the frontend doesn't need to round-trip it.
+        let raw_host = q.host.as_deref().unwrap_or("").trim_end_matches('/');
+        // Normalize: add http:// if no scheme so reqwest gets a valid URL.
+        let host = if raw_host.contains("://") {
+            raw_host.to_string()
+        } else {
+            format!("http://{}", raw_host)
+        };
+        let port = q.port.as_deref().unwrap_or("");
+        let base = if port.is_empty() {
+            host
+        } else {
+            format!("{}:{}", host, port)
+        };
+        let k = q.kind.clone().unwrap_or_default();
+        let api_key = if k == "openai" {
+            let kc = k.clone();
+            tokio::task::spawn_blocking({
+                let db = state.db.clone();
+                move || db.stt_provider(&kc)
+            })
+            .await
+            .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+            .map_err(AppError::internal)?
+            .and_then(|r| r.api_key)
+            .filter(|k| !k.is_empty())
+        } else {
+            None
+        };
+        (base, api_key, k)
+    } else {
+        // No explicit host — use the active kind's stored settings.
+        tokio::task::spawn_blocking({
+            let db = state.db.clone();
+            move || -> anyhow::Result<_> {
+                let kind = db.stt_active_kind()?;
+                let row = db
+                    .stt_provider(&kind)?
+                    .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+                let base = {
+                    let raw = row.host.trim_end_matches('/');
+                    // Normalize: add http:// if no scheme so reqwest gets a valid URL.
+                    let h = if raw.contains("://") {
+                        raw.to_string()
+                    } else {
+                        format!("http://{}", raw)
+                    };
+                    if row.port.is_empty() {
+                        h
+                    } else {
+                        format!("{}:{}", h, row.port)
+                    }
+                };
+                let key = row.api_key.filter(|k| !k.is_empty());
+                Ok((base, key, kind))
+            }
+        })
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+        .map_err(AppError::internal)?
+    };
+
+    if base_url.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "models": fallback_for_kind(&kind)
+        })));
+    }
+
+    let models_url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return Ok(Json(
+                serde_json::json!({ "models": fallback_for_kind(&kind) }),
+            ));
+        }
+    };
+
+    let mut req = client.get(&models_url);
+    if let Some(key) = &api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let ids: Vec<String> = match req.send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("data").cloned())
+            .and_then(|d| d.as_array().cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .unwrap_or_else(|| fallback_for_kind(&kind)),
+        _ => fallback_for_kind(&kind),
+    };
+
+    Ok(Json(serde_json::json!({ "models": ids })))
 }
 
 #[derive(Debug)]
@@ -2161,5 +3329,124 @@ mod tests {
             validate_pinned_host("host-1.tailnet.ts.net").unwrap(),
             "host-1.tailnet.ts.net:8080"
         );
+    }
+
+    /// Minimal AppState backed by a throwaway temp db, with `dev_mode`
+    /// configurable. Only the fields the telemetry handler touches matter.
+    fn test_state(dev_mode: bool) -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(db::Db::open(&dir.path().join("mobux.db")).expect("open db"));
+        let state = AppState {
+            session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap()),
+            auth: None,
+            cache_bust: "test".to_string(),
+            db,
+            internal_token: Arc::new("test-token".to_string()),
+            port: 8080,
+            data_dir: dir.path().to_path_buf(),
+            use_tls: false,
+            update: update::UpdateState::new(),
+            dev_mode,
+            build_hash: "test".to_string(),
+            stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
+                phase: InstallPhase::Idle,
+                output_tail: vec![],
+            })),
+        };
+        (state, dir)
+    }
+
+    // /api/telemetry is inert (404, logs nothing) when dev mode is OFF — the
+    // production default. Holding the TempDir alive for the call's duration.
+    #[tokio::test]
+    async fn telemetry_endpoint_inert_when_dev_off() {
+        let (state, _dir) = test_state(false);
+        let status = api_telemetry(State(state), "hello".to_string()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // /api/telemetry accepts the body (204) when dev mode is ON (MOBUX_DEV=1).
+    #[tokio::test]
+    async fn telemetry_endpoint_active_when_dev_on() {
+        let (state, _dir) = test_state(true);
+        let status = api_telemetry(State(state), "hello".to_string()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    // The dev flag is reflected verbatim into the page so the client can gate
+    // itself on `window.MOBUX_DEV`.
+    #[test]
+    fn render_index_injects_dev_flag() {
+        let on = render_index(&[], None, "v1", true);
+        assert!(on.contains("window.MOBUX_DEV = true"));
+        assert!(on.contains("/static/telemetry.js"));
+        let off = render_index(&[], None, "v1", false);
+        assert!(off.contains("window.MOBUX_DEV = false"));
+    }
+
+    #[tokio::test]
+    async fn stt_install_returns_409_when_already_running() {
+        let (state, _dir) = test_state(false);
+        {
+            let mut guard = state.stt_install.lock().await;
+            guard.phase = InstallPhase::Running;
+        }
+        let result = api_stt_install(State(state)).await;
+        match result {
+            Ok(resp) => {
+                let resp = resp.into_response();
+                assert_eq!(resp.status(), StatusCode::CONFLICT);
+            }
+            Err(_) => panic!("expected Ok with 409"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_status_installed_reflects_sentinel() {
+        let (state, dir) = test_state(false);
+        let resp = api_stt_status(State(state.clone())).await.unwrap();
+        assert_eq!(resp.0["installed"], false);
+
+        let stt_dir = dir.path().join("stt");
+        std::fs::create_dir_all(&stt_dir).unwrap();
+        std::fs::File::create(stt_dir.join(".installed")).unwrap();
+        let resp2 = api_stt_status(State(state)).await.unwrap();
+        assert_eq!(resp2.0["installed"], true);
+    }
+
+    #[tokio::test]
+    async fn stt_models_returns_fallback_when_no_config() {
+        let (state, _dir) = test_state(false);
+        let q = SttModelsQuery {
+            kind: None,
+            host: None,
+            port: None,
+        };
+        let result = api_stt_models(State(state), Query(q)).await;
+        let Json(val) = result.expect("handler should not error");
+        let models = val["models"].as_array().expect("models array");
+        assert!(!models.is_empty(), "fallback models must not be empty");
+    }
+
+    #[tokio::test]
+    async fn stt_models_returns_openai_fallback_for_openai_kind() {
+        let (state, _dir) = test_state(false);
+        let q = SttModelsQuery {
+            kind: Some("openai".to_string()),
+            host: Some("https://api.openai.com".to_string()),
+            port: Some("443".to_string()),
+        };
+        let result = api_stt_models(State(state), Query(q)).await;
+        let Json(val) = result.expect("handler should not error");
+        let models: Vec<String> = val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert!(!models.is_empty());
+        for m in &models {
+            assert!(!m.is_empty(), "model id must not be empty");
+        }
     }
 }

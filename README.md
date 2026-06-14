@@ -100,6 +100,7 @@ On mobile, the xterm.js hidden textarea is bypassed. Instead:
 - **▶ button** sends text without Enter (injects into readline for further editing)
 - **Ribbon keys** send control sequences directly (^C, arrows, Tab, Esc, etc.)
 - **📷 button** uploads images to `/tmp/mobux-uploads/` and sends the path to the terminal
+- **🎤 button** dictates: records mic audio (hard 60 s cap with a countdown, tap again to stop early), transcribes it on the server with a local CPU model, and injects the text into the input (see [Speech-to-text](#speech-to-text))
 
 ## API
 
@@ -113,6 +114,7 @@ On mobile, the xterm.js hidden textarea is bypassed. Instead:
 | `/api/sessions/:name/command` | POST | Run tmux command |
 | `/api/sessions/:name/history` | GET | Capture scrollback |
 | `/api/upload` | POST | Upload file (multipart) |
+| `/transcribe` | POST | Speech-to-text. Multipart `audio` field = 16 kHz mono 16-bit WAV → `{"text": "..."}`. Optional `context` field is accepted but ignored. Returns `503` if no model is installed |
 | `/api/push/vapid-public-key` | GET | VAPID public key (base64url) for client `pushManager.subscribe` |
 | `/api/push/subscribe` | POST / DELETE | Register / unregister a Web Push subscription |
 | `/api/push/devices` | GET | List subscribed devices |
@@ -149,6 +151,41 @@ unit, releasing to crates.io, and running an isolated dev instance — is in
 cargo install mobux --locked     # or: cargo install --git https://github.com/mvhenten/mobux --locked
 systemctl --user restart mobux   # if running as the service
 ```
+
+Building requires **`cmake`** on `PATH` (the speech-to-text crate `sherpa-rs`
+builds sherpa-onnx + onnxruntime natively). `apt install cmake` on Debian/Ubuntu.
+
+## Speech-to-text
+
+`POST /transcribe` runs [NVIDIA Parakeet TDT
+0.6b-v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) (int8) fully on CPU
+via the [`sherpa-rs`](https://crates.io/crates/sherpa-rs) (sherpa-onnx) crate —
+no network, no GPU. The 🎤 button in the mobile input bar records mic audio,
+downsamples it to 16 kHz mono 16-bit WAV in the browser, and uploads it here.
+
+```bash
+make stt-model   # download + extract the model (~480 MB) into ./models/
+```
+
+Then point the server at it (the `start`/`run` targets read your environment):
+
+```bash
+export MOBUX_STT_MODEL_DIR="$(pwd)/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
+make start
+```
+
+Notes:
+
+- If `MOBUX_STT_MODEL_DIR` is unset, the server looks under
+  `<data_dir>/models/` (honouring `MOBUX_DATA_DIR`). With no model present the
+  server still boots; `/transcribe` just returns `503`.
+- The recognizer loads once on the first request (~4 s) and is reused; a typical
+  utterance transcribes in well under a second on CPU. Peak RAM ~2 GB.
+- The endpoint decodes the WAV straight to samples in memory — **no temp files**.
+- `sherpa-rs` emits its `libonnxruntime.so` / `libsherpa-onnx-c-api.so` into
+  `target/<profile>/`; the binary carries an `$ORIGIN` rpath so `make start`
+  finds them. Running the binary from elsewhere needs
+  `LD_LIBRARY_PATH=…/target/<profile>` (the container sets this itself).
 
 ## Building the TWA
 

@@ -128,9 +128,89 @@ impl Db {
                 peer TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS stt_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                kind TEXT NOT NULL,
+                url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_key TEXT,
+                install_cmd TEXT,
+                start_cmd TEXT,
+                stop_cmd TEXT
+            );
+
+            -- Per-kind STT provider settings (one row per kind).
+            -- host/port stored separately so the frontend can display them split.
+            -- url is the full assembled URL (scheme://host:port/v1/audio/transcriptions).
+            CREATE TABLE IF NOT EXISTS stt_providers (
+                kind TEXT PRIMARY KEY,
+                host TEXT NOT NULL DEFAULT '',
+                port TEXT NOT NULL DEFAULT '',
+                url  TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                api_key TEXT
+            );
+
+            -- Single-row table that tracks which provider kind is active.
+            CREATE TABLE IF NOT EXISTS stt_active_kind (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                kind TEXT NOT NULL DEFAULT 'local'
             );",
         )
         .context("initializing sqlite schema")?;
+
+        // Additive migration: add stop_cmd column to existing DBs that
+        // were created before this field was introduced. SQLite ignores
+        // duplicate column errors only through IF NOT EXISTS on indexes,
+        // not columns, so we catch the error and treat it as a no-op.
+        let _ = conn.execute_batch("ALTER TABLE stt_config ADD COLUMN stop_cmd TEXT;");
+
+        // Migrate legacy stt_config row into stt_providers + stt_active_kind
+        // if not yet done (providers table empty).
+        Self::migrate_stt_providers(conn)?;
+
+        Ok(())
+    }
+
+    /// Migrate the legacy single-row `stt_config` into per-kind `stt_providers`.
+    ///
+    /// Only runs when `stt_providers` is empty, so it is safe to call on every
+    /// startup — no-op once data has been migrated or written directly.
+    fn migrate_stt_providers(conn: &Connection) -> Result<()> {
+        // Check whether stt_providers already has any rows.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stt_providers", [], |r| r.get(0))
+            .unwrap_or(0);
+        if count > 0 {
+            return Ok(());
+        }
+
+        // Try to read the legacy stt_config row.
+        let row: Option<(String, String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT kind, url, model, api_key FROM stt_config WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .unwrap_or(None);
+
+        if let Some((kind, url, model, api_key)) = row {
+            // Parse host/port from URL for the migrated row.
+            let (host, port) = split_url_host_port(&url);
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO stt_providers (kind, host, port, url, model, api_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![kind, host, port, url, model, api_key],
+            );
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO stt_active_kind (id, kind) VALUES (1, ?1)",
+                params![kind],
+            );
+        }
+
         Ok(())
     }
 
@@ -334,10 +414,338 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Read STT provider config. Seeds defaults and persists them on first call.
+    pub fn stt_config(&self) -> Result<SttConfig> {
+        let conn = self.lock_conn()?;
+        type Row = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        // stop_cmd may not exist in older DBs (schema migration adds column
+        // lazily via ALTER TABLE on first write); use COALESCE-fallback select.
+        let row: Option<Row> = conn
+            .query_row(
+                "SELECT kind, url, model, api_key, install_cmd, start_cmd, stop_cmd FROM stt_config WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("reading stt_config")?;
+
+        if let Some((kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)) = row {
+            return Ok(SttConfig {
+                kind,
+                url,
+                model,
+                api_key,
+                install_cmd,
+                start_cmd,
+                stop_cmd,
+            });
+        }
+
+        let defaults = SttConfig::default();
+        conn.execute(
+            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                defaults.kind,
+                defaults.url,
+                defaults.model,
+                defaults.api_key,
+                defaults.install_cmd,
+                defaults.start_cmd,
+                defaults.stop_cmd
+            ],
+        )
+        .context("inserting default stt_config")?;
+        Ok(defaults)
+    }
+
+    /// Overwrite STT provider config. Upserts the single row.
+    pub fn set_stt_config(&self, cfg: SttConfig) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                 kind = excluded.kind,
+                 url = excluded.url,
+                 model = excluded.model,
+                 api_key = excluded.api_key,
+                 install_cmd = excluded.install_cmd,
+                 start_cmd = excluded.start_cmd,
+                 stop_cmd = excluded.stop_cmd",
+            params![
+                cfg.kind,
+                cfg.url,
+                cfg.model,
+                cfg.api_key,
+                cfg.install_cmd,
+                cfg.start_cmd,
+                cfg.stop_cmd
+            ],
+        )
+        .context("upserting stt_config")?;
+        Ok(())
+    }
+
+    /// Return the active STT kind ("local", "network", or "openai").
+    /// Defaults to "local" if never set.
+    pub fn stt_active_kind(&self) -> Result<String> {
+        let conn = self.lock_conn()?;
+        let kind: Option<String> = conn
+            .query_row("SELECT kind FROM stt_active_kind WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .optional()
+            .context("reading stt_active_kind")?;
+        Ok(kind.unwrap_or_else(|| "local".to_string()))
+    }
+
+    /// Set the active STT kind.
+    pub fn set_stt_active_kind(&self, kind: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO stt_active_kind (id, kind) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET kind = excluded.kind",
+            params![kind],
+        )
+        .context("upserting stt_active_kind")?;
+        Ok(())
+    }
+
+    /// Return a single provider's settings, or None if never saved.
+    pub fn stt_provider(&self, kind: &str) -> Result<Option<SttProviderRow>> {
+        let conn = self.lock_conn()?;
+        let row: Option<(String, String, String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT kind, host, port, model, api_key FROM stt_providers WHERE kind = ?1",
+                params![kind],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .context("reading stt_provider")?;
+        Ok(
+            row.map(|(kind, host, port, model, api_key)| SttProviderRow {
+                kind,
+                host,
+                port,
+                model,
+                api_key,
+            }),
+        )
+    }
+
+    /// Return all three provider rows (inserting defaults for any that don't exist yet).
+    pub fn stt_all_providers(&self) -> Result<[SttProviderRow; 3]> {
+        let kinds = ["local", "network", "openai"];
+        let mut out = [
+            SttProviderRow::default_for("local"),
+            SttProviderRow::default_for("network"),
+            SttProviderRow::default_for("openai"),
+        ];
+        let conn = self.lock_conn()?;
+        for (i, kind) in kinds.iter().enumerate() {
+            let row: Option<(String, String, String, Option<String>)> = conn
+                .query_row(
+                    "SELECT host, port, model, api_key FROM stt_providers WHERE kind = ?1",
+                    params![kind],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()
+                .context("reading stt_providers")?;
+            if let Some((host, port, model, api_key)) = row {
+                out[i] = SttProviderRow {
+                    kind: kind.to_string(),
+                    host,
+                    port,
+                    model,
+                    api_key,
+                };
+            }
+        }
+        Ok(out)
+    }
+
+    /// Upsert per-kind provider settings. Empty api_key keeps the existing stored key.
+    pub fn set_stt_provider(&self, row: SttProviderRow) -> Result<()> {
+        // Preserve existing api_key when none supplied.
+        let api_key = if row.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+            row.api_key
+        } else {
+            let conn = self.lock_conn()?;
+            let existing: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT api_key FROM stt_providers WHERE kind = ?1",
+                    params![row.kind],
+                    |r| r.get(0),
+                )
+                .optional()
+                .context("reading existing api_key")?;
+            drop(conn);
+            existing.flatten()
+        };
+
+        let url = build_url(&row.host, &row.port);
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO stt_providers (kind, host, port, url, model, api_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(kind) DO UPDATE SET
+                 host    = excluded.host,
+                 port    = excluded.port,
+                 url     = excluded.url,
+                 model   = excluded.model,
+                 api_key = excluded.api_key",
+            params![row.kind, row.host, row.port, url, row.model, api_key],
+        )
+        .context("upserting stt_provider")?;
+        Ok(())
+    }
+
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
             .map_err(|_| anyhow!("db connection mutex poisoned"))
+    }
+}
+
+/// STT provider configuration. Single row, id=1.
+#[derive(Debug, Clone)]
+pub struct SttConfig {
+    pub kind: String, // "local", "network", "openai"
+    pub url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub install_cmd: Option<String>,
+    pub start_cmd: Option<String>,
+    pub stop_cmd: Option<String>,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            kind: "local".to_string(),
+            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
+            model: "Systran/faster-whisper-small".to_string(),
+            api_key: None,
+            install_cmd: Some("bin/stt-install".to_string()),
+            start_cmd: Some("bin/stt-serve".to_string()),
+            stop_cmd: Some("bin/stt-stop".to_string()),
+        }
+    }
+}
+
+/// Per-kind STT provider settings stored in `stt_providers`.
+#[derive(Debug, Clone)]
+pub struct SttProviderRow {
+    pub kind: String, // "local", "network", "openai"
+    pub host: String,
+    pub port: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
+impl SttProviderRow {
+    pub fn default_for(kind: &str) -> Self {
+        match kind {
+            "openai" => Self {
+                kind: "openai".to_string(),
+                host: "https://api.openai.com".to_string(),
+                port: "443".to_string(),
+                model: "whisper-1".to_string(),
+                api_key: None,
+            },
+            "network" => Self {
+                kind: "network".to_string(),
+                host: String::new(),
+                port: String::new(),
+                model: "Systran/faster-whisper-base.en".to_string(),
+                api_key: None,
+            },
+            _ => Self {
+                kind: "local".to_string(),
+                host: "http://127.0.0.1".to_string(),
+                port: "5200".to_string(),
+                model: "Systran/faster-whisper-small".to_string(),
+                api_key: None,
+            },
+        }
+    }
+
+    /// Assemble the full transcription endpoint URL from host + port.
+    pub fn transcription_url(&self) -> String {
+        build_url(&self.host, &self.port)
+    }
+}
+
+/// Build a full transcription URL from scheme+host and port strings.
+/// Accepts a bare hostname (no scheme) and defaults to http://.
+fn build_url(host: &str, port: &str) -> String {
+    let host = host.trim_end_matches('/');
+    if host.is_empty() {
+        return String::new();
+    }
+    // Ensure a scheme is present; default to http:// for bare hostnames.
+    let host_with_scheme = if host.contains("://") {
+        host.to_string()
+    } else {
+        format!("http://{}", host)
+    };
+    let base = if port.is_empty() {
+        host_with_scheme
+    } else {
+        format!("{}:{}", host_with_scheme, port)
+    };
+    format!("{}/v1/audio/transcriptions", base)
+}
+
+/// Split a full URL into (scheme+hostname, port-string).
+fn split_url_host_port(url: &str) -> (String, String) {
+    // Use simple string ops to avoid pulling in a URL parser at the db layer.
+    // url is expected to be "scheme://host:port/path"
+    if url.is_empty() {
+        return (String::new(), String::new());
+    }
+    // Strip the path after the third slash (after scheme://).
+    let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let after_scheme = &url[scheme_end..];
+    let path_start = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..path_start];
+    // Split on last ':' in authority (handles IPv6 only if no brackets, which is fine here).
+    if let Some(colon) = authority.rfind(':') {
+        let host_part = &authority[..colon];
+        let port_part = &authority[colon + 1..];
+        let host_with_scheme = if scheme_end > 0 {
+            format!("{}{}", &url[..scheme_end], host_part)
+        } else {
+            host_part.to_string()
+        };
+        (host_with_scheme, port_part.to_string())
+    } else {
+        // No port — return the whole authority with scheme, empty port.
+        let host_with_scheme = if scheme_end > 0 {
+            format!("{}{}", &url[..scheme_end], authority)
+        } else {
+            authority.to_string()
+        };
+        (host_with_scheme, String::new())
     }
 }
 
@@ -363,13 +771,17 @@ fn unix_seconds() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Monotonically-increasing counter for unique test DB paths.
+    // Using a seconds-only timestamp caused races when multiple tests run in
+    // the same second under the same PID.
+    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn fresh_db() -> Db {
-        let path = std::env::temp_dir().join(format!(
-            "mobux-test-{}-{}.sqlite",
-            std::process::id(),
-            unix_seconds().expect("clock"),
-        ));
+        let n = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("mobux-test-{}-{}.sqlite", std::process::id(), n,));
         let _ = std::fs::remove_file(&path);
         Db::open(&path).expect("open db")
     }
@@ -452,5 +864,192 @@ mod tests {
             !db.delete_peer_pin("host-b:5151").expect("delete again"),
             "deleting a missing pin reports no-op"
         );
+    }
+
+    #[test]
+    fn stt_provider_round_trip() {
+        let db = fresh_db();
+
+        // Fresh DB: active kind defaults to "local", no provider rows yet.
+        assert_eq!(db.stt_active_kind().expect("active kind"), "local");
+        assert!(
+            db.stt_provider("local").expect("no row").is_none(),
+            "no row written yet"
+        );
+
+        // Save a network provider.
+        db.set_stt_provider(SttProviderRow {
+            kind: "network".to_string(),
+            host: "http://lab.example".to_string(),
+            port: "8081".to_string(),
+            model: "Systran/faster-whisper-medium.en".to_string(),
+            api_key: None,
+        })
+        .expect("save network");
+        db.set_stt_active_kind("network").expect("set active");
+
+        let row = db
+            .stt_provider("network")
+            .expect("read network")
+            .expect("row exists");
+        assert_eq!(row.host, "http://lab.example");
+        assert_eq!(row.port, "8081");
+        assert_eq!(row.model, "Systran/faster-whisper-medium.en");
+        assert!(row.api_key.is_none());
+        assert_eq!(
+            row.transcription_url(),
+            "http://lab.example:8081/v1/audio/transcriptions"
+        );
+        assert_eq!(db.stt_active_kind().expect("active kind"), "network");
+
+        // Save openai with an api_key.
+        db.set_stt_provider(SttProviderRow {
+            kind: "openai".to_string(),
+            host: "https://api.openai.com".to_string(),
+            port: "443".to_string(),
+            model: "whisper-1".to_string(),
+            api_key: Some("sk-secret".to_string()),
+        })
+        .expect("save openai");
+
+        let oai = db
+            .stt_provider("openai")
+            .expect("read openai")
+            .expect("oai row");
+        assert_eq!(oai.api_key.as_deref(), Some("sk-secret"));
+
+        // Overwrite with empty api_key — existing key is preserved.
+        db.set_stt_provider(SttProviderRow {
+            kind: "openai".to_string(),
+            host: "https://api.openai.com".to_string(),
+            port: "443".to_string(),
+            model: "gpt-4o-transcribe".to_string(),
+            api_key: Some(String::new()),
+        })
+        .expect("update openai no key");
+        let oai2 = db
+            .stt_provider("openai")
+            .expect("read openai 2")
+            .expect("oai row 2");
+        assert_eq!(
+            oai2.api_key.as_deref(),
+            Some("sk-secret"),
+            "empty api_key preserves stored key"
+        );
+        assert_eq!(oai2.model, "gpt-4o-transcribe");
+    }
+
+    #[test]
+    fn stt_all_providers_returns_defaults_for_missing_kinds() {
+        let db = fresh_db();
+        let rows = db.stt_all_providers().expect("all providers");
+        assert_eq!(rows.len(), 3);
+        // All three kinds present as defaults.
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert!(kinds.contains(&"local"));
+        assert!(kinds.contains(&"network"));
+        assert!(kinds.contains(&"openai"));
+    }
+
+    #[test]
+    fn stt_migration_from_legacy_config() {
+        let db = fresh_db();
+
+        // Simulate a pre-migration DB: write a legacy stt_config row directly.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO stt_config
+                 (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+                 VALUES (1, 'network', 'http://lab.local:9090/v1/audio/transcriptions',
+                         'Systran/faster-whisper-small', 'oldkey', NULL, NULL, NULL)",
+                [],
+            )
+            .expect("insert legacy");
+        }
+
+        // Re-open the same DB — migration should copy the legacy row into stt_providers.
+        // Since stt_providers is already empty at this point we can trigger migrate
+        // by calling migrate_stt_providers directly through a fresh_db that sees our row.
+        // Instead, check that the fresh_db() + manual insert scenario works:
+        // The migration ran at open time and providers was empty — it should have
+        // migrated the legacy row. But fresh_db already opened before we inserted.
+        // So test the migration path by opening a NEW db at the same path.
+        let path = {
+            let conn = db.conn.lock().unwrap();
+            // We need the path — indirect approach: write to a known temp path.
+            drop(conn);
+            std::env::temp_dir().join(format!(
+                "mobux-migrate-test-{}.sqlite",
+                unix_seconds().expect("clock"),
+            ))
+        };
+        {
+            // Write legacy config to a fresh SQLite file.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS stt_config (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    kind TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    api_key TEXT,
+                    install_cmd TEXT,
+                    start_cmd TEXT,
+                    stop_cmd TEXT
+                );
+                INSERT INTO stt_config (id, kind, url, model, api_key)
+                VALUES (1, 'openai', 'https://api.openai.com:443/v1/audio/transcriptions',
+                        'whisper-1', 'sk-migrated');",
+            )
+            .expect("seed legacy db");
+        }
+        // Open via Db::open — this triggers schema creation + migration.
+        let migrated = Db::open(&path).expect("open migrated db");
+        let row = migrated
+            .stt_provider("openai")
+            .expect("read migrated")
+            .expect("migrated row exists");
+        assert_eq!(row.kind, "openai");
+        assert_eq!(row.model, "whisper-1");
+        assert_eq!(row.api_key.as_deref(), Some("sk-migrated"));
+        assert_eq!(
+            migrated.stt_active_kind().expect("active kind"),
+            "openai",
+            "migration sets active kind from legacy row"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn build_url_helper() {
+        assert_eq!(
+            build_url("http://127.0.0.1", "5200"),
+            "http://127.0.0.1:5200/v1/audio/transcriptions"
+        );
+        assert_eq!(
+            build_url("https://api.openai.com", "443"),
+            "https://api.openai.com:443/v1/audio/transcriptions"
+        );
+        assert_eq!(build_url("", ""), "");
+        // Bare hostname (no scheme) — should default to http://.
+        assert_eq!(
+            build_url("lab", "8081"),
+            "http://lab:8081/v1/audio/transcriptions"
+        );
+        assert_eq!(build_url("lab", ""), "http://lab/v1/audio/transcriptions");
+    }
+
+    #[test]
+    fn split_url_host_port_helper() {
+        assert_eq!(
+            split_url_host_port("http://127.0.0.1:5200/v1/audio/transcriptions"),
+            ("http://127.0.0.1".to_string(), "5200".to_string())
+        );
+        assert_eq!(
+            split_url_host_port("https://api.openai.com:443/v1/audio/transcriptions"),
+            ("https://api.openai.com".to_string(), "443".to_string())
+        );
+        assert_eq!(split_url_host_port(""), (String::new(), String::new()));
     }
 }
