@@ -205,6 +205,15 @@ export function createInputBar(term, send) {
     micBtn.addEventListener('click', (e) => { e.preventDefault(); dictate.toggle(); });
   }
 
+  // Settings gear — direct navigation to /settings. Phones can't always rely
+  // on Back to return here (incognito back-stack is flaky), so the bar needs
+  // its own way in, mirroring the desktop top bar's gear.
+  const settingsBtn = document.getElementById('settingsBtn');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    settingsBtn.addEventListener('click', (e) => { e.preventDefault(); window.location.href = '/settings'; });
+  }
+
   // ── Public API ────────────────────────────────────────────────────
   return {
     _computeKeyboardOffset: computeKeyboardOffset,

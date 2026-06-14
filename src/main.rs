@@ -2542,6 +2542,7 @@ fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String
       <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
       <button id="uploadBtn" title="Attach file">📎</button>
       <button id="micBtn" title="Dictate (speech to text)">🎤</button>
+      <button id="settingsBtn" title="Settings">⚙</button>
       <button data-key="\x7f">⌫</button>
       <button data-key="\r">⏎</button>
       <button data-key="\x1b[D">←</button>
