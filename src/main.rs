@@ -1469,8 +1469,7 @@ end</code></pre>
         <button type="button" id="sttProbeBtn">Check status</button>
         <button type="button" id="sttResetBtn" style="opacity:0.6">Reset</button>
         <button type="button" id="sttInstallBtn">Install local server</button>
-        <button type="button" id="sttStartBtn">Start</button>
-        <button type="button" id="sttStopBtn">Stop</button>
+        <button type="button" id="sttToggleBtn">Start</button>
       </div>
       <div class="settings-status" id="sttActionStatus" hidden></div>
     </section>
@@ -1596,10 +1595,14 @@ end</code></pre>
       if (selectedModel) {{
         modelEl.value = selectedModel;
       }}
-      customModelRow.hidden = modelEl.value !== '__custom__';
       if (modelEl.value === '__custom__' && selectedModel) {{
         customModelEl.value = selectedModel;
       }}
+      // updateVisibility() is the single authority for row visibility — call it
+      // so the custom-model row reflects the freshly-set model and the active
+      // provider. Never toggle row .hidden directly here; that re-reveal path is
+      // exactly the bug that left stale fields showing.
+      updateVisibility();
     }}
 
     // Normalize a host string to always include a scheme (default http://).
@@ -1775,10 +1778,11 @@ end</code></pre>
       // API key: only for openai.
       keyRow.hidden = !isOpenai;
 
-      // Install/Start/Stop: local only.
+      // Install + single run toggle: local only. Reset only matters where the
+      // user types host/port/key, so hide it for local too.
       document.getElementById('sttInstallBtn').hidden = !isLocal;
-      document.getElementById('sttStartBtn').hidden   = !isLocal;
-      document.getElementById('sttStopBtn').hidden    = !isLocal;
+      document.getElementById('sttToggleBtn').hidden  = !isLocal;
+      document.getElementById('sttResetBtn').hidden   = isLocal;
     }}
 
     // In-memory per-kind state cache populated on page load.
@@ -1804,6 +1808,7 @@ end</code></pre>
     kindEl.addEventListener('change', () => {{
       populateFromProvider(kindEl.value);
       updateVisibility();
+      if (kindEl.value === 'local') refreshSttStatus();
       schedSave();
     }});
 
@@ -1814,6 +1819,7 @@ end</code></pre>
       kindEl.value = active;
       populateFromProvider(active);
       updateVisibility();
+      if (active === 'local') refreshSttStatus();
     }}).catch(() => {{ setDefaults(kindEl.value); updateVisibility(); }});
 
     // Saving is automatic (see saveProvider) — hide the manual Save button.
@@ -1846,13 +1852,25 @@ end</code></pre>
       showStatus(statusEl, 'Fields reset to defaults (not saved).', true);
     }});
 
+    // Single source of truth for the local-server controls. The toggle button
+    // is Start when stopped and Stop when running; it is disabled until the
+    // server is installed.
     function updateSttButtons(s) {{
       const installBtn = document.getElementById('sttInstallBtn');
-      const startBtn   = document.getElementById('sttStartBtn');
-      const stopBtn    = document.getElementById('sttStopBtn');
+      const toggleBtn  = document.getElementById('sttToggleBtn');
       if (installBtn) installBtn.textContent = s.installed ? 'Reinstall' : 'Install local server';
-      if (startBtn)   startBtn.disabled  = !(s.installed && !s.local_process_running);
-      if (stopBtn)    stopBtn.disabled   = !s.local_process_running;
+      if (toggleBtn) {{
+        const running = !!s.local_process_running;
+        toggleBtn.textContent = running ? 'Stop' : 'Start';
+        toggleBtn.dataset.running = running ? '1' : '';
+        toggleBtn.disabled = !s.installed;
+      }}
+    }}
+
+    // Refresh local-server status and reflect it in the controls. Cheap enough
+    // to call whenever the local provider becomes active.
+    function refreshSttStatus() {{
+      fetch('/api/stt/status').then(r => r.json()).then(updateSttButtons).catch(() => {{}});
     }}
 
     document.getElementById('sttInstallBtn').addEventListener('click', function installClick() {{
@@ -1909,16 +1927,17 @@ end</code></pre>
         }});
     }});
 
-    document.getElementById('sttStartBtn').addEventListener('click', () => {{
-      fetch('/api/stt/start', {{ method: 'POST' }})
-        .then(r => showStatus(actionEl, r.ok ? 'Server started.' : 'Start failed.', r.ok))
-        .catch(() => showStatus(actionEl, 'Start failed.', false));
-    }});
-
-    document.getElementById('sttStopBtn').addEventListener('click', () => {{
-      fetch('/api/stt/stop', {{ method: 'POST' }})
-        .then(r => showStatus(actionEl, r.ok ? 'Server stopped.' : 'Stop failed.', r.ok))
-        .catch(() => showStatus(actionEl, 'Stop failed.', false));
+    document.getElementById('sttToggleBtn').addEventListener('click', () => {{
+      const toggleBtn = document.getElementById('sttToggleBtn');
+      const running = !!toggleBtn.dataset.running;
+      const ep = running ? '/api/stt/stop' : '/api/stt/start';
+      const okMsg = running ? 'Server stopped.' : 'Server started.';
+      const failMsg = running ? 'Stop failed.' : 'Start failed.';
+      toggleBtn.disabled = true;
+      fetch(ep, {{ method: 'POST' }})
+        .then(r => showStatus(actionEl, r.ok ? okMsg : failMsg, r.ok))
+        .catch(() => showStatus(actionEl, failMsg, false))
+        .then(refreshSttStatus);
     }});
 
     // bfcache guard: Chrome restores the page without re-running scripts.

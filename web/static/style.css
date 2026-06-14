@@ -32,6 +32,11 @@
 }
 
 * { box-sizing: border-box; }
+/* The HTML `hidden` attribute hides via the UA `display:none` rule, which has
+   the lowest priority and is silently overridden by author rules such as
+   `.settings-row { display:flex }`. Without this, JS toggling `el.hidden`
+   sets the attribute but the element stays visible. Make `hidden` win. */
+[hidden] { display: none !important; }
 body {
   margin: 0;
   background: var(--bg);
