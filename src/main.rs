@@ -51,6 +51,19 @@ mod tmux;
 mod transcribe;
 mod update;
 
+#[derive(Clone, Debug, PartialEq)]
+enum InstallPhase {
+    Idle,
+    Running,
+    Success,
+    Failed(String),
+}
+
+struct SttInstallState {
+    phase: InstallPhase,
+    output_tail: Vec<String>,
+}
+
 #[derive(Clone)]
 struct AppState {
     session_name_re: Arc<Regex>,
@@ -78,6 +91,8 @@ struct AppState {
     /// no-op 404 and the frontend is told (`window.MOBUX_DEV=false`) not to
     /// post or render its overlay.
     dev_mode: bool,
+    /// Tracks background STT install state (phase + rolling output tail).
+    stt_install: Arc<tokio::sync::Mutex<SttInstallState>>,
 }
 
 #[derive(Clone)]
@@ -158,6 +173,10 @@ async fn main() -> Result<()> {
         use_tls,
         update: update_state,
         dev_mode,
+        stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
+            phase: InstallPhase::Idle,
+            output_tail: vec![],
+        })),
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -230,6 +249,7 @@ async fn main() -> Result<()> {
             "/api/stt/install",
             post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
         )
+        .route("/api/stt/install/status", get(api_stt_install_status))
         .route("/api/stt/start", post(api_stt_start))
         .route("/api/stt/stop", post(api_stt_stop))
         .route(
@@ -2327,37 +2347,173 @@ async fn api_stt_status(
         guard.is_some()
     };
 
-    Ok(Json(json!({
+    let installed = state.data_dir.join("stt").join(".venv").exists();
+
+    let (install_phase, install_error, install_output) = {
+        let guard = state.stt_install.lock().await;
+        let (phase_str, error) = match &guard.phase {
+            InstallPhase::Idle => ("idle", None),
+            InstallPhase::Running => ("running", None),
+            InstallPhase::Success => ("success", None),
+            InstallPhase::Failed(e) => ("failed", Some(e.clone())),
+        };
+        (phase_str, error, guard.output_tail.clone())
+    };
+
+    let mut body = json!({
         "kind": cfg.kind,
         "url": cfg.url,
         "reachable": reachable,
         "local_process_running": child_running,
-    })))
+        "installed": installed,
+        "install_phase": install_phase,
+        "install_output": install_output,
+    });
+    if let Some(err) = install_error {
+        body["install_error"] = serde_json::Value::String(err);
+    }
+    Ok(Json(body))
 }
 
-async fn api_stt_install(State(state): State<AppState>) -> Result<String, AppError> {
-    let cfg = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || db.stt_config()
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
+async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    {
+        let guard = state.stt_install.lock().await;
+        if guard.phase == InstallPhase::Running {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(json!({"status": "already_running"})),
+            ));
+        }
+    }
 
-    let cmd_str = cfg
-        .install_cmd
-        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no install_cmd configured")))?;
+    {
+        let mut guard = state.stt_install.lock().await;
+        guard.phase = InstallPhase::Running;
+        guard.output_tail.clear();
+    }
 
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd_str)
-        .output()
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn install: {e}")))?;
+    let install_state = state.stt_install.clone();
+    let db = state.db.clone();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(format!("{stdout}{stderr}"))
+    tokio::spawn(async move {
+        // Read install_cmd from db.
+        let cfg = tokio::task::spawn_blocking({
+            let db = db.clone();
+            move || db.stt_config()
+        })
+        .await;
+
+        let cmd_str = match cfg {
+            Ok(Ok(c)) => match c.install_cmd {
+                Some(s) => s,
+                None => {
+                    let mut guard = install_state.lock().await;
+                    guard.phase = InstallPhase::Failed("no install_cmd configured".to_string());
+                    return;
+                }
+            },
+            Ok(Err(e)) => {
+                let mut guard = install_state.lock().await;
+                guard.phase = InstallPhase::Failed(format!("db error: {e}"));
+                return;
+            }
+            Err(e) => {
+                let mut guard = install_state.lock().await;
+                guard.phase = InstallPhase::Failed(format!("spawn_blocking error: {e}"));
+                return;
+            }
+        };
+
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut child = match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let mut guard = install_state.lock().await;
+                guard.phase = InstallPhase::Failed(format!("spawn error: {e}"));
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        let state_for_stdout = install_state.clone();
+        let state_for_stderr = install_state.clone();
+
+        let stdout_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut guard = state_for_stdout.lock().await;
+                if guard.output_tail.len() >= 200 {
+                    guard.output_tail.remove(0);
+                }
+                guard.output_tail.push(line);
+            }
+        });
+
+        let stderr_task = tokio::spawn(async move {
+            let mut last_line = String::new();
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut guard = state_for_stderr.lock().await;
+                if guard.output_tail.len() >= 200 {
+                    guard.output_tail.remove(0);
+                }
+                guard.output_tail.push(line.clone());
+                drop(guard);
+                last_line = line;
+            }
+            last_line
+        });
+
+        let _ = stdout_task.await;
+        let stderr_summary = stderr_task.await.unwrap_or_default();
+
+        let exit_status = child.wait().await;
+        let mut guard = install_state.lock().await;
+        match exit_status {
+            Ok(s) if s.success() => {
+                guard.phase = InstallPhase::Success;
+            }
+            Ok(s) => {
+                guard.phase = InstallPhase::Failed(format!(
+                    "exit {}: {}",
+                    s.code().unwrap_or(-1),
+                    stderr_summary
+                ));
+            }
+            Err(e) => {
+                guard.phase = InstallPhase::Failed(format!("wait error: {e}"));
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({"status": "started"}))))
+}
+
+async fn api_stt_install_status(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let guard = state.stt_install.lock().await;
+    let (phase_str, error) = match &guard.phase {
+        InstallPhase::Idle => ("idle", None),
+        InstallPhase::Running => ("running", None),
+        InstallPhase::Success => ("success", None),
+        InstallPhase::Failed(e) => ("failed", Some(e.clone())),
+    };
+    Ok(Json(json!({
+        "phase": phase_str,
+        "output": guard.output_tail,
+        "error": error,
+    })))
 }
 
 async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppError> {
@@ -2594,6 +2750,10 @@ mod tests {
             use_tls: false,
             update: update::UpdateState::new(),
             dev_mode,
+            stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
+                phase: InstallPhase::Idle,
+                output_tail: vec![],
+            })),
         };
         (state, dir)
     }
@@ -2624,5 +2784,34 @@ mod tests {
         assert!(on.contains("/static/telemetry.js"));
         let off = render_index(&[], None, "v1", false);
         assert!(off.contains("window.MOBUX_DEV = false"));
+    }
+
+    #[tokio::test]
+    async fn stt_install_returns_409_when_already_running() {
+        let (state, _dir) = test_state(false);
+        {
+            let mut guard = state.stt_install.lock().await;
+            guard.phase = InstallPhase::Running;
+        }
+        let result = api_stt_install(State(state)).await;
+        match result {
+            Ok(resp) => {
+                let resp = resp.into_response();
+                assert_eq!(resp.status(), StatusCode::CONFLICT);
+            }
+            Err(_) => panic!("expected Ok with 409"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_status_installed_reflects_venv_path() {
+        let (state, dir) = test_state(false);
+        let resp = api_stt_status(State(state.clone())).await.unwrap();
+        assert_eq!(resp.0["installed"], false);
+
+        let venv_path = dir.path().join("stt").join(".venv");
+        std::fs::create_dir_all(&venv_path).unwrap();
+        let resp2 = api_stt_status(State(state)).await.unwrap();
+        assert_eq!(resp2.0["installed"], true);
     }
 }

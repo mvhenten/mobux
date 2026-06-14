@@ -85,6 +85,9 @@ export function createDictateAction({ send, button, onText } = {}) {
     timer: null,
     deadline: null,
     startedAt: 0,
+    pendingChunks: null,
+    pendingRate: 0,
+    pendingDurationMs: 0,
   };
 
   function micLabel(text) {
@@ -93,9 +96,44 @@ export function createDictateAction({ send, button, onText } = {}) {
 
   // Full-viewport overlay (recording indicator + fault state). Tapping the
   // recording overlay routes back through stopRecording (stop & send).
-  const micOverlay = createMicOverlay(() => {
-    if (mic.recording) stopRecording();
-  });
+  const micOverlay = createMicOverlay(
+    () => { if (mic.recording) stopRecording(); },
+    async () => {
+      if (!mic.pendingChunks || !mic.pendingChunks.length) return;
+      const chunks = mic.pendingChunks;
+      const inputRate = mic.pendingRate;
+      const durationMs = mic.pendingDurationMs;
+      mic.pendingChunks = null;
+      try {
+        const wav = encodeWav(chunks, inputRate);
+        const form = new FormData();
+        form.append('audio', wav, 'speech.wav');
+        micLabel('…');
+        const res = await fetch('/transcribe', { method: 'POST', body: form });
+        if (!res.ok) {
+          const bodyText = await res.text().catch(() => '');
+          if (res.status === 503) { micFault('model', '503 ' + bodyText.slice(0, 120)); }
+          else { micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText)); }
+          return;
+        }
+        const { text } = await res.json();
+        if (text && text.trim()) {
+          micOverlay.dismiss();
+          send(text.trim());
+          onText?.();
+          micLabel('🎤');
+        } else {
+          micOverlay.dismiss();
+          micLabel('∅');
+          setTimeout(() => micLabel('🎤'), 1200);
+        }
+      } catch (err) {
+        micFault('mic', err?.message || 'retry error');
+      } finally {
+        mic.busy = false;
+      }
+    }
+  );
 
   // Show a fault: emit telemetry AND render the overlay so logs and UI agree.
   function micFault(kind, extra) {
@@ -230,6 +268,9 @@ export function createDictateAction({ send, button, onText } = {}) {
     const chunks = mic.chunks;
     const inputRate = mic.inputRate;
     const durationMs = mic.startedAt ? Date.now() - mic.startedAt : 0;
+    mic.pendingChunks = chunks;
+    mic.pendingRate = inputRate;
+    mic.pendingDurationMs = durationMs;
     stopTracks();
     mic.chunks = [];
     telemetry.log('mic.recording.stop', { durationMs, chunkCount: chunks.length });

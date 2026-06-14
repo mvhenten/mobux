@@ -106,6 +106,33 @@ function ensureStyles() {
   color: #c8ccc9;
   text-decoration: none;
   font-size: 14px;
+}
+#mobux-mic-overlay .mo-install-btn {
+  display: inline-block;
+  padding: 8px 20px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.08);
+  color: #c8ccc9;
+  border: 1px solid rgba(255,255,255,0.12);
+  font-size: 14px;
+  cursor: pointer;
+  font-family: inherit;
+}
+#mobux-mic-overlay .mo-install-log {
+  font-size: 11px;
+  color: #7e857f;
+  max-height: 6em;
+  overflow-y: auto;
+  background: rgba(0,0,0,0.2);
+  padding: 6px;
+  border-radius: 4px;
+  max-width: 26em;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+#mobux-mic-overlay .mo-install-hint {
+  font-size: 13px;
+  color: #7e857f;
 }`;
   const el = document.createElement('style');
   el.id = STYLE_ID;
@@ -117,9 +144,11 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
-// createMicOverlay(onStop) → { showRecording, showFault, dismiss }
+// createMicOverlay(onStop, retryTranscription) → { showRecording, showFault, dismiss }
 //   onStop() is called when the user taps the RECORDING overlay (stop & send).
-export function createMicOverlay(onStop) {
+//   retryTranscription() is called when install+start succeeds, to replay the
+//   last recording attempt automatically.
+export function createMicOverlay(onStop, retryTranscription) {
   ensureStyles();
   let root = null;
   let timerHandle = null;
@@ -178,19 +207,147 @@ export function createMicOverlay(onStop) {
       '<div class="mo-status"><span class="mo-dot"></span>Dictation failed</div>' +
       '<div class="mo-title"></div>' +
       '<div class="mo-detail"></div>' +
-      (kind === 'model'
-        ? '<a class="mo-action" href="/settings">Open settings</a>'
-        : '') +
+      '<div class="mo-action-area"></div>' +
       '<div class="mo-hint">Tap to dismiss</div>';
     root.querySelector('.mo-title').textContent = title;
     root.querySelector('.mo-detail').textContent = detail;
     root.addEventListener('click', (e) => {
-      if (e.target.tagName === 'A') return;
+      if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') return;
       e.preventDefault();
       e.stopPropagation();
       dismiss();
     });
     document.body.appendChild(root);
+
+    if (kind === 'model') {
+      const actionArea = root.querySelector('.mo-action-area');
+      fetch('/api/stt/status')
+        .then((r) => r.json())
+        .catch(() => null)
+        .then((status) => {
+          if (!root || !actionArea) return;
+          if (status && status.kind === 'local' && !status.reachable) {
+            if (!status.installed) {
+              const btn = document.createElement('button');
+              btn.className = 'mo-install-btn';
+              btn.textContent = 'Install local speech server';
+              const hint = document.createElement('div');
+              hint.className = 'mo-install-hint';
+              hint.textContent = '';
+              const log = document.createElement('pre');
+              log.className = 'mo-install-log';
+              log.style.display = 'none';
+              actionArea.appendChild(btn);
+              actionArea.appendChild(hint);
+              actionArea.appendChild(log);
+              btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                runInstallFlow(btn, hint, log);
+              });
+            } else {
+              const btn = document.createElement('button');
+              btn.className = 'mo-install-btn';
+              btn.textContent = 'Start speech server';
+              const hint = document.createElement('div');
+              hint.className = 'mo-install-hint';
+              actionArea.appendChild(btn);
+              actionArea.appendChild(hint);
+              btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                runStartFlow(btn, hint);
+              });
+            }
+          } else {
+            const a = document.createElement('a');
+            a.className = 'mo-action';
+            a.href = '/settings';
+            a.textContent = 'Open settings';
+            actionArea.appendChild(a);
+          }
+        });
+    }
+  }
+
+  async function runInstallFlow(btn, hint, log) {
+    btn.disabled = true;
+    hint.textContent = 'Installing… this can take a few minutes';
+    log.style.display = '';
+    log.textContent = '';
+
+    try {
+      const r = await fetch('/api/stt/install', { method: 'POST' });
+      if (!r.ok && r.status !== 202) {
+        hint.textContent = 'Install request failed: ' + r.status;
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) {
+      hint.textContent = 'Install request failed: ' + (e.message || 'network error');
+      btn.disabled = false;
+      return;
+    }
+
+    const phase = await pollInstall(log, hint);
+    if (phase === 'success') {
+      hint.textContent = 'Install complete. Starting server…';
+      log.style.display = 'none';
+      await startAndRetry(hint);
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Retry install';
+    }
+  }
+
+  async function pollInstall(log, hint) {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let data;
+      try {
+        const r = await fetch('/api/stt/install/status');
+        data = await r.json();
+      } catch (_) {
+        continue;
+      }
+      if (data.output && data.output.length) {
+        log.textContent = data.output.join('\n');
+        log.scrollTop = log.scrollHeight;
+      }
+      if (data.phase === 'success') return 'success';
+      if (data.phase === 'failed') {
+        hint.textContent = 'Install failed: ' + (data.error || 'unknown error');
+        return 'failed';
+      }
+    }
+  }
+
+  async function runStartFlow(btn, hint) {
+    btn.disabled = true;
+    hint.textContent = 'Starting…';
+    try {
+      await fetch('/api/stt/start', { method: 'POST' });
+    } catch (_) {}
+    await startAndRetry(hint);
+  }
+
+  async function startAndRetry(hint) {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let data;
+      try {
+        const r = await fetch('/api/stt/status');
+        data = await r.json();
+      } catch (_) { continue; }
+      if (data.reachable) {
+        hint.textContent = 'Server ready. Retrying…';
+        if (typeof retryTranscription === 'function') {
+          dismiss();
+          retryTranscription();
+        }
+        return;
+      }
+    }
+    hint.textContent = 'Server did not start in time. Try again.';
   }
 
   return { showRecording, showFault, dismiss };
