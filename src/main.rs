@@ -89,6 +89,11 @@ struct AppState {
     /// no-op 404 and the frontend is told (`window.MOBUX_DEV=false`) not to
     /// post or render its overlay.
     dev_mode: bool,
+    /// SHA-256 prefix of the vendored JS bundles, computed by `web/build.js`
+    /// and written to `web/static/build-info.json` at build time. Injected
+    /// into the settings page so operators can verify whether the bundle on
+    /// disk matches what the browser has loaded.
+    build_hash: String,
     /// Tracks background STT install state (phase + rolling output tail).
     stt_install: Arc<tokio::sync::Mutex<SttInstallState>>,
 }
@@ -144,6 +149,14 @@ async fn main() -> Result<()> {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    let build_hash = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static/build-info.json"),
+    )
+    .ok()
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v["hash"].as_str().map(str::to_owned))
+    .unwrap_or_else(|| "unknown".to_string());
+
     let update_state = update::UpdateState::new();
     // Kick off the background crates.io poller (polls now, then every ~6h).
     update::spawn_checker(update_state.clone());
@@ -170,6 +183,7 @@ async fn main() -> Result<()> {
         use_tls,
         update: update_state,
         dev_mode,
+        build_hash,
         stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
             phase: InstallPhase::Idle,
             output_tail: vec![],
@@ -1193,8 +1207,12 @@ async fn api_shell_integration_uninstall(
     Ok(Json(s))
 }
 
+const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 async fn settings_page(State(state): State<AppState>) -> Response {
     let v = &state.cache_bust;
+    let build_hash = &state.build_hash;
+    let version = PKG_VERSION;
     html_no_store(format!(
         r##"<!doctype html>
 <html lang="en">
@@ -1207,6 +1225,10 @@ async fn settings_page(State(state): State<AppState>) -> Response {
   <link rel="stylesheet" href="/static/style.css?v={v}" />
 </head>
 <body>
+  <script>
+    window.MOBUX_BUILD_SERVER = "{build_hash}";
+    window.MOBUX_VERSION = "{version}";
+  </script>
   <header class="app-header">
     <a href="/" class="header-back" aria-label="Back">‹</a>
     <h1>settings</h1>
@@ -1482,6 +1504,36 @@ end</code></pre>
         Web Speech API not available in this browser.
       </div>
     </section>
+
+    <section class="settings-card" id="build-info">
+      <h2>Build</h2>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Backend version</strong>
+        </span>
+        <span class="settings-value" id="buildVersion">{version}</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Server bundle hash</strong>
+          <small>Hash of the frontend bundle on disk when the server started.</small>
+        </span>
+        <span class="settings-value" id="buildServerHash">{build_hash}</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">
+          <strong>Loaded bundle hash</strong>
+          <small>Hash of the bundle currently loaded in this browser tab.</small>
+        </span>
+        <span class="settings-value" id="buildFeHash">—</span>
+      </div>
+      <div class="settings-row" id="buildStaleRow" hidden>
+        <span class="settings-label">
+          <strong>Status</strong>
+        </span>
+        <span class="settings-value" style="color:#8a7c5a">stale — hard-reload needed</span>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -1754,6 +1806,17 @@ end</code></pre>
         .then(r => showStatus(actionEl, r.ok ? 'Server stopped.' : 'Stop failed.', r.ok))
         .catch(() => showStatus(actionEl, 'Stop failed.', false));
     }});
+  }})();
+  </script>
+  <script src="/static/build-info.js?v={v}"></script>
+  <script>
+  (function() {{
+    const feHash = window.MOBUX_BUILD_FE;
+    const srvHash = window.MOBUX_BUILD_SERVER;
+    if (feHash) document.getElementById('buildFeHash').textContent = feHash;
+    if (feHash && srvHash && feHash !== srvHash) {{
+      document.getElementById('buildStaleRow').hidden = false;
+    }}
   }})();
   </script>
   <script src="/static/settings.js?v={v}"></script>
@@ -3090,6 +3153,7 @@ mod tests {
             use_tls: false,
             update: update::UpdateState::new(),
             dev_mode,
+            build_hash: "test".to_string(),
             stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
                 phase: InstallPhase::Idle,
                 output_tail: vec![],
