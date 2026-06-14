@@ -100,7 +100,12 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
   }
   syncReaderBtn();
 
-  bar.append(attachBtn, micBtn, readerBtn);
+  const settingsBtn = document.createElement('button');
+  settingsBtn.type = 'button';
+  settingsBtn.title = 'Settings';
+  settingsBtn.textContent = '⚙';
+
+  bar.append(attachBtn, micBtn, readerBtn, settingsBtn);
 
   const attach = createAttachAction({ send });
   const dictate = createDictateAction({ send, button: micBtn });
@@ -111,6 +116,11 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
     e.preventDefault();
     toggleReader?.();
     syncReaderBtn();
+  });
+
+  settingsBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.location.href = '/settings';
   });
   // Keep the toggle icon in sync when the view changes elsewhere
   // (boot default, mobile path, future shortcuts).

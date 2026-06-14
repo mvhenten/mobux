@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{ws::Message, Path, State, WebSocketUpgrade},
+    extract::{ws::Message, Path, Query, State, WebSocketUpgrade},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, HeaderValue, Request, StatusCode,
@@ -242,6 +242,7 @@ async fn main() -> Result<()> {
             get(api_get_stt_config).put(api_set_stt_config),
         )
         .route("/api/stt/status", get(api_stt_status))
+        .route("/api/stt/models", get(api_stt_models))
         .route(
             "/api/stt/install",
             post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
@@ -1078,6 +1079,13 @@ struct InternalTriggerQuery {
     window: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+struct SttModelsQuery {
+    kind: Option<String>,
+    host: Option<String>,
+    port: Option<String>,
+}
+
 /// Internal endpoint hit by the `tmux alert-bell` hook. Bound to 127.0.0.1
 /// only and authenticated by `state.internal_token`, so an attacker who
 /// can't already run code on the host can't push fake notifications.
@@ -1400,14 +1408,26 @@ end</code></pre>
         </select>
       </label>
 
-      <label class="settings-row">
-        <span class="settings-label"><strong>Endpoint URL</strong></span>
-        <input type="url" id="sttUrl" class="settings-input" placeholder="http://127.0.0.1:5200/v1/audio/transcriptions" />
+      <label class="settings-row" id="sttHostRow">
+        <span class="settings-label"><strong>Host</strong></span>
+        <input type="text" id="sttHost" class="settings-input" placeholder="http://127.0.0.1" />
       </label>
 
-      <label class="settings-row">
+      <label class="settings-row" id="sttPortRow">
+        <span class="settings-label"><strong>Port</strong></span>
+        <input type="number" id="sttPort" class="settings-input" placeholder="5200" min="1" max="65535" />
+      </label>
+
+      <div class="settings-row" id="sttModelRow">
         <span class="settings-label"><strong>Model</strong></span>
-        <input type="text" id="sttModel" class="settings-input" placeholder="Systran/faster-whisper-base.en" />
+        <span style="display:flex;gap:4px;flex:1">
+          <select id="sttModel" class="settings-input settings-select" style="flex:1"></select>
+          <button type="button" id="sttRefreshModels" title="Refresh model list" style="flex-shrink:0">↺</button>
+        </span>
+      </div>
+      <label class="settings-row" id="sttCustomModelRow" hidden>
+        <span class="settings-label"><strong>Custom model</strong></span>
+        <input type="text" id="sttCustomModel" class="settings-input" placeholder="enter model id" />
       </label>
 
       <label class="settings-row" id="sttApiKeyRow">
@@ -1475,12 +1495,65 @@ end</code></pre>
   <script>
   (function() {{
     const kindEl    = document.getElementById('sttKind');
-    const urlEl     = document.getElementById('sttUrl');
-    const modelEl   = document.getElementById('sttModel');
+    const hostEl    = document.getElementById('sttHost');
+    const portEl    = document.getElementById('sttPort');
+    const hostRow   = document.getElementById('sttHostRow');
+    const portRow   = document.getElementById('sttPortRow');
+    const modelEl        = document.getElementById('sttModel');
+    const customModelEl  = document.getElementById('sttCustomModel');
+    const customModelRow = document.getElementById('sttCustomModelRow');
     const keyEl     = document.getElementById('sttApiKey');
     const keyRow    = document.getElementById('sttApiKeyRow');
     const statusEl  = document.getElementById('sttStatus');
     const actionEl  = document.getElementById('sttActionStatus');
+
+    const MODELS = {{
+      openai:  ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'],
+      local:   ['Systran/faster-whisper-base.en', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
+      network: ['Systran/faster-whisper-base.en', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
+    }};
+
+    function populateModelSelect(models, selectedModel) {{
+      modelEl.innerHTML = '';
+      models.forEach(id => {{
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = id;
+        modelEl.appendChild(opt);
+      }});
+      const customOpt = document.createElement('option');
+      customOpt.value = '__custom__';
+      customOpt.textContent = 'custom…';
+      modelEl.appendChild(customOpt);
+
+      if (models.includes(selectedModel)) {{
+        modelEl.value = selectedModel;
+        customModelRow.hidden = true;
+      }} else {{
+        modelEl.value = '__custom__';
+        customModelEl.value = selectedModel;
+        customModelRow.hidden = false;
+      }}
+    }}
+
+    async function fetchModels(selectedModel) {{
+      const query = '?kind=' + encodeURIComponent(kindEl.value) +
+                    '&host=' + encodeURIComponent(hostEl.value) +
+                    '&port=' + encodeURIComponent(portEl.value);
+      try {{
+        const resp = await fetch('/api/stt/models' + query);
+        if (!resp.ok) throw new Error('not ok');
+        const data = await resp.json();
+        if (!data.models || !data.models.length) throw new Error('empty');
+        populateModelSelect(data.models, selectedModel);
+      }} catch (_) {{
+        populateModelSelect(MODELS[kindEl.value] || MODELS.local, selectedModel);
+      }}
+    }}
+
+    modelEl.addEventListener('change', () => {{
+      customModelRow.hidden = modelEl.value !== '__custom__';
+    }});
 
     function showStatus(el, msg, ok) {{
       el.textContent = msg;
@@ -1488,30 +1561,102 @@ end</code></pre>
       el.style.color = ok ? '#7ec87e' : '#c87e7e';
     }}
 
+    // Parse host+port out of a full URL string and write into the fields.
+    // Returns true if parse succeeded.
+    function parseUrlIntoFields(raw) {{
+      if (!raw) return false;
+      let u;
+      try {{ u = new URL(raw); }} catch (_) {{ return false; }}
+      // scheme+hostname only — no port in the Host field.
+      hostEl.value = u.protocol + '//' + u.hostname;
+      if (u.port) {{
+        portEl.value = u.port;
+      }} else {{
+        portEl.value = u.protocol === 'https:' ? '443' : '80';
+      }}
+      return true;
+    }}
+
+    // Build the full URL to send to the backend.
+    function buildUrl() {{
+      const host = hostEl.value.trim().replace(/\/$/, '');
+      const port = portEl.value.trim();
+      if (!host) return '';
+      return host + (port ? ':' + port : '') + '/v1/audio/transcriptions';
+    }}
+
+    // Paste / blur handler on Host field — if user pastes a full URL, split it.
+    function handleHostInput() {{
+      const raw = hostEl.value.trim();
+      if (!raw) return;
+      // Only parse if it looks like a URL with a path or explicit port beyond origin.
+      try {{
+        const u = new URL(raw);
+        // If there's a path beyond '/' or an explicit port, extract and rewrite.
+        if (u.port || (u.pathname && u.pathname !== '/')) {{
+          parseUrlIntoFields(raw);
+        }}
+      }} catch (_) {{
+        // Not a valid URL — leave as-is.
+      }}
+    }}
+
+    hostEl.addEventListener('paste', () => setTimeout(handleHostInput, 0));
+    hostEl.addEventListener('blur', handleHostInput);
+
+    function setDefaults(kind) {{
+      let defaultModel;
+      if (kind === 'local') {{
+        hostEl.value  = 'http://127.0.0.1';
+        portEl.value  = '5200';
+        defaultModel  = MODELS.local[0];
+      }} else if (kind === 'openai') {{
+        hostEl.value  = 'https://api.openai.com';
+        portEl.value  = '443';
+        defaultModel  = 'whisper-1';
+      }} else {{
+        // network — clear so user types their own
+        hostEl.value = '';
+        portEl.value = '';
+        defaultModel  = MODELS.network[0];
+      }}
+      fetchModels(defaultModel);
+    }}
+
     function updateVisibility() {{
       const isLocal  = kindEl.value === 'local';
       const isOpenai = kindEl.value === 'openai';
+      hostRow.hidden = isLocal;
+      portRow.hidden = false;
       keyRow.hidden  = !isOpenai;
       document.getElementById('sttInstallBtn').hidden = !isLocal;
       document.getElementById('sttStartBtn').hidden   = !isLocal;
       document.getElementById('sttStopBtn').hidden    = !isLocal;
     }}
-    kindEl.addEventListener('change', updateVisibility);
+
+    kindEl.addEventListener('change', () => {{
+      setDefaults(kindEl.value);
+      updateVisibility();
+    }});
 
     // Load current config on page open
     fetch('/api/settings/stt').then(r => r.json()).then(cfg => {{
       kindEl.value  = cfg.kind  || 'local';
-      urlEl.value   = cfg.url   || '';
-      modelEl.value = cfg.model || '';
       // Never populate the key field — the server does not return the secret.
       // Show a placeholder so the user knows a key is already stored.
       keyEl.value = '';
       keyEl.placeholder = cfg.has_key ? '•••• stored' : 'sk-…';
+      // Parse stored URL into host/port fields, or fall back to defaults.
+      if (!parseUrlIntoFields(cfg.url || '')) {{
+        setDefaults(kindEl.value);
+      }}
       updateVisibility();
-    }}).catch(() => updateVisibility());
+      fetchModels(cfg.model || '');
+    }}).catch(() => {{ setDefaults(kindEl.value); updateVisibility(); }});
 
     document.getElementById('sttSaveBtn').addEventListener('click', () => {{
-      const body = {{ kind: kindEl.value, url: urlEl.value, model: modelEl.value }};
+      const model = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+      const body = {{ kind: kindEl.value, url: buildUrl(), model }};
       if (kindEl.value === 'openai' && keyEl.value) body.api_key = keyEl.value;
       fetch('/api/settings/stt', {{
         method: 'PUT',
@@ -1519,6 +1664,11 @@ end</code></pre>
         body: JSON.stringify(body),
       }}).then(r => showStatus(statusEl, r.ok ? 'Saved.' : 'Save failed.', r.ok))
         .catch(() => showStatus(statusEl, 'Save failed.', false));
+    }});
+
+    document.getElementById('sttRefreshModels').addEventListener('click', () => {{
+      const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+      fetchModels(cur);
     }});
 
     document.getElementById('sttProbeBtn').addEventListener('click', () => {{
@@ -2632,6 +2782,117 @@ async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppEr
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn api_stt_models(
+    State(state): State<AppState>,
+    Query(q): Query<SttModelsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use std::time::Duration;
+
+    let fallback_for_kind = |kind: &str| -> Vec<String> {
+        if kind == "openai" {
+            vec![
+                "whisper-1".to_string(),
+                "gpt-4o-transcribe".to_string(),
+                "gpt-4o-mini-transcribe".to_string(),
+            ]
+        } else {
+            vec![
+                "Systran/faster-whisper-base.en".to_string(),
+                "Systran/faster-whisper-small.en".to_string(),
+                "Systran/faster-whisper-medium.en".to_string(),
+            ]
+        }
+    };
+
+    let (base_url, api_key, kind) = if q.host.as_deref().map(|h| !h.is_empty()).unwrap_or(false) {
+        let host = q.host.as_deref().unwrap_or("").trim_end_matches('/');
+        let port = q.port.as_deref().unwrap_or("");
+        let base = if port.is_empty() {
+            host.to_string()
+        } else {
+            format!("{}:{}", host, port)
+        };
+        let k = q.kind.clone().unwrap_or_default();
+        let cfg = tokio::task::spawn_blocking({
+            let db = state.db.clone();
+            move || db.stt_config()
+        })
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+        .map_err(AppError::internal)?;
+        let api_key = if k == "openai" {
+            cfg.api_key.filter(|k| !k.is_empty())
+        } else {
+            None
+        };
+        (base, api_key, k)
+    } else {
+        let cfg = tokio::task::spawn_blocking({
+            let db = state.db.clone();
+            move || db.stt_config()
+        })
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+        .map_err(AppError::internal)?;
+        let base = reqwest::Url::parse(&cfg.url)
+            .ok()
+            .map(|u| {
+                let host = u.host_str().unwrap_or("");
+                if let Some(p) = u.port() {
+                    format!("{}://{}:{}", u.scheme(), host, p)
+                } else {
+                    format!("{}://{}", u.scheme(), host)
+                }
+            })
+            .unwrap_or_default();
+        let key = cfg.api_key.filter(|k| !k.is_empty());
+        (base, key, cfg.kind)
+    };
+
+    if base_url.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "models": fallback_for_kind(&kind)
+        })));
+    }
+
+    let models_url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return Ok(Json(
+                serde_json::json!({ "models": fallback_for_kind(&kind) }),
+            ));
+        }
+    };
+
+    let mut req = client.get(&models_url);
+    if let Some(key) = &api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let ids: Vec<String> = match req.send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("data").cloned())
+            .and_then(|d| d.as_array().cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .unwrap_or_else(|| fallback_for_kind(&kind)),
+        _ => fallback_for_kind(&kind),
+    };
+
+    Ok(Json(serde_json::json!({ "models": ids })))
+}
+
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -2893,5 +3154,41 @@ mod tests {
         std::fs::File::create(stt_dir.join(".installed")).unwrap();
         let resp2 = api_stt_status(State(state)).await.unwrap();
         assert_eq!(resp2.0["installed"], true);
+    }
+
+    #[tokio::test]
+    async fn stt_models_returns_fallback_when_no_config() {
+        let (state, _dir) = test_state(false);
+        let q = SttModelsQuery {
+            kind: None,
+            host: None,
+            port: None,
+        };
+        let result = api_stt_models(State(state), Query(q)).await;
+        let Json(val) = result.expect("handler should not error");
+        let models = val["models"].as_array().expect("models array");
+        assert!(!models.is_empty(), "fallback models must not be empty");
+    }
+
+    #[tokio::test]
+    async fn stt_models_returns_openai_fallback_for_openai_kind() {
+        let (state, _dir) = test_state(false);
+        let q = SttModelsQuery {
+            kind: Some("openai".to_string()),
+            host: Some("https://api.openai.com".to_string()),
+            port: Some("443".to_string()),
+        };
+        let result = api_stt_models(State(state), Query(q)).await;
+        let Json(val) = result.expect("handler should not error");
+        let models: Vec<String> = val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert!(!models.is_empty());
+        for m in &models {
+            assert!(!m.is_empty(), "model id must not be empty");
+        }
     }
 }
