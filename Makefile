@@ -21,7 +21,7 @@ MOBUX_DEV_DOMAIN  ?= sandbox:5152
 PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
-.PHONY: build run dev clean start stop restart status logs test web setup setup-twa twa twa-dev \
+.PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
         podman-build podman-run podman-stop podman-test stt-install
@@ -84,6 +84,22 @@ run: build
 dev: build
 	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 PORT=$(MOBUX_DEV_PORT) \
 		$(CARGO) run
+
+# Auto-rebuild loop for the dev box. Watches src/ (Rust) and on every change
+# rebuilds the binary and bounces the :5152 dev server in the background — so
+# you edit, save, and just reload the phone. Never touches the :5151 lifeline.
+# JS/CSS under web/static/ is served straight from disk (no-store), so those
+# edits need no rebuild at all — just reload. Requires cargo-watch.
+dev-watch: build
+	cargo watch -w src -w Cargo.toml -x build -s '$(MAKE) _dev-bounce'
+
+_dev-bounce:
+	-@kill $$(lsof -ti :$(MOBUX_DEV_PORT)) 2>/dev/null || true
+	@sleep 1
+	@nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 PORT=$(MOBUX_DEV_PORT) \
+		./target/debug/mobux > /tmp/mobux-dev.log 2>&1 &
+	@sleep 2 && lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1 \
+		&& echo "dev :$(MOBUX_DEV_PORT) rebuilt + restarted" || echo "FAILED to restart :$(MOBUX_DEV_PORT)"
 
 start: build
 	@if [ -n "$(PID)" ]; then echo "already running (pid $(PID))"; exit 1; fi

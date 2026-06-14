@@ -222,6 +222,9 @@ export function createDictateAction({ send, button, onText } = {}) {
 
   async function startRecording() {
     if (mic.busy) return;
+    // Dismiss the soft keyboard — the text input keeps focus otherwise and the
+    // on-screen keyboard covers the recording overlay on mobile.
+    document.activeElement?.blur?.();
     mic.paused = false;
     // Secure-context / mediaDevices availability. getUserMedia is undefined on
     // http: (non-localhost) and in unsupported webviews.

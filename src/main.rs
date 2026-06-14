@@ -1627,19 +1627,47 @@ end</code></pre>
       }}
     }}
 
-    // Debounced re-fetch when host/port change.
+    // Persist the active provider + its fields. Mobile SPA — there is no manual
+    // Save tap; every change auto-saves and the Save button is hidden.
+    function saveProvider() {{
+      const kind  = kindEl.value;
+      const model = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
+      const body  = {{ kind, host: hostEl.value.trim(), port: portEl.value.trim(), model }};
+      if (keyEl.value) body.api_key = keyEl.value;
+      fetch('/api/settings/stt', {{
+        method: 'PUT',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body),
+      }}).then(r => {{
+        if (r.ok) {{
+          providerCache[kind] = providerCache[kind] || {{}};
+          providerCache[kind].host  = body.host;
+          providerCache[kind].port  = body.port;
+          providerCache[kind].model = model;
+          if (body.api_key) providerCache[kind].has_key = true;
+        }}
+        showStatus(statusEl, r.ok ? 'Saved ✓' : 'Save failed.', r.ok);
+      }}).catch(() => showStatus(statusEl, 'Save failed.', false));
+    }}
+    let _saveDebounce;
+    function schedSave() {{ clearTimeout(_saveDebounce); _saveDebounce = setTimeout(saveProvider, 700); }}
+
+    // Debounced re-fetch when host/port change, then save with the discovered model.
     let _fetchDebounce;
     function schedFetchModels() {{
       clearTimeout(_fetchDebounce);
-      _fetchDebounce = setTimeout(() => {{
+      _fetchDebounce = setTimeout(async () => {{
         const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
-        fetchModels(cur);
+        await fetchModels(cur);
+        saveProvider();
       }}, 600);
     }}
 
     modelEl.addEventListener('change', () => {{
       updateVisibility();
+      saveProvider();
     }});
+    keyEl.addEventListener('input', schedSave);
 
     function showStatus(el, msg, ok) {{
       el.textContent = msg;
@@ -1734,9 +1762,11 @@ end</code></pre>
       const isOpenai = kind === 'openai';
       const isCustomModel = modelEl.value === '__custom__';
 
-      // Host + Port: hidden for local (always 127.0.0.1:5200), shown for network/openai.
-      hostRow.hidden = isLocal;
-      portRow.hidden = isLocal;
+      // Host + Port: only the self-hosted Network provider needs a custom
+      // endpoint. Local is baked in (127.0.0.1:5200) and OpenAI is fixed
+      // (api.openai.com:443) — both keep their values but hide the fields.
+      hostRow.hidden = !isNetwork;
+      portRow.hidden = !isNetwork;
 
       // Model picker: hidden for local (auto-selected, no user choice needed).
       modelRow.hidden     = isLocal;
@@ -1774,6 +1804,7 @@ end</code></pre>
     kindEl.addEventListener('change', () => {{
       populateFromProvider(kindEl.value);
       updateVisibility();
+      schedSave();
     }});
 
     // Load current config on page open
@@ -1785,27 +1816,9 @@ end</code></pre>
       updateVisibility();
     }}).catch(() => {{ setDefaults(kindEl.value); updateVisibility(); }});
 
-    document.getElementById('sttSaveBtn').addEventListener('click', () => {{
-      const kind  = kindEl.value;
-      const model = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
-      const body  = {{ kind, host: hostEl.value.trim(), port: portEl.value.trim(), model }};
-      if (keyEl.value) body.api_key = keyEl.value;
-      fetch('/api/settings/stt', {{
-        method: 'PUT',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify(body),
-      }}).then(r => {{
-        if (r.ok) {{
-          // Update in-memory cache so switching away and back shows saved values.
-          providerCache[kind] = providerCache[kind] || {{}};
-          providerCache[kind].host  = body.host;
-          providerCache[kind].port  = body.port;
-          providerCache[kind].model = model;
-          if (body.api_key) providerCache[kind].has_key = true;
-        }}
-        showStatus(statusEl, r.ok ? 'Saved.' : 'Save failed.', r.ok);
-      }}).catch(() => showStatus(statusEl, 'Save failed.', false));
-    }});
+    // Saving is automatic (see saveProvider) — hide the manual Save button.
+    const saveBtn = document.getElementById('sttSaveBtn');
+    if (saveBtn) saveBtn.hidden = true;
 
     document.getElementById('sttRefreshModels').addEventListener('click', () => {{
       const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
