@@ -22,7 +22,7 @@ impl ProviderConfig {
     pub fn default_local() -> Self {
         Self {
             url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
-            model: "Systran/faster-whisper-base.en".to_string(),
+            model: "Systran/faster-whisper-small".to_string(),
             api_key: None,
         }
     }

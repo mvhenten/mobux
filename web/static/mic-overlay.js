@@ -1,17 +1,12 @@
 // mic-overlay.js — full-viewport recording / fault overlay for dictation.
 //
-// Replaces the too-subtle mic-icon flash. Two states:
+// Five states:
+//   RECORDING   — waveform canvas, running timer, Pause/Resume/Stop/Cancel
+//   TRANSCRIBING — spinner, no buttons
+//   REVIEW      — returned text (or "Nothing captured"), Retry/Submit or Retry/Dismiss
+//   FAULT       — human error message, Retry + optional install/start flow
 //
-//   RECORDING — shown the moment capture starts. A "● Recording" indicator
-//   with a live elapsed timer and a soft pulse. Tapping anywhere stops &
-//   sends (the host wires `onStop`); the mic button does the same.
-//
-//   FAULT — shown when we can't record or a downstream step fails. Carries a
-//   specific human message plus the technical reason. Tap to dismiss.
-//
-// House style: muted, low-contrast palette (phone use, technical operators —
-// no bright/saturated colors, no consumer fluff). Self-contained: all styles
-// are injected once, no external CSS dependency. Android-only target.
+// House style: muted, low-contrast palette. Android-only target.
 
 // One place for the fault-reason mapping so logs and UI agree. `kind` is a
 // stable short code; the overlay shows {title, detail}. Pass `extra` to fill
@@ -26,7 +21,8 @@ export function faultMessage(kind, extra) {
     case 'denied': // NotAllowedError / SecurityError
       return {
         title: 'Microphone blocked.',
-        detail: 'Enable mic permission for mobux in Android app settings.',
+        detail:
+          'Microphone blocked. Allow mic for this site (tap the lock → Permissions → Microphone) and check Chrome → Site settings → Microphone, and the OS app permission.',
       };
     case 'notfound': // NotFoundError
       return { title: 'No microphone found.', detail: extra || 'NotFoundError' };
@@ -133,6 +129,54 @@ function ensureStyles() {
 #mobux-mic-overlay .mo-install-hint {
   font-size: 13px;
   color: #7e857f;
+}
+/* New shared elements */
+#mobux-mic-overlay .mo-btn-row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  justify-content: center;
+}
+#mobux-mic-overlay .mo-btn {
+  display: inline-block;
+  padding: 8px 20px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.08);
+  color: #c8ccc9;
+  border: 1px solid rgba(255,255,255,0.12);
+  font-size: 14px;
+  cursor: pointer;
+  font-family: inherit;
+}
+#mobux-mic-overlay .mo-canvas {
+  width: 100%;
+  max-width: 320px;
+  height: 60px;
+  display: block;
+}
+#mobux-mic-overlay .mo-review-text {
+  font-family: monospace;
+  font-size: 12px;
+  color: #a9b0ac;
+  max-height: 8em;
+  overflow-y: auto;
+  background: rgba(0,0,0,0.2);
+  padding: 8px;
+  border-radius: 4px;
+  max-width: 26em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Transcribing spinner */
+#mobux-mic-overlay .mo-spinner {
+  width: 28px; height: 28px;
+  border: 3px solid rgba(169, 176, 172, 0.2);
+  border-top-color: #6a8a6a;
+  border-radius: 50%;
+  animation: moSpin 0.9s linear infinite;
+}
+@keyframes moSpin {
+  to { transform: rotate(360deg); }
 }`;
   const el = document.createElement('style');
   el.id = STYLE_ID;
@@ -144,17 +188,32 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
-// createMicOverlay(onStop, retryTranscription) → { showRecording, showFault, dismiss }
-//   onStop() is called when the user taps the RECORDING overlay (stop & send).
-//   retryTranscription() is called when install+start succeeds, to replay the
-//   last recording attempt automatically.
-export function createMicOverlay(onStop, retryTranscription) {
+// createMicOverlay(handlers) → { showRecording(analyser), showTranscribing(), showReview(text), showFault(kind, extra), dismiss() }
+//   handlers = { onStop, onPause, onResume, onCancel, onRetry, onSubmit, retryTranscription }
+export function createMicOverlay(handlers) {
+  // Support legacy two-arg call: createMicOverlay(onStop, retryTranscription)
+  if (typeof handlers === 'function') {
+    const onStop = handlers;
+    const retryTranscription = arguments[1]; // eslint-disable-line prefer-rest-params
+    handlers = { onStop, retryTranscription };
+  }
+  handlers = handlers || {};
+
   ensureStyles();
   let root = null;
   let timerHandle = null;
   let startedAt = 0;
+  let rafId = null;
+
+  function stopRaf() {
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
 
   function teardown() {
+    stopRaf();
     if (timerHandle) {
       clearInterval(timerHandle);
       timerHandle = null;
@@ -169,36 +228,235 @@ export function createMicOverlay(onStop, retryTranscription) {
     teardown();
   }
 
-  function showRecording() {
+  // ── RECORDING state ──────────────────────────────────────────────────
+  function showRecording(analyser) {
     teardown();
     root = document.createElement('div');
     root.id = 'mobux-mic-overlay';
     root.className = 'recording';
-    root.innerHTML =
-      '<div class="mo-status"><span class="mo-dot"></span>Recording</div>' +
-      '<div class="mo-timer">00:00</div>' +
-      '<div class="mo-hint">Tap anywhere to stop &amp; send</div>';
 
-    const timerEl = root.querySelector('.mo-timer');
+    // Status row
+    const statusEl = document.createElement('div');
+    statusEl.className = 'mo-status';
+    statusEl.innerHTML = '<span class="mo-dot"></span>Recording';
+
+    // Timer
+    const timerEl = document.createElement('div');
+    timerEl.className = 'mo-timer';
+    timerEl.textContent = '00:00';
+
+    // Waveform canvas
+    const canvas = document.createElement('canvas');
+    canvas.className = 'mo-canvas';
+    canvas.width = 320;
+    canvas.height = 60;
+
+    // Button row: Pause (visible initially), Resume (hidden), Stop, Cancel
+    const btnRow = document.createElement('div');
+    btnRow.className = 'mo-btn-row';
+
+    const pauseBtn = document.createElement('button');
+    pauseBtn.className = 'mo-btn';
+    pauseBtn.textContent = '⏸ Pause';
+
+    const resumeBtn = document.createElement('button');
+    resumeBtn.className = 'mo-btn';
+    resumeBtn.textContent = '▶ Resume';
+    resumeBtn.style.display = 'none';
+
+    const stopBtn = document.createElement('button');
+    stopBtn.className = 'mo-btn';
+    stopBtn.textContent = '⏹ Stop';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'mo-btn';
+    cancelBtn.textContent = '✕ Cancel';
+
+    btnRow.appendChild(pauseBtn);
+    btnRow.appendChild(resumeBtn);
+    btnRow.appendChild(stopBtn);
+    btnRow.appendChild(cancelBtn);
+
+    root.appendChild(statusEl);
+    root.appendChild(canvas);
+    root.appendChild(timerEl);
+    root.appendChild(btnRow);
+    document.body.appendChild(root);
+
+    // Timer
     startedAt = Date.now();
     timerHandle = setInterval(() => {
       const s = Math.floor((Date.now() - startedAt) / 1000);
       timerEl.textContent = pad(Math.floor(s / 60)) + ':' + pad(s % 60);
     }, 250);
 
-    // Tap-to-stop. Guard so the tap that started recording (on the mic button)
-    // can't immediately dismiss; the click lands on the button, not us.
-    root.addEventListener('click', (e) => {
-      e.preventDefault();
+    // Waveform RAF
+    const ctx2d = canvas.getContext('2d');
+    let paused = false;
+
+    function drawWaveform() {
+      if (!root) return;
+      if (paused || !analyser) {
+        // Flat line when paused or no analyser
+        ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+        ctx2d.beginPath();
+        ctx2d.strokeStyle = '#6a8a6a';
+        ctx2d.lineWidth = 1.5;
+        ctx2d.moveTo(0, canvas.height / 2);
+        ctx2d.lineTo(canvas.width, canvas.height / 2);
+        ctx2d.stroke();
+        if (!paused) rafId = requestAnimationFrame(drawWaveform);
+        return;
+      }
+      const bufLen = analyser.frequencyBinCount;
+      const data = new Uint8Array(bufLen);
+      analyser.getByteTimeDomainData(data);
+
+      ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+      ctx2d.beginPath();
+      ctx2d.strokeStyle = '#6a8a6a';
+      ctx2d.lineWidth = 1.5;
+
+      const sliceW = canvas.width / bufLen;
+      let x = 0;
+      for (let i = 0; i < bufLen; i++) {
+        const v = data[i] / 128.0;
+        const y = (v * canvas.height) / 2;
+        if (i === 0) ctx2d.moveTo(x, y);
+        else ctx2d.lineTo(x, y);
+        x += sliceW;
+      }
+      ctx2d.lineTo(canvas.width, canvas.height / 2);
+      ctx2d.stroke();
+
+      rafId = requestAnimationFrame(drawWaveform);
+    }
+
+    if (analyser) {
+      rafId = requestAnimationFrame(drawWaveform);
+    } else {
+      drawWaveform();
+    }
+
+    // Button handlers
+    pauseBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (typeof onStop === 'function') onStop();
+      paused = true;
+      stopRaf();
+      drawWaveform(); // draw flat line
+      pauseBtn.style.display = 'none';
+      resumeBtn.style.display = '';
+      if (typeof handlers.onPause === 'function') handlers.onPause();
     });
+
+    resumeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      paused = false;
+      resumeBtn.style.display = 'none';
+      pauseBtn.style.display = '';
+      rafId = requestAnimationFrame(drawWaveform);
+      if (typeof handlers.onResume === 'function') handlers.onResume();
+    });
+
+    stopBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof handlers.onStop === 'function') handlers.onStop();
+    });
+
+    cancelBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof handlers.onCancel === 'function') handlers.onCancel();
+    });
+  }
+
+  // ── TRANSCRIBING state ───────────────────────────────────────────────
+  function showTranscribing() {
+    stopRaf();
+    if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+    if (root) { root.remove(); root = null; }
+
+    root = document.createElement('div');
+    root.id = 'mobux-mic-overlay';
+    root.className = 'transcribing';
+
+    const spinner = document.createElement('div');
+    spinner.className = 'mo-spinner';
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'mo-status';
+    statusEl.textContent = 'Transcribing…';
+
+    root.appendChild(spinner);
+    root.appendChild(statusEl);
     document.body.appendChild(root);
   }
 
+  // ── REVIEW state ─────────────────────────────────────────────────────
+  function showReview(text) {
+    stopRaf();
+    if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+    if (root) { root.remove(); root = null; }
+
+    root = document.createElement('div');
+    root.id = 'mobux-mic-overlay';
+    root.className = 'review';
+
+    const isEmpty = !text || !text.trim();
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'mo-status';
+    statusEl.textContent = isEmpty ? 'Nothing captured' : 'Review';
+
+    const textBox = document.createElement('div');
+    textBox.className = 'mo-review-text';
+    textBox.textContent = isEmpty ? 'Nothing captured' : text;
+
+    const btnRow = document.createElement('div');
+    btnRow.className = 'mo-btn-row';
+
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'mo-btn';
+    retryBtn.textContent = '↻ Retry';
+
+    const actionBtn = document.createElement('button');
+    actionBtn.className = 'mo-btn';
+
+    if (isEmpty) {
+      actionBtn.textContent = '✕ Dismiss';
+      actionBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dismiss();
+      });
+    } else {
+      actionBtn.textContent = '✓ Submit';
+      actionBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (typeof handlers.onSubmit === 'function') handlers.onSubmit(text);
+        dismiss();
+      });
+    }
+
+    retryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof handlers.onRetry === 'function') handlers.onRetry();
+    });
+
+    btnRow.appendChild(retryBtn);
+    btnRow.appendChild(actionBtn);
+
+    root.appendChild(statusEl);
+    if (!isEmpty) root.appendChild(textBox);
+    root.appendChild(btnRow);
+    document.body.appendChild(root);
+  }
+
+  // ── FAULT state ──────────────────────────────────────────────────────
   // showFault(kind, extra) — render the mapped fault. Tap to dismiss.
   function showFault(kind, extra) {
-    teardown();
+    stopRaf();
+    if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+    if (root) { root.remove(); root = null; }
+
     const { title, detail } = faultMessage(kind, extra);
     root = document.createElement('div');
     root.id = 'mobux-mic-overlay';
@@ -208,9 +466,21 @@ export function createMicOverlay(onStop, retryTranscription) {
       '<div class="mo-title"></div>' +
       '<div class="mo-detail"></div>' +
       '<div class="mo-action-area"></div>' +
+      '<div class="mo-btn-row mo-fault-btn-row"></div>' +
       '<div class="mo-hint">Tap to dismiss</div>';
     root.querySelector('.mo-title').textContent = title;
     root.querySelector('.mo-detail').textContent = detail;
+
+    // Retry button
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'mo-btn';
+    retryBtn.textContent = '↻ Retry';
+    retryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof handlers.onRetry === 'function') handlers.onRetry();
+    });
+    root.querySelector('.mo-fault-btn-row').appendChild(retryBtn);
+
     root.addEventListener('click', (e) => {
       if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') return;
       e.preventDefault();
@@ -275,8 +545,6 @@ export function createMicOverlay(onStop, retryTranscription) {
     log.style.display = '';
     log.textContent = '';
 
-    // Set cancelled if the overlay is dismissed while installing
-    const origDismiss = dismiss;
     const cancelPoll = () => { cancelled = true; };
     root && root.addEventListener('click', cancelPoll, { once: true });
 
@@ -353,9 +621,9 @@ export function createMicOverlay(onStop, retryTranscription) {
       } catch (_) { continue; }
       if (data.reachable) {
         hint.textContent = 'Server ready. Retrying…';
-        if (typeof retryTranscription === 'function') {
+        if (typeof handlers.retryTranscription === 'function') {
           dismiss();
-          retryTranscription();
+          handlers.retryTranscription();
         }
         return;
       }
@@ -363,5 +631,5 @@ export function createMicOverlay(onStop, retryTranscription) {
     hint.textContent = 'Server did not start in time. Try again.';
   }
 
-  return { showRecording, showFault, dismiss };
+  return { showRecording, showTranscribing, showReview, showFault, dismiss };
 }

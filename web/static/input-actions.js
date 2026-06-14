@@ -65,7 +65,7 @@ export function createAttachAction({ send, onError } = {}) {
 // /transcribe (same-origin, so the session cookie rides along), then inject
 // the returned text into the terminal exactly like the green send button.
 //
-//   createDictateAction({ send, button, onText }) → { toggle(), isRecording() }
+//   createDictateAction({ send, button, onText }) → { trigger(), isRecording() }
 //     button   the 🎤 button element — gets `.mic-recording` + label updates.
 //     onText() optional — invoked after a successful injection (e.g. refocus
 //              the mobile text input). The injection itself always happens.
@@ -79,12 +79,14 @@ export function createDictateAction({ send, button, onText } = {}) {
     stream: null,
     ctx: null,
     source: null,
+    analyser: null,
     processor: null,
     chunks: [],
     inputRate: 0,
     timer: null,
     deadline: null,
     startedAt: 0,
+    paused: false,
     pendingChunks: null,
     pendingRate: 0,
     pendingDurationMs: 0,
@@ -94,11 +96,21 @@ export function createDictateAction({ send, button, onText } = {}) {
     if (button) button.textContent = text;
   }
 
-  // Full-viewport overlay (recording indicator + fault state). Tapping the
-  // recording overlay routes back through stopRecording (stop & send).
-  const micOverlay = createMicOverlay(
-    () => { if (mic.recording) stopRecording(); },
-    async () => {
+  // Full-viewport overlay with five states.
+  const micOverlay = createMicOverlay({
+    onStop: () => { if (mic.recording) captureStop(); },
+    onPause: () => {
+      mic.paused = true;
+      telemetry.log('mic.pause');
+    },
+    onResume: () => {
+      mic.paused = false;
+      telemetry.log('mic.resume');
+    },
+    onCancel: () => { cancelRecording(); },
+    onRetry: () => { retryFresh(); },
+    onSubmit: (text) => { submitText(text); },
+    retryTranscription: async () => {
       if (!mic.pendingChunks || !mic.pendingChunks.length) return;
       const chunks = mic.pendingChunks;
       const inputRate = mic.pendingRate;
@@ -109,6 +121,7 @@ export function createDictateAction({ send, button, onText } = {}) {
         const form = new FormData();
         form.append('audio', wav, 'speech.wav');
         micLabel('…');
+        micOverlay.showTranscribing();
         const res = await fetch('/transcribe', { method: 'POST', body: form });
         if (!res.ok) {
           const bodyText = await res.text().catch(() => '');
@@ -117,23 +130,14 @@ export function createDictateAction({ send, button, onText } = {}) {
           return;
         }
         const { text } = await res.json();
-        if (text && text.trim()) {
-          micOverlay.dismiss();
-          send(text.trim());
-          onText?.();
-          micLabel('🎤');
-        } else {
-          micOverlay.dismiss();
-          micLabel('∅');
-          setTimeout(() => micLabel('🎤'), 1200);
-        }
+        micOverlay.showReview(text && text.trim() ? text : '');
       } catch (err) {
         micFault('mic', err?.message || 'retry error');
       } finally {
         mic.busy = false;
       }
-    }
-  );
+    },
+  });
 
   // Show a fault: emit telemetry AND render the overlay so logs and UI agree.
   function micFault(kind, extra) {
@@ -196,6 +200,7 @@ export function createDictateAction({ send, button, onText } = {}) {
 
   function stopTracks() {
     if (mic.processor) { try { mic.processor.disconnect(); } catch (_) {} mic.processor.onaudioprocess = null; }
+    if (mic.analyser) { try { mic.analyser.disconnect(); } catch (_) {} mic.analyser = null; }
     if (mic.source) { try { mic.source.disconnect(); } catch (_) {} }
     if (mic.ctx) { try { mic.ctx.close(); } catch (_) {} }
     if (mic.stream) mic.stream.getTracks().forEach((t) => t.stop());
@@ -205,6 +210,7 @@ export function createDictateAction({ send, button, onText } = {}) {
 
   async function startRecording() {
     if (mic.busy) return;
+    mic.paused = false;
     // Secure-context / mediaDevices availability. getUserMedia is undefined on
     // http: (non-localhost) and in unsupported webviews.
     const secure = window.isSecureContext !== false;
@@ -235,35 +241,46 @@ export function createDictateAction({ send, button, onText } = {}) {
     mic.ctx = new AC();
     mic.inputRate = mic.ctx.sampleRate;
     mic.source = mic.ctx.createMediaStreamSource(mic.stream);
+
+    // Insert AnalyserNode between source and processor so waveform taps the
+    // graph without affecting the PCM capture.
+    mic.analyser = mic.ctx.createAnalyser();
+    mic.analyser.fftSize = 1024;
+    mic.source.connect(mic.analyser);
+
     mic.processor = mic.ctx.createScriptProcessor(4096, 1, 1);
-    mic.chunks = [];
-    mic.processor.onaudioprocess = (e) => {
-      mic.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-    };
-    mic.source.connect(mic.processor);
+    mic.analyser.connect(mic.processor);
     mic.processor.connect(mic.ctx.destination);
 
+    mic.chunks = [];
+    mic.processor.onaudioprocess = (e) => {
+      if (!mic.paused) {
+        mic.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      }
+    };
+
     mic.recording = true;
+    mic.busy = true;
     mic.startedAt = Date.now();
     button?.classList.add('mic-recording');
-    micOverlay.showRecording();
+    micOverlay.showRecording(mic.analyser);
     telemetry.log('mic.recording.start', { inputRate: mic.inputRate });
     mic.deadline = Date.now() + MAX_SECONDS * 1000;
     const tick = () => {
       const left = Math.max(0, Math.ceil((mic.deadline - Date.now()) / 1000));
       micLabel('⏺' + left);
-      if (left <= 0) stopRecording();
+      if (left <= 0) captureStop();
     };
     tick();
     mic.timer = setInterval(tick, 250);
   }
 
-  async function stopRecording() {
+  async function captureStop() {
     if (!mic.recording) return;
     mic.recording = false;
-    mic.busy = true;
     button?.classList.remove('mic-recording');
     micLabel('…');
+    telemetry.log('mic.stop');
 
     const chunks = mic.chunks;
     const inputRate = mic.inputRate;
@@ -274,6 +291,8 @@ export function createDictateAction({ send, button, onText } = {}) {
     stopTracks();
     mic.chunks = [];
     telemetry.log('mic.recording.stop', { durationMs, chunkCount: chunks.length });
+
+    micOverlay.showTranscribing();
 
     try {
       const wav = encodeWav(chunks, inputRate);
@@ -294,7 +313,6 @@ export function createDictateAction({ send, button, onText } = {}) {
       if (!res.ok) {
         const bodyText = await res.text().catch(() => '');
         telemetry.log('mic.transcribe.err', { stage: 'http', status: res.status, body: bodyText.slice(0, 200) });
-        // 503 = STT model not loaded on this host; everything else is generic.
         if (res.status === 503) {
           micFault('model', '503 ' + bodyText.slice(0, 120));
         } else {
@@ -304,34 +322,60 @@ export function createDictateAction({ send, button, onText } = {}) {
       }
 
       const { text } = await res.json();
-      if (text && text.trim()) {
-        telemetry.log('mic.transcribe.ok', { textLength: text.trim().length });
-        micOverlay.dismiss();
-        // Inject without Enter, same path as the green send button.
-        send(text.trim());
-        onText?.();
-        micLabel('🎤');
-      } else {
-        telemetry.log('mic.transcribe.empty');
-        micOverlay.dismiss();
-        // Empty transcription: brief neutral state, no injection.
-        micLabel('∅');
-        setTimeout(() => micLabel('🎤'), 1200);
-      }
+      telemetry.log('mic.transcribe.ok', { textLength: (text || '').trim().length });
+      micOverlay.showReview(text && text.trim() ? text : '');
     } catch (err) {
       console.error('Transcription failed:', err);
       telemetry.log('mic.transcribe.err', { stage: 'exception', message: err?.message || String(err) });
       micFault('mic', err?.message || 'encode/transcribe error');
-    } finally {
-      mic.busy = false;
     }
+    // Note: mic.busy stays true until submit/cancel/retry resolves
+  }
+
+  function cancelRecording() {
+    mic.recording = false;
+    mic.busy = false;
+    mic.paused = false;
+    stopTracks();
+    mic.chunks = [];
+    mic.pendingChunks = null;
+    button?.classList.remove('mic-recording');
+    micLabel('🎤');
+    micOverlay.dismiss();
+  }
+
+  async function retryFresh() {
+    telemetry.log('mic.retry');
+    stopTracks();
+    mic.chunks = [];
+    mic.pendingChunks = null;
+    mic.recording = false;
+    mic.busy = false;
+    mic.paused = false;
+    micOverlay.dismiss();
+    await startRecording();
+  }
+
+  function submitText(text) {
+    telemetry.log('mic.submit');
+    // send without newline — text is already trimmed by the review state
+    send(text.trim());
+    onText?.();
+    mic.busy = false;
+    micLabel('🎤');
   }
 
   return {
+    trigger() {
+      if (mic.busy) return;
+      telemetry.log('mic.click', { action: 'start' });
+      startRecording();
+    },
+    // Legacy compat
     toggle() {
-      const starting = !mic.recording;
-      telemetry.log('mic.click', { action: starting ? 'start' : 'stop' });
-      if (mic.recording) stopRecording();
+      if (mic.busy) return;
+      telemetry.log('mic.click', { action: mic.recording ? 'stop' : 'start' });
+      if (mic.recording) captureStop();
       else startRecording();
     },
     isRecording() { return mic.recording; },
