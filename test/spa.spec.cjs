@@ -1,0 +1,310 @@
+// SPA coverage — the modern Preact/Wouter UI served by the Rust binary at
+// `/app` (web/spa → web/static/spa, embedded via RustEmbed, served by
+// serve_spa_index + serve_static). The old Rust-rendered UI at `/` is covered
+// by smoke.spec.cjs / critical-path.spec.cjs; this spec is the SPA's own
+// CI safety net so `/app` can never silently regress to feature parity gaps.
+//
+// Runs against the SAME isolated smoke instance as the rest of the suite
+// (MOBUX_URL, basic auth from MOBUX_USER/MOBUX_PASS), so it never touches the
+// live :5151 server or the live sqlite DB. The smoke harness builds the SPA
+// via `make build` before it starts, so `/app` is live.
+//
+// Routing: the SPA uses hash locations under the /app route
+// (`/app#/`, `/app#/settings`, `/app#/install`, `/app#/s/<name>`), parallel to
+// the Rust pages. Modeled on web/spa/verify.prod.spec.mjs, adapted to the
+// standard fixtures + smoke harness and extended with the full session
+// create → terminal → rename → kill lifecycle.
+
+const { test, expect } = require('./fixtures.cjs');
+const { execSync } = require('child_process');
+
+const BASE = process.env.MOBUX_URL || 'https://localhost:5151';
+const APP = `${BASE}/app`;
+const USER = process.env.MOBUX_USER || '';
+const PASS = process.env.MOBUX_PASS || '';
+const AUTH = USER && PASS ? 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64') : null;
+
+// Dedicated tmux server/session, identical convention to smoke.spec.cjs, so
+// SPA session ops drive the smoke instance's tmux without colliding with the
+// host's default tmux server.
+const TMUX_CMD = process.env.MOBUX_TEST_TMUX || 'tmux -L mobux-test';
+const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || '/tmp/mobux-smoke/home';
+const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
+const tmux = (args) => execSync(`${TMUX_CMD} ${args}`, { stdio: 'pipe' });
+
+// Unique session names per run so the create/rename/kill lifecycle never
+// collides with a leftover from a previous run or the smoke seed session.
+const SEED = `spa-seed-${process.pid}`;
+
+test.use({
+  ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
+});
+
+test.beforeAll(() => {
+  // A guaranteed session so Home always has a row to render even on a fresh
+  // smoke instance, and so the terminal-island test has something to attach to
+  // if the in-test create races tmux startup.
+  try { tmux(`kill-session -t ${SEED}`); } catch (_) {}
+  tmux(`new-session -d -s ${SEED} ${SHELL_ENV} "bash --norc --noprofile"`);
+  tmux(`send-keys -t ${SEED} "PS1='\\$ '" Enter`);
+  tmux(`send-keys -t ${SEED} "clear" Enter`);
+  execSync('sleep 0.3');
+});
+
+test.afterAll(() => {
+  try { tmux(`kill-session -t ${SEED}`); } catch (_) {}
+});
+
+// ── app shell + home ────────────────────────────────────────────────────────
+
+test('app route serves the SPA shell and Home lists sessions', async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
+  await expect(page.locator('#app')).toHaveCount(1);
+  await expect(page.locator('.spa-nav')).toBeVisible();
+  // Nav links for every SPA page.
+  await expect(page.locator('.spa-nav a', { hasText: 'Home' })).toBeVisible();
+  await expect(page.locator('.spa-nav a', { hasText: 'Settings' })).toBeVisible();
+  await expect(page.locator('.spa-nav a', { hasText: 'Install' })).toBeVisible();
+
+  // The seed session renders a row.
+  await expect(page.locator('#sessionList .session-item').first()).toBeVisible({ timeout: 8000 });
+  const names = await page.locator('#sessionList .session-name').allTextContents();
+  expect(names.some((n) => n.trim() === SEED)).toBeTruthy();
+
+  // Create FAB present.
+  await expect(page.locator('#fabNew')).toBeVisible();
+});
+
+// ── session lifecycle: create → rename → kill, all via the SPA UI ───────────
+
+// Reveal a row's hidden swipe action (rename/kill sit behind .session-item).
+// Drives the same touch gesture a user would: swipe right (dir=1) to reveal
+// rename, left (dir=-1) to reveal kill. Mirrors Home.jsx's swipe handler.
+async function swipeReveal(page, rowName, dir) {
+  await page.evaluate(
+    ({ rowName, dir }) => {
+      const row = document.querySelector(`#sessionList .swipe-row[data-name="${rowName}"]`);
+      const item = row.querySelector('.session-item');
+      const rect = item.getBoundingClientRect();
+      const y = rect.top + rect.height / 2;
+      const x0 = rect.left + rect.width / 2;
+      const mkTouch = (clientX) =>
+        new Touch({ identifier: 0, target: item, clientX, clientY: y });
+      const fire = (type, touches) =>
+        item.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, touches }));
+      fire('touchstart', [mkTouch(x0)]);
+      fire('touchmove', [mkTouch(x0 + dir * 90)]);
+      // touchend reads currentX from the last move; touches list is empty.
+      fire('touchend', []);
+    },
+    { rowName, dir },
+  );
+}
+
+test('session lifecycle: create, rename, and kill through the SPA', async ({ page }) => {
+  const name = `spa-life-${process.pid}-${Date.now() % 100000}`;
+  const renamed = `${name}-r`;
+
+  await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
+
+  // CREATE via the FAB dialog.
+  await page.locator('#fabNew').click();
+  await expect(page.locator('#newSessionDialog')).toBeVisible();
+  await page.locator('#sessionName').fill(name);
+  await page.locator('#newSessionForm .btn-create').click();
+  const row = page.locator(`#sessionList .swipe-row[data-name="${name}"]`);
+  await expect(row).toBeVisible({ timeout: 8000 });
+  // Confirm the backend actually has it.
+  let api = await page.evaluate(async () => (await fetch('/api/sessions')).json());
+  let list = (Array.isArray(api) ? api : api.sessions || []).map((s) => (typeof s === 'string' ? s : s.name));
+  expect(list).toContain(name);
+
+  // RENAME (prompt-driven) — swipe right to reveal, then accept the prompt.
+  page.once('dialog', (d) => d.accept(renamed));
+  await swipeReveal(page, name, 1);
+  await row.locator('.rename-btn').click();
+  await expect(page.locator(`#sessionList .swipe-row[data-name="${renamed}"]`)).toBeVisible({ timeout: 8000 });
+  api = await page.evaluate(async () => (await fetch('/api/sessions')).json());
+  list = (Array.isArray(api) ? api : api.sessions || []).map((s) => (typeof s === 'string' ? s : s.name));
+  expect(list).toContain(renamed);
+  expect(list).not.toContain(name);
+
+  // KILL (confirm-driven) — swipe left to reveal, then accept the confirm.
+  page.once('dialog', (d) => d.accept());
+  await swipeReveal(page, renamed, -1);
+  await page.locator(`#sessionList .swipe-row[data-name="${renamed}"] .kill-btn`).click();
+  await expect(page.locator(`#sessionList .swipe-row[data-name="${renamed}"]`)).toHaveCount(0, { timeout: 8000 });
+  api = await page.evaluate(async () => (await fetch('/api/sessions')).json());
+  list = (Array.isArray(api) ? api : api.sessions || []).map((s) => (typeof s === 'string' ? s : s.name));
+  expect(list).not.toContain(renamed);
+});
+
+// ── terminal island: mounts + PTY WebSocket connects ───────────────────────
+
+test('terminal island mounts and the PTY websocket connects', async ({ page }) => {
+  // Attach to the guaranteed seed session.
+  const wsConnected = new Promise((resolve) => {
+    page.on('websocket', (ws) => {
+      if (ws.url().includes(`/ws/${encodeURIComponent(SEED)}`)) resolve(ws.url());
+    });
+  });
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, { waitUntil: 'networkidle' });
+
+  // Island scaffold present (the engine binds to #terminal).
+  await expect(page.locator('#terminal')).toHaveCount(1);
+
+  const wsUrl = await Promise.race([
+    wsConnected,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('ws timeout')), 15000)),
+  ]);
+  expect(wsUrl).toContain(`/ws/${encodeURIComponent(SEED)}`);
+
+  // Engine actually rendered into the host (xterm/sterk attaches a child).
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById('terminal');
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+});
+
+// ── settings: every card renders and hits its endpoint ──────────────────────
+
+test('settings: every ported card renders and consumes its endpoint', async ({ page }) => {
+  const seen = new Set();
+  page.on('request', (r) => {
+    const u = new URL(r.url()).pathname;
+    if (u.startsWith('/api/') || u.startsWith('/static/')) seen.add(`${r.method()} ${u}`);
+  });
+
+  await page.goto(`${APP}#/settings`, { waitUntil: 'networkidle' });
+
+  // Update / Renderer / Theme / Shell-integration / STT / Install / Notifications.
+  await expect(page.locator('#update h2')).toHaveText('Software update');
+  await expect(page.locator('#renderer-picker')).toBeVisible();
+  await expect(page.locator('#theme-picker')).toBeVisible();
+  await expect(page.locator('#shell-integration')).toBeVisible();
+  await expect(page.locator('#stt-provider')).toBeVisible();
+  await expect(page.locator('section#install-app')).toBeVisible();
+  await expect(page.locator('input[name="bell"]')).toHaveCount(1);
+  await expect(page.locator('input[name="program_exit_nonzero"]')).toHaveCount(1);
+
+  // Theme picker populated from /static/themes.js.
+  await page.waitForFunction(
+    () => document.querySelectorAll('#theme-picker option').length > 0,
+    { timeout: 6000 },
+  );
+
+  // Shell-integration state resolved (not the initial "…").
+  await expect(
+    page.locator('#shell-integration .shell-card[data-shell="bash"] [data-role="state"]'),
+  ).not.toHaveText('…', { timeout: 6000 });
+
+  // Update card resolved a current version.
+  await expect(page.locator('#update .settings-value').first()).not.toHaveText('…', { timeout: 8000 });
+
+  // Listen + Build-info cards.
+  await expect(page.locator('#listen-settings h2')).toHaveText('Listen');
+  await expect(page.locator('#build-info h2')).toHaveText('Build');
+
+  // The cards consumed their endpoints.
+  for (const want of [
+    'GET /api/update/status',
+    'GET /api/settings/notifications',
+    'GET /api/shell-integration/status',
+    'GET /api/settings/stt',
+    'GET /api/build-info',
+    'GET /static/build-info.json',
+  ]) {
+    expect(seen.has(want), `expected ${want}`).toBeTruthy();
+  }
+});
+
+// ── settings: STT provider switch shows per-provider fields + auto-saves ─────
+
+test('settings: STT provider switch shows the right fields and auto-saves', async ({ page }) => {
+  await page.goto(`${APP}#/settings`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('#stt-provider');
+  const kind = page.locator('#sttKind');
+
+  // network: Host + Port + Model; no API key, no install.
+  await kind.selectOption('network');
+  await expect(page.locator('#sttHost')).toBeVisible();
+  await expect(page.locator('#sttPort')).toBeVisible();
+  await expect(page.locator('#sttModelRow')).toBeVisible();
+  await expect(page.locator('#sttApiKey')).toHaveCount(0);
+  await expect(page.locator('#sttInstallBtn')).toHaveCount(0);
+
+  // openai: API key + Model; no Host/Port.
+  await kind.selectOption('openai');
+  await expect(page.locator('#sttApiKey')).toBeVisible();
+  await expect(page.locator('#sttModelRow')).toBeVisible();
+  await expect(page.locator('#sttHost')).toHaveCount(0);
+  await expect(page.locator('#sttPort')).toHaveCount(0);
+
+  // local: install + run toggle; nothing else.
+  await kind.selectOption('local');
+  await expect(page.locator('#sttInstallBtn')).toBeVisible();
+  await expect(page.locator('#sttToggleBtn')).toBeVisible();
+  await expect(page.locator('#sttHost')).toHaveCount(0);
+
+  // auto-save: switch to network, change the port, NO Save tap.
+  await kind.selectOption('network');
+  const probe = String(5290 + Math.floor(Math.random() * 9));
+  const portEl = page.locator('#sttPort');
+  await portEl.fill(probe);
+  await portEl.blur();
+  await expect(page.locator('#sttStatus')).toContainText('Saved', { timeout: 6000 });
+
+  // Persisted with no Save tap.
+  const cfg = await page.evaluate(async () => (await fetch('/api/settings/stt')).json());
+  expect(cfg.activeKind).toBe('network');
+  expect(cfg.providers.network.port).toBe(probe);
+});
+
+// ── build-info card ─────────────────────────────────────────────────────────
+
+test('settings: build-info card shows version and matching hashes', async ({ page }) => {
+  await page.goto(`${APP}#/settings`, { waitUntil: 'networkidle' });
+  await expect(page.locator('#build-info h2')).toHaveText('Build');
+  await expect(page.locator('#buildVersion')).not.toHaveText('…', { timeout: 6000 });
+  await expect(page.locator('#buildServerHash')).not.toHaveText('…', { timeout: 6000 });
+  await expect(page.locator('#buildFeHash')).not.toHaveText('—', { timeout: 6000 });
+  // Fresh build: server hash and FE hash agree.
+  const srv = await page.locator('#buildServerHash').textContent();
+  const fe = await page.locator('#buildFeHash').textContent();
+  expect(srv.trim()).toBe(fe.trim());
+});
+
+// ── install page: QR codes ──────────────────────────────────────────────────
+
+test('install page renders QR codes for CA and APK', async ({ page }) => {
+  await page.goto(`${APP}#/install`, { waitUntil: 'networkidle' });
+  const qrs = page.locator('.install-qr');
+  await expect(qrs).toHaveCount(2);
+  await expect(qrs.first().locator('svg')).toBeVisible();
+  await expect(qrs.nth(1).locator('svg')).toBeVisible();
+  await expect(page.locator('a[href="/install/mobux-ca.crt"]')).toBeVisible();
+  await expect(page.locator('a[href="/install/mobux.apk"]')).toBeVisible();
+});
+
+// ── mesh host picker ────────────────────────────────────────────────────────
+
+test('mesh host picker opens and lists "This host"', async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
+
+  // Trigger present in the nav.
+  const trigger = page.locator('.spa-host-picker .host-trigger');
+  await expect(trigger).toBeVisible();
+  // Default label is the current node.
+  await expect(trigger.locator('.host-label')).toHaveText('This host');
+
+  // Open the dropdown → peer list with the current-node entry.
+  await trigger.click();
+  await expect(page.locator('.spa-host-dropdown .peer-list')).toBeVisible({ timeout: 6000 });
+  await expect(page.locator('.spa-host-dropdown .peer-option', { hasText: 'This host' })).toBeVisible();
+  // "+ Add host" affordance for manual peers.
+  await expect(page.locator('.spa-host-dropdown .peer-add')).toBeVisible();
+});

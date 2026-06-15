@@ -98,6 +98,55 @@ export function HomePage() {
     }
   };
 
+  // Swipe-to-reveal on a session row, ported from the old index.js
+  // initSwipeRows. The rename/kill buttons sit behind the .session-item
+  // (z-index), so without this gesture they're unreachable — drag the row to
+  // reveal them (right → rename, left → kill), tap elsewhere to snap back.
+  const swipeRow = (row) => {
+    if (!row) return;
+    const item = row.querySelector('.session-item');
+    if (!item || item.dataset.swipeWired) return;
+    item.dataset.swipeWired = '1';
+
+    let startX = 0;
+    let currentX = 0;
+    let swiping = false;
+
+    item.addEventListener(
+      'touchstart',
+      (e) => {
+        startX = e.touches[0].clientX;
+        currentX = 0;
+        swiping = true;
+        item.style.transition = 'none';
+      },
+      { passive: true },
+    );
+    item.addEventListener(
+      'touchmove',
+      (e) => {
+        if (!swiping) return;
+        currentX = Math.max(-100, Math.min(100, e.touches[0].clientX - startX));
+        item.style.transform = `translateX(${currentX}px)`;
+      },
+      { passive: true },
+    );
+    item.addEventListener('touchend', () => {
+      swiping = false;
+      item.style.transition = 'transform 0.2s ease';
+      if (currentX < -60) item.style.transform = 'translateX(-100px)';
+      else if (currentX > 60) item.style.transform = 'translateX(100px)';
+      else item.style.transform = 'translateX(0)';
+    });
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.swipe-btn')) return;
+      if (item.style.transform !== 'translateX(0px)' && item.style.transform !== '') {
+        item.style.transition = 'transform 0.2s ease';
+        item.style.transform = 'translateX(0)';
+      }
+    });
+  };
+
   const list = sessions.value;
 
   return (
@@ -113,7 +162,7 @@ export function HomePage() {
               ? `${s.windows ?? '?'} win · ${s.attached ?? 0} attached`
               : '';
           return (
-            <div class="swipe-row" data-name={name} key={name}>
+            <div class="swipe-row" data-name={name} key={name} ref={swipeRow}>
               <div class="swipe-action swipe-left">
                 <button class="swipe-btn rename-btn" onClick={() => rename(name)}>
                   Rename

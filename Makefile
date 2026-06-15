@@ -197,6 +197,18 @@ test-update-runner:
 	@command -v shellcheck >/dev/null 2>&1 && shellcheck src/update_runner.sh test/update-runner.test.sh || echo "shellcheck not installed; skipping lint"
 	@bash test/update-runner.test.sh
 
+# SPA coverage: the Preact/Wouter UI served at /app on the smoke instance
+# (built into web/static/spa by `make build`, which smoke-start depends on).
+# Same isolated smoke instance + isolated MOBUX_DATA_DIR as the rest of the
+# suite, so it never touches the live :5151 server or the live DB.
+.PHONY: test-spa
+test-spa:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/spa.spec.cjs
+
 .PHONY: test-e2e
 test-e2e:
 	@$(MAKE) smoke-start
