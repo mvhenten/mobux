@@ -126,7 +126,30 @@ execSync([
   `--outfile=${path.join(VENDOR, 'sterk.bundle.js')}`,
 ].join(' '), { cwd: ROOT, stdio: 'inherit' });
 
-// ── 3. Build hash ─────────────────────────────────────────────────────
+// ── 3. Client SPA (web/spa → web/static/spa) ──────────────────────────
+// Build the Vite/Preact SPA so its assets exist for the Rust `/app` route
+// (served by serve_spa_index + serve_static, embedded via RustEmbed). Output
+// goes to web/static/spa/ (vite.config.js `outDir`/`base`). Idempotent.
+//
+// The SPA has its own npm project + lockfile, so ensure its node_modules
+// exist (npm ci with a lockfile, else npm install) before building. If web/spa
+// is absent the step is skipped with a warning so the vendor-bundle build above
+// still succeeds.
+const SPA_DIR = path.join(ROOT, 'web', 'spa');
+if (fs.existsSync(path.join(SPA_DIR, 'package.json'))) {
+  if (!fs.existsSync(path.join(SPA_DIR, 'node_modules'))) {
+    const hasLock = fs.existsSync(path.join(SPA_DIR, 'package-lock.json'));
+    console.log(`[build] Installing SPA deps (${hasLock ? 'npm ci' : 'npm install'})...`);
+    execSync(hasLock ? 'npm ci' : 'npm install', { cwd: SPA_DIR, stdio: 'inherit' });
+  }
+  console.log('[build] Building client SPA (web/spa)...');
+  execSync('npm run build', { cwd: SPA_DIR, stdio: 'inherit' });
+  console.log('[build] SPA built -> web/static/spa/');
+} else {
+  console.warn(`[build] WARN: web/spa not found at ${SPA_DIR}; skipping SPA build.`);
+}
+
+// ── 4. Build hash ─────────────────────────────────────────────────────
 const crypto = require('crypto');
 const STATIC = path.join(ROOT, 'web', 'static');
 

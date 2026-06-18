@@ -1,0 +1,47 @@
+/* SPA shell chrome. The ported pages reuse the backend's style.css (loaded in
+   index.html via the proxy); this file only styles the migration skeleton's
+   nav + layout, kept deliberately minimal and muted. */
+.spa-shell {
+  min-height: 100dvh;
+}
+.spa-nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  background: #161922;
+  border-bottom: 1px solid #232733;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.spa-nav a {
+  color: #9aa4b2;
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+.spa-nav a:hover {
+  color: #c7d0dc;
+}
+.spa-main {
+  padding: 1rem;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+/* Host picker in the SPA nav. Pushed to the right; dropdown anchors below the nav. */
+.spa-host-picker {
+  margin-left: auto;
+  position: relative;
+}
+.spa-host-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 220px;
+  max-width: 320px;
+  z-index: 20;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}

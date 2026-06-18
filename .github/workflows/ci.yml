@@ -51,6 +51,11 @@ jobs:
         env:
           CI: true
           MOBUX_URL: http://localhost:8281
+      - name: Run SPA (/app) tests
+        run: make test-spa
+        env:
+          CI: true
+          MOBUX_URL: http://localhost:8281
       - name: Run mesh relay tests (two-instance)
         run: make test-mesh
         env:
