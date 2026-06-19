@@ -74,8 +74,9 @@ struct AppState {
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
     internal_token: Arc<String>,
-    /// The TCP port this instance serves on. Mesh peer probing dials peers on
-    /// the same port (the EDD assumes a homogeneous mobux port across nodes).
+    /// The TCP port this instance serves on. Used for self-update health-checks
+    /// and the detached updater spawn; NOT used for mesh peer probing (see
+    /// `mesh_peer_port` in the DB — defaults to 5151, the fleet-standard port).
     port: u16,
     /// Where mobux persists state — used to write/spawn the detached updater.
     data_dir: PathBuf,
@@ -255,6 +256,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/settings/stt",
             get(api_get_stt_config).put(api_set_stt_config),
+        )
+        .route(
+            "/api/settings/mesh",
+            get(api_get_mesh_settings).put(api_set_mesh_settings),
         )
         .route("/api/stt/status", get(api_stt_status))
         .route("/api/stt/models", get(api_stt_models))
@@ -660,8 +665,20 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
 /// structured error (HTTP 502) the UI can show — never a silent empty list.
 /// An empty `peers` array means "tailscale fine, nothing found"; the error
 /// path means "tailscale unavailable".
+///
+/// Probes peers on the configured `mesh_peer_port` (default 5151 — the
+/// fleet-standard mobux port). Configurable via GET/PUT /api/settings/mesh
+/// so preview instances on non-standard ports probe the right port.
 async fn api_peers(State(state): State<AppState>) -> Response {
-    match mesh::enumerate(state.port).await {
+    let probe_port = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.mesh_peer_port()
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(5151);
+    match mesh::enumerate(probe_port).await {
         Ok(peers) => Json(json!({ "peers": peers })).into_response(),
         Err(err) => {
             // 502: this node is up, but the upstream dependency (tailscaled)
@@ -2716,6 +2733,51 @@ fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String
 }
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
+
+/// Shape returned by GET /api/settings/mesh.
+#[derive(serde::Serialize)]
+struct MeshSettingsJson {
+    /// Port used to probe tailnet peers for mobux. Default 5151.
+    peer_port: u16,
+}
+
+/// Shape accepted by PUT /api/settings/mesh.
+#[derive(serde::Deserialize)]
+struct MeshSettingsPutJson {
+    peer_port: u16,
+}
+
+async fn api_get_mesh_settings(
+    State(state): State<AppState>,
+) -> Result<Json<MeshSettingsJson>, AppError> {
+    let peer_port = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.mesh_peer_port()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(Json(MeshSettingsJson { peer_port }))
+}
+
+async fn api_set_mesh_settings(
+    State(state): State<AppState>,
+    Json(req): Json<MeshSettingsPutJson>,
+) -> Result<StatusCode, AppError> {
+    if req.peer_port == 0 {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "peer_port must be 1–65535"
+        )));
+    }
+    tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.set_mesh_peer_port(req.peer_port)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 /// Per-kind provider info returned by GET /api/settings/stt.
 /// api_key is NEVER returned; has_key is a boolean indicator.
