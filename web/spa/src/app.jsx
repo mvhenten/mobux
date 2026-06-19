@@ -1,4 +1,4 @@
-import { Router, Route, Switch, Link } from 'wouter-preact';
+import { Router, Route, Switch, Link, useLocation } from 'wouter-preact';
 import { useHashLocation } from 'wouter-preact/use-hash-location';
 import { HomePage } from './pages/Home.jsx';
 import { TerminalPage } from './pages/Terminal.jsx';
@@ -47,14 +47,28 @@ export function App() {
   );
 }
 
+function GearButton() {
+  const [, navigate] = useLocation();
+  return (
+    <button
+      class="spa-gear-btn"
+      type="button"
+      aria-label="Settings"
+      onClick={() => navigate('/settings')}
+    >
+      ⚙
+    </button>
+  );
+}
+
 function Shell({ children }) {
   return (
     <div class="spa-shell">
       <nav class="spa-nav">
         <Link href="/">Home</Link>
-        <Link href="/settings">Settings</Link>
         <Link href="/install">Install</Link>
         <HostPicker />
+        <GearButton />
       </nav>
       <main class="spa-main">{children}</main>
     </div>

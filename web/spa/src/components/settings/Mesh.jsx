@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import { signal } from '@preact/signals';
 import { apiGet, apiPutJSON } from '../../lib/api.js';
 
@@ -23,8 +23,14 @@ async function save() {
   }
 }
 
+function getMesh() {
+  return window.MobuxMesh || null;
+}
+
 export function MeshCard() {
   const saveTimer = useRef(null);
+  const [manualPeers, setManualPeers] = useState([]);
+  const [addHost, setAddHost] = useState('');
 
   useEffect(() => {
     apiGet('/api/settings/mesh')
@@ -32,11 +38,49 @@ export function MeshCard() {
         peerPort.value = cfg.peer_port ?? 5151;
       })
       .catch(() => {});
+
+    // Load manual peers from mesh-client if available.
+    const syncManual = () => {
+      const m = getMesh();
+      if (m) setManualPeers(m.getManualPeers() || []);
+    };
+    syncManual();
+    // Re-sync whenever a peer-changed event fires.
+    window.addEventListener('mobux:peer-changed', syncManual);
+    return () => window.removeEventListener('mobux:peer-changed', syncManual);
   }, []);
 
   const schedSave = () => {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(save, 700);
+  };
+
+  const handleAddHost = (e) => {
+    e.preventDefault();
+    const host = addHost.trim();
+    if (!host) return;
+    const m = getMesh();
+    if (!m) return;
+    const peerId = m.addManualPeer(host);
+    if (!peerId) {
+      flash('Invalid host. Use "host" or "host:port".', false);
+      return;
+    }
+    setManualPeers(m.getManualPeers() || []);
+    setAddHost('');
+    window.dispatchEvent(new CustomEvent('mobux:peer-changed'));
+  };
+
+  const handleRemove = (peerId) => {
+    const m = getMesh();
+    if (!m) return;
+    const wasActive = m.getPeer() === peerId;
+    m.removeManualPeer(peerId);
+    setManualPeers(m.getManualPeers() || []);
+    if (wasActive) {
+      m.setPeer('');
+      window.dispatchEvent(new CustomEvent('mobux:peer-changed'));
+    }
   };
 
   return (
@@ -70,6 +114,40 @@ export function MeshCard() {
           {status.value.msg}
         </div>
       )}
+
+      <h3 class="mesh-hosts-heading">Manual hosts</h3>
+
+      {manualPeers.length > 0 ? (
+        <ul class="mesh-host-list">
+          {manualPeers.map((peerId) => (
+            <li key={peerId} class="mesh-host-item">
+              <span class="mesh-host-label">{peerId}</span>
+              <button
+                class="mesh-host-remove"
+                type="button"
+                aria-label={`Remove ${peerId}`}
+                onClick={() => handleRemove(peerId)}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="hint">No manual hosts added.</p>
+      )}
+
+      <form class="mesh-add-host" onSubmit={handleAddHost}>
+        <input
+          class="settings-input mesh-add-input"
+          type="text"
+          placeholder="host or host:port"
+          value={addHost}
+          onInput={(e) => setAddHost(e.target.value)}
+          autocomplete="off"
+        />
+        <button class="btn-create mesh-add-btn" type="submit">Add host</button>
+      </form>
     </section>
   );
 }

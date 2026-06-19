@@ -1,18 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useCallback } from 'preact/hooks';
 
-// App-shell host picker. Loads mesh-client.js once (app-wide), then provides
-// the same pick / credential-prompt / peer-discovery flow as the old
-// host-picker.js, implemented as a Preact component so it integrates with the
-// SPA nav rather than hooking into .app-header DOM nodes.
+// App-shell host picker (native <select> variant).
+// Loads mesh-client.js once (app-wide), then renders a native <select> so
+// Android shows its own bottom-sheet picker instead of a custom overlay.
 //
-// On peer change this component dispatches a 'mobux:peer-changed' CustomEvent
-// on window so Home (and any other page) knows to re-fetch against the new
-// host. It also sets window.refreshSessions for backwards-compat with anything
-// still referencing the old host-picker.js callback.
+// On peer change dispatches 'mobux:peer-changed' on window so Home (and any
+// other page) re-fetches against the new host. Also sets window.refreshSessions
+// for backwards-compat with anything still referencing the old host-picker.js.
 
-// Load mesh-client.js once across the entire SPA lifetime. After the script
-// loads, window.MobuxMesh is set and the terminal island's own load attempt
-// becomes a no-op (browser skips duplicate src).
 let meshLoaded = false;
 let meshLoadPromise = null;
 
@@ -41,12 +36,10 @@ function getMesh() {
   return window.MobuxMesh || null;
 }
 
-// ── peer credential prompt ────────────────────────────────────────────────
-// Opens a dialog-based prompt for user/PIN, reusing the existing .session-dialog
-// CSS class to match the session-create dialog.
+// Credential prompt — shown when switching to a peer that has no stored creds.
 function CredDialog({ peer, note, onConfirm, onCancel }) {
-  const userRef = useRef(null);
-  const pinRef = useRef(null);
+  const userRef = { current: null };
+  const pinRef = { current: null };
 
   useEffect(() => {
     userRef.current?.focus();
@@ -76,191 +69,41 @@ function CredDialog({ peer, note, onConfirm, onCancel }) {
   );
 }
 
-// ── add-host dialog ───────────────────────────────────────────────────────
-function AddHostDialog({ onConfirm, onCancel }) {
-  const hostRef = useRef(null);
-
-  useEffect(() => {
-    hostRef.current?.focus();
-  }, []);
-
-  const submit = (e) => {
-    e.preventDefault();
-    const host = (hostRef.current?.value || '').trim();
-    if (!host) return;
-    onConfirm(host);
-  };
-
-  return (
-    <dialog class="session-dialog" open>
-      <form method="dialog" onSubmit={submit}>
-        <h3>Add host</h3>
-        <input ref={hostRef} placeholder="host or host:port" autocomplete="off" required />
-        <div class="dialog-actions">
-          <button type="button" class="btn-cancel" onClick={onCancel}>Cancel</button>
-          <button type="submit" class="btn-create">Add</button>
-        </div>
-      </form>
-    </dialog>
-  );
-}
-
-// ── peer list dropdown ────────────────────────────────────────────────────
-function PeerList({ peers, errorMsg, selectedPeer, manualPeers, onSelect, onRemoveManual, onAddHost, onClose }) {
-  return (
-    <div class="peer-list">
-      {/* Current node */}
-      <button
-        class={`peer-option${!selectedPeer ? ' selected' : ''}`}
-        type="button"
-        onClick={async () => { await onSelect(''); onClose(); }}
-      >
-        <div class="peer-info">
-          <span class="peer-name">This host</span>
-          <span class="peer-sub">current node</span>
-        </div>
-        {!selectedPeer && <span class="peer-check">✓</span>}
-      </button>
-
-      {/* Discovered peers */}
-      {(peers || []).map((p) => {
-        const peerId = `${p.host}:${p.port}`;
-        const sub = p.version ? `v${p.version}` : 'unreachable';
-        const sel = selectedPeer === peerId;
-        return (
-          <button
-            key={peerId}
-            class={`peer-option${sel ? ' selected' : ''}`}
-            type="button"
-            onClick={async () => { await onSelect(peerId); onClose(); }}
-          >
-            {p.reachable != null && (
-              <span
-                class={`peer-status ${p.reachable ? 'peer-up' : 'peer-down'}`}
-                title={p.reachable ? 'reachable' : 'unreachable'}
-              />
-            )}
-            <div class="peer-info">
-              <span class="peer-name">{p.name}</span>
-              <span class="peer-sub">{sub}</span>
-            </div>
-            {sel && <span class="peer-check">✓</span>}
-          </button>
-        );
-      })}
-
-      {/* Manual peers */}
-      {(manualPeers || []).map((peerId) => {
-        const sel = selectedPeer === peerId;
-        return (
-          <button
-            key={peerId}
-            class={`peer-option${sel ? ' selected' : ''}`}
-            type="button"
-            onClick={async () => { await onSelect(peerId); onClose(); }}
-          >
-            <div class="peer-info">
-              <span class="peer-name">{peerId}</span>
-              <span class="peer-sub">manual</span>
-            </div>
-            {sel && <span class="peer-check">✓</span>}
-            <button
-              class="peer-remove"
-              type="button"
-              aria-label={`Remove ${peerId}`}
-              onClick={(e) => { e.stopPropagation(); onRemoveManual(peerId); }}
-            >
-              ✕
-            </button>
-          </button>
-        );
-      })}
-
-      {errorMsg && <div class="peer-error">{errorMsg}</div>}
-      {!errorMsg && (!peers || !peers.length) && !(manualPeers || []).length && (
-        <p class="hint">No other hosts discovered.</p>
-      )}
-
-      <button class="peer-add" type="button" onClick={onAddHost}>+ Add host</button>
-    </div>
-  );
-}
-
-// ── main component ────────────────────────────────────────────────────────
+// Main component — a native <select> in the nav.
 export function HostPicker() {
   const [ready, setReady] = useState(false);
-  const [open, setOpen] = useState(false);
   const [selectedPeer, setSelectedPeer] = useState('');
   const [peers, setPeers] = useState([]);
-  const [manualPeers, setManualPeers] = useState([]);
-  const [peerError, setPeerError] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [credDialog, setCredDialog] = useState(null); // { peer, note }
-  const [addHostDialog, setAddHostDialog] = useState(false);
-  const dropdownRef = useRef(null);
+  const [credDialog, setCredDialog] = useState(null);
 
-  // Load mesh-client.js once on mount.
+  // Load mesh-client.js once on mount, then fetch peer list.
   useEffect(() => {
     ensureMeshClient()
-      .then(() => {
+      .then(async () => {
         const m = getMesh();
         if (m) setSelectedPeer(m.getPeer() || '');
+
+        try {
+          const res = await fetch('/api/peers');
+          if (res.ok) {
+            const body = await res.json();
+            setPeers(body.peers || []);
+          }
+        } catch (_) {}
+
         setReady(true);
       })
-      .catch((e) => {
-        console.warn('HostPicker: mesh-client.js failed to load:', e.message);
-        // Render as "This host" with no picker — same-origin fallback.
+      .catch(() => {
+        // Mesh unavailable — show just "This host".
         setReady(true);
       });
   }, []);
 
-  // Sync refreshSessions global so old host-picker.js onPeerChange still works.
   const notifyPeerChanged = useCallback(() => {
     window.dispatchEvent(new CustomEvent('mobux:peer-changed'));
     if (typeof window.refreshSessions === 'function') window.refreshSessions();
   }, []);
 
-  // Close dropdown when clicking outside.
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler, true);
-    return () => document.removeEventListener('mousedown', handler, true);
-  }, [open]);
-
-  // Load peer list when opening the dropdown.
-  const openPicker = useCallback(async () => {
-    setOpen(true);
-    setLoading(true);
-    setPeerError(null);
-    try {
-      const res = await fetch('/api/peers');
-      if (!res.ok) {
-        let msg = `Peer discovery failed (${res.status}).`;
-        try {
-          const body = await res.json();
-          if (body?.error?.message) msg = body.error.message;
-        } catch (_) {}
-        setPeerError(msg);
-        setPeers([]);
-      } else {
-        const body = await res.json();
-        setPeers(body.peers || []);
-      }
-    } catch (e) {
-      setPeerError(`Peer discovery failed: ${e.message}`);
-      setPeers([]);
-    }
-    const m = getMesh();
-    setManualPeers(m ? m.getManualPeers() : []);
-    setLoading(false);
-  }, []);
-
-  // Select a peer: set in mesh, prompt for creds if needed.
   const selectPeer = useCallback(async (peer) => {
     const m = getMesh();
     if (!m) return;
@@ -272,7 +115,6 @@ export function HostPicker() {
     }
     m.setPeer(peer);
     if (!m.getPeerCred(peer)) {
-      // Need creds — show the credential dialog.
       await new Promise((resolve) => {
         setCredDialog({
           peer,
@@ -284,6 +126,7 @@ export function HostPicker() {
           },
           onCancel: () => {
             m.setPeer('');
+            setSelectedPeer('');
             setCredDialog(null);
             resolve(false);
           },
@@ -294,68 +137,33 @@ export function HostPicker() {
     notifyPeerChanged();
   }, [notifyPeerChanged]);
 
-  // Remove a manual peer.
-  const removeManual = useCallback((peerId) => {
-    const m = getMesh();
-    if (!m) return;
-    const wasActive = m.getPeer() === peerId;
-    m.removeManualPeer(peerId);
-    setManualPeers(m.getManualPeers());
-    if (wasActive) {
-      setSelectedPeer('');
-      notifyPeerChanged();
-    }
-  }, [notifyPeerChanged]);
-
-  // Add a manual host.
-  const handleAddHost = useCallback(async (rawHost) => {
-    const m = getMesh();
-    setAddHostDialog(false);
-    if (!m) return;
-    const peerId = m.addManualPeer(rawHost);
-    if (!peerId) {
-      alert('Invalid host. Use "host" or "host:port".');
-      return;
-    }
-    setManualPeers(m.getManualPeers());
-    await selectPeer(peerId);
-    setOpen(false);
+  const handleChange = useCallback(async (e) => {
+    await selectPeer(e.target.value);
   }, [selectPeer]);
 
   if (!ready) return null;
 
-  const label = selectedPeer || 'This host';
-
   return (
-    <div class="spa-host-picker" ref={dropdownRef}>
-      <button
-        class="host-trigger"
-        type="button"
-        onClick={() => (open ? setOpen(false) : openPicker())}
-        aria-label={`Active host: ${label}`}
+    <div class="spa-host-picker">
+      <select
+        class="host-select"
+        value={selectedPeer}
+        onChange={handleChange}
+        aria-label="Active host"
       >
-        <span class="host-label">{label}</span>
-        <span class="host-caret">▾</span>
-      </button>
-
-      {open && (
-        <div class="host-dropdown open spa-host-dropdown">
-          {loading ? (
-            <div class="peer-list"><p class="hint">Loading hosts…</p></div>
-          ) : (
-            <PeerList
-              peers={peers}
-              errorMsg={peerError}
-              selectedPeer={selectedPeer}
-              manualPeers={manualPeers}
-              onSelect={selectPeer}
-              onRemoveManual={removeManual}
-              onAddHost={() => setAddHostDialog(true)}
-              onClose={() => setOpen(false)}
-            />
-          )}
-        </div>
-      )}
+        <option value="">This host</option>
+        {peers.map((p) => {
+          const peerId = `${p.host}:${p.port}`;
+          const label = p.reachable === false
+            ? `${p.name} (unreachable)`
+            : p.name;
+          return (
+            <option key={peerId} value={peerId} disabled={p.reachable === false}>
+              {label}
+            </option>
+          );
+        })}
+      </select>
 
       {credDialog && (
         <CredDialog
@@ -363,13 +171,6 @@ export function HostPicker() {
           note={credDialog.note}
           onConfirm={credDialog.onConfirm}
           onCancel={credDialog.onCancel}
-        />
-      )}
-
-      {addHostDialog && (
-        <AddHostDialog
-          onConfirm={handleAddHost}
-          onCancel={() => setAddHostDialog(false)}
         />
       )}
     </div>

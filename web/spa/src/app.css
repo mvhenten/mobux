@@ -29,19 +29,99 @@
   margin: 0 auto;
 }
 
-/* Host picker in the SPA nav. Pushed to the right; dropdown anchors below the nav. */
+/* Host picker — native <select> in the nav. Pushed to the right so the gear
+   button can anchor flush to the far edge. */
 .spa-host-picker {
   margin-left: auto;
-  position: relative;
 }
-.spa-host-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  min-width: 220px;
-  max-width: 320px;
-  z-index: 20;
+.host-select {
+  background: #1e2330;
+  color: #9aa4b2;
+  border: 1px solid #2e3447;
   border-radius: 4px;
-  overflow: hidden;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  padding: 0.3rem 0.5rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  /* Let Android/Chrome use its native picker styling */
+  -webkit-appearance: menulist;
+  appearance: menulist;
+}
+.host-select:focus {
+  outline: none;
+  border-color: #4a5470;
+}
+
+/* Gear button — right-aligned settings shortcut. */
+.spa-gear-btn {
+  background: none;
+  border: none;
+  padding: 0.25rem 0.35rem;
+  color: #6a7485;
+  font-size: 1.1rem;
+  cursor: pointer;
+  line-height: 1;
+  border-radius: 4px;
+}
+.spa-gear-btn:hover {
+  color: #9aa4b2;
+  background: #1e2330;
+}
+
+/* Mesh settings card — manual host list and add-host form. */
+.mesh-hosts-heading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #6a7485;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 1.25rem 0 0.5rem;
+}
+.mesh-host-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.mesh-host-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #1a1e2a;
+  border: 1px solid #2e3447;
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+}
+.mesh-host-label {
+  font-size: 0.9rem;
+  color: #9aa4b2;
+  font-family: monospace;
+}
+.mesh-host-remove {
+  background: none;
+  border: none;
+  color: #6a7485;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  line-height: 1;
+}
+.mesh-host-remove:hover {
+  color: #c87e7e;
+  background: #2a1e1e;
+}
+.mesh-add-host {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.mesh-add-input {
+  flex: 1;
+  min-width: 0;
+}
+.mesh-add-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
