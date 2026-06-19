@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
 
     let state_for_mw = state.clone();
     let app = Router::new()
-        .route("/", get(index))
+        .route("/", get(root_redirect))
         .route("/api/identify", get(api_identify))
         .route("/api/build-info", get(api_build_info))
         .route("/api/peers", get(api_peers))
@@ -608,6 +608,20 @@ async fn auth_middleware(
     resp
 }
 
+/// Dev-only root redirect: `GET /` → 307 `/app` with `Cache-Control: no-store`
+/// so browsers and BFCache never pin a stale redirect. The old `index` handler
+/// is kept intact; it is just no longer mounted at `/`.
+async fn root_redirect() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, "/app"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+    )
+}
+
+#[allow(dead_code)]
 async fn index(State(state): State<AppState>) -> Result<axum::response::Response, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
     Ok(html_no_store(render_index(
@@ -2485,6 +2499,7 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str, dev: bool) -> String {
     let mut cards = String::new();
     if sessions.is_empty() {
