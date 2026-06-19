@@ -30,9 +30,11 @@
 }
 
 /* Host picker — native <select> in the nav. Pushed to the right so the gear
-   button can anchor flush to the far edge. */
+   button can anchor flush to the far edge. Shrinks before the gear does. */
 .spa-host-picker {
   margin-left: auto;
+  min-width: 0;
+  flex-shrink: 1;
 }
 .host-select {
   background: #1e2330;
@@ -42,6 +44,9 @@
   padding: 0.3rem 0.5rem;
   font-size: 0.9rem;
   cursor: pointer;
+  /* Constrain width so the gear button is never pushed off-screen */
+  max-width: 48vw;
+  min-width: 0;
   /* Let Android/Chrome use its native picker styling */
   -webkit-appearance: menulist;
   appearance: menulist;
@@ -51,16 +56,22 @@
   border-color: #4a5470;
 }
 
-/* Gear button — right-aligned settings shortcut. */
+/* Gear button — always visible, never squeezed. */
 .spa-gear-btn {
   background: none;
   border: none;
-  padding: 0.25rem 0.35rem;
+  padding: 0.25rem 0.5rem;
   color: #6a7485;
   font-size: 1.1rem;
   cursor: pointer;
   line-height: 1;
   border-radius: 4px;
+  flex-shrink: 0;
+  min-width: 2rem;
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .spa-gear-btn:hover {
   color: #9aa4b2;
