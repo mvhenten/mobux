@@ -1,35 +1,28 @@
-/* SPA shell chrome. The ported pages reuse the backend's style.css (loaded in
-   index.html via the proxy); this file only styles the migration skeleton's
-   nav + layout, kept deliberately minimal and muted. */
+/* SPA shell chrome. Copies the old Rust-rendered home header: the .app-header /
+   .app-header h1 / .header-icon rules come from web/static/style.css (loaded in
+   index.html via the proxy), so the header already matches the old UI's colors,
+   spacing, and typography. This file only adds what's SPA-specific: making the
+   wordmark behave as a home link, placing the native host <select>, and giving
+   the gear a <button> the same look as the old <a class="header-icon">. */
 .spa-shell {
   min-height: 100dvh;
 }
-.spa-nav {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
-  background: #161922;
-  border-bottom: 1px solid #232733;
-  position: sticky;
-  top: 0;
-  z-index: 10;
+
+/* Wordmark = home link. The old header gave h1 `flex: 1` to shove the lone gear
+   to the far edge; here the host picker owns that stretch (margin-left: auto),
+   so the wordmark hugs the left instead. */
+.app-header .app-wordmark {
+  flex: 0 0 auto;
+  cursor: pointer;
 }
-.spa-nav a {
-  color: #9aa4b2;
-  text-decoration: none;
-  font-size: 0.95rem;
-}
-.spa-nav a:hover {
-  color: #c7d0dc;
-}
+
 .spa-main {
   padding: 1rem;
   max-width: 640px;
   margin: 0 auto;
 }
 
-/* Host picker — native <select> in the nav. Pushed to the right so the gear
+/* Host picker — native <select> in the header. Pushed to the right so the gear
    button can anchor flush to the far edge. Shrinks before the gear does. */
 .spa-host-picker {
   margin-left: auto;
@@ -37,9 +30,9 @@
   flex-shrink: 1;
 }
 .host-select {
-  background: #1e2330;
-  color: #9aa4b2;
-  border: 1px solid #2e3447;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0.3rem 0.5rem;
   font-size: 0.9rem;
@@ -53,29 +46,23 @@
 }
 .host-select:focus {
   outline: none;
-  border-color: #4a5470;
+  border-color: var(--accent);
 }
 
-/* Gear button — always visible, never squeezed. */
-.spa-gear-btn {
+/* Gear — a <button> that wears the old `.header-icon` look (color/font-size/
+   padding/radius come from style.css). These rules only reset the native button
+   chrome and keep it from ever being squeezed off-screen. */
+.header-icon-btn {
   background: none;
   border: none;
-  padding: 0.25rem 0.5rem;
-  color: #6a7485;
-  font-size: 1.1rem;
   cursor: pointer;
-  line-height: 1;
-  border-radius: 4px;
   flex-shrink: 0;
-  min-width: 2rem;
-  min-height: 2rem;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-.spa-gear-btn:hover {
-  color: #9aa4b2;
-  background: #1e2330;
+  min-width: 2rem;
+  min-height: 2rem;
+  font-family: inherit;
 }
 
 /* Mesh settings card — manual host list and add-host form. */

@@ -374,7 +374,15 @@ async fn relay_http_inner(
     let next_hop = check_loop_guard(&headers, &forward_path)?;
 
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let url = format!("https://{peer}{forward_path}{query}");
+    let url_str = format!("https://{peer}{forward_path}{query}");
+    // Parse the target URL up front. reqwest's `request(method, &str)` defers
+    // URL parsing to `.send()`, where a parse failure surfaces as an opaque
+    // `Builder`-kind error that `Display`s as the bare string "builder error"
+    // — the exact "Failed to load sessions: builder error" the UI showed when
+    // a relayed path/peer didn't form a valid URL. Parse it here so a malformed
+    // URL becomes an actionable message instead.
+    let url = reqwest::Url::parse(&url_str)
+        .map_err(|e| RelayError::BadRequest(format!("invalid peer URL ({url_str}): {e}")))?;
 
     let body_bytes = axum::body::to_bytes(body, usize::MAX)
         .await
@@ -401,7 +409,7 @@ async fn relay_http_inner(
         .map_err(|e| RelayError::Upstream(format!("building client: {e}")))?;
 
     let upstream = client
-        .request(method, &url)
+        .request(method, url)
         .headers(fwd_headers)
         .body(body_bytes)
         .send()
@@ -802,6 +810,19 @@ mod tests {
         let (auth3, fwd3) = split_ws_query(None);
         assert!(auth3.is_none());
         assert_eq!(fwd3, "");
+    }
+
+    #[test]
+    fn forwarded_url_parses_for_normal_paths() {
+        // The relay parses `https://{peer}{path}{query}` up front so a parse
+        // failure is a clear BadRequest instead of reqwest's opaque deferred
+        // "builder error". A normal relayed API path must parse cleanly.
+        let url = reqwest::Url::parse("https://devbox:5151/api/sessions?x=1");
+        assert!(url.is_ok());
+        // A malformed authority (e.g. an unclosed IPv6 bracket) must be
+        // rejected here, rather than slipping through to reqwest's `.send()`
+        // where it surfaces as the opaque "builder error".
+        assert!(reqwest::Url::parse("https://[bad:5151/api/sessions").is_err());
     }
 
     #[test]

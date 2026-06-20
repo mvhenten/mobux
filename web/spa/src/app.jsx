@@ -47,29 +47,61 @@ export function App() {
   );
 }
 
-function GearButton() {
+// App-shell chrome. Two headers, both copied verbatim from the old Rust-rendered
+// pages (src/main.rs) so the SPA wears the old UI's chrome with the new engine
+// underneath; .app-header / .app-header h1 / .header-icon / .header-back come
+// from web/static/style.css, so colors/spacing/typography match exactly.
+//
+//   • home/install/etc: the old render_index header — a `mobux` wordmark
+//     (clicks home) + `⚙` gear. The only addition is the native <select> host
+//     picker between them (the user-preferred replacement for the old popover).
+//     No Home/Install text tabs — Install stays reachable via Settings.
+//   • /settings: the old settings_page header — a `‹` back link + "settings".
+function HomeHeader() {
   const [, navigate] = useLocation();
   return (
-    <button
-      class="spa-gear-btn"
-      type="button"
-      aria-label="Settings"
-      onClick={() => navigate('/settings')}
-    >
-      ⚙
-    </button>
+    <header class="app-header">
+      <h1
+        class="app-wordmark"
+        role="link"
+        tabindex="0"
+        onClick={() => navigate('/')}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') navigate('/');
+        }}
+      >
+        mobux
+      </h1>
+      <HostPicker />
+      <button
+        class="header-icon header-icon-btn"
+        type="button"
+        aria-label="Settings"
+        onClick={() => navigate('/settings')}
+      >
+        ⚙
+      </button>
+    </header>
+  );
+}
+
+function SettingsHeader() {
+  return (
+    <header class="app-header">
+      <Link href="/" class="header-back" aria-label="Back">
+        ‹
+      </Link>
+      <h1>settings</h1>
+    </header>
   );
 }
 
 function Shell({ children }) {
+  const [location] = useLocation();
+  const onSettings = location === '/settings';
   return (
     <div class="spa-shell">
-      <nav class="spa-nav">
-        <Link href="/">Home</Link>
-        <Link href="/install">Install</Link>
-        <HostPicker />
-        <GearButton />
-      </nav>
+      {onSettings ? <SettingsHeader /> : <HomeHeader />}
       <main class="spa-main">{children}</main>
     </div>
   );
