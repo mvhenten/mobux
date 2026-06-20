@@ -8,6 +8,52 @@
   min-height: 100dvh;
 }
 
+/* ── Terminal route layout ───────────────────────────────────────────
+   The terminal route is a full-bleed island with no SPA chrome. The old
+   Rust page keyed its full-screen terminal layout off `body.term-body`
+   (web/static/style.css: position:fixed; 100dvh; flex column). In the SPA
+   the engine's children live one level deeper — inside `#app` →
+   `.term-body-spa` — so we have to extend that full-height flex column the
+   whole way down, or `#terminal` (flex:1; min-height:0) collapses to ~0
+   and the backend computes far too few rows on mount (the stranded
+   status-bar / dead-black-bottom bug). These rules only apply on the
+   terminal route, gated by `body.term-body`. */
+body.term-body #app {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.term-body-spa {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Control-key ribbon ──────────────────────────────────────────────
+   The ribbon (^C, arrows, Tab, Esc, …) is a horizontal strip that must
+   scroll sideways by touch and never wrap. The base rules already come
+   from web/static/style.css `.input-ribbon`; these reassert them in the
+   SPA context so a stray parent `touch-action`/flex rule can't clip or
+   wrap the strip (the "ribbon won't scroll by touch" regression). Mirrors
+   the old `.input-ribbon`: overflow-x:auto + touch momentum + nowrap, with
+   touch-action:pan-x so the browser hands horizontal pans to the strip. */
+.term-body-spa .input-ribbon {
+  display: flex;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+}
+.term-body-spa .input-ribbon button {
+  flex: 0 0 auto;
+}
+
 /* Wordmark = home link. The old header gave h1 `flex: 1` to shove the lone gear
    to the far edge; here the host picker owns that stretch (margin-left: auto),
    so the wordmark hugs the left instead. */

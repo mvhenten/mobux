@@ -45,6 +45,7 @@ function loadScript(src, { module = false } = {}) {
 export function TerminalIsland({ session, peer = '' }) {
   const rootRef = useRef(null);
   const bootedRef = useRef(false);
+  const resizeObsRef = useRef(null);
 
   useLayoutEffect(() => {
     if (bootedRef.current) return; // never boot twice
@@ -87,8 +88,42 @@ export function TerminalIsland({ session, peer = '' }) {
         // Surface boot failure in the loading splash rather than a blank page.
         const q = rootRef.current?.querySelector('#quote');
         if (q) q.textContent = `Terminal failed to load: ${e.message}`;
+        return;
+      }
+
+      // Force a resize once the SPA layout has actually painted. terminal.js
+      // sizes the PTY (cols/rows) from the host element's clientHeight, and it
+      // does its own resize at 0ms/100ms after load — but in the SPA the engine
+      // boots while Preact's island subtree is still settling its flex height,
+      // so that early measurement can read a too-short host and the backend
+      // computes far too few rows (the stranded-status-bar / dead-black bug).
+      // The engine already listens on window `resize` → core.resize(), so we
+      // reuse that machinery: re-fire a synthetic resize after a double-rAF
+      // (one full painted frame later) and again after the host's box settles,
+      // via a ResizeObserver, so the initial row count is correct without a
+      // rotate/keyboard nudge.
+      const kick = () => window.dispatchEvent(new Event('resize'));
+      requestAnimationFrame(() => requestAnimationFrame(kick));
+
+      const host = rootRef.current?.querySelector('#terminal');
+      if (host && 'ResizeObserver' in window) {
+        let last = 0;
+        const ro = new ResizeObserver(() => {
+          const h = host.clientHeight;
+          if (h && h !== last) {
+            last = h;
+            kick();
+          }
+        });
+        ro.observe(host);
+        resizeObsRef.current = ro;
       }
     })();
+
+    return () => {
+      resizeObsRef.current?.disconnect();
+      resizeObsRef.current = null;
+    };
   }, []);
 
   // Scaffold mirrors render_terminal_page() in src/main.rs. The engine binds to

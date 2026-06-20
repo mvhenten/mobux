@@ -170,6 +170,110 @@ test('terminal island mounts and the PTY websocket connects', async ({ page }) =
   );
 });
 
+// ── terminal island: fills the viewport on mount (no too-short PTY) ─────────
+//
+// Regression guard for the "terminal mounts too short" bug: the SPA wraps the
+// engine in `.term-body-spa` under `#app`, and if that wrapper doesn't extend
+// the old `body.term-body` full-height flex column all the way down, `#terminal`
+// (flex:1; min-height:0) collapses to ~0 on mount. The backend sizes the PTY
+// from the host clientHeight, so it ends up with ~13 rows: terminal + tmux
+// status bar occupy only the top third and the bottom is dead black. Assert the
+// host fills the viewport AND the PTY row count matches the available height, so
+// a too-short initial terminal FAILS here.
+test('terminal island fills the viewport on mount (correct PTY rows)', async ({ page }) => {
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, { waitUntil: 'networkidle' });
+
+  // Engine attached into the host.
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById('terminal');
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+
+  // Give the post-mount resize (double-rAF + ResizeObserver) a beat to settle
+  // the row count against the painted layout.
+  await page.waitForTimeout(500);
+
+  const geo = await page.evaluate(() => {
+    const t = document.getElementById('terminal');
+    const r = t.getBoundingClientRect();
+    return {
+      hostTop: r.top,
+      hostBottom: r.bottom,
+      hostHeight: r.height,
+      viewportHeight: window.innerHeight,
+      rows: (window.__mobuxView?.test?.rows?.() ?? null),
+    };
+  });
+
+  // The terminal host fills essentially the whole viewport: it starts at the
+  // top (no SPA chrome on this route) and its bottom reaches the viewport
+  // bottom within a few px. A too-short host (status bar stranded mid-screen)
+  // leaves a large gap and fails this.
+  expect(geo.hostTop).toBeLessThan(8);
+  expect(geo.hostHeight).toBeGreaterThan(geo.viewportHeight * 0.85);
+  expect(Math.abs(geo.viewportHeight - geo.hostBottom)).toBeLessThan(8);
+
+  // And the PTY actually got enough rows for that height. Derive an expected
+  // minimum from the host height; the ~13-row bug (top third only) fails this.
+  const minRows = Math.floor((geo.hostHeight / geo.viewportHeight) * 30);
+  expect(geo.rows).toBeGreaterThanOrEqual(Math.max(20, minRows));
+});
+
+// ── control-key ribbon: horizontally scrollable by touch ────────────────────
+//
+// Regression guard for the "ribbon won't scroll sideways" bug. The control-key
+// ribbon (^C, arrows, Tab, Esc, …) is wider than the viewport and must scroll
+// horizontally by touch without wrapping. Assert it overflows (scrollWidth >
+// clientWidth), is not wrapped (single row of buttons), is overflow-x:auto, and
+// that programmatic scrollLeft actually moves it.
+test('control-key ribbon is horizontally scrollable (not wrapped/clipped)', async ({ page }) => {
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, { waitUntil: 'networkidle' });
+  await expect(page.locator('#inputRibbon')).toHaveCount(1);
+
+  // The mobile input bar mounts lazily; reveal it the way a touch double-tap
+  // would so the ribbon is laid out and measurable.
+  await page.evaluate(() => {
+    const bar = document.getElementById('inputBar');
+    if (bar) bar.classList.remove('hidden');
+  });
+  await page.waitForTimeout(100);
+
+  const ribbon = page.locator('#inputRibbon');
+  const m = await ribbon.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    // Single row of buttons → all buttons share the same offsetTop (not wrapped).
+    const btns = [...el.querySelectorAll('button')];
+    const tops = new Set(btns.map((b) => b.offsetTop));
+    return {
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      overflowX: cs.overflowX,
+      flexWrap: cs.flexWrap,
+      rowCount: tops.size,
+      buttonCount: btns.length,
+    };
+  });
+
+  // Overflows horizontally and the browser treats it as scrollable.
+  expect(m.buttonCount).toBeGreaterThan(5);
+  expect(m.scrollWidth).toBeGreaterThan(m.clientWidth);
+  expect(['auto', 'scroll']).toContain(m.overflowX);
+  expect(m.flexWrap).toBe('nowrap');
+  // Not wrapped — every button sits on the same row.
+  expect(m.rowCount).toBe(1);
+
+  // Programmatic scrollLeft actually moves it (it's a real scroll container).
+  const moved = await ribbon.evaluate((el) => {
+    el.scrollLeft = 0;
+    el.scrollLeft = 80;
+    return el.scrollLeft;
+  });
+  expect(moved).toBeGreaterThan(0);
+});
+
 // ── settings: every card renders and hits its endpoint ──────────────────────
 
 test('settings: every ported card renders and consumes its endpoint', async ({ page }) => {
