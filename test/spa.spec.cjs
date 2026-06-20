@@ -60,11 +60,17 @@ test.afterAll(() => {
 test('app route serves the SPA shell and Home lists sessions', async ({ page }) => {
   await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
   await expect(page.locator('#app')).toHaveCount(1);
-  await expect(page.locator('.spa-nav')).toBeVisible();
-  // Nav links for every SPA page.
-  await expect(page.locator('.spa-nav a', { hasText: 'Home' })).toBeVisible();
-  await expect(page.locator('.spa-nav a', { hasText: 'Settings' })).toBeVisible();
-  await expect(page.locator('.spa-nav a', { hasText: 'Install' })).toBeVisible();
+
+  // Current header: `mobux` wordmark (home link), native host-select, gear button.
+  // No old-style text tabs (.spa-nav / Home / Install tabs).
+  await expect(page.locator('.app-wordmark')).toBeVisible();
+  await expect(page.locator('select.host-select')).toBeVisible();
+  await expect(page.locator('button.header-icon-btn[aria-label="Settings"]')).toBeVisible();
+
+  // Explicitly assert old nav tabs are gone (regression guard).
+  await expect(page.locator('.spa-nav')).toHaveCount(0);
+  await expect(page.locator('.spa-nav a', { hasText: 'Home' })).toHaveCount(0);
+  await expect(page.locator('.spa-nav a', { hasText: 'Install' })).toHaveCount(0);
 
   // The seed session renders a row.
   await expect(page.locator('#sessionList .session-item').first()).toBeVisible({ timeout: 8000 });
@@ -396,19 +402,21 @@ test('install page renders QR codes for CA and APK', async ({ page }) => {
 
 // ── mesh host picker ────────────────────────────────────────────────────────
 
-test('mesh host picker opens and lists "This host"', async ({ page }) => {
+test('mesh host picker is a native select with "This host" as default', async ({ page }) => {
   await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
 
-  // Trigger present in the nav.
-  const trigger = page.locator('.spa-host-picker .host-trigger');
-  await expect(trigger).toBeVisible();
-  // Default label is the current node.
-  await expect(trigger.locator('.host-label')).toHaveText('This host');
+  // Native <select> host picker inside .spa-host-picker — no popover/overlay.
+  const picker = page.locator('.spa-host-picker');
+  await expect(picker).toBeVisible();
+  const select = picker.locator('select.host-select');
+  await expect(select).toBeVisible();
 
-  // Open the dropdown → peer list with the current-node entry.
-  await trigger.click();
-  await expect(page.locator('.spa-host-dropdown .peer-list')).toBeVisible({ timeout: 6000 });
-  await expect(page.locator('.spa-host-dropdown .peer-option', { hasText: 'This host' })).toBeVisible();
-  // "+ Add host" affordance for manual peers.
-  await expect(page.locator('.spa-host-dropdown .peer-add')).toBeVisible();
+  // Default selection is "This host" (empty-value option).
+  await expect(select).toHaveValue('');
+  const thisHostOption = select.locator('option[value=""]');
+  await expect(thisHostOption).toHaveText('This host');
+
+  // No old popover/floating overlay exists.
+  await expect(page.locator('.spa-host-dropdown')).toHaveCount(0);
+  await expect(page.locator('.host-trigger')).toHaveCount(0);
 });
