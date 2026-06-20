@@ -31,6 +31,15 @@ async function refresh() {
     sessions.value = Array.isArray(data) ? data : data.sessions || [];
     error.value = null;
   } catch (e) {
+    // mesh-client clears the cred and throws meshKind=unauthorized on 401.
+    // Surface the in-app credential dialog instead of a text error so the
+    // browser's native auth prompt never appears.
+    if (e.meshKind === 'unauthorized') {
+      window.dispatchEvent(
+        new CustomEvent('mobux:peer-auth-required', { detail: { peer: e.peer } }),
+      );
+      return;
+    }
     error.value = String(e.message || e);
   }
 }

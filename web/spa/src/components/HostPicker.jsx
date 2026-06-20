@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 
 // App-shell host picker (native <select> variant).
 // Loads mesh-client.js once (app-wide), then renders a native <select> so
@@ -7,6 +7,11 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 // On peer change dispatches 'mobux:peer-changed' on window so Home (and any
 // other page) re-fetches against the new host. Also sets window.refreshSessions
 // for backwards-compat with anything still referencing the old host-picker.js.
+//
+// 401 re-prompt: mesh-client's apiFetch clears the stored cred and throws
+// err.meshKind === 'unauthorized'. Callers (e.g. Home's refresh()) can dispatch
+// 'mobux:peer-auth-required' on window with { detail: { peer } } to re-surface
+// this in-app credential dialog — the HostPicker listens and re-prompts.
 
 let meshLoaded = false;
 let meshLoadPromise = null;
@@ -36,12 +41,21 @@ function getMesh() {
   return window.MobuxMesh || null;
 }
 
-// Credential prompt — shown when switching to a peer that has no stored creds.
+// Credential prompt — shown when switching to a peer that has no stored creds,
+// or after a 401 clears the stored cred (re-prompt path).
+// Uses a real <dialog> element via showModal() so it is a proper modal overlay
+// (backdrop, focus-trap) and the browser never sees a 401 and triggers its own
+// native credential UI.
 function CredDialog({ peer, note, onConfirm, onCancel }) {
-  const userRef = { current: null };
-  const pinRef = { current: null };
+  const dialogRef = useRef(null);
+  const userRef = useRef(null);
+  const pinRef = useRef(null);
 
   useEffect(() => {
+    // showModal() turns the element into a top-layer modal — this is what
+    // prevents the browser from popping its own Basic-auth dialog when a 401
+    // response would otherwise go unhandled.
+    dialogRef.current?.showModal();
     userRef.current?.focus();
   }, []);
 
@@ -54,7 +68,7 @@ function CredDialog({ peer, note, onConfirm, onCancel }) {
   };
 
   return (
-    <dialog class="session-dialog" open>
+    <dialog ref={dialogRef} class="session-dialog" onCancel={(e) => { e.preventDefault(); onCancel(); }}>
       <form method="dialog" onSubmit={submit}>
         <h3>Sign in to {peer}</h3>
         {note && <p class="hint" style="padding:0 0 8px;text-align:left">{note}</p>}
@@ -104,6 +118,27 @@ export function HostPicker() {
     if (typeof window.refreshSessions === 'function') window.refreshSessions();
   }, []);
 
+  // promptCred: show the in-app CredDialog and resolve with true (creds saved)
+  // or false (cancelled). Used both on first select and on 401 re-prompt.
+  const promptCred = useCallback((peer, note = null) => {
+    return new Promise((resolve) => {
+      const m = getMesh();
+      setCredDialog({
+        peer,
+        note,
+        onConfirm: (user, pin) => {
+          m?.setPeerCred(peer, user, pin);
+          setCredDialog(null);
+          resolve(true);
+        },
+        onCancel: () => {
+          setCredDialog(null);
+          resolve(false);
+        },
+      });
+    });
+  }, []);
+
   const selectPeer = useCallback(async (peer) => {
     const m = getMesh();
     if (!m) return;
@@ -115,27 +150,43 @@ export function HostPicker() {
     }
     m.setPeer(peer);
     if (!m.getPeerCred(peer)) {
-      await new Promise((resolve) => {
-        setCredDialog({
-          peer,
-          note: null,
-          onConfirm: (user, pin) => {
-            m.setPeerCred(peer, user, pin);
-            setCredDialog(null);
-            resolve(true);
-          },
-          onCancel: () => {
-            m.setPeer('');
-            setSelectedPeer('');
-            setCredDialog(null);
-            resolve(false);
-          },
-        });
-      });
+      const ok = await promptCred(peer);
+      if (!ok) {
+        m.setPeer('');
+        setSelectedPeer('');
+        notifyPeerChanged();
+        return;
+      }
     }
     setSelectedPeer(m.getPeer() || '');
     notifyPeerChanged();
-  }, [notifyPeerChanged]);
+  }, [notifyPeerChanged, promptCred]);
+
+  // Listen for 401-from-peer events dispatched by callers (e.g. Home's refresh)
+  // when mesh-client's apiFetch clears the cred and throws meshKind=unauthorized.
+  // Re-show the in-app dialog so the user can re-enter creds without ever seeing
+  // the browser's native auth prompt.
+  useEffect(() => {
+    const handler = async (e) => {
+      const m = getMesh();
+      if (!m) return;
+      const peer = e.detail?.peer || m.getPeer();
+      if (!peer) return;
+      const ok = await promptCred(peer, 'Authentication failed — please re-enter your PIN.');
+      if (ok) {
+        // Re-select the peer so the relay carries the fresh cred.
+        setSelectedPeer(peer);
+        notifyPeerChanged();
+      } else {
+        // Cancelled — drop back to this host.
+        m.setPeer('');
+        setSelectedPeer('');
+        notifyPeerChanged();
+      }
+    };
+    window.addEventListener('mobux:peer-auth-required', handler);
+    return () => window.removeEventListener('mobux:peer-auth-required', handler);
+  }, [promptCred, notifyPeerChanged]);
 
   const handleChange = useCallback(async (e) => {
     await selectPeer(e.target.value);
