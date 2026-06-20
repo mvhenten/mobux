@@ -9,7 +9,10 @@
 // consumers (terminal.js, reader-view.js, tests) use a single contract.
 
 const WINDOW_SWITCH_CMDS = new Set([
-  'next-window', 'prev-window', 'new-window', 'kill-window',
+  "next-window",
+  "prev-window",
+  "new-window",
+  "kill-window",
 ]);
 
 export class TerminalCoreXterm extends EventTarget {
@@ -17,12 +20,15 @@ export class TerminalCoreXterm extends EventTarget {
     super();
     this.session = session;
     this.host = host;
-    this.renderer = 'xterm';
+    this.renderer = "xterm";
 
     const Xterm = window.Terminal;
-    const WebLinksAddon = window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
+    const WebLinksAddon =
+      window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
     if (!Xterm) {
-      throw new Error('xterm bundle not loaded — check vendor/xterm.bundle.js script tag');
+      throw new Error(
+        "xterm bundle not loaded — check vendor/xterm.bundle.js script tag",
+      );
     }
 
     this.term = new Xterm({
@@ -30,13 +36,14 @@ export class TerminalCoreXterm extends EventTarget {
       // Match the reader's typography (style.css `.rb-line`): same
       // mono stack, same 13px font, line-height bumped from xterm's
       // default 1.0 to 1.25 for a bit of breathing room.
-      fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
+      fontFamily:
+        "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
       fontSize: 13,
       lineHeight: 1.25,
       fontWeight: 300,
       convertEol: false,
       scrollback: 10000,
-      theme: { background: '#0f1115' },
+      theme: { background: "#0f1115" },
     });
     this.term.open(host);
     if (WebLinksAddon) {
@@ -46,9 +53,17 @@ export class TerminalCoreXterm extends EventTarget {
     // Lock mouse protocol to NONE — prevents xterm.js from capturing
     // touch/mouse when tmux sends \x1b[?1000h
     try {
-      Object.defineProperty(this.term._core.coreMouseService, 'activeProtocol', {
-        set() {}, get() { return 'NONE'; }, configurable: true,
-      });
+      Object.defineProperty(
+        this.term._core.coreMouseService,
+        "activeProtocol",
+        {
+          set() {},
+          get() {
+            return "NONE";
+          },
+          configurable: true,
+        },
+      );
     } catch (_) {}
 
     // Block alternate screen buffer — tmux alt screen has no scrollback
@@ -78,14 +93,15 @@ export class TerminalCoreXterm extends EventTarget {
     this.oscDetected = false;
     if (this.term.parser && this.term.parser.registerOscHandler) {
       this.term.parser.registerOscHandler(133, (data) => {
-        const kind = (data || '').charAt(0);
-        if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return false;
+        const kind = (data || "").charAt(0);
+        if (kind !== "A" && kind !== "B" && kind !== "C" && kind !== "D")
+          return false;
         const buf = this.term.buffer.active;
         const absY = buf.baseY + buf.cursorY;
         this.oscMarkers.set(absY, kind);
         if (!this.oscDetected) {
           this.oscDetected = true;
-          this.dispatchEvent(new Event('osc-detected'));
+          this.dispatchEvent(new Event("osc-detected"));
         }
         return false;
       });
@@ -94,7 +110,7 @@ export class TerminalCoreXterm extends EventTarget {
     this.term.onData((d) => this.send(d));
 
     // Debug peephole for tests / themes.js.
-    if (typeof window !== 'undefined') {
+    if (typeof window !== "undefined") {
       window.__xterm = this.term;
     }
   }
@@ -109,17 +125,17 @@ export class TerminalCoreXterm extends EventTarget {
     this.intentionalClose = false;
     // Same-origin by default; routed through the relay when a peer is picked.
     this.ws = new WebSocket(window.MobuxMesh.wsUrl(this.session));
-    this.ws.binaryType = 'arraybuffer';
+    this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
       // A clean open resets the backoff window.
       this._reconnectDelay = 0;
       this.resize();
       this.refreshPanes();
-      this.dispatchEvent(new Event('open'));
+      this.dispatchEvent(new Event("open"));
     };
     this.ws.onmessage = async (ev) => {
       let bytes;
-      if (typeof ev.data === 'string') {
+      if (typeof ev.data === "string") {
         this.term.write(ev.data);
         bytes = ev.data;
       } else if (ev.data instanceof ArrayBuffer) {
@@ -131,9 +147,12 @@ export class TerminalCoreXterm extends EventTarget {
         this.term.write(u8);
         bytes = u8;
       }
-      this.dispatchEvent(new CustomEvent('data', { detail: bytes }));
+      this.dispatchEvent(new CustomEvent("data", { detail: bytes }));
     };
-    this.ws.onclose = () => this._scheduleReconnect();
+    this.ws.onclose = () => {
+      this.dispatchEvent(new Event("close"));
+      this._scheduleReconnect();
+    };
     this.ws.onerror = () => {};
   }
 
@@ -158,14 +177,19 @@ export class TerminalCoreXterm extends EventTarget {
     // no action. The CONNECTING guard also avoids a double-socket race
     // when an early `pageshow`/`visibilitychange` fires before boot's
     // own connect() has finished handshaking.
-    if (this.ws &&
-        (this.ws.readyState === WebSocket.OPEN ||
-         this.ws.readyState === WebSocket.CONNECTING)) return;
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    )
+      return;
     if (this.ws) {
       // Tear down the stale socket without arming the backoff — connect()
       // below opens a fresh one immediately.
       this.intentionalClose = true;
-      try { this.ws.close(); } catch (_) {}
+      try {
+        this.ws.close();
+      } catch (_) {}
     }
     this.connect();
   }
@@ -197,13 +221,15 @@ export class TerminalCoreXterm extends EventTarget {
     const cols = Math.max(20, Math.floor((hostW - pad) / cell.width) - 1);
     const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
     this.term.resize(cols, rows);
-    this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
   _horizontalPadding() {
     try {
       const cs = getComputedStyle(this.host);
-      return (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+      return (
+        (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+      );
     } catch (_) {
       return 0;
     }
@@ -215,10 +241,18 @@ export class TerminalCoreXterm extends EventTarget {
   }
 
   // ── Buffer / scroll passthroughs ──────────────────────────────────
-  getActiveBuffer() { return this.term.buffer.active; }
-  scrollLines(n)    { this.term.scrollLines(n); }
-  scrollToBottom()  { this.term.scrollToBottom(); }
-  clear()           { this.term.clear(); }
+  getActiveBuffer() {
+    return this.term.buffer.active;
+  }
+  scrollLines(n) {
+    this.term.scrollLines(n);
+  }
+  scrollToBottom() {
+    this.term.scrollToBottom();
+  }
+  clear() {
+    this.term.clear();
+  }
 
   setFontSize(px) {
     if (px !== this.term.options.fontSize) {
@@ -226,25 +260,31 @@ export class TerminalCoreXterm extends EventTarget {
       this.resize();
     }
   }
-  getFontSize() { return this.term.options.fontSize; }
+  getFontSize() {
+    return this.term.options.fontSize;
+  }
 
   // ── Panes (= tmux windows) ────────────────────────────────────────
   async refreshPanes() {
     try {
-      const res = await window.MobuxMesh.apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/panes`);
+      const res = await window.MobuxMesh.apiFetch(
+        `/api/sessions/${encodeURIComponent(this.session)}/panes`,
+      );
       if (!res.ok) return;
       this.panes = await res.json();
       this.activeIndex = this.panes.findIndex((p) => p.active);
       if (this.activeIndex < 0) this.activeIndex = 0;
-      this.dispatchEvent(new CustomEvent('panes', {
-        detail: { panes: this.panes, activeIndex: this.activeIndex },
-      }));
+      this.dispatchEvent(
+        new CustomEvent("panes", {
+          detail: { panes: this.panes, activeIndex: this.activeIndex },
+        }),
+      );
     } catch (_) {}
   }
 
   switchWindow(direction) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.send(direction === 'next' ? '\x02n' : '\x02p');
+    this.send(direction === "next" ? "\x02n" : "\x02p");
     this.clear();
     this.scrollToBottom();
     setTimeout(async () => {
@@ -262,39 +302,49 @@ export class TerminalCoreXterm extends EventTarget {
     const pad = this._horizontalPadding();
     const cols = Math.max(20, Math.floor((hostW - pad) / cell.width) - 1);
     const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
-    this.ws.send(JSON.stringify({ type: 'resize', cols, rows: Math.max(2, rows - 1) }));
+    this.ws.send(
+      JSON.stringify({ type: "resize", cols, rows: Math.max(2, rows - 1) }),
+    );
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       this.term.resize(cols, rows);
-      this.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }, 50);
   }
 
   async runTmuxCmd(command) {
     try {
-      await window.MobuxMesh.apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
-      });
+      await window.MobuxMesh.apiFetch(
+        `/api/sessions/${encodeURIComponent(this.session)}/command`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command }),
+        },
+      );
     } catch (_) {}
     if (WINDOW_SWITCH_CMDS.has(command)) {
       this.clear();
       this.scrollToBottom();
     }
-    setTimeout(() => { this.refreshPanes(); this.reloadHistory(); }, 300);
+    setTimeout(() => {
+      this.refreshPanes();
+      this.reloadHistory();
+    }, 300);
   }
 
   // ── History ───────────────────────────────────────────────────────
   async reloadHistory() {
     try {
-      const res = await window.MobuxMesh.apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/history`);
+      const res = await window.MobuxMesh.apiFetch(
+        `/api/sessions/${encodeURIComponent(this.session)}/history`,
+      );
       if (!res.ok) return;
       const history = await res.text();
       if (history.trim()) {
-        this.term.write(history.replace(/\n/g, '\r\n'));
+        this.term.write(history.replace(/\n/g, "\r\n"));
         this.scrollToBottom();
-        this.dispatchEvent(new CustomEvent('history', { detail: history }));
+        this.dispatchEvent(new CustomEvent("history", { detail: history }));
       }
     } catch (_) {}
   }
