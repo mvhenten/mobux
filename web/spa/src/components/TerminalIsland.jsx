@@ -81,7 +81,12 @@ export function TerminalIsland({ session, peer = '' }) {
     (async () => {
       try {
         await loadScript(`/static/vendor/${bundle}${v}`);
-        await loadScript(`/static/mesh-client.js${v}`);
+        // Skip if HostPicker (or a prior terminal mount) already loaded it —
+        // mesh-client.js uses top-level `const` declarations that throw a
+        // SyntaxError if the same script body executes twice in the same page.
+        if (!window.MobuxMesh) {
+          await loadScript(`/static/mesh-client.js${v}`);
+        }
         await loadScript(`/static/host-picker.js${v}`);
         await loadScript(`/static/terminal.js${v}`, { module: true });
       } catch (e) {

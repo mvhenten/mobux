@@ -388,6 +388,62 @@ test('settings: build-info card shows version and matching hashes', async ({ pag
   expect(srv.trim()).toBe(fe.trim());
 });
 
+// ── regression: mesh-client loads exactly once (no double-declaration) ──────
+//
+// If HostPicker (mounted on the home route) loads mesh-client.js and then
+// TerminalIsland (mounted on a session route) also loads mesh-client.js with a
+// different cache-bust URL, the browser treats them as distinct scripts and
+// executes the body twice — the top-level `const PEER_KEY` declaration on the
+// second execution throws `SyntaxError: Identifier 'PEER_KEY' has already been
+// declared`, which propagates as a pageerror and leaves the terminal blank.
+// Guard: after the fix, TerminalIsland skips the load when window.MobuxMesh
+// is already present. This test catches any regression in that guard.
+test('mesh-client loads once: no double-declaration error navigating home then terminal', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(err.message));
+
+  // 1. Load the home route — HostPicker mounts and loads mesh-client.js first.
+  await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
+  // Confirm mesh-client ran and exported its global before we navigate away.
+  await page.waitForFunction(() => !!window.MobuxMesh, { timeout: 10000 });
+
+  // 2. SPA-navigate to a terminal route — TerminalIsland mounts and must NOT
+  //    re-execute mesh-client.js (same page, same global scope).
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, { waitUntil: 'networkidle' });
+
+  // Terminal scaffold must be present.
+  await expect(page.locator('#terminal')).toHaveCount(1);
+
+  // Engine must attach child content (xterm viewport or sterk canvas).
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById('terminal');
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+
+  // #terminal must have rendered height > 0 (not collapsed).
+  const termHeight = await page.evaluate(() => {
+    const t = document.getElementById('terminal');
+    return t ? t.getBoundingClientRect().height : 0;
+  });
+  expect(termHeight).toBeGreaterThan(0);
+
+  // window.MobuxMesh must still exist (not blown away by a failed second load).
+  expect(await page.evaluate(() => !!window.MobuxMesh)).toBe(true);
+
+  // No "already been declared" error — the core symptom of double-execution.
+  const doubleDecl = pageErrors.filter((m) => m.includes('already been declared'));
+  expect(doubleDecl, `double-declaration errors: ${doubleDecl.join('; ')}`).toHaveLength(0);
+
+  // No SyntaxErrors at all from the boot chain.
+  const syntaxErrors = pageErrors.filter((m) =>
+    m.toLowerCase().includes('syntaxerror'),
+  );
+  expect(syntaxErrors, `unexpected SyntaxErrors: ${syntaxErrors.join('; ')}`).toHaveLength(0);
+});
+
 // ── install page: QR codes ──────────────────────────────────────────────────
 
 test('install page renders QR codes for CA and APK', async ({ page }) => {
