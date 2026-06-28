@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
-import { useLocation } from "wouter-preact";
 import { apiGet, apiSend } from "../lib/api.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
@@ -83,7 +82,6 @@ async function refresh() {
 }
 
 export function HomePage() {
-  const [, navigate] = useLocation();
   const dialogRef = useRef(null);
   const nameRef = useRef(null);
 
@@ -108,7 +106,11 @@ export function HomePage() {
     const href = peer
       ? `/s/${encodeURIComponent(peer)}/${encodeURIComponent(name)}`
       : `/s/${encodeURIComponent(name)}`;
-    navigate(href);
+    // Hard-load so terminal.js and host-picker.js always get a fresh execution
+    // context. Client-side navigation re-uses the module map, leaving #terminal
+    // empty and triggering "already been declared" errors on the second open.
+    window.location.href = `/app#${href}`;
+    window.location.reload();
   };
 
   const create = async (e) => {

@@ -444,6 +444,66 @@ test('mesh-client loads once: no double-declaration error navigating home then t
   expect(syntaxErrors, `unexpected SyntaxErrors: ${syntaxErrors.join('; ')}`).toHaveLength(0);
 });
 
+// ── regression: second terminal session renders after navigating home → terminal → home → terminal
+//
+// Before the fix, terminal.js was an ES module already in the browser's module
+// map after the first open. Client-side navigate() to a second session route
+// never re-executed it, host-picker.js threw "already been declared", and
+// #terminal stayed empty. The fix: open() hard-loads (location.href + reload())
+// for every terminal route, so each open gets a fresh module scope.
+test('second terminal session renders (regression: was blank on same-page second open)', async ({ page }) => {
+  const pageErrors = [];
+  page.on('pageerror', (err) => pageErrors.push(err.message));
+
+  // A second dedicated session so the test can open two distinct terminals.
+  const SEED2 = `spa-seed2-${process.pid}`;
+  try { tmux(`kill-session -t ${SEED2}`); } catch (_) {}
+  tmux(`new-session -d -s ${SEED2} ${SHELL_ENV} "bash --norc --noprofile"`);
+
+  try {
+    // Home — both session rows must appear.
+    await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
+    await expect(page.locator(`#sessionList .swipe-row[data-name="${SEED}"] .session-item`)).toBeVisible({ timeout: 8000 });
+    await expect(page.locator(`#sessionList .swipe-row[data-name="${SEED2}"] .session-item`)).toBeVisible({ timeout: 8000 });
+
+    // Click first session row — hard-load navigates to the terminal route.
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle' }),
+      page.locator(`#sessionList .swipe-row[data-name="${SEED}"] .session-item`).click(),
+    ]);
+    await page.waitForFunction(
+      () => { const t = document.getElementById('terminal'); return t && t.childElementCount > 0; },
+      { timeout: 15000 },
+    );
+    expect(await page.evaluate(() => document.getElementById('terminal').getBoundingClientRect().height)).toBeGreaterThan(0);
+
+    // Return to Home.
+    await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
+    await expect(page.locator(`#sessionList .swipe-row[data-name="${SEED2}"] .session-item`)).toBeVisible({ timeout: 8000 });
+
+    // Click second session row — hard-load again; without the fix this was blank
+    // because terminal.js was already module-cached and would not re-execute.
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle' }),
+      page.locator(`#sessionList .swipe-row[data-name="${SEED2}"] .session-item`).click(),
+    ]);
+    await page.waitForFunction(
+      () => { const t = document.getElementById('terminal'); return t && t.childElementCount > 0; },
+      { timeout: 15000 },
+    );
+    expect(await page.evaluate(() => document.getElementById('terminal').getBoundingClientRect().height)).toBeGreaterThan(0);
+
+    // MobuxMesh must be present (not blown away by a failed re-load).
+    expect(await page.evaluate(() => !!window.MobuxMesh)).toBe(true);
+
+    // Core symptom of double-execution — must be absent.
+    const doubleDecl = pageErrors.filter((m) => m.includes('already been declared'));
+    expect(doubleDecl, `double-declaration errors: ${doubleDecl.join('; ')}`).toHaveLength(0);
+  } finally {
+    try { tmux(`kill-session -t ${SEED2}`); } catch (_) {}
+  }
+});
+
 // ── install page: QR codes ──────────────────────────────────────────────────
 
 test('install page renders QR codes for CA and APK', async ({ page }) => {
