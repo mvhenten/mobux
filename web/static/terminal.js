@@ -369,10 +369,13 @@ function ensureInputBar() {
   return inputBar;
 }
 
-// If we already look like a touch device, mount eagerly so the existing
-// auto-hide / viewport plumbing is wired from the start.
+// If we already look like a touch device, mount eagerly AND reveal the bar
+// immediately so the mic button (and the full control-key ribbon) are
+// visible from the moment the terminal boots — no double-tap required.
+// `reveal()` shows the bar without stealing keyboard focus, which avoids
+// popping the soft keyboard on load.
 if (isMobile) {
-  ensureInputBar();
+  ensureInputBar().reveal();
 }
 
 // Re-evaluate when the primary pointer flips to coarse (e.g. a 2-in-1

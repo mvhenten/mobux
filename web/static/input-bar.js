@@ -217,6 +217,11 @@ export function createInputBar(term, send) {
   // ── Public API ────────────────────────────────────────────────────
   return {
     _computeKeyboardOffset: computeKeyboardOffset,
+    // reveal() — show the bar without focusing the text input.  Used for
+    // the eager mobile mount so #micBtn is visible from the start without
+    // popping the soft keyboard.
+    reveal: show,
+    // show() — show the bar AND focus the text input (the double-tap path).
     show: activateInput,
     hide,
     destroy() {
