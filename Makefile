@@ -136,7 +136,7 @@ smoke-start: build
 		HOME=/tmp/mobux-smoke/home HISTFILE=/dev/null \
 		MOBUX_TMUX_SOCKET=mobux-test \
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
-		MOBUX_UPDATE_CHECK_URL=http://localhost:$(MOBUX_SMOKE_PORT)/api/update/test-index \
+		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
 		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
@@ -166,7 +166,7 @@ test:
 test-smoke:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/smoke.spec.cjs
 
@@ -174,7 +174,7 @@ test-smoke:
 test-critical-path:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
 
@@ -186,7 +186,7 @@ test-critical-path:
 test-mesh:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/mesh-relay.spec.cjs
 
@@ -204,7 +204,7 @@ test-update-runner:
 test-stt-ux:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_STT_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_STT_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_STT_USER=smoke MOBUX_STT_PASS=00000 \
 		npx playwright test test/stt-ux.spec.cjs
 
@@ -213,7 +213,7 @@ test-stt-ux:
 test-stt-per-kind:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_STT_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_STT_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_STT_USER=smoke MOBUX_STT_PASS=00000 \
 		npx playwright test test/stt-per-kind.spec.cjs
 
@@ -225,7 +225,7 @@ test-stt-per-kind:
 test-spa:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/spa.spec.cjs
 
@@ -233,7 +233,7 @@ test-spa:
 test-e2e:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test
 
