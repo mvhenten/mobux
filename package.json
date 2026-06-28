@@ -9,6 +9,7 @@
   "scripts": {
     "build": "node web/build.js",
     "postinstall": "node web/build.js",
+    "fix": "npx prettier --write 'test/*.cjs' 'web/spa/src/**/*.{jsx,js}'",
     "test": "npx playwright test"
   },
   "repository": {

@@ -66,9 +66,13 @@ test("sessionRow pins /app#/s/<host>/<name> when a peer is selected, plain when 
 }) => {
   // Case 1: no peer → /app#/s/<name> (single segment, no host).
   await page.goto(`${BASE}/app#/`);
+  // HostPicker loads mesh-client.js async; wait for it before touching it.
+  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
+    timeout: 8000,
+  });
   await page.waitForSelector(".session-item", { timeout: 8000 });
   // Clear any leftover peer from a previous run.
-  await page.evaluate(() => window.MobuxMesh?.setPeer(""));
+  await page.evaluate(() => window.MobuxMesh.setPeer(""));
 
   await Promise.all([
     page.waitForURL(/\/app#\/s\//, { timeout: 5000 }),
@@ -78,6 +82,9 @@ test("sessionRow pins /app#/s/<host>/<name> when a peer is selected, plain when 
 
   // Case 2: peer 'box:8443' → /app#/s/box%3A8443/<name>.
   await page.goto(`${BASE}/app#/`);
+  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
+    timeout: 8000,
+  });
   await page.waitForSelector(".session-item", { timeout: 8000 });
   // Inject peer + cred so ensurePeerCred resolves without a dialog.
   await page.evaluate(() => {

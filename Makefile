@@ -24,6 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
+        test-smoke test-critical-path test-mesh test-update-runner test-spa test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -196,6 +197,25 @@ test-mesh:
 test-update-runner:
 	@command -v shellcheck >/dev/null 2>&1 && shellcheck src/update_runner.sh test/update-runner.test.sh || echo "shellcheck not installed; skipping lint"
 	@bash test/update-runner.test.sh
+
+# STT settings UX: run stt-ux.spec.cjs against the smoke instance.
+# Uses MOBUX_STT_URL so the spec's openSettings() hits the smoke server.
+.PHONY: test-stt-ux
+test-stt-ux:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_STT_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_STT_USER=smoke MOBUX_STT_PASS=00000 \
+		npx playwright test test/stt-ux.spec.cjs
+
+# STT per-kind persistence: run stt-per-kind.spec.cjs against the smoke instance.
+.PHONY: test-stt-per-kind
+test-stt-per-kind:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_STT_URL=http://localhost:$(MOBUX_SMOKE_PORT) \
+		MOBUX_STT_USER=smoke MOBUX_STT_PASS=00000 \
+		npx playwright test test/stt-per-kind.spec.cjs
 
 # SPA coverage: the Preact/Wouter UI served at /app on the smoke instance
 # (built into web/static/spa by `make build`, which smoke-start depends on).
