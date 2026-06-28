@@ -451,7 +451,7 @@ test('mesh-client loads once: no double-declaration error navigating home then t
 // never re-executed it, host-picker.js threw "already been declared", and
 // #terminal stayed empty. The fix: open() hard-loads (location.href + reload())
 // for every terminal route, so each open gets a fresh module scope.
-test('second terminal session renders (regression: was blank on same-page second open)', async ({ page }) => {
+test('second terminal open renders without engine boot error', async ({ page }) => {
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(err.message));
 
