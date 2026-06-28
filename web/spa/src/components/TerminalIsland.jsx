@@ -1,4 +1,4 @@
-import { useRef, useLayoutEffect } from 'preact/hooks';
+import { useRef, useLayoutEffect } from "preact/hooks";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -25,16 +25,16 @@ import { useRef, useLayoutEffect } from 'preact/hooks';
 //
 // `CACHE_BUST` mirrors the Rust page's `?v=` query so a stale SW cache can't
 // hand back an old bundle; in dev it is just a constant.
-const CACHE_BUST = 'spa';
+const CACHE_BUST = "spa";
 
 // Append a classic <script> and resolve when it loads. Order matters (the
 // renderer global must exist before terminal-core constructs the backend), so
 // callers await each one.
 function loadScript(src, { module = false } = {}) {
   return new Promise((resolve, reject) => {
-    const el = document.createElement('script');
+    const el = document.createElement("script");
     el.src = src;
-    if (module) el.type = 'module';
+    if (module) el.type = "module";
     el.async = false; // preserve execution order
     el.onload = () => resolve();
     el.onerror = () => reject(new Error(`failed to load ${src}`));
@@ -42,7 +42,7 @@ function loadScript(src, { module = false } = {}) {
   });
 }
 
-export function TerminalIsland({ session, peer = '' }) {
+export function TerminalIsland({ session, peer = "" }) {
   const rootRef = useRef(null);
   const bootedRef = useRef(false);
   const resizeObsRef = useRef(null);
@@ -53,24 +53,24 @@ export function TerminalIsland({ session, peer = '' }) {
 
     // 1. Globals the engine reads at module-eval time.
     window.MOBUX_SESSION = session;
-    window.MOBUX_PEER = peer || '';
+    window.MOBUX_PEER = peer || "";
     window.MOBUX_DEV = false;
 
     // 2. Resolve the renderer choice exactly like the Rust page's inline
     //    boot script, then load the matching vendor bundle + css first.
-    let renderer = 'xterm';
+    let renderer = "xterm";
     try {
-      const s = localStorage.getItem('mobux:renderer');
-      if (s === 'sterk' || s === 'xterm') renderer = s;
+      const s = localStorage.getItem("mobux:renderer");
+      if (s === "sterk" || s === "xterm") renderer = s;
     } catch (_) {}
     window.__mobuxRenderer = renderer;
 
     const v = `?v=${CACHE_BUST}`;
-    const bundle = renderer === 'sterk' ? 'sterk.bundle.js' : 'xterm.bundle.js';
+    const bundle = renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js";
 
-    if (renderer === 'xterm') {
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
+    if (renderer === "xterm") {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
       link.href = `/static/vendor/xterm.css${v}`;
       document.head.appendChild(link);
     }
@@ -89,9 +89,16 @@ export function TerminalIsland({ session, peer = '' }) {
         }
         await loadScript(`/static/host-picker.js${v}`);
         await loadScript(`/static/terminal.js${v}`, { module: true });
+        // chime.js sets up the in-page bell that plays when the SW delivers a
+        // push notification. It self-boots via IIFE (attaches to SW messages),
+        // so loading it once is enough. Guard against double-mount via the global
+        // it exposes (unlikely here since the island boots once, but be safe).
+        if (!window.__mobuxChime) {
+          await loadScript(`/static/chime.js${v}`);
+        }
       } catch (e) {
         // Surface boot failure in the loading splash rather than a blank page.
-        const q = rootRef.current?.querySelector('#quote');
+        const q = rootRef.current?.querySelector("#quote");
         if (q) q.textContent = `Terminal failed to load: ${e.message}`;
         return;
       }
@@ -107,11 +114,11 @@ export function TerminalIsland({ session, peer = '' }) {
       // (one full painted frame later) and again after the host's box settles,
       // via a ResizeObserver, so the initial row count is correct without a
       // rotate/keyboard nudge.
-      const kick = () => window.dispatchEvent(new Event('resize'));
+      const kick = () => window.dispatchEvent(new Event("resize"));
       requestAnimationFrame(() => requestAnimationFrame(kick));
 
-      const host = rootRef.current?.querySelector('#terminal');
-      if (host && 'ResizeObserver' in window) {
+      const host = rootRef.current?.querySelector("#terminal");
+      if (host && "ResizeObserver" in window) {
         let last = 0;
         const ro = new ResizeObserver(() => {
           const h = host.clientHeight;
@@ -152,19 +159,39 @@ export function TerminalIsland({ session, peer = '' }) {
             Close
           </button>
         </div>
-        <button class="cmd-item" data-cmd="new-window">New window</button>
-        <button class="cmd-item" data-cmd="kill-window">Close window</button>
+        <button class="cmd-item" data-cmd="new-window">
+          New window
+        </button>
+        <button class="cmd-item" data-cmd="kill-window">
+          Close window
+        </button>
         <div class="cmd-separator" />
-        <button class="cmd-item" data-cmd="split-h">Split horizontal</button>
-        <button class="cmd-item" data-cmd="split-v">Split vertical</button>
-        <button class="cmd-item" data-cmd="kill-pane">Close pane</button>
+        <button class="cmd-item" data-cmd="split-h">
+          Split horizontal
+        </button>
+        <button class="cmd-item" data-cmd="split-v">
+          Split vertical
+        </button>
+        <button class="cmd-item" data-cmd="kill-pane">
+          Close pane
+        </button>
         <div class="cmd-separator" />
-        <button class="cmd-item" data-cmd="next-window">Next window</button>
-        <button class="cmd-item" data-cmd="prev-window">Previous window</button>
-        <button class="cmd-item" data-cmd="next-pane">Next pane</button>
-        <button class="cmd-item" data-cmd="prev-pane">Previous pane</button>
+        <button class="cmd-item" data-cmd="next-window">
+          Next window
+        </button>
+        <button class="cmd-item" data-cmd="prev-window">
+          Previous window
+        </button>
+        <button class="cmd-item" data-cmd="next-pane">
+          Next pane
+        </button>
+        <button class="cmd-item" data-cmd="prev-pane">
+          Previous pane
+        </button>
         <div class="cmd-separator" />
-        <button class="cmd-item" data-cmd="zoom-pane">Zoom pane</button>
+        <button class="cmd-item" data-cmd="zoom-pane">
+          Zoom pane
+        </button>
       </div>
 
       <div id="inputBar" class="input-bar hidden">
@@ -172,9 +199,15 @@ export function TerminalIsland({ session, peer = '' }) {
           <button id="viewToggleBtn" title="Toggle reader/terminal view">
             📖
           </button>
-          <button id="uploadBtn" title="Attach file">📎</button>
-          <button id="micBtn" title="Dictate (speech to text)">🎤</button>
-          <button id="settingsBtn" title="Settings">⚙</button>
+          <button id="uploadBtn" title="Attach file">
+            📎
+          </button>
+          <button id="micBtn" title="Dictate (speech to text)">
+            🎤
+          </button>
+          <button id="settingsBtn" title="Settings">
+            ⚙
+          </button>
           <button data-key="\x7f">⌫</button>
           <button data-key="\r">⏎</button>
           <button data-key="\x1b[D">←</button>
@@ -194,7 +227,12 @@ export function TerminalIsland({ session, peer = '' }) {
           <button data-key="/clear\r">/clear</button>
           <button data-key="/quit\r">/quit</button>
         </div>
-        <div id="inputToast" class="input-toast hidden" role="status" aria-live="polite" />
+        <div
+          id="inputToast"
+          class="input-toast hidden"
+          role="status"
+          aria-live="polite"
+        />
         <div class="input-row">
           <input
             id="inputText"

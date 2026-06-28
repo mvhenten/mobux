@@ -1,10 +1,10 @@
-import { Router, Route, Switch, Link, useLocation } from 'wouter-preact';
-import { useHashLocation } from 'wouter-preact/use-hash-location';
-import { HomePage } from './pages/Home.jsx';
-import { TerminalPage } from './pages/Terminal.jsx';
-import { SettingsPage } from './pages/Settings.jsx';
-import { InstallPage } from './pages/Install.jsx';
-import { HostPicker } from './components/HostPicker.jsx';
+import { Router, Route, Switch, Link, useLocation } from "wouter-preact";
+import { useHashLocation } from "wouter-preact/use-hash-location";
+import { HomePage } from "./pages/Home.jsx";
+import { TerminalPage } from "./pages/Terminal.jsx";
+import { SettingsPage } from "./pages/Settings.jsx";
+import { InstallPage } from "./pages/Install.jsx";
+import { HostPicker } from "./components/HostPicker.jsx";
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -65,9 +65,9 @@ function HomeHeader() {
         class="app-wordmark"
         role="link"
         tabindex="0"
-        onClick={() => navigate('/')}
+        onClick={() => navigate("/")}
         onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') navigate('/');
+          if (e.key === "Enter" || e.key === " ") navigate("/");
         }}
       >
         mobux
@@ -77,7 +77,7 @@ function HomeHeader() {
         class="header-icon header-icon-btn"
         type="button"
         aria-label="Settings"
-        onClick={() => navigate('/settings')}
+        onClick={() => navigate("/settings")}
       >
         ⚙
       </button>
@@ -98,7 +98,7 @@ function SettingsHeader() {
 
 function Shell({ children }) {
   const [location] = useLocation();
-  const onSettings = location === '/settings';
+  const onSettings = location === "/settings";
   return (
     <div class="spa-shell">
       {onSettings ? <SettingsHeader /> : <HomeHeader />}

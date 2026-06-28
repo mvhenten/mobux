@@ -1,37 +1,37 @@
-import { useEffect, useRef } from 'preact/hooks';
-import { signal, computed } from '@preact/signals';
-import { apiGet, apiPutJSON, apiPost } from '../../lib/api.js';
+import { useEffect, useRef } from "preact/hooks";
+import { signal, computed } from "@preact/signals";
+import { apiGet, apiPutJSON, apiPost } from "../../lib/api.js";
 import {
   FALLBACK_MODELS,
   kindDefaults,
   normalizeHost,
   parseUrlIntoFields,
   fetchModels,
-} from '../../lib/stt.js';
+} from "../../lib/stt.js";
 
 // ── State ────────────────────────────────────────────────────────────
 // Per-kind cache of the last-known field values, seeded from GET on mount and
 // kept in sync on save — mirrors `providerCache` in the original IIFE.
 const cache = signal({}); // { local: {host,port,model,has_key}, ... }
-const kind = signal('local');
-const host = signal('http://127.0.0.1');
-const port = signal('5200');
+const kind = signal("local");
+const host = signal("http://127.0.0.1");
+const port = signal("5200");
 const model = signal(FALLBACK_MODELS.local[0]);
-const customModel = signal('');
-const apiKey = signal('');
+const customModel = signal("");
+const apiKey = signal("");
 const hasKey = signal(false);
 const models = signal(FALLBACK_MODELS.local.slice());
 const status = signal(null); // { msg, ok }
 const action = signal(null); // local install/run status line
 const sttStatus = signal(null); // { installed, local_process_running }
 
-const CUSTOM = '__custom__';
+const CUSTOM = "__custom__";
 
 // Which fields a kind exposes — this is the component-model replacement for the
 // old visibility toggling. We render only what applies (no [hidden]).
-const isLocal = computed(() => kind.value === 'local');
-const isNetwork = computed(() => kind.value === 'network');
-const isOpenai = computed(() => kind.value === 'openai');
+const isLocal = computed(() => kind.value === "local");
+const isNetwork = computed(() => kind.value === "network");
+const isOpenai = computed(() => kind.value === "openai");
 const isCustomModel = computed(() => model.value === CUSTOM);
 
 function flash(sig, msg, ok) {
@@ -51,7 +51,10 @@ async function loadModels(selected) {
     selected && !list.includes(selected) ? [selected, ...list] : list.slice();
   models.value = withSaved;
   if (selected) {
-    model.value = list.includes(selected) || withSaved.includes(selected) ? selected : CUSTOM;
+    model.value =
+      list.includes(selected) || withSaved.includes(selected)
+        ? selected
+        : CUSTOM;
     if (model.value === CUSTOM) customModel.value = selected;
   }
 }
@@ -66,7 +69,7 @@ async function save() {
   };
   if (apiKey.value) body.api_key = apiKey.value;
   try {
-    const r = await apiPutJSON('/api/settings/stt', body);
+    const r = await apiPutJSON("/api/settings/stt", body);
     if (r.ok) {
       const prev = cache.value[k] || {};
       cache.value = {
@@ -80,9 +83,9 @@ async function save() {
         },
       };
     }
-    flash(status, r.ok ? 'Saved ✓' : 'Save failed.', r.ok);
+    flash(status, r.ok ? "Saved ✓" : "Save failed.", r.ok);
   } catch (_) {
-    flash(status, 'Save failed.', false);
+    flash(status, "Save failed.", false);
   }
 }
 
@@ -91,14 +94,14 @@ function populateFromProvider(k) {
   const p = cache.value[k] || {};
   host.value = p.host || def.host;
   port.value = p.port || def.port;
-  apiKey.value = '';
+  apiKey.value = "";
   hasKey.value = !!p.has_key;
   loadModels(p.model || def.model);
 }
 
 async function refreshSttStatus() {
   try {
-    sttStatus.value = await apiGet('/api/stt/status');
+    sttStatus.value = await apiGet("/api/stt/status");
   } catch (_) {}
 }
 
@@ -109,13 +112,13 @@ export function SttCard() {
 
   // Load current config on mount (mirrors the original's initial fetch).
   useEffect(() => {
-    apiGet('/api/settings/stt')
+    apiGet("/api/settings/stt")
       .then((cfg) => {
         cache.value = cfg.providers || {};
-        const active = cfg.activeKind || 'local';
+        const active = cfg.activeKind || "local";
         kind.value = active;
         populateFromProvider(active);
-        if (active === 'local') refreshSttStatus();
+        if (active === "local") refreshSttStatus();
       })
       .catch(() => {
         populateFromProvider(kind.value);
@@ -139,7 +142,7 @@ export function SttCard() {
   const onKindChange = (e) => {
     kind.value = e.target.value;
     populateFromProvider(kind.value);
-    if (kind.value === 'local') refreshSttStatus();
+    if (kind.value === "local") refreshSttStatus();
     schedSave();
   };
 
@@ -155,14 +158,14 @@ export function SttCard() {
     const parsed = parseUrlIntoFields(raw);
     if (parsed) {
       // Re-split only when there was a port or a real path component.
-      let normalised = /^https?:\/\//i.test(raw) ? raw : 'http://' + raw;
+      let normalised = /^https?:\/\//i.test(raw) ? raw : "http://" + raw;
       try {
         const u = new URL(normalised);
-        if (u.port || (u.pathname && u.pathname !== '/')) {
+        if (u.port || (u.pathname && u.pathname !== "/")) {
           host.value = parsed.host;
           port.value = parsed.port;
         } else {
-          host.value = u.protocol + '//' + u.hostname;
+          host.value = u.protocol + "//" + u.hostname;
         }
       } catch (_) {}
     }
@@ -170,16 +173,16 @@ export function SttCard() {
   };
 
   const onInstall = async () => {
-    flash(action, 'Installing… (this may take a minute)', true);
+    flash(action, "Installing… (this may take a minute)", true);
     let r;
     try {
-      r = await apiPost('/api/stt/install');
+      r = await apiPost("/api/stt/install");
     } catch (_) {
-      flash(action, 'Install failed (network).', false);
+      flash(action, "Install failed (network).", false);
       return;
     }
     if (!r.ok && r.status !== 202 && r.status !== 409) {
-      flash(action, 'Install request failed: ' + r.status, false);
+      flash(action, "Install request failed: " + r.status, false);
       return;
     }
     // Poll install status to completion.
@@ -188,51 +191,67 @@ export function SttCard() {
       await new Promise((res) => setTimeout(res, 2000));
       let s;
       try {
-        s = await apiGet('/api/stt/status');
+        s = await apiGet("/api/stt/status");
         errCount = 0;
       } catch (_) {
         if (++errCount >= 5) {
-          flash(action, 'Install status unavailable.', false);
+          flash(action, "Install status unavailable.", false);
           break;
         }
         continue;
       }
-      const tail = Array.isArray(s.install_output) ? s.install_output.slice(-3).join(' | ') : '';
-      if (s.install_phase === 'success') {
-        flash(action, 'Installed.' + (tail ? ' ' + tail : ''), true);
+      const tail = Array.isArray(s.install_output)
+        ? s.install_output.slice(-3).join(" | ")
+        : "";
+      if (s.install_phase === "success") {
+        flash(action, "Installed." + (tail ? " " + tail : ""), true);
         sttStatus.value = s;
         break;
-      } else if (s.install_phase === 'failed') {
-        flash(action, 'Install failed: ' + (s.install_error || 'unknown'), false);
+      } else if (s.install_phase === "failed") {
+        flash(
+          action,
+          "Install failed: " + (s.install_error || "unknown"),
+          false,
+        );
         break;
-      } else if (s.install_phase === 'running') {
-        flash(action, 'Installing… ' + (tail || ''), true);
+      } else if (s.install_phase === "running") {
+        flash(action, "Installing… " + (tail || ""), true);
       }
     }
   };
 
   const onToggle = async () => {
     const running = !!sttStatus.value?.local_process_running;
-    const ep = running ? '/api/stt/stop' : '/api/stt/start';
+    const ep = running ? "/api/stt/stop" : "/api/stt/start";
     try {
       const r = await apiPost(ep);
-      flash(action, r.ok ? (running ? 'Server stopped.' : 'Server started.') : 'Action failed.', r.ok);
+      flash(
+        action,
+        r.ok
+          ? running
+            ? "Server stopped."
+            : "Server started."
+          : "Action failed.",
+        r.ok,
+      );
     } catch (_) {
-      flash(action, 'Action failed.', false);
+      flash(action, "Action failed.", false);
     }
     refreshSttStatus();
   };
 
   const onProbe = async () => {
     try {
-      const s = await apiGet('/api/stt/status');
+      const s = await apiGet("/api/stt/status");
       flash(
         status,
-        s.reachable ? `Provider reachable (kind: ${s.kind})` : `Provider NOT reachable (${s.url})`,
+        s.reachable
+          ? `Provider reachable (kind: ${s.kind})`
+          : `Provider NOT reachable (${s.url})`,
         s.reachable,
       );
     } catch (_) {
-      flash(status, 'Status check failed.', false);
+      flash(status, "Status check failed.", false);
     }
   };
 
@@ -245,7 +264,12 @@ export function SttCard() {
 
       <label class="settings-row">
         <span>Provider</span>
-        <select id="sttKind" class="settings-select" value={kind.value} onChange={onKindChange}>
+        <select
+          id="sttKind"
+          class="settings-select"
+          value={kind.value}
+          onChange={onKindChange}
+        >
           <option value="local">Local server</option>
           <option value="network">Network (self-hosted)</option>
           <option value="openai">OpenAI</option>
@@ -340,7 +364,7 @@ export function SttCard() {
             type="password"
             id="sttApiKey"
             class="settings-input"
-            placeholder={hasKey.value ? '•••• stored' : 'sk-…'}
+            placeholder={hasKey.value ? "•••• stored" : "sk-…"}
             autocomplete="off"
             value={apiKey.value}
             onInput={(e) => (apiKey.value = e.target.value)}
@@ -350,7 +374,11 @@ export function SttCard() {
       )}
 
       {status.value && (
-        <div id="sttStatus" class="settings-status" style={{ color: status.value.ok ? '#7ec87e' : '#c87e7e' }}>
+        <div
+          id="sttStatus"
+          class="settings-status"
+          style={{ color: status.value.ok ? "#7ec87e" : "#c87e7e" }}
+        >
           {status.value.msg}
         </div>
       )}
@@ -363,17 +391,26 @@ export function SttCard() {
         {isLocal.value && (
           <>
             <button type="button" id="sttInstallBtn" onClick={onInstall}>
-              {installed ? 'Reinstall' : 'Install local server'}
+              {installed ? "Reinstall" : "Install local server"}
             </button>
-            <button type="button" id="sttToggleBtn" onClick={onToggle} disabled={!installed}>
-              {running ? 'Stop' : 'Start'}
+            <button
+              type="button"
+              id="sttToggleBtn"
+              onClick={onToggle}
+              disabled={!installed}
+            >
+              {running ? "Stop" : "Start"}
             </button>
           </>
         )}
       </div>
 
       {action.value && (
-        <div class="settings-status" id="sttActionStatus" style={{ color: action.value.ok ? '#7ec87e' : '#c87e7e' }}>
+        <div
+          class="settings-status"
+          id="sttActionStatus"
+          style={{ color: action.value.ok ? "#7ec87e" : "#c87e7e" }}
+        >
           {action.value.msg}
         </div>
       )}

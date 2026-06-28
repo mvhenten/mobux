@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'preact/hooks';
-import { signal } from '@preact/signals';
-import { apiGet, apiPutJSON } from '../../lib/api.js';
+import { useState, useEffect, useRef } from "preact/hooks";
+import { signal } from "@preact/signals";
+import { apiGet, apiPutJSON } from "../../lib/api.js";
 
 const peerPort = signal(5151);
 const status = signal(null); // { msg, ok }
@@ -12,14 +12,14 @@ function flash(msg, ok) {
 async function save() {
   const port = Number(peerPort.value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    flash('Port must be 1–65535.', false);
+    flash("Port must be 1–65535.", false);
     return;
   }
   try {
-    const r = await apiPutJSON('/api/settings/mesh', { peer_port: port });
-    flash(r.ok ? 'Saved ✓' : 'Save failed.', r.ok);
+    const r = await apiPutJSON("/api/settings/mesh", { peer_port: port });
+    flash(r.ok ? "Saved ✓" : "Save failed.", r.ok);
   } catch (_) {
-    flash('Save failed.', false);
+    flash("Save failed.", false);
   }
 }
 
@@ -30,10 +30,10 @@ function getMesh() {
 export function MeshCard() {
   const saveTimer = useRef(null);
   const [manualPeers, setManualPeers] = useState([]);
-  const [addHost, setAddHost] = useState('');
+  const [addHost, setAddHost] = useState("");
 
   useEffect(() => {
-    apiGet('/api/settings/mesh')
+    apiGet("/api/settings/mesh")
       .then((cfg) => {
         peerPort.value = cfg.peer_port ?? 5151;
       })
@@ -46,8 +46,8 @@ export function MeshCard() {
     };
     syncManual();
     // Re-sync whenever a peer-changed event fires.
-    window.addEventListener('mobux:peer-changed', syncManual);
-    return () => window.removeEventListener('mobux:peer-changed', syncManual);
+    window.addEventListener("mobux:peer-changed", syncManual);
+    return () => window.removeEventListener("mobux:peer-changed", syncManual);
   }, []);
 
   const schedSave = () => {
@@ -67,8 +67,8 @@ export function MeshCard() {
       return;
     }
     setManualPeers(m.getManualPeers() || []);
-    setAddHost('');
-    window.dispatchEvent(new CustomEvent('mobux:peer-changed'));
+    setAddHost("");
+    window.dispatchEvent(new CustomEvent("mobux:peer-changed"));
   };
 
   const handleRemove = (peerId) => {
@@ -78,8 +78,8 @@ export function MeshCard() {
     m.removeManualPeer(peerId);
     setManualPeers(m.getManualPeers() || []);
     if (wasActive) {
-      m.setPeer('');
-      window.dispatchEvent(new CustomEvent('mobux:peer-changed'));
+      m.setPeer("");
+      window.dispatchEvent(new CustomEvent("mobux:peer-changed"));
     }
   };
 
@@ -87,8 +87,9 @@ export function MeshCard() {
     <section class="settings-card" id="mesh-settings">
       <h2>Mesh</h2>
       <p class="settings-lede">
-        Port probed on each tailnet peer when checking which hosts run mobux. The fleet
-        standard is <strong>5151</strong>. Change only if your fleet uses a different port.
+        Port probed on each tailnet peer when checking which hosts run mobux.
+        The fleet standard is <strong>5151</strong>. Change only if your fleet
+        uses a different port.
       </p>
 
       <label class="settings-row">
@@ -109,7 +110,7 @@ export function MeshCard() {
       {status.value && (
         <div
           class="settings-status"
-          style={{ color: status.value.ok ? '#7ec87e' : '#c87e7e' }}
+          style={{ color: status.value.ok ? "#7ec87e" : "#c87e7e" }}
         >
           {status.value.msg}
         </div>
@@ -146,7 +147,9 @@ export function MeshCard() {
           onInput={(e) => setAddHost(e.target.value)}
           autocomplete="off"
         />
-        <button class="btn-create mesh-add-btn" type="submit">Add host</button>
+        <button class="btn-create mesh-add-btn" type="submit">
+          Add host
+        </button>
       </form>
     </section>
   );

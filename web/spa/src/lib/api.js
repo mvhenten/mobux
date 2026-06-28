@@ -12,7 +12,7 @@
 // act on the page's own host regardless — call the `*Local` helpers there.
 
 function mesh() {
-  return typeof window !== 'undefined' ? window.MobuxMesh : undefined;
+  return typeof window !== "undefined" ? window.MobuxMesh : undefined;
 }
 
 // ── Mesh-aware helpers (peer-routed when a host is selected) ──────────
@@ -20,7 +20,7 @@ function mesh() {
 export async function apiGet(path) {
   const m = mesh();
   if (m) return m.apiFetchJSON(path);
-  const res = await fetch(path, { headers: { Accept: 'application/json' } });
+  const res = await fetch(path, { headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
   return res.json();
 }
@@ -29,14 +29,14 @@ export async function apiPutJSON(path, body) {
   const m = mesh();
   if (m) {
     return m.apiFetch(path, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
   }
   return fetch(path, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -44,8 +44,12 @@ export async function apiPutJSON(path, body) {
 export async function apiPost(path, body) {
   const m = mesh();
   const opts = body
-    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    : { method: 'POST' };
+    ? {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    : { method: "POST" };
   if (m) return m.apiFetch(path, opts);
   return fetch(path, opts);
 }
@@ -57,11 +61,12 @@ export async function apiSend(path, opts = {}) {
   const m = mesh();
   const merged = {
     ...opts,
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   };
   if (m) return m.apiFetchJSON(path, merged);
   const res = await fetch(path, merged);
-  if (!res.ok) throw new Error(`${opts.method || 'GET'} ${path} -> ${res.status}`);
+  if (!res.ok)
+    throw new Error(`${opts.method || "GET"} ${path} -> ${res.status}`);
   const text = await res.text();
   return text ? JSON.parse(text) : null;
 }
@@ -73,13 +78,13 @@ export async function apiSend(path, opts = {}) {
 
 export async function localGet(path) {
   const res = await fetch(path, {
-    headers: { Accept: 'application/json' },
-    credentials: 'same-origin',
+    headers: { Accept: "application/json" },
+    credentials: "same-origin",
   });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
   return res.json();
 }
 
 export async function localFetch(path, opts = {}) {
-  return fetch(path, { credentials: 'same-origin', ...opts });
+  return fetch(path, { credentials: "same-origin", ...opts });
 }

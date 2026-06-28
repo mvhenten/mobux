@@ -2749,6 +2749,47 @@ test("mesh client: manual peer add / normalize / remove APIs work", async ({
   expect(after).not.toContain("manualbox:7000");
 });
 
+// ── Legacy route redirect tests (SPA cutover) ─────────────────────────────
+//
+// The old server-rendered pages at /settings, /s/<name>, /s/<host>/<name>, and
+// /install now 307-redirect into the SPA. These tests assert the redirects so
+// that deep-links, bookmarks, and the installed TWA keep working.
+
+test("GET /settings 307-redirects to /app#/settings", async ({ page }) => {
+  const resp = await page.request.get(`${BASE}/settings`, {
+    maxRedirects: 0,
+  });
+  expect(resp.status()).toBe(307);
+  expect(resp.headers()["location"]).toBe("/app#/settings");
+});
+
+test("GET /s/<name> 307-redirects to /app#/s/<name>", async ({ page }) => {
+  const resp = await page.request.get(`${BASE}/s/${SESSION}`, {
+    maxRedirects: 0,
+  });
+  expect(resp.status()).toBe(307);
+  expect(resp.headers()["location"]).toBe(`/app#/s/${SESSION}`);
+});
+
+test("GET /install 307-redirects to /app#/install", async ({ page }) => {
+  const resp = await page.request.get(`${BASE}/install`, {
+    maxRedirects: 0,
+  });
+  expect(resp.status()).toBe(307);
+  expect(resp.headers()["location"]).toBe("/app#/install");
+});
+
+test("GET /s/<host>/<name> 307-redirects to /app#/s/<encoded-host>/<name>", async ({
+  page,
+}) => {
+  // host:port → colon is percent-encoded to %3A (same as the SPA's encodeURIComponent)
+  const resp = await page.request.get(`${BASE}/s/box:8443/${SESSION}`, {
+    maxRedirects: 0,
+  });
+  expect(resp.status()).toBe(307);
+  expect(resp.headers()["location"]).toBe(`/app#/s/box%3A8443/${SESSION}`);
+});
+
 test.fixme("host picker: manual add host appears in picker with label and remove button", async ({
   page,
 }) => {
