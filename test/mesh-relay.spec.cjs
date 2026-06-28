@@ -11,30 +11,34 @@
 // (no built binary, port busy), the suite skips rather than failing — the
 // in-browser picker tests in smoke.spec.cjs cover the UI regardless.
 
-const { test, expect } = require('./fixtures.cjs');
-const { spawn, execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
+const { test, expect } = require("./fixtures.cjs");
+const { spawn, execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
-const RELAY = process.env.MOBUX_URL || 'http://localhost:8281';
-const RELAY_USER = process.env.MOBUX_USER || 'smoke';
-const RELAY_PASS = process.env.MOBUX_PASS || '00000';
-const RELAY_AUTH = 'Basic ' + Buffer.from(`${RELAY_USER}:${RELAY_PASS}`).toString('base64');
+const RELAY = process.env.MOBUX_URL || "http://localhost:8281";
+const RELAY_USER = process.env.MOBUX_USER || "smoke";
+const RELAY_PASS = process.env.MOBUX_PASS || "00000";
+const RELAY_AUTH =
+  "Basic " + Buffer.from(`${RELAY_USER}:${RELAY_PASS}`).toString("base64");
 
 // The peer's own credentials (separate per node, per the EDD).
 const PEER_PORT = Number(process.env.MOBUX_PEER_PORT || 8282);
-const PEER_USER = 'peer';
-const PEER_PASS = '99999';
-const PEER_AUTH_B64 = Buffer.from(`${PEER_USER}:${PEER_PASS}`).toString('base64');
+const PEER_USER = "peer";
+const PEER_PASS = "99999";
+const PEER_AUTH_B64 = Buffer.from(`${PEER_USER}:${PEER_PASS}`).toString(
+  "base64",
+);
 const PEER = `localhost:${PEER_PORT}`;
 const PEER_HOST = `https://localhost:${PEER_PORT}`;
 
-const PEER_DATA = '/tmp/mobux-mesh-peer';
-const PEER_TMUX = 'mobux-mesh-peer';
-const PEER_SESSION = 'peer-session';
+const PEER_DATA = "/tmp/mobux-mesh-peer";
+const PEER_TMUX = "mobux-mesh-peer";
+const PEER_SESSION = "peer-session";
 
-const BIN = path.resolve(__dirname, '..', 'target', 'debug', 'mobux');
-const tmux = (args) => execSync(`tmux -L ${PEER_TMUX} ${args}`, { stdio: 'pipe' });
+const BIN = path.resolve(__dirname, "..", "target", "debug", "mobux");
+const tmux = (args) =>
+  execSync(`tmux -L ${PEER_TMUX} ${args}`, { stdio: "pipe" });
 
 let peerProc = null;
 
@@ -60,15 +64,19 @@ test.beforeAll(async () => {
   }
   // Node 18+ fetch rejects self-signed certs; the peer serves one. Relax it
   // for this process only (we're a test reaching the peer directly to seed it).
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
   fs.rmSync(PEER_DATA, { recursive: true, force: true });
-  fs.mkdirSync(path.join(PEER_DATA, 'home'), { recursive: true });
+  fs.mkdirSync(path.join(PEER_DATA, "home"), { recursive: true });
 
   // Seed a tmux session on the peer's dedicated server so the relayed
   // /api/sessions has something to return.
-  try { tmux(`kill-session -t ${PEER_SESSION}`); } catch (_) {}
-  tmux(`new-session -d -s ${PEER_SESSION} -e HISTFILE=/dev/null -e HOME=${PEER_DATA}/home "bash --norc --noprofile"`);
+  try {
+    tmux(`kill-session -t ${PEER_SESSION}`);
+  } catch (_) {}
+  tmux(
+    `new-session -d -s ${PEER_SESSION} -e HISTFILE=/dev/null -e HOME=${PEER_DATA}/home "bash --norc --noprofile"`,
+  );
 
   peerProc = spawn(BIN, [], {
     env: {
@@ -79,64 +87,79 @@ test.beforeAll(async () => {
       MOBUX_AUTH_USER: PEER_USER,
       MOBUX_PIN: PEER_PASS,
       HOME: `${PEER_DATA}/home`,
-      HISTFILE: '/dev/null',
+      HISTFILE: "/dev/null",
       // Default TLS (self-signed CA + leaf) so the relay can dial https.
-      MOBUX_TLS: '1',
+      MOBUX_TLS: "1",
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
-  const log = fs.createWriteStream(path.join(PEER_DATA, 'peer.log'));
+  const log = fs.createWriteStream(path.join(PEER_DATA, "peer.log"));
   peerProc.stdout.pipe(log);
   peerProc.stderr.pipe(log);
 
   const up = await waitFor(`${PEER_HOST}/api/identify`, {});
   if (!up) {
-    test.skip(true, `peer did not come up on ${PEER_HOST} (see ${PEER_DATA}/peer.log)`);
+    test.skip(
+      true,
+      `peer did not come up on ${PEER_HOST} (see ${PEER_DATA}/peer.log)`,
+    );
   }
 
   // The relay node's pin DB persists across runs (and across the xterm/sterk
   // project pair). Each beforeAll wipes PEER_DATA → a fresh peer cert, so drop
   // any stale relay pin first; the next relayed call re-pins via TOFU.
   await fetch(`${RELAY}/api/peers/${encodeURIComponent(PEER)}/pin`, {
-    method: 'DELETE',
+    method: "DELETE",
     headers: { Authorization: RELAY_AUTH },
   }).catch(() => {});
 });
 
 test.afterAll(() => {
-  if (peerProc) { try { peerProc.kill('SIGKILL'); } catch (_) {} }
-  try { tmux(`kill-session -t ${PEER_SESSION}`); } catch (_) {}
+  if (peerProc) {
+    try {
+      peerProc.kill("SIGKILL");
+    } catch (_) {}
+  }
+  try {
+    tmux(`kill-session -t ${PEER_SESSION}`);
+  } catch (_) {}
   fs.rmSync(PEER_DATA, { recursive: true, force: true });
 });
 
-test('peer is directly reachable and identifies as mobux', async () => {
+test("peer is directly reachable and identifies as mobux", async () => {
   const res = await fetch(`${PEER_HOST}/api/identify`);
   expect(res.ok).toBeTruthy();
   const id = await res.json();
-  expect(id.app).toBe('mobux');
-  expect(typeof id.version).toBe('string');
+  expect(id.app).toBe("mobux");
+  expect(typeof id.version).toBe("string");
 });
 
-test('relayed /api/sessions returns the PEER\'s sessions, not the relay\'s', async () => {
+test("relayed /api/sessions returns the PEER's sessions, not the relay's", async () => {
   // Through the relay node, with the relay's own auth + the peer's upstream
   // auth — exactly what mesh-client.js sends for a selected peer.
-  const res = await fetch(`${RELAY}/r/${encodeURIComponent(PEER)}/api/sessions`, {
-    headers: {
-      Authorization: RELAY_AUTH,
-      'X-Mobux-Upstream-Authorization': `Basic ${PEER_AUTH_B64}`,
+  const res = await fetch(
+    `${RELAY}/r/${encodeURIComponent(PEER)}/api/sessions`,
+    {
+      headers: {
+        Authorization: RELAY_AUTH,
+        "X-Mobux-Upstream-Authorization": `Basic ${PEER_AUTH_B64}`,
+      },
     },
-  });
+  );
   expect(res.ok).toBeTruthy();
   const sessions = await res.json();
   const names = sessions.map((s) => s.name);
   expect(names).toContain(PEER_SESSION);
 });
 
-test('relay without upstream auth is rejected by the peer (401)', async () => {
-  const res = await fetch(`${RELAY}/r/${encodeURIComponent(PEER)}/api/sessions`, {
-    headers: { Authorization: RELAY_AUTH },
-  });
+test("relay without upstream auth is rejected by the peer (401)", async () => {
+  const res = await fetch(
+    `${RELAY}/r/${encodeURIComponent(PEER)}/api/sessions`,
+    {
+      headers: { Authorization: RELAY_AUTH },
+    },
+  );
   // No X-Mobux-Upstream-Authorization → relay forwards no Authorization →
   // the peer's auth middleware rejects.
   expect(res.status).toBe(401);
@@ -146,24 +169,31 @@ const relayCall = () =>
   fetch(`${RELAY}/r/${encodeURIComponent(PEER)}/api/sessions`, {
     headers: {
       Authorization: RELAY_AUTH,
-      'X-Mobux-Upstream-Authorization': `Basic ${PEER_AUTH_B64}`,
+      "X-Mobux-Upstream-Authorization": `Basic ${PEER_AUTH_B64}`,
     },
   });
 
 // The reinstall scenario the pin-mismatch UX exists for: the peer comes back
 // with a brand-new self-signed cert, the relay's stored pin no longer matches,
 // and the UI must surface a structured 409 with a one-tap re-trust.
-test('pin mismatch surfaces 409, and re-trust (DELETE pin) recovers', async () => {
+test("pin mismatch surfaces 409, and re-trust (DELETE pin) recovers", async () => {
   // 1. First contact pins the peer's current cert.
   const ok = await relayCall();
   expect(ok.ok).toBeTruthy();
 
   // 2. Simulate a peer reinstall: drop its cert material and restart so it
   //    regenerates a different self-signed leaf. The relay keeps the old pin.
-  peerProc.kill('SIGKILL');
+  peerProc.kill("SIGKILL");
   await new Promise((r) => setTimeout(r, 500));
-  const certDir = path.join(PEER_DATA, 'home', '.config', 'mobux');
-  for (const f of ['leaf.crt', 'leaf.key', 'leaf.meta', 'leaf.expiry', 'ca.crt', 'ca.key']) {
+  const certDir = path.join(PEER_DATA, "home", ".config", "mobux");
+  for (const f of [
+    "leaf.crt",
+    "leaf.key",
+    "leaf.meta",
+    "leaf.expiry",
+    "ca.crt",
+    "ca.key",
+  ]) {
     fs.rmSync(path.join(certDir, f), { force: true });
   }
   peerProc = spawn(BIN, [], {
@@ -175,10 +205,10 @@ test('pin mismatch surfaces 409, and re-trust (DELETE pin) recovers', async () =
       MOBUX_AUTH_USER: PEER_USER,
       MOBUX_PIN: PEER_PASS,
       HOME: `${PEER_DATA}/home`,
-      HISTFILE: '/dev/null',
-      MOBUX_TLS: '1',
+      HISTFILE: "/dev/null",
+      MOBUX_TLS: "1",
     },
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ["ignore", "ignore", "ignore"],
   });
   expect(await waitFor(`${PEER_HOST}/api/identify`, {})).toBeTruthy();
 
@@ -186,14 +216,17 @@ test('pin mismatch surfaces 409, and re-trust (DELETE pin) recovers', async () =
   const mism = await relayCall();
   expect(mism.status).toBe(409);
   const body = await mism.json();
-  expect(body.error).toBe('pin_mismatch');
-  expect(body.message).toContain('fingerprint');
+  expect(body.error).toBe("pin_mismatch");
+  expect(body.message).toContain("fingerprint");
 
   // 4. One-tap re-trust: drop the pin, then the next contact re-pins and works.
-  const del = await fetch(`${RELAY}/api/peers/${encodeURIComponent(PEER)}/pin`, {
-    method: 'DELETE',
-    headers: { Authorization: RELAY_AUTH },
-  });
+  const del = await fetch(
+    `${RELAY}/api/peers/${encodeURIComponent(PEER)}/pin`,
+    {
+      method: "DELETE",
+      headers: { Authorization: RELAY_AUTH },
+    },
+  );
   expect(del.ok).toBeTruthy();
   expect((await del.json()).deleted).toBe(true);
 
@@ -219,29 +252,37 @@ test('pin mismatch surfaces 409, and re-trust (DELETE pin) recovers', async () =
 // for a peer link, and the plain /ws/<name> for a same-origin link — exactly
 // what mesh-client.wsUrl() emits for the page's bound peer.
 
-const RELAY_WS_BASE = RELAY.replace(/^http/, 'ws');
+const RELAY_WS_BASE = RELAY.replace(/^http/, "ws");
 
 // Open a relay WS to a peer, collect frames until close or timeout. Returns
 // the concatenated text received (binary frames decoded as utf-8).
 function collectWs(url, { headers, timeoutMs = 4000 } = {}) {
   return new Promise((resolve) => {
-    let text = '';
+    let text = "";
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
-      try { ws.close(); } catch (_) {}
+      try {
+        ws.close();
+      } catch (_) {}
       resolve(text);
     };
     const ws = new WebSocket(url, headers ? { headers } : undefined);
-    ws.binaryType = 'arraybuffer';
+    ws.binaryType = "arraybuffer";
     const timer = setTimeout(finish, timeoutMs);
     ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') text += ev.data;
-      else text += Buffer.from(ev.data).toString('utf-8');
+      if (typeof ev.data === "string") text += ev.data;
+      else text += Buffer.from(ev.data).toString("utf-8");
     };
-    ws.onclose = () => { clearTimeout(timer); finish(); };
-    ws.onerror = () => { clearTimeout(timer); finish(); };
+    ws.onclose = () => {
+      clearTimeout(timer);
+      finish();
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      finish();
+    };
   });
 }
 
@@ -251,7 +292,7 @@ const pinnedPeerWsUrl = (name) =>
   `${RELAY_WS_BASE}/r/${encodeURIComponent(PEER)}/ws/${encodeURIComponent(name)}` +
   `?upstream_auth=${encodeURIComponent(PEER_AUTH_B64)}`;
 
-test('pinned to host A (the peer): WS attaches the session that lives there', async () => {
+test("pinned to host A (the peer): WS attaches the session that lives there", async () => {
   // /s/<PEER>/<PEER_SESSION> → page pins PEER → this WS.
   const out = await collectWs(pinnedPeerWsUrl(PEER_SESSION), {
     headers: { Authorization: RELAY_AUTH },
@@ -263,7 +304,7 @@ test('pinned to host A (the peer): WS attaches the session that lives there', as
   expect(out.length).toBeGreaterThan(0);
 });
 
-test('pinned to host B (relay/current node): a peer-only session surfaces not-found, not silence', async () => {
+test("pinned to host B (relay/current node): a peer-only session surfaces not-found, not silence", async () => {
   // The session lives on the PEER, not on the relay. Opening it bound to the
   // CURRENT node (same-origin /ws/<name>, no relay) is what the old bug did
   // after flipping the picker to "This host". tmux on the relay can't find it
@@ -280,32 +321,36 @@ test('pinned to host B (relay/current node): a peer-only session surfaces not-fo
   expect(out).toMatch(/can't find session|no sessions|session not found/);
 });
 
-test('host-pinned page route injects MOBUX_PEER; same-origin route does not', async () => {
-  // Two-segment /s/<host>/<name> renders the terminal page with the host
-  // surfaced as window.MOBUX_PEER so the client pins it. The one-segment
-  // /s/<name> stays byte-identical (empty peer).
-  const pinned = await fetch(
-    `${RELAY}/s/${encodeURIComponent(PEER)}/${encodeURIComponent(PEER_SESSION)}`,
-    { headers: { Authorization: RELAY_AUTH } },
-  );
-  expect(pinned.ok).toBeTruthy();
-  const pinnedHtml = await pinned.text();
-  expect(pinnedHtml).toContain(`window.MOBUX_PEER = ${JSON.stringify(PEER)}`);
-
-  const plain = await fetch(`${RELAY}/s/${encodeURIComponent(PEER_SESSION)}`, {
+test("host-pinned page route 307-redirects to /app#/s/<host>/<name>", async () => {
+  // Two-segment /s/<host>/<name> now 307-redirects to the SPA hash route with
+  // the host percent-encoded. The one-segment /s/<name> redirects to /app#/s/<name>.
+  // Both still validate the host/name and preserve the peer in the fragment.
+  const pinnedUrl = `${RELAY}/s/${encodeURIComponent(PEER)}/${encodeURIComponent(PEER_SESSION)}`;
+  const pinnedResp = await fetch(pinnedUrl, {
     headers: { Authorization: RELAY_AUTH },
+    redirect: "manual",
   });
-  expect(plain.ok).toBeTruthy();
-  const plainHtml = await plain.text();
-  // Same-origin: peer is the empty string (no override on the client).
-  expect(plainHtml).toContain('window.MOBUX_PEER = ""');
+  expect(pinnedResp.status).toBe(307);
+  const pinnedLoc = pinnedResp.headers.get("location");
+  // Colon in host:port is encoded as %3A (same as encodeURIComponent).
+  const encodedPeer = PEER.replace(/:/g, "%3A");
+  expect(pinnedLoc).toBe(`/app#/s/${encodedPeer}/${PEER_SESSION}`);
+
+  const plainUrl = `${RELAY}/s/${encodeURIComponent(PEER_SESSION)}`;
+  const plainResp = await fetch(plainUrl, {
+    headers: { Authorization: RELAY_AUTH },
+    redirect: "manual",
+  });
+  expect(plainResp.status).toBe(307);
+  const plainLoc = plainResp.headers.get("location");
+  expect(plainLoc).toBe(`/app#/s/${PEER_SESSION}`);
 });
 
-test('host-pinned route rejects a script-breakout host (reflected XSS guard)', async () => {
+test("host-pinned route rejects a script-breakout host (reflected XSS guard)", async () => {
   // The host segment is reflected into an inline <script> as window.MOBUX_PEER
   // and serde_json does not escape markup. A host carrying </script> / < / >
   // must be rejected (400), never rendered into the page.
-  const payload = '</script><script>window.__xss=1</script>';
+  const payload = "</script><script>window.__xss=1</script>";
   const res = await fetch(
     `${RELAY}/s/${encodeURIComponent(payload)}/${encodeURIComponent(PEER_SESSION)}`,
     { headers: { Authorization: RELAY_AUTH } },
@@ -313,10 +358,10 @@ test('host-pinned route rejects a script-breakout host (reflected XSS guard)', a
   expect(res.status).toBe(400);
   const body = await res.text();
   // The payload must not be reflected verbatim into any response body.
-  expect(body).not.toContain('window.__xss');
+  expect(body).not.toContain("window.__xss");
 });
 
-test('global picker set to B does not cross-wire a link pinned to A', async () => {
+test("global picker set to B does not cross-wire a link pinned to A", async () => {
   // Pinning is page-lifetime state, independent of the global selection. The
   // pinned WS targets PEER regardless of what "the picker" (the relay's own
   // global selection) would be — so the same pinned URL still attaches the

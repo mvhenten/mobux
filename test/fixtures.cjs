@@ -22,22 +22,26 @@
 // Renderer-agnostic boot/PTY/settings tests should NOT use this
 // helper so they run on the xterm project too.
 
-const base = require('@playwright/test');
+const base = require("@playwright/test");
 
 exports.test = base.test.extend({
   // autouse: every test gets the init script before any nav.
   context: async ({ context }, use, testInfo) => {
     const renderer = testInfo.project.use && testInfo.project.use.renderer;
-    if (renderer === 'sterk') {
+    if (renderer === "sterk") {
       await context.addInitScript(() => {
-        try { localStorage.setItem('mobux:renderer', 'sterk'); } catch (_) {}
+        try {
+          localStorage.setItem("mobux:renderer", "sterk");
+        } catch (_) {}
       });
-    } else if (renderer === 'xterm') {
+    } else if (renderer === "xterm") {
       // Belt-and-braces: even if a previous test in the same context
       // wrote `sterk`, force xterm on every doc load. This matches a
       // virgin-device first hit (no key set, boot defaults to xterm).
       await context.addInitScript(() => {
-        try { localStorage.removeItem('mobux:renderer'); } catch (_) {}
+        try {
+          localStorage.removeItem("mobux:renderer");
+        } catch (_) {}
       });
     }
     await use(context);
@@ -54,5 +58,5 @@ exports.expect = base.expect;
 // genuinely sterk-only and worth keeping around for that backend.
 exports.sterkOnly = (test, testInfo) => {
   const renderer = testInfo.project.use && testInfo.project.use.renderer;
-  test.skip(renderer !== 'sterk', 'sterk-specific renderer assertion');
+  test.skip(renderer !== "sterk", "sterk-specific renderer assertion");
 };

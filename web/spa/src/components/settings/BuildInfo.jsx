@@ -1,6 +1,6 @@
-import { useEffect } from 'preact/hooks';
-import { signal, computed } from '@preact/signals';
-import { localGet } from '../../lib/api.js';
+import { useEffect } from "preact/hooks";
+import { signal, computed } from "@preact/signals";
+import { localGet } from "../../lib/api.js";
 
 // Build-info card. Ports the Build section of the Rust /settings page.
 // Shows backend version, server bundle hash (from /api/build-info), and the
@@ -18,11 +18,11 @@ const stale = computed(() => {
 
 export function BuildInfoCard() {
   useEffect(() => {
-    localGet('/api/build-info')
+    localGet("/api/build-info")
       .then((d) => (info.value = d))
       .catch(() => {});
 
-    localGet('/static/build-info.json')
+    localGet("/static/build-info.json")
       .then((d) => (feHash.value = d?.hash || null))
       .catch(() => {});
   }, []);
@@ -38,25 +38,29 @@ export function BuildInfoCard() {
           <strong>Backend version</strong>
         </span>
         <span class="settings-value" id="buildVersion">
-          {srv?.version || '…'}
+          {srv?.version || "…"}
         </span>
       </div>
       <div class="settings-row">
         <span class="settings-label">
           <strong>Server bundle hash</strong>
-          <small>Hash of the frontend bundle on disk when the server started.</small>
+          <small>
+            Hash of the frontend bundle on disk when the server started.
+          </small>
         </span>
         <span class="settings-value" id="buildServerHash">
-          {srv?.build_hash || '…'}
+          {srv?.build_hash || "…"}
         </span>
       </div>
       <div class="settings-row">
         <span class="settings-label">
           <strong>Loaded bundle hash</strong>
-          <small>Hash of the bundle currently loaded in this browser tab.</small>
+          <small>
+            Hash of the bundle currently loaded in this browser tab.
+          </small>
         </span>
         <span class="settings-value" id="buildFeHash">
-          {fe || '—'}
+          {fe || "—"}
         </span>
       </div>
       {stale.value && (

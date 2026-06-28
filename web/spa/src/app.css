@@ -1,47 +1,171 @@
-/* SPA shell chrome. The ported pages reuse the backend's style.css (loaded in
-   index.html via the proxy); this file only styles the migration skeleton's
-   nav + layout, kept deliberately minimal and muted. */
+/* SPA shell chrome. Copies the old Rust-rendered home header: the .app-header /
+   .app-header h1 / .header-icon rules come from web/static/style.css (loaded in
+   index.html via the proxy), so the header already matches the old UI's colors,
+   spacing, and typography. This file only adds what's SPA-specific: making the
+   wordmark behave as a home link, placing the native host <select>, and giving
+   the gear a <button> the same look as the old <a class="header-icon">. */
 .spa-shell {
   min-height: 100dvh;
 }
-.spa-nav {
+
+/* ── Terminal route layout ───────────────────────────────────────────
+   The terminal route is a full-bleed island with no SPA chrome. The old
+   Rust page keyed its full-screen terminal layout off `body.term-body`
+   (web/static/style.css: position:fixed; 100dvh; flex column). In the SPA
+   the engine's children live one level deeper — inside `#app` →
+   `.term-body-spa` — so we have to extend that full-height flex column the
+   whole way down, or `#terminal` (flex:1; min-height:0) collapses to ~0
+   and the backend computes far too few rows on mount (the stranded
+   status-bar / dead-black-bottom bug). These rules only apply on the
+   terminal route, gated by `body.term-body`. */
+body.term-body #app {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
-  background: #161922;
-  border-bottom: 1px solid #232733;
-  position: sticky;
-  top: 0;
-  z-index: 10;
+  flex-direction: column;
 }
-.spa-nav a {
-  color: #9aa4b2;
-  text-decoration: none;
-  font-size: 0.95rem;
+.term-body-spa {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-.spa-nav a:hover {
-  color: #c7d0dc;
+
+/* ── Control-key ribbon ──────────────────────────────────────────────
+   The ribbon (^C, arrows, Tab, Esc, …) is a horizontal strip that must
+   scroll sideways by touch and never wrap. The base rules already come
+   from web/static/style.css `.input-ribbon`; these reassert them in the
+   SPA context so a stray parent `touch-action`/flex rule can't clip or
+   wrap the strip (the "ribbon won't scroll by touch" regression). Mirrors
+   the old `.input-ribbon`: overflow-x:auto + touch momentum + nowrap, with
+   touch-action:pan-x so the browser hands horizontal pans to the strip. */
+.term-body-spa .input-ribbon {
+  display: flex;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
 }
+.term-body-spa .input-ribbon button {
+  flex: 0 0 auto;
+}
+
+/* Wordmark = home link. The old header gave h1 `flex: 1` to shove the lone gear
+   to the far edge; here the host picker owns that stretch (margin-left: auto),
+   so the wordmark hugs the left instead. */
+.app-header .app-wordmark {
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
 .spa-main {
   padding: 1rem;
   max-width: 640px;
   margin: 0 auto;
 }
 
-/* Host picker in the SPA nav. Pushed to the right; dropdown anchors below the nav. */
+/* Host picker — native <select> in the header. Pushed to the right so the gear
+   button can anchor flush to the far edge. Shrinks before the gear does. */
 .spa-host-picker {
   margin-left: auto;
-  position: relative;
+  min-width: 0;
+  flex-shrink: 1;
 }
-.spa-host-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  min-width: 220px;
-  max-width: 320px;
-  z-index: 20;
+.host-select {
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  overflow: hidden;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  padding: 0.3rem 0.5rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  /* Constrain width so the gear button is never pushed off-screen */
+  max-width: 48vw;
+  min-width: 0;
+  /* Let Android/Chrome use its native picker styling */
+  -webkit-appearance: menulist;
+  appearance: menulist;
+}
+.host-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Gear — a <button> that wears the old `.header-icon` look (color/font-size/
+   padding/radius come from style.css). These rules only reset the native button
+   chrome and keep it from ever being squeezed off-screen. */
+.header-icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  min-height: 2rem;
+  font-family: inherit;
+}
+
+/* Mesh settings card — manual host list and add-host form. */
+.mesh-hosts-heading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #6a7485;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 1.25rem 0 0.5rem;
+}
+.mesh-host-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.mesh-host-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #1a1e2a;
+  border: 1px solid #2e3447;
+  border-radius: 4px;
+  padding: 0.35rem 0.6rem;
+}
+.mesh-host-label {
+  font-size: 0.9rem;
+  color: #9aa4b2;
+  font-family: monospace;
+}
+.mesh-host-remove {
+  background: none;
+  border: none;
+  color: #6a7485;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  line-height: 1;
+}
+.mesh-host-remove:hover {
+  color: #c87e7e;
+  background: #2a1e1e;
+}
+.mesh-add-host {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.mesh-add-input {
+  flex: 1;
+  min-width: 0;
+}
+.mesh-add-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
 }

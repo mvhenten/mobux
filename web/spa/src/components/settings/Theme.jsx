@@ -1,5 +1,5 @@
-import { useEffect } from 'preact/hooks';
-import { signal } from '@preact/signals';
+import { useEffect } from "preact/hooks";
+import { signal } from "@preact/signals";
 
 // Theme picker. Ports settings-theme.js. The theme catalogue + apply logic
 // lives in the backend ES module /static/themes.js (single source of truth,
@@ -10,7 +10,7 @@ import { signal } from '@preact/signals';
 // 'storage' event the module's setter triggers).
 
 const themes = signal([]); // [{ id, label }]
-const current = signal('');
+const current = signal("");
 let mod = null;
 
 export function ThemeCard() {
@@ -19,7 +19,7 @@ export function ThemeCard() {
     // host in both dev (Vite proxy) and prod (served from /static). The URL is
     // assembled at runtime so the bundler treats it as a genuine dynamic import
     // and leaves it external (does not try to resolve /static/themes.js itself).
-    const themesUrl = new URL('/static/themes.js', location.origin).href;
+    const themesUrl = new URL("/static/themes.js", location.origin).href;
     import(/* @vite-ignore */ themesUrl)
       .then((m) => {
         mod = m;
@@ -28,8 +28,8 @@ export function ThemeCard() {
       })
       .catch((e) => {
         themes.value = [];
-        current.value = '';
-        console.warn('themes.js load failed', e);
+        current.value = "";
+        console.warn("themes.js load failed", e);
       });
   }, []);
 
@@ -39,16 +39,16 @@ export function ThemeCard() {
     if (!mod) return;
     mod.setStoredThemeId(id);
     mod.applyTheme(id);
-    window.dispatchEvent(new CustomEvent('mobux:theme', { detail: id }));
+    window.dispatchEvent(new CustomEvent("mobux:theme", { detail: id }));
   };
 
   return (
     <section class="settings-card" id="theme-picker">
       <h2>Theme</h2>
       <p class="settings-lede">
-        Sets the editor theme, terminal palette and reader palette together. All bundles are muted,
-        low-contrast — picked for a phone screen at night. Switching applies live to any open
-        terminal tab.
+        Sets the editor theme, terminal palette and reader palette together. All
+        bundles are muted, low-contrast — picked for a phone screen at night.
+        Switching applies live to any open terminal tab.
       </p>
       <label class="settings-row">
         <span class="settings-label">
@@ -57,7 +57,11 @@ export function ThemeCard() {
             Stored locally as <code>mobux:theme</code>. Per-device.
           </small>
         </span>
-        <select class="settings-select" value={current.value} onChange={onChange}>
+        <select
+          class="settings-select"
+          value={current.value}
+          onChange={onChange}
+        >
           {themes.value.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}

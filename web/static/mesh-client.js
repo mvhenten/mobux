@@ -105,8 +105,10 @@ function normalizeManualPeer(raw) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
     return `${s.slice(0, i)}:${port}`;
   }
-  const port = location.port || (location.protocol === 'https:' ? '443' : '80');
-  return `${s}:${port}`;
+  // Default to 5151 — the fleet-standard mobux port. Using location.port
+  // here would make preview instances (:5153) add peers on :5153, where
+  // nothing listens. Operators who run a non-standard port type host:port.
+  return `${s}:5151`;
 }
 
 function getManualPeers() {

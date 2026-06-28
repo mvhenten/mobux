@@ -157,6 +157,13 @@ impl Db {
             CREATE TABLE IF NOT EXISTS stt_active_kind (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 kind TEXT NOT NULL DEFAULT 'local'
+            );
+
+            -- Mesh settings: configurable probe port for peer enumeration.
+            -- Default 5151 (fleet-standard mobux port). Single row, id=1.
+            CREATE TABLE IF NOT EXISTS mesh_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                peer_port INTEGER NOT NULL DEFAULT 5151
             );",
         )
         .context("initializing sqlite schema")?;
@@ -616,6 +623,32 @@ impl Db {
             params![row.kind, row.host, row.port, url, row.model, api_key],
         )
         .context("upserting stt_provider")?;
+        Ok(())
+    }
+
+    /// Return the configured mesh peer probe port. Defaults to 5151.
+    pub fn mesh_peer_port(&self) -> Result<u16> {
+        let conn = self.lock_conn()?;
+        let port: Option<i64> = conn
+            .query_row(
+                "SELECT peer_port FROM mesh_settings WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("reading mesh_settings")?;
+        Ok(port.map(|p| p as u16).unwrap_or(5151))
+    }
+
+    /// Set the mesh peer probe port. Validates 1–65535.
+    pub fn set_mesh_peer_port(&self, port: u16) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO mesh_settings (id, peer_port) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET peer_port = excluded.peer_port",
+            params![port as i64],
+        )
+        .context("upserting mesh_settings")?;
         Ok(())
     }
 

@@ -14,7 +14,7 @@ use axum::{
         HeaderMap, HeaderValue, Request, StatusCode,
     },
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{any, delete, get, post},
     Extension, Json, Router,
 };
@@ -74,8 +74,9 @@ struct AppState {
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
     internal_token: Arc<String>,
-    /// The TCP port this instance serves on. Mesh peer probing dials peers on
-    /// the same port (the EDD assumes a homogeneous mobux port across nodes).
+    /// The TCP port this instance serves on. Used for self-update health-checks
+    /// and the detached updater spawn; NOT used for mesh peer probing (see
+    /// `mesh_peer_port` in the DB — defaults to 5151, the fleet-standard port).
     port: u16,
     /// Where mobux persists state — used to write/spawn the detached updater.
     data_dir: PathBuf,
@@ -212,7 +213,7 @@ async fn main() -> Result<()> {
 
     let state_for_mw = state.clone();
     let app = Router::new()
-        .route("/", get(index))
+        .route("/", get(root_redirect))
         .route("/api/identify", get(api_identify))
         .route("/api/build-info", get(api_build_info))
         .route("/api/peers", get(api_peers))
@@ -255,6 +256,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/settings/stt",
             get(api_get_stt_config).put(api_set_stt_config),
+        )
+        .route(
+            "/api/settings/mesh",
+            get(api_get_mesh_settings).put(api_set_mesh_settings),
         )
         .route("/api/stt/status", get(api_stt_status))
         .route("/api/stt/models", get(api_stt_models))
@@ -608,15 +613,21 @@ async fn auth_middleware(
     resp
 }
 
-async fn index(State(state): State<AppState>) -> Result<axum::response::Response, AppError> {
-    let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
-    Ok(html_no_store(render_index(
-        &sessions,
-        None,
-        &state.cache_bust,
-        state.dev_mode,
-    )))
+/// Dev-only root redirect: `GET /` → 307 `/app` with `Cache-Control: no-store`
+/// so browsers and BFCache never pin a stale redirect. The old `index` handler
+/// is kept intact; it is just no longer mounted at `/`.
+async fn root_redirect() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, "/app"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+    )
 }
+
+// Old `index` handler removed — the root path now redirects to `/app` via
+// `root_redirect`. `render_index` is also removed; the SPA Home page is canonical.
 
 async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
     let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
@@ -646,8 +657,20 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
 /// structured error (HTTP 502) the UI can show — never a silent empty list.
 /// An empty `peers` array means "tailscale fine, nothing found"; the error
 /// path means "tailscale unavailable".
+///
+/// Probes peers on the configured `mesh_peer_port` (default 5151 — the
+/// fleet-standard mobux port). Configurable via GET/PUT /api/settings/mesh
+/// so preview instances on non-standard ports probe the right port.
 async fn api_peers(State(state): State<AppState>) -> Response {
-    match mesh::enumerate(state.port).await {
+    let probe_port = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.mesh_peer_port()
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or(5151);
+    match mesh::enumerate(probe_port).await {
         Ok(peers) => Json(json!({ "peers": peers })).into_response(),
         Err(err) => {
             // 502: this node is up, but the upstream dependency (tailscaled)
@@ -1234,800 +1257,53 @@ async fn api_shell_integration_uninstall(
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-async fn settings_page(State(state): State<AppState>) -> Response {
-    let v = &state.cache_bust;
-    let build_hash = &state.build_hash;
-    let version = PKG_VERSION;
-    html_no_store(format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-  <title>Mobux · Settings</title>
-  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
-  <meta name="theme-color" content="#0f1115" />
-  <link rel="stylesheet" href="/static/style.css?v={v}" />
-</head>
-<body>
-  <script>
-    window.MOBUX_BUILD_SERVER = "{build_hash}";
-    window.MOBUX_VERSION = "{version}";
-  </script>
-  <header class="app-header">
-    <a href="/" class="header-back" aria-label="Back">‹</a>
-    <h1>settings</h1>
-  </header>
-
-  <main class="settings-page">
-    <section class="settings-card" id="update">
-      <h2>Software update</h2>
-      <p class="settings-lede">mobux checks crates.io for newer published versions. Updating installs the new version with <code>cargo install</code>, restarts the systemd service, health-checks it, and rolls back automatically if the new version doesn't come up. This acts on <strong>this host only</strong> — to update a peer, open its own settings page.</p>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Current version</strong>
-          <small id="updateHost">This running binary.</small>
-        </span>
-        <span id="updateCurrent" class="settings-value">…</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Latest version</strong>
-          <small id="updateCheckedAt">Checking crates.io…</small>
-        </span>
-        <span id="updateLatest" class="settings-value">…</span>
-      </div>
-      <div class="shell-card-actions">
-        <button type="button" id="updateCheckBtn">Check for updates</button>
-        <button type="button" id="updateRunBtn" hidden>Update now</button>
-      </div>
-      <div class="settings-status" id="updateStatus" hidden></div>
-    </section>
-
-    <section class="settings-card" id="install-app">
-      <h2>Install app</h2>
-      <p class="settings-lede">Add Mobux to your home screen as a standalone Android app. The install page has the CA certificate and APK with step-by-step instructions.</p>
-      <a href="/install" class="settings-link-btn">Open install page →</a>
-    </section>
-
-    <section class="settings-card">
-      <h2>Notifications</h2>
-      <p class="settings-lede">Pick what fires a push to subscribed devices. Everything is detected by parsing the PTY stream — no shell hooks needed except the OSC-133 prompt for the exit toggles.</p>
-
-      <label class="settings-row">
-        <input type="checkbox" name="bell" />
-        <span class="settings-label">
-          <strong>Terminal bell (\x07)</strong>
-          <small>Standard ASCII BEL byte. Most apps fire this on tab-complete failures, vim errors, irc highlights.</small>
-        </span>
-      </label>
-
-      <label class="settings-row">
-        <input type="checkbox" name="bell_emoji" />
-        <span class="settings-label">
-          <strong>🔔 emoji in output</strong>
-          <small>Used for intentional pings — Claude, scripts, anything that prints the bell glyph.</small>
-        </span>
-      </label>
-
-      <label class="settings-row">
-        <input type="checkbox" name="program_exit" />
-        <span class="settings-label">
-          <strong>Program exit (any code)</strong>
-          <small>Detected via OSC 133;D semantic prompt. Requires Starship, Powerlevel10k, or a PS1 that emits <code>\e]133;D;$?\a</code>.</small>
-        </span>
-      </label>
-
-      <label class="settings-row">
-        <input type="checkbox" name="program_exit_nonzero" />
-        <span class="settings-label">
-          <strong>Program exit (non-zero only)</strong>
-          <small>Same OSC 133;D detection, fires only on failures.</small>
-        </span>
-      </label>
-
-      <div class="settings-status" id="settingsStatus" hidden>Saved.</div>
-    </section>
-
-    <section class="settings-card" id="renderer-picker">
-      <h2>Terminal renderer</h2>
-      <p class="settings-lede">The browser-side terminal emulator. <strong>xterm.js</strong> is the stable default. <strong>sterk</strong> is an experimental renderer (libterm + Ace) that is still catching up to xterm parity — switch back to xterm if the experimental lane breaks. The setting is per-device; reload the terminal tab after changing it.</p>
-      <label class="settings-row">
-        <span class="settings-label">
-          <strong>Renderer</strong>
-          <small>Stored locally as <code>mobux:renderer</code>. Per-device. Reload the terminal page after switching.</small>
-        </span>
-        <select id="rendererSelect" class="settings-select">
-          <option value="xterm">xterm.js (stable, default)</option>
-          <option value="sterk">sterk (experimental)</option>
-        </select>
-      </label>
-      <div class="settings-status" id="rendererStatus" hidden></div>
-    </section>
-
-    <section class="settings-card" id="theme-picker">
-      <h2>Theme</h2>
-      <p class="settings-lede">Sets the editor theme, terminal palette and reader palette together. All bundles are muted, low-contrast — picked for a phone screen at night. Switching applies live to any open terminal tab.</p>
-      <label class="settings-row">
-        <span class="settings-label">
-          <strong>Colour theme</strong>
-          <small>Stored locally as <code>mobux:theme</code>. Per-device.</small>
-        </span>
-        <select id="themeSelect" class="settings-select"></select>
-      </label>
-    </section>
-
-    <section class="settings-card" id="shell-integration">
-      <h2>Shell integration</h2>
-      <p class="settings-lede">The reader view classifies prompts and command output deterministically when your shell emits <a href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md" target="_blank" rel="noopener">OSC 133</a> (FinalTerm) markers. Without it, mobux falls back to heuristics. Click install — mobux appends a managed, fenced block to your rc file and keeps a timestamped backup. Nothing outside the fence is touched. The snippet detects <code>$TMUX</code> and wraps OSC 133 in tmux's DCS passthrough envelope so tmux 3.4's default <code>allow-passthrough off</code> doesn't drop the marker; mobux turns the option on for sessions it attaches.</p>
-
-      <div class="shell-card" data-shell="bash">
-        <div class="shell-card-head">
-          <strong>bash</strong> <code>~/.bashrc</code>
-          <span class="shell-state" data-role="state">…</span>
-        </div>
-        <div class="shell-card-actions">
-          <button type="button" data-action="install">Install</button>
-          <button type="button" data-action="uninstall">Uninstall</button>
-        </div>
-        <details class="settings-detail">
-          <summary>Show snippet</summary>
-<pre class="settings-snippet"><code>if [ -n "$TMUX" ]; then
-    PS0='\ePtmux;\e\e]133;C\a\e\\'
-    PS1='\[\ePtmux;\e\e]133;D;$?\a\e]133;A\a\e\\\]'"$PS1"'\[\ePtmux;\e\e]133;B\a\e\\\]'
-else
-    PS0='\e]133;C\a'
-    PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
-fi</code></pre>
-        </details>
-      </div>
-
-      <div class="shell-card" data-shell="zsh">
-        <div class="shell-card-head">
-          <strong>zsh</strong> <code>~/.zshrc</code>
-          <span class="shell-state" data-role="state">…</span>
-        </div>
-        <div class="shell-card-actions">
-          <button type="button" data-action="install">Install</button>
-          <button type="button" data-action="uninstall">Uninstall</button>
-        </div>
-        <details class="settings-detail">
-          <summary>Show snippet</summary>
-<pre class="settings-snippet"><code>if [ -n "$TMUX" ]; then
-    preexec() {{ print -Pn '\ePtmux;\e\e]133;C\a\e\\' }}
-    precmd()  {{ print -Pn '\ePtmux;\e\e]133;D;'$?'\a\e]133;A\a\e\\' }}
-else
-    preexec() {{ print -Pn '\e]133;C\a' }}
-    precmd()  {{ print -Pn '\e]133;D;'$?'\a\e]133;A\a' }}
-fi</code></pre>
-        </details>
-      </div>
-
-      <div class="shell-card" data-shell="fish">
-        <div class="shell-card-head">
-          <strong>fish</strong> <code>~/.config/fish/config.fish</code>
-          <span class="shell-state" data-role="state">…</span>
-        </div>
-        <div class="shell-card-actions">
-          <button type="button" data-action="install">Install</button>
-          <button type="button" data-action="uninstall">Uninstall</button>
-        </div>
-        <details class="settings-detail">
-          <summary>Show snippet</summary>
-<pre class="settings-snippet"><code>if test -n "$TMUX"
-    function __mobux_osc133_preexec --on-event fish_preexec
-        printf '\ePtmux;\e\e]133;C\a\e\\'
-    end
-    function __mobux_osc133_postexec --on-event fish_postexec
-        printf '\ePtmux;\e\e]133;D;%s\a\e\\' $status
-    end
-    function __mobux_osc133_prompt --on-event fish_prompt
-        printf '\ePtmux;\e\e]133;A\a\e\\'
-    end
-else
-    function __mobux_osc133_preexec --on-event fish_preexec
-        printf '\e]133;C\a'
-    end
-    function __mobux_osc133_postexec --on-event fish_postexec
-        printf '\e]133;D;%s\a' $status
-    end
-    function __mobux_osc133_prompt --on-event fish_prompt
-        printf '\e]133;A\a'
-    end
-end</code></pre>
-        </details>
-      </div>
-
-      <div class="settings-status" id="shellIntegrationStatus" hidden></div>
-      <p class="settings-foot">Reload the shell after installing. The fenced block is the contract — mobux only ever modifies what's between the fences. A timestamped <code>.mobux.bak.&lt;ts&gt;</code> is written next to the rc file before any change.</p>
-    </section>
-
-    <section class="settings-card" id="stt-provider">
-      <h2>Speech provider</h2>
-      <p class="settings-lede">Dictation forwards audio to an OpenAI-compatible <code>/v1/audio/transcriptions</code> endpoint. Use Local to run a <a href="https://github.com/speaches-ai/speaches" target="_blank" rel="noopener">speaches</a> server on port 5200, Network for a self-hosted instance, or OpenAI for the cloud API.</p>
-
-      <label class="settings-row">
-        <span class="settings-label"><strong>Provider</strong></span>
-        <select id="sttKind" class="settings-select">
-          <option value="local">Local (port 5200)</option>
-          <option value="network">Network (self-hosted)</option>
-          <option value="openai">OpenAI</option>
-        </select>
-      </label>
-
-      <label class="settings-row" id="sttHostRow">
-        <span class="settings-label"><strong>Host</strong></span>
-        <input type="text" id="sttHost" class="settings-input" placeholder="http://127.0.0.1" />
-      </label>
-
-      <label class="settings-row" id="sttPortRow">
-        <span class="settings-label"><strong>Port</strong></span>
-        <input type="number" id="sttPort" class="settings-input" placeholder="5200" min="1" max="65535" />
-      </label>
-
-      <div class="settings-row" id="sttModelRow">
-        <span class="settings-label"><strong>Model</strong></span>
-        <span style="display:flex;gap:4px;flex:1">
-          <select id="sttModel" class="settings-input settings-select" style="flex:1"></select>
-          <button type="button" id="sttRefreshModels" title="Refresh model list" style="flex-shrink:0">↺</button>
-        </span>
-      </div>
-      <label class="settings-row" id="sttCustomModelRow" hidden>
-        <span class="settings-label"><strong>Custom model</strong></span>
-        <input type="text" id="sttCustomModel" class="settings-input" placeholder="enter model id" />
-      </label>
-
-      <label class="settings-row" id="sttApiKeyRow">
-        <span class="settings-label"><strong>API key</strong></span>
-        <input type="password" id="sttApiKey" class="settings-input" placeholder="sk-…" autocomplete="off" />
-      </label>
-
-      <div id="sttStatus" class="settings-status" hidden></div>
-
-      <div class="shell-card-actions">
-        <button type="button" id="sttSaveBtn">Save</button>
-        <button type="button" id="sttProbeBtn">Check status</button>
-        <button type="button" id="sttResetBtn" style="opacity:0.6">Reset</button>
-        <button type="button" id="sttInstallBtn">Install local server</button>
-        <button type="button" id="sttToggleBtn">Start</button>
-      </div>
-      <div class="settings-status" id="sttActionStatus" hidden></div>
-    </section>
-
-    <section class="settings-card" id="listen-settings">
-      <h2>Listen</h2>
-      <p class="settings-lede">Make reader-view bubbles tappable to be spoken aloud via the Web Speech API. Settings are stored locally and apply to all sessions.</p>
-
-      <div id="listenCapable">
-        <div class="listen-range-group">
-          <label>
-            <strong>Voice</strong>
-            <select id="listenVoice" class="settings-select" style="flex: 1;"></select>
-          </label>
-        </div>
-
-        <div class="listen-range-group" style="margin-top: 12px;">
-          <label>
-            <strong>Rate</strong>
-            <input type="range" id="listenRate" min="0.5" max="2" step="0.1" value="1.0" />
-            <span class="listen-value" id="listenRateValue">1.0</span>
-          </label>
-        </div>
-
-        <div class="listen-range-group" style="margin-top: 8px;">
-          <label>
-            <strong>Pitch</strong>
-            <input type="range" id="listenPitch" min="0.5" max="2" step="0.1" value="1.0" />
-            <span class="listen-value" id="listenPitchValue">1.0</span>
-          </label>
-        </div>
-
-        <button type="button" id="listenTest" class="listen-test-btn">Test</button>
-      </div>
-
-      <div id="listenUnavailable" class="listen-unavailable" hidden>
-        Web Speech API not available in this browser.
-      </div>
-    </section>
-
-    <section class="settings-card" id="build-info">
-      <h2>Build</h2>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Backend version</strong>
-        </span>
-        <span class="settings-value" id="buildVersion">{version}</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Server bundle hash</strong>
-          <small>Hash of the frontend bundle on disk when the server started.</small>
-        </span>
-        <span class="settings-value" id="buildServerHash">{build_hash}</span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Loaded bundle hash</strong>
-          <small>Hash of the bundle currently loaded in this browser tab.</small>
-        </span>
-        <span class="settings-value" id="buildFeHash">—</span>
-      </div>
-      <div class="settings-row" id="buildStaleRow" hidden>
-        <span class="settings-label">
-          <strong>Status</strong>
-        </span>
-        <span class="settings-value" style="color:#8a7c5a">stale — hard-reload needed</span>
-      </div>
-    </section>
-  </main>
-
-  <script>
-    // Capability gate only — all slider/value wiring lives in listen-settings.js
-    // (single source of truth for prefs + DOM behaviour).
-    if (!('speechSynthesis' in window)) {{
-      document.getElementById('listenCapable').hidden = true;
-      document.getElementById('listenUnavailable').hidden = false;
-    }}
-  </script>
-  <script>
-  (function() {{
-    const kindEl    = document.getElementById('sttKind');
-    const hostEl    = document.getElementById('sttHost');
-    const portEl    = document.getElementById('sttPort');
-    const hostRow   = document.getElementById('sttHostRow');
-    const portRow   = document.getElementById('sttPortRow');
-    const modelEl        = document.getElementById('sttModel');
-    const modelRow       = document.getElementById('sttModelRow');
-    const customModelEl  = document.getElementById('sttCustomModel');
-    const customModelRow = document.getElementById('sttCustomModelRow');
-    const keyEl     = document.getElementById('sttApiKey');
-    const keyRow    = document.getElementById('sttApiKeyRow');
-    const statusEl  = document.getElementById('sttStatus');
-    const actionEl  = document.getElementById('sttActionStatus');
-
-    const MODELS = {{
-      openai:  ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'],
-      local:   ['Systran/faster-whisper-small', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
-      network: ['Systran/faster-whisper-base.en', 'Systran/faster-whisper-small.en', 'Systran/faster-whisper-medium.en'],
-    }};
-
-    function populateModelSelect(models, selectedModel) {{
-      modelEl.innerHTML = '';
-      models.forEach(id => {{
-        const opt = document.createElement('option');
-        opt.value = id;
-        opt.textContent = id;
-        modelEl.appendChild(opt);
-      }});
-      // If the saved model isn't in the list, add it as a real selectable option
-      // rather than silently falling to the "custom…" free-text box.
-      if (selectedModel && !models.includes(selectedModel)) {{
-        const extra = document.createElement('option');
-        extra.value = selectedModel;
-        extra.textContent = selectedModel;
-        modelEl.insertBefore(extra, modelEl.firstChild);
-      }}
-      const customOpt = document.createElement('option');
-      customOpt.value = '__custom__';
-      customOpt.textContent = 'custom…';
-      modelEl.appendChild(customOpt);
-
-      if (selectedModel) {{
-        modelEl.value = selectedModel;
-      }}
-      if (modelEl.value === '__custom__' && selectedModel) {{
-        customModelEl.value = selectedModel;
-      }}
-      // updateVisibility() is the single authority for row visibility — call it
-      // so the custom-model row reflects the freshly-set model and the active
-      // provider. Never toggle row .hidden directly here; that re-reveal path is
-      // exactly the bug that left stale fields showing.
-      updateVisibility();
-    }}
-
-    // Normalize a host string to always include a scheme (default http://).
-    // Accepts bare hostname like "lab", returns "http://lab".
-    function normalizeHost(h) {{
-      h = h.trim().replace(/\/$/, '');
-      if (!h) return h;
-      if (!/^https?:\/\//i.test(h)) return 'http://' + h;
-      return h;
-    }}
-
-    async function fetchModels(selectedModel) {{
-      const host = normalizeHost(hostEl.value);
-      const query = '?kind=' + encodeURIComponent(kindEl.value) +
-                    '&host=' + encodeURIComponent(host) +
-                    '&port=' + encodeURIComponent(portEl.value);
-      try {{
-        const resp = await fetch('/api/stt/models' + query);
-        if (!resp.ok) throw new Error('not ok');
-        const data = await resp.json();
-        if (!data.models || !data.models.length) throw new Error('empty');
-        populateModelSelect(data.models, selectedModel);
-      }} catch (_) {{
-        populateModelSelect(MODELS[kindEl.value] || MODELS.local, selectedModel);
-      }}
-    }}
-
-    // Persist the active provider + its fields. Mobile SPA — there is no manual
-    // Save tap; every change auto-saves and the Save button is hidden.
-    function saveProvider() {{
-      const kind  = kindEl.value;
-      const model = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
-      const body  = {{ kind, host: hostEl.value.trim(), port: portEl.value.trim(), model }};
-      if (keyEl.value) body.api_key = keyEl.value;
-      fetch('/api/settings/stt', {{
-        method: 'PUT',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify(body),
-      }}).then(r => {{
-        if (r.ok) {{
-          providerCache[kind] = providerCache[kind] || {{}};
-          providerCache[kind].host  = body.host;
-          providerCache[kind].port  = body.port;
-          providerCache[kind].model = model;
-          if (body.api_key) providerCache[kind].has_key = true;
-        }}
-        showStatus(statusEl, r.ok ? 'Saved ✓' : 'Save failed.', r.ok);
-      }}).catch(() => showStatus(statusEl, 'Save failed.', false));
-    }}
-    let _saveDebounce;
-    function schedSave() {{ clearTimeout(_saveDebounce); _saveDebounce = setTimeout(saveProvider, 700); }}
-
-    // Debounced re-fetch when host/port change, then save with the discovered model.
-    let _fetchDebounce;
-    function schedFetchModels() {{
-      clearTimeout(_fetchDebounce);
-      _fetchDebounce = setTimeout(async () => {{
-        const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
-        await fetchModels(cur);
-        saveProvider();
-      }}, 600);
-    }}
-
-    modelEl.addEventListener('change', () => {{
-      updateVisibility();
-      saveProvider();
-    }});
-    keyEl.addEventListener('input', schedSave);
-
-    function showStatus(el, msg, ok) {{
-      el.textContent = msg;
-      el.hidden = false;
-      el.style.color = ok ? '#7ec87e' : '#c87e7e';
-    }}
-
-    // Parse host+port out of a full URL string and write into the fields.
-    // Returns true if parse succeeded.
-    // Uses new URL() for robust parsing — no regex splits that can truncate hostnames.
-    function parseUrlIntoFields(raw) {{
-      if (!raw) return false;
-      // Normalise: if no scheme, prepend http:// so new URL() doesn't mangle the hostname.
-      let normalised = raw.trim();
-      if (!/^https?:\/\//i.test(normalised)) normalised = 'http://' + normalised;
-      let u;
-      try {{ u = new URL(normalised); }} catch (_) {{ return false; }}
-      // scheme+hostname only — no port suffix in the Host field.
-      hostEl.value = u.protocol + '//' + u.hostname;
-      if (u.port) {{
-        portEl.value = u.port;
-      }} else {{
-        portEl.value = u.protocol === 'https:' ? '443' : '80';
-      }}
-      return true;
-    }}
-
-    // Build the full URL to send to the backend.
-    // host field must contain scheme+hostname (e.g. "http://lab.tailfa81e6.ts.net").
-    // port field is appended as ":port"; path is always /v1/audio/transcriptions.
-    function buildUrl() {{
-      const host = hostEl.value.trim().replace(/\/$/, '');
-      const port = portEl.value.trim();
-      if (!host) return '';
-      // Guard: ensure host has a scheme; add http:// if bare hostname slipped through.
-      const hasScheme = /^https?:\/\//i.test(host);
-      const base = hasScheme ? host : 'http://' + host;
-      return base + (port ? ':' + port : '') + '/v1/audio/transcriptions';
-    }}
-
-    // Paste / blur handler on Host field.
-    // - If the user pasted a full URL with path/port, split it into fields.
-    // - Always ensure a scheme is present so bare hostnames are stored as "http://lab".
-    function handleHostInput() {{
-      const raw = hostEl.value.trim();
-      if (!raw) return;
-      // Normalise for URL test: add scheme if missing.
-      let normalised = raw;
-      if (!/^https?:\/\//i.test(normalised)) normalised = 'http://' + normalised;
-      try {{
-        const u = new URL(normalised);
-        // Re-parse into fields if there's a path beyond '/' or an explicit port.
-        if (u.port || (u.pathname && u.pathname !== '/')) {{
-          parseUrlIntoFields(raw);
-        }} else {{
-          // Ensure field always stores scheme+hostname (not a bare name).
-          hostEl.value = u.protocol + '//' + u.hostname;
-        }}
-      }} catch (_) {{
-        // Not a valid URL — leave as-is.
-      }}
-      schedFetchModels();
-    }}
-
-    hostEl.addEventListener('paste', () => setTimeout(handleHostInput, 0));
-    hostEl.addEventListener('blur', handleHostInput);
-    portEl.addEventListener('change', schedFetchModels);
-
-    function setDefaults(kind) {{
-      let defaultModel;
-      if (kind === 'local') {{
-        hostEl.value  = 'http://127.0.0.1';
-        portEl.value  = '5200';
-        defaultModel  = MODELS.local[0];
-      }} else if (kind === 'openai') {{
-        hostEl.value  = 'https://api.openai.com';
-        portEl.value  = '443';
-        defaultModel  = 'whisper-1';
-      }} else {{
-        // network — clear so user types their own
-        hostEl.value = '';
-        portEl.value = '';
-        defaultModel  = MODELS.network[0];
-      }}
-      fetchModels(defaultModel);
-    }}
-
-    function updateVisibility() {{
-      const kind     = kindEl.value;
-      const isLocal  = kind === 'local';
-      const isNetwork = kind === 'network';
-      const isOpenai = kind === 'openai';
-      const isCustomModel = modelEl.value === '__custom__';
-
-      // Host + Port: only the self-hosted Network provider needs a custom
-      // endpoint. Local is baked in (127.0.0.1:5200) and OpenAI is fixed
-      // (api.openai.com:443) — both keep their values but hide the fields.
-      hostRow.hidden = !isNetwork;
-      portRow.hidden = !isNetwork;
-
-      // Model picker: hidden for local (auto-selected, no user choice needed).
-      modelRow.hidden     = isLocal;
-      customModelRow.hidden = isLocal || !isCustomModel;
-
-      // API key: only for openai.
-      keyRow.hidden = !isOpenai;
-
-      // Install + single run toggle: local only. Reset only matters where the
-      // user types host/port/key, so hide it for local too.
-      document.getElementById('sttInstallBtn').hidden = !isLocal;
-      document.getElementById('sttToggleBtn').hidden  = !isLocal;
-      document.getElementById('sttResetBtn').hidden   = isLocal;
-    }}
-
-    // In-memory per-kind state cache populated on page load.
-    // Shape: {{ local: {{host, port, model, has_key}}, network: {{...}}, openai: {{...}} }}
-    let providerCache = {{}};
-
-    function populateFromProvider(kind) {{
-      const def = kindDefaults(kind);
-      const p   = providerCache[kind] || {{}};
-      hostEl.value = p.host  || def.host;
-      portEl.value = p.port  || def.port;
-      keyEl.value  = '';
-      keyEl.placeholder = p.has_key ? '•••• stored' : 'sk-…';
-      fetchModels(p.model || def.model);
-    }}
-
-    function kindDefaults(kind) {{
-      if (kind === 'local')  return {{ host: 'http://127.0.0.1', port: '5200', model: MODELS.local[0] }};
-      if (kind === 'openai') return {{ host: 'https://api.openai.com', port: '443', model: 'whisper-1' }};
-      return {{ host: '', port: '', model: MODELS.network[0] }};
-    }}
-
-    kindEl.addEventListener('change', () => {{
-      populateFromProvider(kindEl.value);
-      updateVisibility();
-      if (kindEl.value === 'local') refreshSttStatus();
-      schedSave();
-    }});
-
-    // Load current config on page open
-    fetch('/api/settings/stt').then(r => r.json()).then(cfg => {{
-      providerCache = cfg.providers || {{}};
-      const active = cfg.activeKind || 'local';
-      kindEl.value = active;
-      populateFromProvider(active);
-      updateVisibility();
-      if (active === 'local') refreshSttStatus();
-    }}).catch(() => {{ setDefaults(kindEl.value); updateVisibility(); }});
-
-    // Saving is automatic (see saveProvider) — hide the manual Save button.
-    const saveBtn = document.getElementById('sttSaveBtn');
-    if (saveBtn) saveBtn.hidden = true;
-
-    document.getElementById('sttRefreshModels').addEventListener('click', () => {{
-      const cur = modelEl.value === '__custom__' ? customModelEl.value.trim() : modelEl.value;
-      fetchModels(cur);
-    }});
-
-    document.getElementById('sttProbeBtn').addEventListener('click', () => {{
-      fetch('/api/stt/status').then(r => r.json()).then(s => {{
-        const msg = s.reachable
-          ? `Provider reachable (kind: ${{s.kind}})`
-          : `Provider NOT reachable (${{s.url}})`;
-        showStatus(statusEl, msg, s.reachable);
-      }}).catch(() => showStatus(statusEl, 'Status check failed.', false));
-    }});
-
-    document.getElementById('sttResetBtn').addEventListener('click', () => {{
-      const kind = kindEl.value;
-      const def = kindDefaults(kind);
-      hostEl.value = def.host;
-      portEl.value = def.port;
-      keyEl.value  = '';
-      keyEl.placeholder = 'sk-…';
-      updateVisibility();
-      fetchModels(def.model);
-      showStatus(statusEl, 'Fields reset to defaults (not saved).', true);
-    }});
-
-    // Single source of truth for the local-server controls. The toggle button
-    // is Start when stopped and Stop when running; it is disabled until the
-    // server is installed.
-    function updateSttButtons(s) {{
-      const installBtn = document.getElementById('sttInstallBtn');
-      const toggleBtn  = document.getElementById('sttToggleBtn');
-      if (installBtn) installBtn.textContent = s.installed ? 'Reinstall' : 'Install local server';
-      if (toggleBtn) {{
-        const running = !!s.local_process_running;
-        toggleBtn.textContent = running ? 'Stop' : 'Start';
-        toggleBtn.dataset.running = running ? '1' : '';
-        toggleBtn.disabled = !s.installed;
-      }}
-    }}
-
-    // Refresh local-server status and reflect it in the controls. Cheap enough
-    // to call whenever the local provider becomes active.
-    function refreshSttStatus() {{
-      fetch('/api/stt/status').then(r => r.json()).then(updateSttButtons).catch(() => {{}});
-    }}
-
-    document.getElementById('sttInstallBtn').addEventListener('click', function installClick() {{
-      let cancelled = false;
-      document.getElementById('sttInstallBtn').disabled = true;
-      showStatus(actionEl, 'Installing… (this may take a minute)', true);
-      fetch('/api/stt/install', {{ method: 'POST' }})
-        .then(r => {{
-          if (!r.ok && r.status !== 202 && r.status !== 409) {{
-            showStatus(actionEl, 'Install request failed: ' + r.status, false);
-            document.getElementById('sttInstallBtn').disabled = false;
-            cancelled = true;
-          }}
-        }})
-        .catch(() => {{
-          showStatus(actionEl, 'Install failed (network).', false);
-          document.getElementById('sttInstallBtn').disabled = false;
-          cancelled = true;
-        }})
-        .then(async () => {{
-          if (cancelled) return;
-          let errCount = 0;
-          for (;;) {{
-            await new Promise(res => setTimeout(res, 2000));
-            if (cancelled) break;
-            let s;
-            try {{
-              const r = await fetch('/api/stt/status');
-              s = await r.json();
-              errCount = 0;
-            }} catch (_) {{
-              if (++errCount >= 5) {{
-                showStatus(actionEl, 'Install status unavailable.', false);
-                document.getElementById('sttInstallBtn').disabled = false;
-                break;
-              }}
-              continue;
-            }}
-            const tail = Array.isArray(s.install_output) ? s.install_output.slice(-3).join(' | ') : '';
-            if (s.install_phase === 'success') {{
-              showStatus(actionEl, 'Installed.' + (tail ? ' ' + tail : ''), true);
-              document.getElementById('sttInstallBtn').disabled = false;
-              updateSttButtons(s);
-              break;
-            }} else if (s.install_phase === 'failed') {{
-              showStatus(actionEl, 'Install failed: ' + (s.install_error || 'unknown'), false);
-              document.getElementById('sttInstallBtn').textContent = 'Retry install';
-              document.getElementById('sttInstallBtn').disabled = false;
-              break;
-            }} else if (s.install_phase === 'running') {{
-              showStatus(actionEl, 'Installing… ' + (tail || ''), true);
-            }}
-          }}
-        }});
-    }});
-
-    document.getElementById('sttToggleBtn').addEventListener('click', () => {{
-      const toggleBtn = document.getElementById('sttToggleBtn');
-      const running = !!toggleBtn.dataset.running;
-      const ep = running ? '/api/stt/stop' : '/api/stt/start';
-      const okMsg = running ? 'Server stopped.' : 'Server started.';
-      const failMsg = running ? 'Stop failed.' : 'Start failed.';
-      toggleBtn.disabled = true;
-      fetch(ep, {{ method: 'POST' }})
-        .then(r => showStatus(actionEl, r.ok ? okMsg : failMsg, r.ok))
-        .catch(() => showStatus(actionEl, failMsg, false))
-        .then(refreshSttStatus);
-    }});
-
-    // bfcache guard: Chrome restores the page without re-running scripts.
-    // Force a reload so settings are always fresh from the server.
-    window.addEventListener('pageshow', (e) => {{
-      if (e.persisted) location.reload();
-    }});
-  }})();
-  </script>
-  <script src="/static/build-info.js?v={v}"></script>
-  <script>
-  (function() {{
-    const feHash = window.MOBUX_BUILD_FE;
-    const srvHash = window.MOBUX_BUILD_SERVER;
-    if (feHash) document.getElementById('buildFeHash').textContent = feHash;
-    if (feHash && srvHash && feHash !== srvHash) {{
-      document.getElementById('buildStaleRow').hidden = false;
-    }}
-  }})();
-  </script>
-  <script src="/static/settings.js?v={v}"></script>
-  <!-- mesh-client first so update.js can relay update calls to a selected peer. -->
-  <script src="/static/mesh-client.js?v={v}"></script>
-  <script src="/static/update.js?v={v}"></script>
-  <script type="module" src="/static/settings-theme.js?v={v}"></script>
-  <script src="/static/settings-renderer.js?v={v}"></script>
-  <script src="/static/shell-integration.js?v={v}"></script>
-  <script type="module" src="/static/listen-settings.js?v={v}"></script>
-</body>
-</html>
-"##,
-    ))
+async fn settings_page() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, "/app#/settings"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+    )
 }
 
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<axum::response::Response, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     validate_session_name(&state, &name)?;
-    // No host segment → current node / same-origin, no peer pinned.
-    Ok(html_no_store(render_terminal_page(
-        &name,
-        "",
-        &state.cache_bust,
-        state.dev_mode,
-    )))
+    // 307 to the SPA hash route. Name is already validated to [a-zA-Z0-9_-] so
+    // no percent-encoding needed.
+    let location = format!("/app#/s/{name}");
+    Ok((
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, location),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+    ))
 }
 
-// Host-pinned variant: `/s/{host}/{name}`. Renders the SAME terminal page but
-// surfaces the host so the client pins that peer for the page's lifetime. The
-// server itself does not route by host — the relay does — so `host` is only
-// echoed back to the client, never used to resolve the session here.
+// Host-pinned variant: `/s/{host}/{name}`. Deep-link bookmarks and the TWA
+// keep working — the route stays, we just redirect into the SPA hash.
 async fn terminal_page_pinned(
     State(state): State<AppState>,
     Path((host, name)): Path<(String, String)>,
-) -> Result<axum::response::Response, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     validate_session_name(&state, &name)?;
-    // `host` is reflected into an inline <script> as window.MOBUX_PEER, and
-    // serde_json does NOT escape `<`/`>`/`</script>` — an unvalidated host is a
-    // reflected-XSS breakout. Gate it to the legal peer shape (canonical_peer
-    // rejects slashes/spaces/bad ports) AND a strict charset so no markup
-    // metacharacter can survive. Reject anything else as 400, mirroring
-    // validate_session_name.
+    // Validate host (rejects XSS / bad chars) AND canonicalize to host:port.
     let peer = validate_pinned_host(&host)?;
-    Ok(html_no_store(render_terminal_page(
-        &name,
-        &peer,
-        &state.cache_bust,
-        state.dev_mode,
-    )))
+    // The SPA router expects the colon in host:port to be percent-encoded
+    // (e.g. box%3A8443) — same as Home.jsx uses encodeURIComponent(peer).
+    let peer_enc = peer.replace(':', "%3A");
+    let location = format!("/app#/s/{peer_enc}/{name}");
+    Ok((
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, location),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+    ))
 }
 
 /// Validate + canonicalize a `host` path segment for the pinned terminal route.
@@ -2048,22 +1324,6 @@ fn validate_pinned_host(host: &str) -> Result<String, AppError> {
         return Err(AppError::bad_request(anyhow::anyhow!("invalid host")));
     }
     Ok(peer)
-}
-
-// Same payload as Html<String> but with Cache-Control: no-store.
-// The HTML embeds the per-restart cache_bust query param on every
-// /static asset URL; if the HTML itself is cached the embedded
-// version IDs go stale and the page ends up loading a mismatched
-// mix of old→new JS. no-store guarantees the browser always sees a
-// fresh document and therefore a fresh set of asset version pins.
-fn html_no_store(body: String) -> axum::response::Response {
-    use axum::http::{header, HeaderValue};
-    let mut resp = Html(body).into_response();
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, must-revalidate"),
-    );
-    resp
 }
 
 // Serve sw.js with the per-restart cache_bust appended as a comment.
@@ -2156,127 +1416,21 @@ async fn serve_spa_index() -> Response {
     }
 }
 
-// ── /install: TWA install page (APK + CA download, with QR codes) ────
-//
-// Pure server-rendered, no client JS. The QR codes encode absolute URLs
-// (built from the request `Host` header) so a desktop browser visitor can
-// scan from a phone and land on the right asset on the right host.
+// ── /install: redirect to the SPA Install page ────────────────────────
+// APK and CA downloads (/install/mobux.apk, /install/mobux-ca.crt) are
+// preserved as-is. The install UI itself lives in the SPA at /app#/install.
 
 const INSTALL_APK_PATH: &str = "web/static/install/mobux.apk";
 const INSTALL_ASSETLINKS_PATH: &str = "web/static/.well-known/assetlinks.json";
 
-fn host_from_headers(headers: &HeaderMap) -> String {
-    headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost")
-        .to_string()
-}
-
-/// Render a QR code as inline SVG. Returns the SVG document text. Falls back
-/// to a short error string baked into the page if encoding fails — QR
-/// generation should never abort the install page render.
-fn qr_svg(data: &str) -> String {
-    use qrcode::render::svg;
-    use qrcode::{EcLevel, QrCode};
-
-    match QrCode::with_error_correction_level(data.as_bytes(), EcLevel::M) {
-        Ok(code) => code
-            .render::<svg::Color<'_>>()
-            .min_dimensions(220, 220)
-            .dark_color(svg::Color("#0f1115"))
-            .light_color(svg::Color("#ffffff"))
-            .quiet_zone(true)
-            .build(),
-        Err(_) => "<!-- qr encode failed -->".to_string(),
-    }
-}
-
-async fn install_page(headers: HeaderMap, State(state): State<AppState>) -> Response {
-    let host = host_from_headers(&headers);
-    let host_esc = html_escape::encode_text(&host);
-
-    let apk_url = format!("https://{host}/install/mobux.apk");
-    let ca_url = format!("https://{host}/install/mobux-ca.crt");
-    let apk_present = std::path::Path::new(INSTALL_APK_PATH).exists();
-
-    let acme = ssl::acme_mode_enabled();
-    let app_heading = if acme {
-        "Install the app"
-    } else {
-        "2. Install the app"
-    };
-    let app_section = if apk_present {
-        format!(
-            r##"<section class="install-card">
-  <h2>{app_heading}</h2>
-  <p class="install-lede">Download the Android APK, or scan the QR with your phone.</p>
-  <div class="install-grid">
-    <a class="install-btn" href="/install/mobux.apk" download>Download APK</a>
-    <div class="install-qr">{qr}</div>
-  </div>
-</section>"##,
-            qr = qr_svg(&apk_url),
-        )
-    } else {
-        format!(
-            r##"<section class="install-card">
-  <h2>{app_heading}</h2>
-  <p class="install-lede">APK not built yet.</p>
-  <p class="install-hint">Run <code>make twa MOBUX_DOMAIN={host_esc}</code> on the server to build the APK.</p>
-</section>"##,
-        )
-    };
-
-    let ca_section = if acme {
-        String::new()
-    } else {
-        format!(
-            r##"<section class="install-card">
-  <h2>1. Install the CA certificate</h2>
-  <p class="install-lede">Do this <strong>first</strong>. Without the CA, Android won't trust this server, the APK download will be blocked, and the installed app won't connect.</p>
-  <div class="install-grid">
-    <a class="install-btn" href="/install/mobux-ca.crt" download>Download CA certificate</a>
-    <div class="install-qr">{qr}</div>
-  </div>
-  <p class="install-hint">After downloading, install it through Android Settings:</p>
-  <ol class="install-steps">
-    <li>Settings &rarr; Security &amp; privacy (or just Security)</li>
-    <li>More security settings &rarr; Encryption &amp; credentials</li>
-    <li>Install a certificate &rarr; CA certificate</li>
-    <li>Acknowledge the warning, pick <code>mobux-ca.crt</code> from your Downloads</li>
-  </ol>
-</section>"##,
-            qr = qr_svg(&ca_url),
-        )
-    };
-
-    let v = &state.cache_bust;
-    html_no_store(format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mobux · Install</title>
-  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
-  <link rel="manifest" href="/static/manifest.json" />
-  <meta name="theme-color" content="#0f1115" />
-  <link rel="apple-touch-icon" href="/static/icon-192.png" />
-  <link rel="stylesheet" href="/static/style.css?v={v}" />
-</head>
-<body>
-  <header class="app-header">
-    <h1>mobux · install</h1>
-  </header>
-  <main class="install-page">
-    {ca_section}
-    {app_section}
-  </main>
-</body>
-</html>
-"##,
-    ))
+async fn install_page() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, "/app#/install"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+    )
 }
 
 async fn serve_install_apk() -> Response {
@@ -2485,222 +1639,52 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn render_index(sessions: &[tmux::Session], error: Option<&str>, v: &str, dev: bool) -> String {
-    let mut cards = String::new();
-    if sessions.is_empty() {
-        cards.push_str(r#"<p class="hint">No tmux sessions. Tap + to create one.</p>"#);
-    } else {
-        for s in sessions {
-            let name = html_escape::encode_text(&s.name);
-            cards.push_str(&format!(
-                r#"<div class="swipe-row" data-name="{name}">
-  <div class="swipe-action swipe-left"><button class="swipe-btn rename-btn">Rename</button></div>
-  <a class="session-item" href="/s/{name}">
-    <div class="session-info">
-      <span class="session-name">{name}</span>
-      <span class="session-meta">{} win · {} attached</span>
-    </div>
-    <span class="session-arrow">›</span>
-  </a>
-  <div class="swipe-action swipe-right"><button class="swipe-btn kill-btn" data-kill="{name}">Kill</button></div>
-</div>"#,
-                s.windows, s.attached
-            ));
-        }
-    }
-
-    let error_html = error
-        .map(|e| {
-            format!(
-                r#"<section class="panel error">{}</section>"#,
-                html_escape::encode_text(e)
-            )
-        })
-        .unwrap_or_default();
-
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>Mobux</title>
-  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
-  <link rel="manifest" href="/static/manifest.json" />
-  <meta name="theme-color" content="#0f1115" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="apple-touch-icon" href="/static/icon-192.png" />
-  <link rel="stylesheet" href="/static/style.css?v={v}" />
-</head>
-<body>
-  <header class="app-header">
-    <h1>mobux</h1>
-    <a href="/settings" class="header-icon" aria-label="Settings">⚙</a>
-  </header>
-
-  {error_html}
-
-  <div id="sessionList" class="session-list">
-    {cards}
-  </div>
-
-  <button id="fabNew" class="fab" aria-label="New session">+</button>
-
-  <dialog id="newSessionDialog" class="session-dialog">
-    <form id="newSessionForm" method="dialog">
-      <h3>New session</h3>
-      <input id="sessionName" placeholder="session-name" autocomplete="off" required />
-      <div class="dialog-actions">
-        <button type="button" class="btn-cancel" id="cancelNew">Cancel</button>
-        <button type="submit" class="btn-create">Create</button>
-      </div>
-    </form>
-  </dialog>
-
-  <script>window.MOBUX_DEV = {dev};</script>
-  <script src="/static/mesh-client.js?v={v}"></script>
-  <script src="/static/host-picker.js?v={v}"></script>
-  <script src="/static/index.js?v={v}"></script>
-  <script src="/static/chime.js?v={v}"></script>
-  <script src="/static/install-hint.js?v={v}"></script>
-  <script type="module" src="/static/telemetry.js?v={v}"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
-</body>
-</html>
-"##
-    )
-}
-
-fn render_terminal_page(session: &str, peer: &str, v: &str, dev: bool) -> String {
-    let session_json = serde_json::to_string(session).unwrap_or_else(|_| "\"\"".to_string());
-    // Peer the page is pinned to ("" for the same-origin/current-node route).
-    // JSON-encoded so the client can read it verbatim and decide whether to
-    // override the global host-picker selection for this page.
-    let peer_json = serde_json::to_string(peer).unwrap_or_else(|_| "\"\"".to_string());
-    let session_title = html_escape::encode_text(session);
-
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>Mobux · {session_title}</title>
-  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>' />
-  <link rel="manifest" href="/static/manifest.json" />
-  <meta name="theme-color" content="#0f1115" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="apple-touch-icon" href="/static/icon-192.png" />
-  <link rel="stylesheet" href="/static/style.css?v={v}" />
-</head>
-<body class="term-body">
-  <div id="terminal"></div>
-  <div id="reader" class="hidden"></div>
-  <div id="loadquote"><q id="quote"></q><br><cite id="qauthor"></cite></div>
-  <div id="touchOverlay"></div>
-  <div id="paneIndicator"></div>
-  <div id="cmdOverlayBg"></div>
-  <div id="cmdPickList">
-    <div class="cmd-header">
-      <h3>tmux</h3>
-      <button class="cmd-close" id="cmdCloseBtn" aria-label="Close">Close</button>
-    </div>
-    <button class="cmd-item" data-cmd="new-window">New window</button>
-    <button class="cmd-item" data-cmd="kill-window">Close window</button>
-    <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="split-h">Split horizontal</button>
-    <button class="cmd-item" data-cmd="split-v">Split vertical</button>
-    <button class="cmd-item" data-cmd="kill-pane">Close pane</button>
-    <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="next-window">Next window</button>
-    <button class="cmd-item" data-cmd="prev-window">Previous window</button>
-    <button class="cmd-item" data-cmd="next-pane">Next pane</button>
-    <button class="cmd-item" data-cmd="prev-pane">Previous pane</button>
-    <div class="cmd-separator"></div>
-    <button class="cmd-item" data-cmd="zoom-pane">Zoom pane</button>
-  </div>
-
-  <div id="inputBar" class="input-bar hidden">
-    <div id="inputRibbon" class="input-ribbon">
-      <button id="viewToggleBtn" title="Toggle reader/terminal view">📖</button>
-      <button id="uploadBtn" title="Attach file">📎</button>
-      <button id="micBtn" title="Dictate (speech to text)">🎤</button>
-      <button id="settingsBtn" title="Settings">⚙</button>
-      <button data-key="\x7f">⌫</button>
-      <button data-key="\r">⏎</button>
-      <button data-key="\x1b[D">←</button>
-      <button data-key="\x1b[C">→</button>
-      <button data-key="\x1b[A">↑</button>
-      <button data-key="\x1b[B">↓</button>
-      <button data-key="\x03">^C</button>
-      <button data-key="\x04">^D</button>
-      <button data-key="\x1b">Esc</button>
-      <button data-key="\t">Tab</button>
-      <button data-key="\x1a">^Z</button>
-      <button data-key="\x1b[3~">Del</button>
-      <button data-key="\x1b[H">Home</button>
-      <button data-key="\x1b[F">End</button>
-      <button data-key="\x15">^U</button>
-      <button data-key="\x0c">^L</button>
-      <button data-key="/clear\r">/clear</button>
-      <button data-key="/quit\r">/quit</button>
-    </div>
-    <div id="inputToast" class="input-toast hidden" role="status" aria-live="polite"></div>
-    <div class="input-row">
-      <input id="inputText" type="text" enterkeyhint="send" placeholder="Type here…" autocomplete="off" autocorrect="on" autocapitalize="off" spellcheck="false" />
-      <button id="inputSend" class="input-send" title="Send without Enter">▶</button>
-    </div>
-  </div>
-
-  <script>
-    window.MOBUX_SESSION = {session_json};
-    // Host this page is pinned to (issue #123). Empty string = current node
-    // (no override); terminal.js binds MobuxMesh to this peer before connect.
-    window.MOBUX_PEER = {peer_json};
-    // Dev-mode flag (MOBUX_DEV). Gates the dev-only telemetry module below.
-    window.MOBUX_DEV = {dev};
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
-  </script>
-  <!-- Renderer picker: reads `mobux:renderer` from localStorage and
-       synchronously injects the matching bundle script (xterm.bundle.js
-       or sterk.bundle.js) via document.write so its globals
-       (`window.Terminal` / `window.Sterk`) are guaranteed to be present
-       by the time terminal.js (the module below) evaluates.
-       Default: xterm (stable). User toggles on /settings. -->
-  <script>
-    (function () {{
-      var r = 'xterm';
-      try {{
-        var s = localStorage.getItem('mobux:renderer');
-        if (s === 'sterk' || s === 'xterm') r = s;
-      }} catch (_) {{}}
-      window.__mobuxRenderer = r;
-      var bundle = (r === 'sterk') ? 'sterk.bundle.js' : 'xterm.bundle.js';
-      document.write('<script src="/static/vendor/' + bundle + '?v={v}"><\/script>');
-      if (r === 'xterm') {{
-        document.write('<link rel="stylesheet" href="/static/vendor/xterm.css?v={v}">');
-      }}
-    }})();
-  </script>
-  <!-- mesh-client (global) must be present before the terminal module so the
-       renderer cores can resolve relayed API/WS paths for a selected peer.
-       host-picker supplies the cred prompt the page reuses when it's pinned to
-       a peer (?MOBUX_PEER) whose creds aren't stored yet; its mount() no-ops
-       here since the terminal page has no .app-header. -->
-  <script src="/static/mesh-client.js?v={v}"></script>
-  <script src="/static/host-picker.js?v={v}"></script>
-  <script type="module" src="/static/terminal.js?v={v}"></script>
-  <script type="module" src="/static/telemetry.js?v={v}"></script>
-  <script src="/static/chime.js?v={v}"></script>
-</body>
-</html>
-"##
-    )
-}
-
 // ── STT provider settings + lifecycle endpoints ───────────────────────
+
+/// Shape returned by GET /api/settings/mesh.
+#[derive(serde::Serialize)]
+struct MeshSettingsJson {
+    /// Port used to probe tailnet peers for mobux. Default 5151.
+    peer_port: u16,
+}
+
+/// Shape accepted by PUT /api/settings/mesh.
+#[derive(serde::Deserialize)]
+struct MeshSettingsPutJson {
+    peer_port: u16,
+}
+
+async fn api_get_mesh_settings(
+    State(state): State<AppState>,
+) -> Result<Json<MeshSettingsJson>, AppError> {
+    let peer_port = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.mesh_peer_port()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(Json(MeshSettingsJson { peer_port }))
+}
+
+async fn api_set_mesh_settings(
+    State(state): State<AppState>,
+    Json(req): Json<MeshSettingsPutJson>,
+) -> Result<StatusCode, AppError> {
+    if req.peer_port == 0 {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "peer_port must be 1–65535"
+        )));
+    }
+    tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.set_mesh_peer_port(req.peer_port)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 /// Per-kind provider info returned by GET /api/settings/stt.
 /// api_key is NEVER returned; has_key is a boolean indicator.
@@ -3246,7 +2230,7 @@ mod tests {
     #[tokio::test]
     async fn serve_static_is_no_store() {
         use axum::http::header;
-        let resp = serve_static(Path("index.js".to_string())).await;
+        let resp = serve_static(Path("style.css".to_string())).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let cc = resp
@@ -3424,17 +2408,6 @@ mod tests {
         let (state, _dir) = test_state(true);
         let status = api_telemetry(State(state), "hello".to_string()).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-    }
-
-    // The dev flag is reflected verbatim into the page so the client can gate
-    // itself on `window.MOBUX_DEV`.
-    #[test]
-    fn render_index_injects_dev_flag() {
-        let on = render_index(&[], None, "v1", true);
-        assert!(on.contains("window.MOBUX_DEV = true"));
-        assert!(on.contains("/static/telemetry.js"));
-        let off = render_index(&[], None, "v1", false);
-        assert!(off.contains("window.MOBUX_DEV = false"));
     }
 
     #[tokio::test]

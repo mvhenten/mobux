@@ -302,11 +302,16 @@ pub fn build_forward_headers(incoming: &HeaderMap) -> HeaderMap {
 }
 
 /// Response headers we must not echo back to the browser (hop-by-hop +
-/// re-set-by-axum framing).
+/// re-set-by-axum framing). `WWW-Authenticate` is stripped on *every* relayed
+/// response (not just 401s): if it reached the browser on the relay origin the
+/// browser would pop its native Basic-auth "Sign in" dialog before the SPA's JS
+/// could intercept the 401 and show the in-app credential prompt. The 401
+/// status + body still pass through, so the client knows auth is needed.
 fn is_stripped_response_header(name: &HeaderName) -> bool {
     let n = name.as_str();
     n == header::CONNECTION.as_str()
         || n == header::TRANSFER_ENCODING.as_str()
+        || n == header::WWW_AUTHENTICATE.as_str()
         || n == "keep-alive"
         || n == "proxy-authenticate"
         || n == "te"
@@ -374,7 +379,15 @@ async fn relay_http_inner(
     let next_hop = check_loop_guard(&headers, &forward_path)?;
 
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let url = format!("https://{peer}{forward_path}{query}");
+    let url_str = format!("https://{peer}{forward_path}{query}");
+    // Parse the target URL up front. reqwest's `request(method, &str)` defers
+    // URL parsing to `.send()`, where a parse failure surfaces as an opaque
+    // `Builder`-kind error that `Display`s as the bare string "builder error"
+    // — the exact "Failed to load sessions: builder error" the UI showed when
+    // a relayed path/peer didn't form a valid URL. Parse it here so a malformed
+    // URL becomes an actionable message instead.
+    let url = reqwest::Url::parse(&url_str)
+        .map_err(|e| RelayError::BadRequest(format!("invalid peer URL ({url_str}): {e}")))?;
 
     let body_bytes = axum::body::to_bytes(body, usize::MAX)
         .await
@@ -401,7 +414,7 @@ async fn relay_http_inner(
         .map_err(|e| RelayError::Upstream(format!("building client: {e}")))?;
 
     let upstream = client
-        .request(method, &url)
+        .request(method, url)
         .headers(fwd_headers)
         .body(body_bytes)
         .send()
@@ -758,6 +771,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn response_strips_www_authenticate_so_browser_never_prompts() {
+        // A peer 401 carries `WWW-Authenticate: Basic realm=...`. If the relay
+        // echoed it back on its own origin, the browser would show its native
+        // "Sign in" dialog before the SPA could intercept the 401. The header
+        // must be stripped on every relayed response; the 401 status + body
+        // still pass through so JS can react and show the in-app prompt.
+        assert!(
+            is_stripped_response_header(&header::WWW_AUTHENTICATE),
+            "WWW-Authenticate must never be forwarded to the browser"
+        );
+        // Sanity: a benign header is still forwarded.
+        assert!(!is_stripped_response_header(&header::CONTENT_TYPE));
+
+        // Mirror the response-builder copy loop (relay_http_inner ~line 438):
+        // build the peer's 401 header set, then copy through the same filter the
+        // relay uses and assert WWW-Authenticate is gone but status is intact.
+        let mut peer_headers = HeaderMap::new();
+        peer_headers.insert(
+            header::WWW_AUTHENTICATE,
+            hv("Basic realm=\"mobux\", charset=\"UTF-8\""),
+        );
+        peer_headers.insert(header::CONTENT_TYPE, hv("application/json"));
+
+        let status = StatusCode::UNAUTHORIZED;
+        let mut out = Response::builder().status(status);
+        for (name, value) in peer_headers.iter() {
+            if is_stripped_response_header(name) {
+                continue;
+            }
+            out = out.header(name, value);
+        }
+        let resp = out.body(Body::empty()).unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "401 preserved");
+        assert!(
+            resp.headers().get(header::WWW_AUTHENTICATE).is_none(),
+            "relay must not forward the peer's WWW-Authenticate challenge"
+        );
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "non-stripped headers still pass through"
+        );
+    }
+
     // ── peer canonicalization + loop guard ───────────────────────────────────
 
     #[test]
@@ -802,6 +861,19 @@ mod tests {
         let (auth3, fwd3) = split_ws_query(None);
         assert!(auth3.is_none());
         assert_eq!(fwd3, "");
+    }
+
+    #[test]
+    fn forwarded_url_parses_for_normal_paths() {
+        // The relay parses `https://{peer}{path}{query}` up front so a parse
+        // failure is a clear BadRequest instead of reqwest's opaque deferred
+        // "builder error". A normal relayed API path must parse cleanly.
+        let url = reqwest::Url::parse("https://devbox:5151/api/sessions?x=1");
+        assert!(url.is_ok());
+        // A malformed authority (e.g. an unclosed IPv6 bracket) must be
+        // rejected here, rather than slipping through to reqwest's `.send()`
+        // where it surfaces as the opaque "builder error".
+        assert!(reqwest::Url::parse("https://[bad:5151/api/sessions").is_err());
     }
 
     #[test]

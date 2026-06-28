@@ -1,18 +1,18 @@
-import { useEffect, useRef } from 'preact/hooks';
-import { signal, computed } from '@preact/signals';
+import { useEffect, useRef } from "preact/hooks";
+import { signal, computed } from "@preact/signals";
 
 // Listen card. Ports listen-settings.js (settings-page wiring) and
 // listen-prefs.js (prefs schema). Uses the same localStorage key and
 // the same Web Speech API so existing phone preferences are preserved.
 
-const STORAGE_KEY = 'mobux.listen.prefs';
+const STORAGE_KEY = "mobux.listen.prefs";
 const RATE_MIN = 0.5;
 const RATE_MAX = 2.0;
 const PITCH_MIN = 0.5;
 const PITCH_MAX = 2.0;
 
 function clamp(n, lo, hi, fallback) {
-  const v = typeof n === 'number' ? n : parseFloat(n);
+  const v = typeof n === "number" ? n : parseFloat(n);
   if (!Number.isFinite(v)) return fallback;
   return Math.max(lo, Math.min(hi, v));
 }
@@ -20,15 +20,15 @@ function clamp(n, lo, hi, fallback) {
 function loadPrefs() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { voice: '', rate: 1.0, pitch: 1.0 };
+    if (!raw) return { voice: "", rate: 1.0, pitch: 1.0 };
     const p = JSON.parse(raw);
     return {
-      voice: typeof p.voice === 'string' ? p.voice : '',
+      voice: typeof p.voice === "string" ? p.voice : "",
       rate: clamp(p.rate, RATE_MIN, RATE_MAX, 1.0),
       pitch: clamp(p.pitch, PITCH_MIN, PITCH_MAX, 1.0),
     };
   } catch (_) {
-    return { voice: '', rate: 1.0, pitch: 1.0 };
+    return { voice: "", rate: 1.0, pitch: 1.0 };
   }
 }
 
@@ -37,7 +37,7 @@ function savePrefs(prefs) {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        voice: typeof prefs.voice === 'string' ? prefs.voice : '',
+        voice: typeof prefs.voice === "string" ? prefs.voice : "",
         rate: clamp(prefs.rate, RATE_MIN, RATE_MAX, 1.0),
         pitch: clamp(prefs.pitch, PITCH_MIN, PITCH_MAX, 1.0),
       }),
@@ -45,7 +45,9 @@ function savePrefs(prefs) {
   } catch (_) {}
 }
 
-const available = signal(typeof window !== 'undefined' && 'speechSynthesis' in window);
+const available = signal(
+  typeof window !== "undefined" && "speechSynthesis" in window,
+);
 const voices = signal([]);
 const prefs = signal(loadPrefs());
 
@@ -58,8 +60,9 @@ export function ListenCard() {
       voices.value = window.speechSynthesis.getVoices();
     }
     populate();
-    window.speechSynthesis.addEventListener('voiceschanged', populate);
-    return () => window.speechSynthesis.removeEventListener('voiceschanged', populate);
+    window.speechSynthesis.addEventListener("voiceschanged", populate);
+    return () =>
+      window.speechSynthesis.removeEventListener("voiceschanged", populate);
   }, []);
 
   function setVoice(e) {
@@ -83,9 +86,13 @@ export function ListenCard() {
   function test() {
     window.speechSynthesis.cancel();
     const current = loadPrefs();
-    const utt = new SpeechSynthesisUtterance('Mobux listen mode test, one two three');
+    const utt = new SpeechSynthesisUtterance(
+      "Mobux listen mode test, one two three",
+    );
     if (current.voice) {
-      const found = window.speechSynthesis.getVoices().find((v) => v.name === current.voice);
+      const found = window.speechSynthesis
+        .getVoices()
+        .find((v) => v.name === current.voice);
       if (found) utt.voice = found;
     }
     utt.rate = current.rate;
@@ -145,7 +152,12 @@ export function ListenCard() {
               {prefs.value.pitch.toFixed(1)}
             </span>
           </div>
-          <button type="button" id="listenTest" class="listen-test-btn" onClick={test}>
+          <button
+            type="button"
+            id="listenTest"
+            class="listen-test-btn"
+            onClick={test}
+          >
             Test
           </button>
         </div>

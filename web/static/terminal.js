@@ -1,9 +1,9 @@
-import { TerminalCore } from './terminal-core.js';
-import { ReaderView } from './reader-view.js';
-import { createGestureRecognizer } from './touch.js';
-import { createInputBar } from './input-bar.js';
-import { createTopBar } from './top-bar.js';
-import { applyTheme, getStoredThemeId } from './themes.js';
+import { TerminalCore } from "./terminal-core.js";
+import { ReaderView } from "./reader-view.js";
+import { createGestureRecognizer } from "./touch.js";
+import { createInputBar } from "./input-bar.js";
+import { createTopBar } from "./top-bar.js";
+import { applyTheme, getStoredThemeId } from "./themes.js";
 
 const session = window.MOBUX_SESSION;
 
@@ -15,7 +15,7 @@ const session = window.MOBUX_SESSION;
 // which calls wsUrl() again — target the host the session actually lives on,
 // regardless of what the global host picker is set to. Empty (same-origin /
 // current node) → no override, behaviour unchanged.
-const pinnedHost = window.MOBUX_PEER || '';
+const pinnedHost = window.MOBUX_PEER || "";
 if (pinnedHost) window.MobuxMesh.usePeerForPage(pinnedHost);
 
 const termEl = document.getElementById("terminal");
@@ -30,32 +30,74 @@ const cmdCloseBtn = document.getElementById("cmdCloseBtn");
 // ── Loading screen quotes ───────────────────────────────────────────
 const quotes = [
   ["Simplicity is prerequisite for reliability.", "Edsger W. Dijkstra"],
-  ["If debugging is the process of removing bugs, then programming must be the process of putting them in.", "Edsger W. Dijkstra"],
-  ["The Analytical Engine weaves algebraical patterns just as the Jacquard loom weaves flowers and leaves.", "Ada Lovelace"],
-  ["We can only see a short distance ahead, but we can see plenty there that needs to be done.", "Alan Turing"],
+  [
+    "If debugging is the process of removing bugs, then programming must be the process of putting them in.",
+    "Edsger W. Dijkstra",
+  ],
+  [
+    "The Analytical Engine weaves algebraical patterns just as the Jacquard loom weaves flowers and leaves.",
+    "Ada Lovelace",
+  ],
+  [
+    "We can only see a short distance ahead, but we can see plenty there that needs to be done.",
+    "Alan Turing",
+  ],
   ["Those who can imagine anything, can create the impossible.", "Alan Turing"],
-  ["The most dangerous phrase in the language is: we\u2019ve always done it this way.", "Grace Hopper"],
+  [
+    "The most dangerous phrase in the language is: we\u2019ve always done it this way.",
+    "Grace Hopper",
+  ],
   ["The best way to predict the future is to invent it.", "Alan Kay"],
   ["Premature optimization is the root of all evil.", "Donald Knuth"],
   ["Talk is cheap. Show me the code.", "Linus Torvalds"],
-  ["Controlling complexity is the essence of computer programming.", "Brian Kernighan"],
-  ["Any sufficiently advanced technology is indistinguishable from magic.", "Arthur C. Clarke"],
+  [
+    "Controlling complexity is the essence of computer programming.",
+    "Brian Kernighan",
+  ],
+  [
+    "Any sufficiently advanced technology is indistinguishable from magic.",
+    "Arthur C. Clarke",
+  ],
   ["Information is the resolution of uncertainty.", "Claude Shannon"],
-  ["Looking back, we were the luckiest people in the world; there was no choice but to be pioneers.", "Margaret Hamilton"],
+  [
+    "Looking back, we were the luckiest people in the world; there was no choice but to be pioneers.",
+    "Margaret Hamilton",
+  ],
 
   // Contemporary craft
-  ["Any fool can write code that a computer can understand. Good programmers write code that humans can understand.", "Martin Fowler"],
+  [
+    "Any fool can write code that a computer can understand. Good programmers write code that humans can understand.",
+    "Martin Fowler",
+  ],
   ["Truth can only be found in one place: the code.", "Robert C. Martin"],
-  ["I'm not a great programmer; I'm just a good programmer with great habits.", "Kent Beck"],
+  [
+    "I'm not a great programmer; I'm just a good programmer with great habits.",
+    "Kent Beck",
+  ],
   ["Duplication is far cheaper than the wrong abstraction.", "Sandi Metz"],
   ["It's harder to read code than to write it.", "Joel Spolsky"],
   ["I call it my billion-dollar mistake.", "Tony Hoare, on null"],
-  ["Programmers know the value of everything and the cost of nothing.", "Rich Hickey"],
-  ["Fancy algorithms are slow when n is small, and n is usually small.", "Rob Pike"],
-  ["There are only two kinds of programming languages: the ones people complain about and the ones nobody uses.", "Bjarne Stroustrup"],
+  [
+    "Programmers know the value of everything and the cost of nothing.",
+    "Rich Hickey",
+  ],
+  [
+    "Fancy algorithms are slow when n is small, and n is usually small.",
+    "Rob Pike",
+  ],
+  [
+    "There are only two kinds of programming languages: the ones people complain about and the ones nobody uses.",
+    "Bjarne Stroustrup",
+  ],
   ["Ruby is designed to make programmers happy.", "Yukihiro Matsumoto"],
-  ["The three chief virtues of a programmer are: laziness, impatience, and hubris.", "Larry Wall"],
-  ["If you're not failing every now and again, it's a sign you're not doing anything very innovative.", "John Carmack"],
+  [
+    "The three chief virtues of a programmer are: laziness, impatience, and hubris.",
+    "Larry Wall",
+  ],
+  [
+    "If you're not failing every now and again, it's a sign you're not doing anything very innovative.",
+    "John Carmack",
+  ],
 ];
 {
   const [text, author] = quotes[Math.floor(Math.random() * quotes.length)];
@@ -82,24 +124,24 @@ function navigateToUrl(url) {
 }
 
 function openExternal(url) {
-  const isTWA = document.referrer.startsWith('android-app://');
-  
+  const isTWA = document.referrer.startsWith("android-app://");
+
   if (isTWA && /^https?:\/\//.test(url)) {
     // Build an intent:// URL that opens the link in the system default
     // browser. Format:
     // intent://<url>#Intent;action=android.intent.action.VIEW;scheme=<scheme>;S.browser_fallback_url=<url>;end;
     const urlObj = new URL(url);
-    const intentUrl = `intent://${urlObj.host}${urlObj.pathname}${urlObj.search}${urlObj.hash}#Intent;action=android.intent.action.VIEW;scheme=${urlObj.protocol.replace(':', '')};S.browser_fallback_url=${encodeURIComponent(url)};end;`;
+    const intentUrl = `intent://${urlObj.host}${urlObj.pathname}${urlObj.search}${urlObj.hash}#Intent;action=android.intent.action.VIEW;scheme=${urlObj.protocol.replace(":", "")};S.browser_fallback_url=${encodeURIComponent(url)};end;`;
     window.__mobuxNavigateToUrl(intentUrl);
     return;
   }
-  
+
   // Non-TWA or non-http(s) URLs: use anchor-click fallback
-  const a = document.createElement('a');
+  const a = document.createElement("a");
   a.href = url;
-  a.target = '_blank';
-  a.rel = 'noopener noreferrer';
-  a.style.display = 'none';
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.style.display = "none";
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -113,7 +155,8 @@ window.__mobuxOpenExternal = openExternal;
 // `coarse` pointer = touch primary (phones + tablets). Width fallback
 // catches devices that misreport pointer capability. Desktops with a
 // mouse stay `false` and skip the on-screen input bar.
-const isMobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 620;
+const isMobile =
+  window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 620;
 const core = new TerminalCore({ session, host: termEl });
 
 // Apply the stored theme to all three layers. terminal-core.js already
@@ -129,14 +172,14 @@ applyTheme(getStoredThemeId(), { editor: getEditor() });
 function onThemeChange() {
   applyTheme(getStoredThemeId(), { editor: getEditor() });
 }
-window.addEventListener('storage', (e) => {
-  if (e.key === 'mobux:theme') onThemeChange();
+window.addEventListener("storage", (e) => {
+  if (e.key === "mobux:theme") onThemeChange();
 });
-window.addEventListener('mobux:theme', onThemeChange);
+window.addEventListener("mobux:theme", onThemeChange);
 
 // Enable overlay for touch devices
-if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-  overlay.style.pointerEvents = 'auto';
+if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
+  overlay.style.pointerEvents = "auto";
 }
 
 // ── Pane indicator ──────────────────────────────────────────────────
@@ -149,7 +192,7 @@ function updatePaneUI() {
     paneIndicator.textContent = `${current ? current.title : "?"} (${activeIndex + 1}/${panes.length})`;
   }
 }
-core.addEventListener('panes', () => {
+core.addEventListener("panes", () => {
   updatePaneUI();
   pruneViewPrefs();
   applyStoredViewForActiveWindow();
@@ -157,25 +200,29 @@ core.addEventListener('panes', () => {
 
 // ── Command pick list ───────────────────────────────────────────────
 function showCmdList() {
-  cmdPickList.classList.add('visible');
-  cmdOverlayBg.classList.add('visible');
-  overlay.style.pointerEvents = 'none';
+  cmdPickList.classList.add("visible");
+  cmdOverlayBg.classList.add("visible");
+  overlay.style.pointerEvents = "none";
 }
 
 function hideCmdList() {
-  cmdPickList.classList.remove('visible');
-  cmdOverlayBg.classList.remove('visible');
-  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-    overlay.style.pointerEvents = 'auto';
+  cmdPickList.classList.remove("visible");
+  cmdOverlayBg.classList.remove("visible");
+  if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
+    overlay.style.pointerEvents = "auto";
   }
 }
 
-cmdPickList.addEventListener('click', (e) => {
-  const cmdItem = e.target.closest('[data-cmd]');
-  if (cmdItem) { core.runTmuxCmd(cmdItem.dataset.cmd); hideCmdList(); return; }
+cmdPickList.addEventListener("click", (e) => {
+  const cmdItem = e.target.closest("[data-cmd]");
+  if (cmdItem) {
+    core.runTmuxCmd(cmdItem.dataset.cmd);
+    hideCmdList();
+    return;
+  }
 });
-cmdCloseBtn.addEventListener('click', hideCmdList);
-cmdOverlayBg.addEventListener('click', hideCmdList);
+cmdCloseBtn.addEventListener("click", hideCmdList);
+cmdOverlayBg.addEventListener("click", hideCmdList);
 
 // ── Touch gestures ──────────────────────────────────────────────────
 function scrollByPixels(dy) {
@@ -194,8 +241,9 @@ createGestureRecognizer(overlay, {
   },
 
   onTwoPullMove(pull, vh) {
-    if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
-    else if (pull > vh * 0.03) paneIndicator.textContent = '↓ Pull to reload...';
+    if (pull > vh * 0.08) paneIndicator.textContent = "↻ Release to reload";
+    else if (pull > vh * 0.03)
+      paneIndicator.textContent = "↓ Pull to reload...";
   },
 
   onTwoPullEnd(pull, vh) {
@@ -249,27 +297,35 @@ createGestureRecognizer(overlay, {
 let readerGestures = null;
 function mountReaderGestures() {
   if (readerGestures) return;
-  readerGestures = createGestureRecognizer(readerEl, {
-    onReconnect: () => core.reconnect(),
-    onLongPress: showCmdList,
-    onSwipeUp: showCmdList,
-    onHSwipe: (dir) => core.switchWindow(dir),
-    onTap: () => {},
-    // Double-tap in reader mode is for typing, but the reader has no
-    // cursor / no live editing affordance — opening the keyboard
-    // there is confusing. Drop back to xterm first, then show the
-    // input bar so the keystrokes have somewhere to land.
-    onDoubleTap: () => { swapView('xterm'); ensureInputBar().show(); },
-    onScroll: (dy) => reader.scrollBy(dy),
-    onTwoPullMove(pull, vh) {
-      if (pull > vh * 0.08) paneIndicator.textContent = '↻ Release to reload';
-      else if (pull > vh * 0.03) paneIndicator.textContent = '↓ Pull to reload...';
+  readerGestures = createGestureRecognizer(
+    readerEl,
+    {
+      onReconnect: () => core.reconnect(),
+      onLongPress: showCmdList,
+      onSwipeUp: showCmdList,
+      onHSwipe: (dir) => core.switchWindow(dir),
+      onTap: () => {},
+      // Double-tap in reader mode is for typing, but the reader has no
+      // cursor / no live editing affordance — opening the keyboard
+      // there is confusing. Drop back to xterm first, then show the
+      // input bar so the keystrokes have somewhere to land.
+      onDoubleTap: () => {
+        swapView("xterm");
+        ensureInputBar().show();
+      },
+      onScroll: (dy) => reader.scrollBy(dy),
+      onTwoPullMove(pull, vh) {
+        if (pull > vh * 0.08) paneIndicator.textContent = "↻ Release to reload";
+        else if (pull > vh * 0.03)
+          paneIndicator.textContent = "↓ Pull to reload...";
+      },
+      onTwoPullEnd(pull, vh) {
+        if (pull > vh * 0.08) location.reload(true);
+        else updatePaneUI();
+      },
     },
-    onTwoPullEnd(pull, vh) {
-      if (pull > vh * 0.08) location.reload(true);
-      else updatePaneUI();
-    },
-  }, { passiveScroll: false });
+    { passiveScroll: false },
+  );
 }
 function unmountReaderGestures() {
   if (!readerGestures) return;
@@ -289,11 +345,13 @@ function scheduleReveal() {
   revealScheduled = true;
   setTimeout(() => {
     core.scrollToBottom();
-    loadquote.style.opacity = '0';
-    setTimeout(() => { if (loadquote.parentNode) loadquote.remove(); }, 300);
+    loadquote.style.opacity = "0";
+    setTimeout(() => {
+      if (loadquote.parentNode) loadquote.remove();
+    }, 300);
   }, 200);
 }
-core.addEventListener('data', scheduleReveal);
+core.addEventListener("data", scheduleReveal);
 
 // ── Mobile input bar ────────────────────────────────────────────────
 // `isMobile` is a one-shot guess at load time. It can be wrong: a device
@@ -321,17 +379,22 @@ if (isMobile) {
 // switching to tablet mode). matchMedia change fires on modality changes;
 // once coarse, make sure the bar exists.
 try {
-  const coarse = window.matchMedia('(pointer: coarse)');
-  const onPointerChange = (e) => { if (e.matches) ensureInputBar(); };
-  if (coarse.addEventListener) coarse.addEventListener('change', onPointerChange);
+  const coarse = window.matchMedia("(pointer: coarse)");
+  const onPointerChange = (e) => {
+    if (e.matches) ensureInputBar();
+  };
+  if (coarse.addEventListener)
+    coarse.addEventListener("change", onPointerChange);
   else if (coarse.addListener) coarse.addListener(onPointerChange);
-} catch (_) { /* matchMedia unsupported: lazy creation on tap still covers us */ }
+} catch (_) {
+  /* matchMedia unsupported: lazy creation on tap still covers us */
+}
 
 // ── View swap (xterm <-> reader) ────────────────────────────────────
 const reader = new ReaderView({ host: readerEl, core, overlay });
-let currentView = 'xterm';
+let currentView = "xterm";
 
-const VIEW_DEFAULT_KEY = 'mobux.view.default';
+const VIEW_DEFAULT_KEY = "mobux.view.default";
 const viewPrefKey = (windowId) => `mobux.view.${session}.${windowId}`;
 
 function activeWindowId() {
@@ -340,44 +403,53 @@ function activeWindowId() {
 }
 
 function storedDefaultView() {
-  try { return localStorage.getItem(VIEW_DEFAULT_KEY) || 'xterm'; }
-  catch (_) { return 'xterm'; }
+  try {
+    return localStorage.getItem(VIEW_DEFAULT_KEY) || "xterm";
+  } catch (_) {
+    return "xterm";
+  }
 }
 
 function storedViewFor(windowId) {
   if (!windowId) return null;
-  try { return localStorage.getItem(viewPrefKey(windowId)); }
-  catch (_) { return null; }
+  try {
+    return localStorage.getItem(viewPrefKey(windowId));
+  } catch (_) {
+    return null;
+  }
 }
 
 function updateToggleLabel() {
-  const btn = document.getElementById('viewToggleBtn');
+  const btn = document.getElementById("viewToggleBtn");
   if (!btn) return;
-  if (currentView === 'reader') {
-    btn.textContent = '▣';
-    btn.title = 'Switch to terminal view';
+  if (currentView === "reader") {
+    btn.textContent = "▣";
+    btn.title = "Switch to terminal view";
   } else {
-    btn.textContent = '📖';
-    btn.title = 'Switch to reader view';
+    btn.textContent = "📖";
+    btn.title = "Switch to reader view";
   }
 }
 
 function applyView(mode, { persist = true } = {}) {
-  if (mode !== 'xterm' && mode !== 'reader') return;
-  if (mode === currentView) { updateToggleLabel(); return; }
-  if (mode === 'reader') {
-    termEl.classList.add('hidden');
+  if (mode !== "xterm" && mode !== "reader") return;
+  if (mode === currentView) {
+    updateToggleLabel();
+    return;
+  }
+  if (mode === "reader") {
+    termEl.classList.add("hidden");
     // Reader has its own gesture recogniser on #reader. Disable the
     // xterm overlay so it doesn't sit on top and eat every touch.
-    overlay.style.pointerEvents = 'none';
+    overlay.style.pointerEvents = "none";
     reader.mount();
     mountReaderGestures();
   } else {
     unmountReaderGestures();
     reader.unmount();
-    termEl.classList.remove('hidden');
-    if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-      overlay.style.pointerEvents = 'auto';
+    termEl.classList.remove("hidden");
+    if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
+      overlay.style.pointerEvents = "auto";
     }
     setTimeout(() => core.resize(), 0);
   }
@@ -390,18 +462,20 @@ function applyView(mode, { persist = true } = {}) {
     } catch (_) {}
   }
   updateToggleLabel();
-  window.dispatchEvent(new CustomEvent('mobux:viewchange', { detail: mode }));
+  window.dispatchEvent(new CustomEvent("mobux:viewchange", { detail: mode }));
 }
 
-function swapView(mode) { applyView(mode, { persist: true }); }
+function swapView(mode) {
+  applyView(mode, { persist: true });
+}
 
 // Ribbon view-toggle button (mobile input bar).
-const viewToggleBtn = document.getElementById('viewToggleBtn');
+const viewToggleBtn = document.getElementById("viewToggleBtn");
 if (viewToggleBtn) {
-  viewToggleBtn.addEventListener('mousedown', (e) => e.preventDefault());
-  viewToggleBtn.addEventListener('click', (e) => {
+  viewToggleBtn.addEventListener("mousedown", (e) => e.preventDefault());
+  viewToggleBtn.addEventListener("click", (e) => {
     e.preventDefault();
-    swapView(currentView === 'xterm' ? 'reader' : 'xterm');
+    swapView(currentView === "xterm" ? "reader" : "xterm");
   });
 }
 
@@ -416,19 +490,24 @@ function ensureTopBar() {
   if (topBar || isMobile) return;
   topBar = createTopBar({
     send: (d) => core.send(d),
-    toggleReader: () => swapView(currentView === 'xterm' ? 'reader' : 'xterm'),
-    isReader: () => currentView === 'reader',
+    toggleReader: () => swapView(currentView === "xterm" ? "reader" : "xterm"),
+    isReader: () => currentView === "reader",
   });
 }
 if (!isMobile) ensureTopBar();
 try {
-  const coarse = window.matchMedia('(pointer: coarse)');
+  const coarse = window.matchMedia("(pointer: coarse)");
   const onCoarse = (e) => {
-    if (e.matches && topBar) { topBar.destroy(); topBar = null; }
+    if (e.matches && topBar) {
+      topBar.destroy();
+      topBar = null;
+    }
   };
-  if (coarse.addEventListener) coarse.addEventListener('change', onCoarse);
+  if (coarse.addEventListener) coarse.addEventListener("change", onCoarse);
   else if (coarse.addListener) coarse.addListener(onCoarse);
-} catch (_) { /* matchMedia unsupported: static gate still covers us */ }
+} catch (_) {
+  /* matchMedia unsupported: static gate still covers us */
+}
 
 function applyStoredViewForActiveWindow() {
   const wid = activeWindowId();
@@ -452,7 +531,9 @@ function pruneViewPrefs() {
 
 window.__mobuxView = {
   swap: swapView,
-  get current() { return currentView; },
+  get current() {
+    return currentView;
+  },
   send: (d) => core.send(d),
   test: {
     // Test injections close the WS first so tmux can't race/clobber
@@ -461,14 +542,19 @@ window.__mobuxView = {
       // Mark the close intentional so auto-reconnect doesn't reopen the
       // WS and let tmux clobber the injected content.
       core.intentionalClose = true;
-      try { core.ws?.close(); } catch (_) {}
+      try {
+        core.ws?.close();
+      } catch (_) {}
       return new Promise((resolve) =>
-        core.term.write('\x1b[?1049l' + str.replace(/\n/g, '\r\n'), resolve));
+        core.term.write("\x1b[?1049l" + str.replace(/\n/g, "\r\n"), resolve),
+      );
     },
-    injectLines: (n, prefix = 'inject') => {
+    injectLines: (n, prefix = "inject") => {
       core.intentionalClose = true;
-      try { core.ws?.close(); } catch (_) {}
-      let s = '\x1b[?1049l';
+      try {
+        core.ws?.close();
+      } catch (_) {}
+      let s = "\x1b[?1049l";
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
     },
@@ -477,9 +563,11 @@ window.__mobuxView = {
     // behaviour after incremental content growth: the alt-screen exit
     // sequence causes sterk to reset the buffer, which races with the
     // test's scroll-geometry probe.
-    injectLinesPlain: (n, prefix = 'inject') => {
-      try { core.ws?.close(); } catch (_) {}
-      let s = '';
+    injectLinesPlain: (n, prefix = "inject") => {
+      try {
+        core.ws?.close();
+      } catch (_) {}
+      let s = "";
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return new Promise((resolve) => core.term.write(s, resolve));
     },
@@ -493,14 +581,20 @@ window.__mobuxView = {
     isAlternate: () => {
       // sterk: compare alternate vs active buffer references
       if (core.term?._sterk?.buffer) {
-        return core.term._sterk.buffer.alternate === core.term._sterk.buffer.active;
+        return (
+          core.term._sterk.buffer.alternate === core.term._sterk.buffer.active
+        );
       }
       // xterm: the BufferNamespace exposes `active.type` ('normal' | 'alternate')
       const t = core.term?.buffer?.active?.type;
-      return t === 'alternate';
+      return t === "alternate";
     },
     readerAtBottom: () => reader._atBottom,
-    readerForceScrollTop: () => { reader._atBottom = false; reader._scrollY = 0; reader._applyTransform?.(); },
+    readerForceScrollTop: () => {
+      reader._atBottom = false;
+      reader._scrollY = 0;
+      reader._applyTransform?.();
+    },
     terminalRows: () => core.term.rows,
     cols: () => core.term.cols,
     rows: () => core.term.rows,
@@ -513,7 +607,9 @@ window.__mobuxView = {
     // Used by the auto-reconnect test.
     forceDrop: () => {
       core.intentionalClose = false;
-      try { core.ws?.close(); } catch (_) {}
+      try {
+        core.ws?.close();
+      } catch (_) {}
     },
     oscDetected: () => !!core.oscDetected,
     readerScrollY: () => reader.scrollY,
@@ -527,8 +623,12 @@ window.__mobuxView = {
     // 50ms render throttle.
     readerForceRender: () => reader._render(),
     switchWindow: (dir) => core.switchWindow(dir),
-    statusBarOffsetHeight: () => document.querySelector('.reader-statusbar')?.offsetHeight ?? 0,
-    statusBarFilled: () => document.querySelector('.reader-statusbar')?.classList.contains('reader-statusbar--filled') ?? false,
+    statusBarOffsetHeight: () =>
+      document.querySelector(".reader-statusbar")?.offsetHeight ?? 0,
+    statusBarFilled: () =>
+      document
+        .querySelector(".reader-statusbar")
+        ?.classList.contains("reader-statusbar--filled") ?? false,
   },
 };
 
@@ -536,8 +636,8 @@ window.__mobuxView = {
 // view even before the first /panes refresh resolves. Per-window
 // override (if any) is applied later in the panes listener.
 const bootDefault = storedDefaultView();
-if (bootDefault === 'reader') {
-  setTimeout(() => applyView('reader', { persist: false }), 0);
+if (bootDefault === "reader") {
+  setTimeout(() => applyView("reader", { persist: false }), 0);
 }
 
 updateToggleLabel();
@@ -548,25 +648,33 @@ updateToggleLabel();
 // on a click into an already-open tab the SW posts `mobux-navigate`
 // so we can switch without a reload.
 function selectWindow(windowIndex) {
-  if (windowIndex == null || windowIndex === '') return;
+  if (windowIndex == null || windowIndex === "") return;
   window.MobuxMesh.apiFetch(
     `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select`,
-    { method: 'POST' },
-  ).then(() => {
-    core.clear();
-    core.scrollToBottom();
-    setTimeout(() => { core.refreshPanes(); core.reloadHistory(); }, 300);
-  }).catch(() => {});
+    { method: "POST" },
+  )
+    .then(() => {
+      core.clear();
+      core.scrollToBottom();
+      setTimeout(() => {
+        core.refreshPanes();
+        core.reloadHistory();
+      }, 300);
+    })
+    .catch(() => {});
 }
 
 function windowFromUrl(href) {
-  try { return new URL(href, location.origin).searchParams.get('w'); }
-  catch (_) { return null; }
+  try {
+    return new URL(href, location.origin).searchParams.get("w");
+  } catch (_) {
+    return null;
+  }
 }
 
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', (ev) => {
-    if (ev.data?.type === 'mobux-navigate') {
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (ev) => {
+    if (ev.data?.type === "mobux-navigate") {
       selectWindow(windowFromUrl(ev.data.url));
     }
   });
@@ -588,15 +696,17 @@ let booted = false;
   if (pinnedHost && !window.MobuxMesh.getPeerCred(pinnedHost)) {
     const picker = window.MobuxHostPicker;
     let signedIn = false;
-    if (picker && typeof picker.promptPeerCred === 'function') {
-      try { signedIn = await picker.promptPeerCred(pinnedHost); } catch (_) {}
+    if (picker && typeof picker.promptPeerCred === "function") {
+      try {
+        signedIn = await picker.promptPeerCred(pinnedHost);
+      } catch (_) {}
     }
     if (!signedIn) {
       if (loadquote) {
-        const q = document.getElementById('quote');
-        const a = document.getElementById('qauthor');
+        const q = document.getElementById("quote");
+        const a = document.getElementById("qauthor");
         if (q) q.textContent = `Sign in to ${pinnedHost} to open this session.`;
-        if (a) a.textContent = '';
+        if (a) a.textContent = "";
       }
       return; // don't connect with no creds — avoids the silent close-loop
     }
@@ -636,18 +746,55 @@ function autoReconnect() {
 }
 
 // Primary path: screen/tab is visible again → reconnect now.
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') autoReconnect();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") autoReconnect();
 });
 // Network came back.
-window.addEventListener('online', autoReconnect);
+window.addEventListener("online", autoReconnect);
 // Android bfcache restore (app swapped back into the foreground).
-window.addEventListener('pageshow', autoReconnect);
+window.addEventListener("pageshow", autoReconnect);
 
 // A real navigation away / unload is an intentional teardown — mark it
 // so the socket's onclose doesn't arm a (pointless) backoff retry on a
 // page that's going away.
-window.addEventListener('pagehide', () => { core.intentionalClose = true; });
+window.addEventListener("pagehide", () => {
+  core.intentionalClose = true;
+});
+
+// ── Peer WS auth-failure → in-app re-prompt ─────────────────────────
+// When pinned to a peer, the relay accepts the browser WS first, then dials
+// the peer with the stored upstream_auth. A *stale/wrong* cred makes that
+// server-side dial 401, so the browser socket closes WITHOUT ever opening —
+// indistinguishable from a network blip, so the core would just back off and
+// retry the same bad cred forever (a silent close-loop, never the browser's
+// native dialog since a WS upgrade can't trigger it). To recover: if a peer
+// socket closes before it ever opened, treat it as an auth failure — clear the
+// cred, prompt in-app for fresh creds, then reconnect. A clean open clears the
+// flag so a later blip on a working session reconnects normally.
+if (pinnedHost) {
+  let everOpened = false;
+  let reprompting = false;
+  core.addEventListener("open", () => {
+    everOpened = true;
+  });
+  core.addEventListener("close", async () => {
+    if (everOpened || reprompting || core.intentionalClose) return;
+    reprompting = true;
+    const mesh = window.MobuxMesh;
+    const picker = window.MobuxHostPicker;
+    mesh.clearPeerCred(pinnedHost);
+    let signedIn = false;
+    if (picker && typeof picker.promptPeerCred === "function") {
+      try {
+        signedIn = await picker.promptPeerCred(pinnedHost, {
+          note: `Sign in to ${pinnedHost} to open this session.`,
+        });
+      } catch (_) {}
+    }
+    reprompting = false;
+    if (signedIn) core.connect();
+  });
+}
 
 // ── Soft keyboard (visualViewport) handler ──────────────────────────
 // Renderer-agnostic. On Android Chrome (the TWA target) the soft
@@ -670,17 +817,17 @@ if (window.visualViewport) {
   let lastH = vv.height;
   const trackKeyboard = () => {
     const shrunk = vv.height < window.innerHeight - 1;
-    document.body.style.height = shrunk ? `${vv.height}px` : '';
+    document.body.style.height = shrunk ? `${vv.height}px` : "";
     if (Math.abs(vv.height - lastH) > 0.5) {
       lastH = vv.height;
       // Synchronous resize so both backends recompute cols/rows from
       // the freshly-laid-out host height in the same task — no visible
       // jump on the next frame.
-      window.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event("resize"));
     }
   };
-  vv.addEventListener('resize', trackKeyboard);
-  vv.addEventListener('scroll', trackKeyboard);
+  vv.addEventListener("resize", trackKeyboard);
+  vv.addEventListener("scroll", trackKeyboard);
 }
 
 // ── Tap-to-snap-to-bottom ───────────────────────────────────────────
@@ -711,14 +858,14 @@ if (window.visualViewport) {
   let downT = 0;
   let tracking = false;
 
-  termEl.addEventListener('pointerdown', (e) => {
+  termEl.addEventListener("pointerdown", (e) => {
     downX = e.clientX;
     downY = e.clientY;
     downT = e.timeStamp;
     tracking = true;
   });
 
-  termEl.addEventListener('pointerup', (e) => {
+  termEl.addEventListener("pointerup", (e) => {
     if (!tracking) return;
     tracking = false;
     const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
@@ -731,5 +878,7 @@ if (window.visualViewport) {
   // A canceled pointer (e.g. the gesture recogniser claims it for a
   // scroll/pinch) is never a tap — drop tracking so the next pointerup
   // can't be misread.
-  termEl.addEventListener('pointercancel', () => { tracking = false; });
+  termEl.addEventListener("pointercancel", () => {
+    tracking = false;
+  });
 }
