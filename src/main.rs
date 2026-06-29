@@ -491,23 +491,6 @@ fn ensure_session_cookie_value() -> String {
     value
 }
 
-/// Build the `Set-Cookie` value for the post-auth session cookie.
-///
-/// `Secure` is only attached when the listener actually serves TLS. A home box
-/// reached over plain http (the common tailnet case) would otherwise hand the
-/// browser a `Secure` cookie, which the browser silently refuses to store on an
-/// http origin. The session then never sticks and every relayed request falls
-/// back to a fresh Basic-auth prompt — the "asks for auth twice every time"
-/// bug. On http we drop `Secure` so the cookie is stored and reused; HttpOnly
-/// and SameSite still apply in both modes, and TLS binds keep `Secure`.
-fn session_set_cookie(auth: &AuthConfig, use_tls: bool) -> String {
-    let secure = if use_tls { "; Secure" } else { "" };
-    format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=2592000",
-        auth.session_cookie_name, auth.session_cookie_value
-    )
-}
-
 fn load_auth_config() -> Option<AuthConfig> {
     let user_env = env::var("MOBUX_AUTH_USER")
         .ok()
