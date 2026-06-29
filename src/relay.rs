@@ -57,6 +57,43 @@ fn default_peer_port() -> u16 {
         .unwrap_or(8080)
 }
 
+/// Percent-decode `%XX` sequences in a path segment (no `+`→space, path
+/// segments are not query strings).  Returns `Err` if the input contains an
+/// invalid or incomplete `%XX` sequence, or if a decoded `%2F` (slash) or any
+/// residual `%` remains after decoding (guards against path-traversal /
+/// double-encoding attacks).
+fn decode_peer_segment(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(format!("invalid percent-encoding in peer: {s}"));
+            }
+            let hi = char::from(bytes[i + 1])
+                .to_digit(16)
+                .ok_or_else(|| format!("invalid percent-encoding in peer: {s}"))?;
+            let lo = char::from(bytes[i + 2])
+                .to_digit(16)
+                .ok_or_else(|| format!("invalid percent-encoding in peer: {s}"))?;
+            let decoded = ((hi << 4) | lo) as u8;
+            out.push(decoded as char);
+            i += 3;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    // Reject if decoded result still contains a '%' (double-encoded) or '/'
+    if out.contains('%') {
+        return Err(format!(
+            "residual percent-encoding in peer after decode: {s}"
+        ));
+    }
+    Ok(out)
+}
+
 /// Canonicalize a `peer` path segment (`host` or `host:port`) into `host:port`.
 /// Rejects empty hosts, embedded slashes, and anything that already looks like
 /// a relay path (defence in depth against crafted peer values).
@@ -65,6 +102,9 @@ pub fn canonical_peer(raw: &str) -> Result<String, String> {
     if raw.is_empty() {
         return Err("empty peer".into());
     }
+    // Percent-decode first so `host%3Aport` is treated as `host:port`.
+    let decoded = decode_peer_segment(raw)?;
+    let raw = decoded.as_str();
     if raw.contains('/') || raw.contains(' ') {
         return Err("invalid peer (host or host:port only)".into());
     }
@@ -884,5 +924,36 @@ mod tests {
         assert_eq!(percent_decode("dXNlcjpwYXNz"), "dXNlcjpwYXNz");
         assert_eq!(percent_decode("a%2Bb"), "a+b");
         assert_eq!(percent_decode("a%2Fb"), "a/b");
+    }
+
+    #[test]
+    fn canonical_peer_decodes_encoded_colon() {
+        assert_eq!(
+            canonical_peer("devbox.example.ts.net%3A5151"),
+            Ok("devbox.example.ts.net:5151".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_peer_bare_host_gets_default_port() {
+        assert_eq!(
+            canonical_peer("devbox.example.ts.net"),
+            Ok(format!("devbox.example.ts.net:{}", default_peer_port()))
+        );
+    }
+
+    #[test]
+    fn canonical_peer_raw_host_port_back_compat() {
+        assert_eq!(canonical_peer("host:5151"), Ok("host:5151".to_string()));
+    }
+
+    #[test]
+    fn canonical_peer_rejects_encoded_slash() {
+        assert!(canonical_peer("host%2Fevil:5151").is_err());
+    }
+
+    #[test]
+    fn canonical_peer_rejects_leftover_percent() {
+        assert!(canonical_peer("host%ZZevil:5151").is_err());
     }
 }
