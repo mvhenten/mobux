@@ -2661,8 +2661,15 @@ test("mesh client: peer selection rewrites API + WS paths and carries creds", as
     m.clearPeerCred("peerhost:5151");
     return result;
   });
-  expect(out.apiPath).toBe("/r/peerhost%3A5151/api/sessions");
-  expect(out.ws).toContain("/r/peerhost%3A5151/ws/demo");
+  // The peer segment is base64url-encoded (encodePeer in mesh-client.js), so
+  // "peerhost:5151" relays as its base64url form — the colon never reaches the
+  // URL path. Compute it the same way the client does instead of hardcoding.
+  const encPeer = btoa("peerhost:5151")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+  expect(out.apiPath).toBe(`/r/${encPeer}/api/sessions`);
+  expect(out.ws).toContain(`/r/${encPeer}/ws/demo`);
   expect(out.ws).toContain("upstream_auth=");
   // base64("bob:12345")
   expect(out.cred).toBe(btoa("bob:12345"));
