@@ -782,7 +782,13 @@ test('mesh host picker is a native select with "This host" as default', async ({
 
 // Fake peer used across all three regression tests.
 const MOCK_PEER = "127.0.0.1:8282";
-const MOCK_PEER_ENC = encodeURIComponent(MOCK_PEER);
+// Relay API paths use base64url (encodePeer in mesh-client.js).
+const MOCK_PEER_ENC = btoa(MOCK_PEER)
+  .replace(/\+/g, "-")
+  .replace(/\//g, "_")
+  .replace(/=/g, "");
+// SPA navigation URLs (#/s/<peer>/<name>) still use encodeURIComponent.
+const MOCK_PEER_URL_ENC = encodeURIComponent(MOCK_PEER);
 const MOCK_PEER_SESSIONS = [
   { name: "peer-only-session", windows: 1, attached: 0 },
 ];
@@ -946,8 +952,8 @@ test("host-switcher: opening a remote session deep-links to /app#/s/<peer>/<name
 
   const url = page.url();
   // URL must carry the peer host so the terminal routes to the right node.
-  // MOCK_PEER is "127.0.0.1:8282" → encoded as "127.0.0.1%3A8282".
-  const encodedPeer = MOCK_PEER_ENC;
+  // SPA navigation URLs use encodeURIComponent (not base64url relay paths).
+  const encodedPeer = MOCK_PEER_URL_ENC;
   expect(url).toContain(`/s/${encodedPeer}/peer-only-session`);
   // Must NOT be the no-host form (which would open on the local node).
   expect(url).not.toMatch(/\/s\/peer-only-session$/);
