@@ -15,7 +15,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, delete, get, post},
+    routing::{any, get, post},
     Extension, Json, Router,
 };
 use base64::{
@@ -291,7 +291,6 @@ async fn main() -> Result<()> {
         // catch-all HTTP relay so the upgrade lands on the right handler.
         .route("/r/{peer}/ws/{*rest}", get(relay::relay_ws))
         .route("/r/{peer}/{*rest}", any(relay::relay_http))
-        .route("/api/peers/{peer}/pin", delete(relay::delete_peer_pin))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
         // Host-pinned terminal page (issue #123): the peer the session lives

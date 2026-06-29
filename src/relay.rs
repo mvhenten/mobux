@@ -7,35 +7,33 @@
 //! - swaps the client's `X-Mobux-Upstream-Authorization` into `Authorization`
 //!   when forwarding (and never forwards the upstream header otherwise), so the
 //!   relay stores no peer credentials,
-//! - validates the peer's self-signed cert by **TOFU fingerprint pinning**
-//!   (persisted in the sqlite db, see `db::peer_pin`), distinguishing a pin
-//!   mismatch from any other failure,
+//! - accepts the peer's self-signed cert unconditionally (trust comes from the
+//!   peer's password, not transport cert verification),
 //! - refuses to relay a request that is itself a relay path (loop guard).
 //!
 //! Peer resolution for phase 2 is intentionally minimal: a `peer` path segment
-//! is `host` or `host:port` (default port = the relay's own mobux port). If
+//! is base64url-encoded `host:port` (new encoding) or `host:port`/`host` plain
+//! for backward compat. Default port = the relay's own mobux port. If
 //! `MOBUX_PEERS` is set (comma-separated `host:port` list) the peer must be in
 //! it; otherwise any peer is dialable (dev convenience). The integration point
 //! with phase 1's `/api/peers` enumeration is exactly this allowlist.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{ws::Message as AxumMessage, Path, State, WebSocketUpgrade},
+    extract::{ws::Message as AxumMessage, Path, WebSocketUpgrade},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures_util::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TungMessage;
-
-use crate::AppState;
 
 /// Header the client uses to carry the *peer's* Basic-auth creds. The relay
 /// moves its value into `Authorization` for the forwarded request and strips
@@ -94,21 +92,49 @@ fn decode_peer_segment(s: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Canonicalize a `peer` path segment (`host` or `host:port`) into `host:port`.
-/// Rejects empty hosts, embedded slashes, and anything that already looks like
-/// a relay path (defence in depth against crafted peer values).
+/// Canonicalize a `peer` path segment into `host:port`.
+///
+/// Accepts three encodings, tried in order:
+/// 1. Base64url (`A-Za-z0-9_-`): the new encoding; avoids colon-in-path issues.
+///    Only accepted when the decoded result contains `:` (i.e. it's a host:port).
+/// 2. Percent-encoded (`host%3Aport`): backward compat for old clients.
+/// 3. Plain `host` or `host:port`.
 pub fn canonical_peer(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("empty peer".into());
     }
-    // Percent-decode first so `host%3Aport` is treated as `host:port`.
+
+    // Try base64url decode when the segment is all base64url chars (no `%` or `:`).
+    // A decoded value that contains `:` is a host:port pair — use it directly.
+    // Bare hostnames (no port) also land here but their decoded bytes won't
+    // contain `:`, so they fall through cleanly to the percent-decode path.
+    let is_b64url = !raw.contains('%')
+        && !raw.contains(':')
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '=');
+    if is_b64url {
+        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(raw) {
+            if let Ok(decoded) = String::from_utf8(bytes) {
+                if decoded.contains(':') {
+                    return parse_peer_str(decoded.trim());
+                }
+            }
+        }
+    }
+
+    // Fall back: percent-decode (backward compat) then parse as host[:port].
     let decoded = decode_peer_segment(raw)?;
-    let raw = decoded.as_str();
-    if raw.contains('/') || raw.contains(' ') {
+    parse_peer_str(&decoded)
+}
+
+/// Parse an already-decoded `host` or `host:port` string into canonical `host:port`.
+fn parse_peer_str(s: &str) -> Result<String, String> {
+    if s.contains('/') || s.contains(' ') {
         return Err("invalid peer (host or host:port only)".into());
     }
-    match raw.rsplit_once(':') {
+    match s.rsplit_once(':') {
         Some((host, port)) => {
             if host.is_empty() {
                 return Err("empty peer host".into());
@@ -118,7 +144,7 @@ pub fn canonical_peer(raw: &str) -> Result<String, String> {
                 .map_err(|_| format!("invalid peer port: {port}"))?;
             Ok(format!("{host}:{port}"))
         }
-        None => Ok(format!("{raw}:{}", default_peer_port())),
+        None => Ok(format!("{s}:{}", default_peer_port())),
     }
 }
 
@@ -133,21 +159,12 @@ fn peer_allowed(peer: &str) -> bool {
     }
 }
 
-/// Compute the lowercase-hex SHA-256 of a cert DER — the pin fingerprint.
-pub fn cert_fingerprint(der: &[u8]) -> String {
-    let digest = Sha256::digest(der);
-    hex::encode(digest)
-}
+// ── TLS verifier ─────────────────────────────────────────────────────────────
 
-// ── TOFU cert verifier ──────────────────────────────────────────────────────
-
-/// Result of a pinned-TLS dial, distinguishing a pin mismatch (security event,
-/// surfaced to the UI as a re-pin prompt) from any other failure.
+/// Relay errors surfaced to the caller.
 #[derive(Debug)]
 pub enum RelayError {
-    /// The peer presented a cert whose fingerprint differs from the stored pin.
-    PinMismatch { expected: String, actual: String },
-    /// Transport/HTTP/parse failure — not a pinning decision.
+    /// Transport/HTTP/parse failure.
     Upstream(String),
     /// Caller-side problem (bad peer, loop, allowlist) → 4xx.
     BadRequest(String),
@@ -156,14 +173,6 @@ pub enum RelayError {
 impl RelayError {
     fn into_response(self) -> Response {
         match self {
-            RelayError::PinMismatch { expected, actual } => structured_error(
-                StatusCode::CONFLICT,
-                "pin_mismatch",
-                &format!(
-                    "peer certificate fingerprint changed (pinned {expected}, got {actual}); \
-                     delete the pin to re-trust this peer"
-                ),
-            ),
             RelayError::Upstream(msg) => {
                 structured_error(StatusCode::BAD_GATEWAY, "upstream_error", &msg)
             }
@@ -179,54 +188,21 @@ fn structured_error(status: StatusCode, kind: &str, message: &str) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
-/// rustls verifier that pins the peer leaf cert by SHA-256.
-///
-/// `expected` is the stored pin (None on first contact). The observed leaf
-/// fingerprint is captured into `observed` so the caller can persist it after a
-/// successful first-contact handshake. A mismatch is recorded in `mismatch` and
-/// surfaced as a `rustls::Error` so the handshake aborts; the caller maps that
-/// back to `RelayError::PinMismatch` using `mismatch`.
+/// Simple accept-all TLS verifier for peers with self-signed certs.
+/// Security comes from the peer's password, not transport cert verification.
 #[derive(Debug)]
-struct TofuVerifier {
-    expected: Option<String>,
-    observed: Mutex<Option<String>>,
-    mismatch: Mutex<Option<(String, String)>>,
-}
+struct AcceptAnyCert;
 
-impl TofuVerifier {
-    fn new(expected: Option<String>) -> Self {
-        Self {
-            expected,
-            observed: Mutex::new(None),
-            mismatch: Mutex::new(None),
-        }
-    }
-}
-
-impl ServerCertVerifier for TofuVerifier {
+impl ServerCertVerifier for AcceptAnyCert {
     fn verify_server_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
+        _end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let fp = cert_fingerprint(end_entity.as_ref());
-        *self.observed.lock().unwrap() = Some(fp.clone());
-
-        match &self.expected {
-            Some(pin) if pin != &fp => {
-                *self.mismatch.lock().unwrap() = Some((pin.clone(), fp));
-                Err(rustls::Error::General(
-                    "mobux: peer cert pin mismatch".into(),
-                ))
-            }
-            // Pinned & matching, or first contact (no pin yet): accept. We
-            // deliberately ignore CA chain / hostname / expiry — peers serve
-            // self-signed leafs and trust is the pin, exactly per the EDD.
-            _ => Ok(ServerCertVerified::assertion()),
-        }
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -264,42 +240,12 @@ impl ServerCertVerifier for TofuVerifier {
     }
 }
 
-/// Build a rustls `ClientConfig` whose only trust anchor is the TOFU pin. The
-/// returned `Arc<TofuVerifier>` lets the caller read the observed fingerprint /
-/// mismatch after the handshake.
-fn pinned_client_config(expected: Option<String>) -> (ClientConfig, Arc<TofuVerifier>) {
-    let verifier = Arc::new(TofuVerifier::new(expected));
-    let config = ClientConfig::builder()
+/// Build a rustls `ClientConfig` that accepts any self-signed peer cert.
+fn accept_any_cert_config() -> ClientConfig {
+    ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(verifier.clone())
-        .with_no_client_auth();
-    (config, verifier)
-}
-
-/// After a (possibly failed) pinned dial, turn the verifier state + transport
-/// error into the right `RelayError`, and persist a first-contact pin.
-fn resolve_pin_outcome(
-    state: &AppState,
-    peer: &str,
-    had_pin: bool,
-    verifier: &TofuVerifier,
-    transport_err: Option<String>,
-) -> Result<(), RelayError> {
-    if let Some((expected, actual)) = verifier.mismatch.lock().unwrap().clone() {
-        return Err(RelayError::PinMismatch { expected, actual });
-    }
-    if let Some(err) = transport_err {
-        return Err(RelayError::Upstream(err));
-    }
-    // Success. On first contact, persist the observed fingerprint (TOFU).
-    if !had_pin {
-        if let Some(fp) = verifier.observed.lock().unwrap().clone() {
-            if let Err(e) = state.db.insert_peer_pin(peer, &fp) {
-                eprintln!("[relay] WARN: failed to persist pin for {peer}: {e:#}");
-            }
-        }
-    }
-    Ok(())
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth()
 }
 
 // ── Header plumbing ──────────────────────────────────────────────────────────
@@ -382,25 +328,22 @@ fn check_loop_guard(headers: &HeaderMap, forward_path: &str) -> Result<u32, Rela
 
 // ── HTTP relay handler ───────────────────────────────────────────────────────
 
-/// `/r/{peer}/{*rest}` — forward an HTTP request to the peer's mobux port over
-/// pinned HTTPS. `rest` is the path *after* the peer segment (e.g. `api/sessions`).
+/// `/r/{peer}/{*rest}` — forward an HTTP request to the peer's mobux port.
+/// `rest` is the path *after* the peer segment (e.g. `api/sessions`).
 pub async fn relay_http(
-    State(state): State<AppState>,
     Path((peer, rest)): Path<(String, String)>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    match relay_http_inner(state, peer, rest, method, uri, headers, body).await {
+    match relay_http_inner(peer, rest, method, uri, headers, body).await {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn relay_http_inner(
-    state: AppState,
     peer: String,
     rest: String,
     method: Method,
@@ -439,15 +382,8 @@ async fn relay_http_inner(
         HeaderValue::from_str(&next_hop.to_string()).unwrap(),
     );
 
-    let pin = state
-        .db
-        .peer_pin(&peer)
-        .map_err(|e| RelayError::Upstream(format!("reading pin: {e}")))?;
-    let had_pin = pin.is_some();
-    let (tls, verifier) = pinned_client_config(pin);
-
     let client = reqwest::Client::builder()
-        .use_preconfigured_tls(tls)
+        .use_preconfigured_tls(accept_any_cert_config())
         // Peers are on the tailnet; keep the hop snappy and fail fast.
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
@@ -461,16 +397,8 @@ async fn relay_http_inner(
         .await;
 
     let resp = match upstream {
-        Ok(r) => {
-            resolve_pin_outcome(&state, &peer, had_pin, &verifier, None)?;
-            r
-        }
-        Err(e) => {
-            resolve_pin_outcome(&state, &peer, had_pin, &verifier, Some(e.to_string()))?;
-            // resolve_pin_outcome already returned on mismatch/upstream; this
-            // is unreachable, but keep the type checker happy.
-            return Err(RelayError::Upstream(e.to_string()));
-        }
+        Ok(r) => r,
+        Err(e) => return Err(RelayError::Upstream(e.to_string())),
     };
 
     let status = resp.status();
@@ -502,9 +430,8 @@ async fn relay_http_inner(
 /// browser's constraint: the client passes the peer Basic-auth in the
 /// `?upstream_auth=<base64(user:pass)>` query param, which the relay turns into
 /// an `Authorization` header on the *server-to-peer* upgrade (server-side, so it
-/// never rides an actual browser WS header). Documented in the PR.
+/// never rides an actual browser WS header).
 pub async fn relay_ws(
-    State(state): State<AppState>,
     Path((peer, rest)): Path<(String, String)>,
     uri: Uri,
     ws: WebSocketUpgrade,
@@ -529,13 +456,8 @@ pub async fn relay_ws(
     let (upstream_auth, fwd_query) = split_ws_query(uri.query());
     let target = format!("wss://{peer}{forward_path}{fwd_query}");
 
-    let pin = match state.db.peer_pin(&peer) {
-        Ok(p) => p,
-        Err(e) => return RelayError::Upstream(format!("reading pin: {e}")).into_response(),
-    };
-
     ws.on_upgrade(move |client_socket| async move {
-        if let Err(e) = pump_ws(state, peer, target, upstream_auth, pin, client_socket).await {
+        if let Err(e) = pump_ws(target, upstream_auth, client_socket).await {
             eprintln!("[relay] ws error: {e}");
         }
     })
@@ -565,16 +487,11 @@ fn split_ws_query(query: Option<&str>) -> (Option<String>, String) {
 }
 
 async fn pump_ws(
-    state: AppState,
-    peer: String,
     target: String,
     upstream_auth: Option<String>,
-    pin: Option<String>,
     client_socket: axum::extract::ws::WebSocket,
 ) -> Result<(), String> {
-    let had_pin = pin.is_some();
-    let (tls, verifier) = pinned_client_config(pin);
-    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls));
+    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(accept_any_cert_config()));
 
     let mut request = target
         .into_client_request()
@@ -595,18 +512,8 @@ async fn pump_ws(
             .await;
 
     let (peer_ws, _resp) = match dial {
-        Ok(ok) => {
-            resolve_pin_outcome(&state, &peer, had_pin, &verifier, None)
-                .map_err(|e| format!("{e:?}"))?;
-            ok
-        }
-        Err(e) => {
-            // Map a pin mismatch to a clear log; the client just sees the WS
-            // close since headers are already negotiated with the browser.
-            resolve_pin_outcome(&state, &peer, had_pin, &verifier, Some(e.to_string()))
-                .map_err(|e| format!("{e:?}"))?;
-            return Err(format!("ws dial: {e}"));
-        }
+        Ok(ok) => ok,
+        Err(e) => return Err(format!("ws dial: {e}")),
     };
 
     let (mut peer_tx, mut peer_rx) = peer_ws.split();
@@ -690,83 +597,12 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-// ── Pin management endpoint ──────────────────────────────────────────────────
-
-/// `DELETE /api/peers/{peer}/pin` — drop a peer's pin so the next contact
-/// re-pins (one-tap re-trust after a peer reinstall). Authed via the normal
-/// middleware. Returns `{deleted: bool}`.
-pub async fn delete_peer_pin(State(state): State<AppState>, Path(peer): Path<String>) -> Response {
-    let peer = match canonical_peer(&peer) {
-        Ok(p) => p,
-        Err(e) => return RelayError::BadRequest(e).into_response(),
-    };
-    match state.db.delete_peer_pin(&peer) {
-        Ok(deleted) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "deleted": deleted })),
-        )
-            .into_response(),
-        Err(e) => RelayError::Upstream(format!("deleting pin: {e}")).into_response(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn hv(s: &str) -> HeaderValue {
         HeaderValue::from_str(s).unwrap()
-    }
-
-    // ── fingerprint pin/verify/mismatch ──────────────────────────────────────
-
-    #[test]
-    fn fingerprint_is_stable_lowercase_hex_sha256() {
-        let fp = cert_fingerprint(b"hello");
-        // Known SHA-256("hello").
-        assert_eq!(
-            fp,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-        assert_eq!(fp, cert_fingerprint(b"hello"), "deterministic");
-        assert_ne!(fp, cert_fingerprint(b"hella"), "input-sensitive");
-    }
-
-    #[test]
-    fn verifier_records_observed_on_first_contact() {
-        let v = TofuVerifier::new(None);
-        let der = CertificateDer::from(b"fake-cert-der".to_vec());
-        let name = ServerName::try_from("peer.example").unwrap();
-        let ok = v.verify_server_cert(&der, &[], &name, &[], UnixTime::now());
-        assert!(ok.is_ok(), "first contact accepts");
-        assert_eq!(
-            v.observed.lock().unwrap().clone(),
-            Some(cert_fingerprint(b"fake-cert-der"))
-        );
-        assert!(v.mismatch.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn verifier_accepts_matching_pin() {
-        let der = CertificateDer::from(b"cert".to_vec());
-        let v = TofuVerifier::new(Some(cert_fingerprint(b"cert")));
-        let name = ServerName::try_from("peer.example").unwrap();
-        assert!(v
-            .verify_server_cert(&der, &[], &name, &[], UnixTime::now())
-            .is_ok());
-        assert!(v.mismatch.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn verifier_flags_pin_mismatch() {
-        let der = CertificateDer::from(b"new-cert".to_vec());
-        let v = TofuVerifier::new(Some("deadbeef".to_string()));
-        let name = ServerName::try_from("peer.example").unwrap();
-        let res = v.verify_server_cert(&der, &[], &name, &[], UnixTime::now());
-        assert!(res.is_err(), "mismatch aborts handshake");
-        let (expected, actual) = v.mismatch.lock().unwrap().clone().unwrap();
-        assert_eq!(expected, "deadbeef");
-        assert_eq!(actual, cert_fingerprint(b"new-cert"));
     }
 
     // ── header-swap logic ────────────────────────────────────────────────────
@@ -955,5 +791,26 @@ mod tests {
     #[test]
     fn canonical_peer_rejects_leftover_percent() {
         assert!(canonical_peer("host%ZZevil:5151").is_err());
+    }
+
+    // ── base64url peer encoding roundtrip ────────────────────────────────────
+
+    #[test]
+    fn peer_encoding_roundtrip_base64url() {
+        // host:port with a colon must survive base64url encode → canonical_peer
+        // without corruption. Regression test for the "session can't be opened"
+        // bug where percent-encoding mangled the colon in the path segment.
+        std::env::remove_var("PORT");
+
+        let original = "192.168.1.5:8080";
+        let encoded = URL_SAFE_NO_PAD.encode(original);
+        let decoded = canonical_peer(&encoded).unwrap();
+        assert_eq!(decoded, "192.168.1.5:8080");
+
+        // Tailscale FQDN with port
+        let ts = "devbox.example.ts.net:5151";
+        let encoded2 = URL_SAFE_NO_PAD.encode(ts);
+        let decoded2 = canonical_peer(&encoded2).unwrap();
+        assert_eq!(decoded2, ts);
     }
 }
