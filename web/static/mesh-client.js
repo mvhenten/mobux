@@ -144,6 +144,13 @@ function removeManualPeer(peer) {
   if (getPeer() === peer) setPeer('');
 }
 
+// ── peer encoding ────────────────────────────────────────────────────
+// base64url-encode the host:port so colons don't get mangled in URL path
+// segments. The Rust relay decodes this back to host:port before dialing.
+function encodePeer(peer) {
+  return btoa(peer).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
 // ── path resolution ──────────────────────────────────────────────────
 // `apiPath('/api/sessions')` → same-origin path, or the relay path for the
 // selected peer. Accepts paths with or without a leading slash.
@@ -151,14 +158,14 @@ function apiPath(path) {
   const p = path.startsWith('/') ? path : `/${path}`;
   const peer = activePeer();
   if (!peer) return p;
-  // /api/foo → /r/<peer>/api/foo
-  return `/r/${encodeURIComponent(peer)}${p}`;
+  // /api/foo → /r/<encoded-peer>/api/foo
+  return `/r/${encodePeer(peer)}${p}`;
 }
 
 // WebSocket URL for a session. Same-origin uses /ws/<name>; a peer uses the
 // relay WS path with the peer creds in ?upstream_auth= (browsers can't set
 // headers on a WS upgrade — the relay turns the param into a server-side
-// Authorization header over the pinned wss hop, per PR #128).
+// Authorization header on the wss hop to the peer).
 function wsUrl(session) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const peer = activePeer();
@@ -166,7 +173,7 @@ function wsUrl(session) {
     return `${proto}://${location.host}/ws/${encodeURIComponent(session)}`;
   }
   let url =
-    `${proto}://${location.host}/r/${encodeURIComponent(peer)}` +
+    `${proto}://${location.host}/r/${encodePeer(peer)}` +
     `/ws/${encodeURIComponent(session)}`;
   const cred = getPeerCred(peer);
   if (cred) url += `?upstream_auth=${encodeURIComponent(cred)}`;
@@ -174,9 +181,8 @@ function wsUrl(session) {
 }
 
 // ── structured relay errors ──────────────────────────────────────────
-// The relay returns JSON `{error, message}` for pin_mismatch (409),
-// upstream_error (502) and bad_request (400). Parse that out of a Response
-// so callers can branch on `kind`.
+// The relay returns JSON `{error, message}` for upstream_error (502) and
+// bad_request (400). Parse that out of a Response so callers can branch on `kind`.
 async function parseError(res) {
   let body = null;
   try {
@@ -192,21 +198,11 @@ async function parseError(res) {
   return { status: res.status, kind: null, message: text || `${res.status}` };
 }
 
-// Re-trust a peer after a cert change: drop the server-side pin so the next
-// contact re-pins (TOFU). One-tap action behind the pin_mismatch UX.
-async function trustNewCert(peer) {
-  const res = await fetch(`/api/peers/${encodeURIComponent(peer)}/pin`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) throw new Error(`failed to reset pin: ${res.status}`);
-}
-
 // ── fetch wrapper ────────────────────────────────────────────────────
 // Drop-in fetch that:
 //   * rewrites the path to the relay when a peer is selected,
 //   * attaches X-Mobux-Upstream-Authorization with the peer creds,
-//   * on 401 from a peer, clears the stored cred so the caller can re-prompt,
-//   * exposes the structured pin_mismatch error.
+//   * on 401 from a peer, clears the stored cred so the caller can re-prompt.
 // Returns the raw Response; callers decide what to do with non-ok statuses.
 // Throws a tagged error only for the cases the UI must react to.
 async function apiFetch(path, opts = {}) {
@@ -220,21 +216,18 @@ async function apiFetch(path, opts = {}) {
   const res = await fetch(url, { ...opts, headers });
 
   if (peer && res.status === 401) {
-    // Peer rejected the creds — forget them so the next call re-prompts.
-    clearPeerCred(peer);
+    // Only wipe the stored cred when the 401 genuinely came from the upstream
+    // PEER, not from the relay's own auth middleware. The relay strips
+    // WWW-Authenticate from forwarded peer responses (see relay.rs
+    // is_stripped_response_header); its own auth rejection always includes it.
+    // No WWW-Authenticate header → the 401 is from the peer → safe to clear.
+    if (!res.headers.get('www-authenticate')) {
+      clearPeerCred(peer);
+    }
     const err = new Error('peer authentication failed');
     err.meshKind = 'unauthorized';
     err.peer = peer;
     throw err;
-  }
-  if (peer && res.status === 409) {
-    const e = await parseError(res);
-    if (e.kind === 'pin_mismatch') {
-      const err = new Error(e.message);
-      err.meshKind = 'pin_mismatch';
-      err.peer = peer;
-      throw err;
-    }
   }
   return res;
 }
@@ -267,10 +260,10 @@ window.MobuxMesh = {
   addManualPeer,
   removeManualPeer,
   normalizeManualPeer,
+  encodePeer,
   apiPath,
   wsUrl,
   apiFetch,
   apiFetchJSON,
   parseError,
-  trustNewCert,
 };

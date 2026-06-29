@@ -15,7 +15,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, delete, get, post},
+    routing::{any, get, post},
     Extension, Json, Router,
 };
 use base64::{
@@ -291,7 +291,6 @@ async fn main() -> Result<()> {
         // catch-all HTTP relay so the upgrade lands on the right handler.
         .route("/r/{peer}/ws/{*rest}", get(relay::relay_ws))
         .route("/r/{peer}/{*rest}", any(relay::relay_http))
-        .route("/api/peers/{peer}/pin", delete(relay::delete_peer_pin))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
         // Host-pinned terminal page (issue #123): the peer the session lives
@@ -548,6 +547,19 @@ fn is_public_path(path: &str) -> bool {
         || path == "/sw.js"
 }
 
+/// Build the `Set-Cookie` header value for the session cookie.
+///
+/// `Secure` is only added when `use_tls` is true: on a plain-HTTP bind the
+/// browser will not store a `Secure` cookie, so every subsequent request
+/// falls back to a fresh Basic-auth prompt instead of the cached session.
+fn build_session_cookie(name: &str, value: &str, use_tls: bool) -> String {
+    if use_tls {
+        format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000")
+    } else {
+        format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
+    }
+}
+
 async fn auth_middleware(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -595,9 +607,10 @@ async fn auth_middleware(
 
     if basic_ok {
         let mut resp = next.run(req).await;
-        let set_cookie = format!(
-            "{}={}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000",
-            auth.session_cookie_name, auth.session_cookie_value
+        let set_cookie = build_session_cookie(
+            &auth.session_cookie_name,
+            &auth.session_cookie_value,
+            state.use_tls,
         );
         if let Ok(v) = HeaderValue::from_str(&set_cookie) {
             resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
@@ -2408,6 +2421,43 @@ mod tests {
         let (state, _dir) = test_state(true);
         let status = api_telemetry(State(state), "hello".to_string()).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    // ── session cookie Secure attribute ──────────────────────────────────────
+    //
+    // Regression test for the recurring home-login prompt: on a plain-HTTP
+    // bind, `Secure` cookies are never stored by the browser, so every relayed
+    // request fell back to Basic-auth. `Secure` must be omitted on HTTP and
+    // present only when TLS is actually serving.
+
+    #[test]
+    fn session_cookie_no_secure_on_plain_http() {
+        let cookie = build_session_cookie("mobux_session", "abc123", false);
+        assert!(
+            !cookie.contains("Secure"),
+            "plain-HTTP bind must not set Secure: {cookie}"
+        );
+        assert!(
+            cookie.contains("HttpOnly"),
+            "HttpOnly must always be present: {cookie}"
+        );
+        assert!(
+            cookie.contains("SameSite=Lax"),
+            "SameSite=Lax must always be present: {cookie}"
+        );
+    }
+
+    #[test]
+    fn session_cookie_has_secure_on_tls() {
+        let cookie = build_session_cookie("mobux_session", "abc123", true);
+        assert!(
+            cookie.contains("Secure"),
+            "TLS bind must set Secure: {cookie}"
+        );
+        assert!(
+            cookie.contains("HttpOnly"),
+            "HttpOnly must always be present: {cookie}"
+        );
     }
 
     #[tokio::test]

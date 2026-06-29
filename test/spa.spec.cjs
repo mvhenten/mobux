@@ -532,6 +532,96 @@ test("mesh-client loads once: no double-declaration error navigating home then t
   ).toHaveLength(0);
 });
 
+// ── regression: apiFetch only forgets the remote cred on a genuine upstream 401
+//
+// A relayed request can fail at two layers. A relay-/transport-level failure
+// surfaces as a structured 502 (upstream_error) or 400 (bad_request); the home
+// relay rejecting the BROWSER's own session surfaces as a 401 that still carries
+// WWW-Authenticate (the relay strips that header from forwarded PEER responses,
+// see relay.rs). Only a 401 WITHOUT WWW-Authenticate is the upstream peer
+// rejecting the creds. apiFetch must clear the stored peer cred only in that
+// last case — otherwise a momentary relay/home hiccup wipes a perfectly good
+// remote cred and re-prompts. This drove the "asks for auth twice" loop.
+test("apiFetch keeps the remote cred on relay-level failures, clears it only on a true upstream 401", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => !!window.MobuxMesh, { timeout: 10000 });
+
+  const out = await page.evaluate(async () => {
+    const M = window.MobuxMesh;
+    const peer = "cred-guard-test:9999";
+    const realFetch = window.fetch;
+    const stub = (status, body, headers) => {
+      window.fetch = async () => new Response(body, { status, headers });
+    };
+    const seed = () => M.setPeerCred(peer, "user", "pin");
+    const r = {};
+    try {
+      M.setPeer(peer);
+
+      // Relay/transport failure → structured 502. Cred must survive.
+      seed();
+      stub(502, JSON.stringify({ error: "upstream_error", message: "dial" }), {
+        "Content-Type": "application/json",
+      });
+      await M.apiFetch("/api/sessions");
+      r.credAfter502 = M.getPeerCred(peer);
+
+      // Caller/relay rejection → structured 400. Cred must survive.
+      seed();
+      stub(400, JSON.stringify({ error: "bad_request", message: "bad peer" }), {
+        "Content-Type": "application/json",
+      });
+      await M.apiFetch("/api/sessions");
+      r.credAfter400 = M.getPeerCred(peer);
+
+      // Home relay rejecting the browser's OWN session → 401 + WWW-Authenticate.
+      // That header is present only on the relay's own auth response (it is
+      // stripped from forwarded peer 401s), so the cred must NOT be cleared.
+      seed();
+      stub(401, "Authentication required", {
+        "WWW-Authenticate": "Basic realm=mobux",
+      });
+      r.threwHomeHop = false;
+      try {
+        await M.apiFetch("/api/sessions");
+      } catch (e) {
+        r.threwHomeHop = true;
+      }
+      r.credAfterHomeHop = M.getPeerCred(peer);
+
+      // Genuine upstream PEER 401 (relay stripped WWW-Authenticate) → clear cred.
+      seed();
+      stub(401, "Authentication required", {});
+      r.threwUpstream = false;
+      try {
+        await M.apiFetch("/api/sessions");
+      } catch (e) {
+        r.threwUpstream = true;
+        r.meshKind = e.meshKind;
+      }
+      r.credAfterUpstream = M.getPeerCred(peer);
+    } finally {
+      window.fetch = realFetch;
+      M.clearPeerCred(peer);
+      M.setPeer("");
+    }
+    return r;
+  });
+
+  // Relay-level failures (502/400) and the home-hop 401 all preserve the cred.
+  expect(out.credAfter502).not.toBeNull();
+  expect(out.credAfter400).not.toBeNull();
+  expect(out.credAfterHomeHop).not.toBeNull();
+  expect(out.threwHomeHop).toBe(true);
+
+  // Only the genuine upstream 401 clears it and surfaces the unauthorized error.
+  expect(out.threwUpstream).toBe(true);
+  expect(out.meshKind).toBe("unauthorized");
+  expect(out.credAfterUpstream).toBeNull();
+});
+
 // ── regression: second terminal session renders after navigating home → terminal → home → terminal
 //
 // Before the fix, terminal.js was an ES module already in the browser's module

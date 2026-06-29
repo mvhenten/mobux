@@ -121,15 +121,6 @@ impl Db {
                 program_exit_nonzero INTEGER NOT NULL
             );
 
-            -- Mesh relay (phase 2): TOFU cert pins for peers we relay to.
-            -- `peer` is the canonical host:port the relay dials; `fingerprint`
-            -- is the lowercase hex SHA-256 of the peer leaf cert DER.
-            CREATE TABLE IF NOT EXISTS peer_pins (
-                peer TEXT PRIMARY KEY,
-                fingerprint TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS stt_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 kind TEXT NOT NULL,
@@ -173,6 +164,12 @@ impl Db {
         // duplicate column errors only through IF NOT EXISTS on indexes,
         // not columns, so we catch the error and treat it as a no-op.
         let _ = conn.execute_batch("ALTER TABLE stt_config ADD COLUMN stop_cmd TEXT;");
+
+        // Migration: drop the TOFU peer_pins table (cert-pinning removed).
+        // DROP TABLE IF EXISTS is always safe — the table may not exist on
+        // fresh installs. Existing rows are discarded; the relay now accepts
+        // any self-signed cert (trust is enforced by the peer's password).
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS peer_pins;");
 
         // Migrate legacy stt_config row into stt_providers + stt_active_kind
         // if not yet done (providers table empty).
@@ -378,47 +375,6 @@ impl Db {
         )
         .context("deleting push subscription")?;
         Ok(())
-    }
-
-    /// Return the pinned SHA-256 fingerprint (lowercase hex) for `peer`, if any.
-    pub fn peer_pin(&self, peer: &str) -> Result<Option<String>> {
-        let conn = self.lock_conn()?;
-        let fp: Option<String> = conn
-            .query_row(
-                "SELECT fingerprint FROM peer_pins WHERE peer = ?1",
-                params![peer],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("reading peer_pin")?;
-        Ok(fp)
-    }
-
-    /// Record a fingerprint pin for `peer`. Errors if a *different* pin already
-    /// exists (callers must `delete_peer_pin` first to re-pin) — this keeps the
-    /// TOFU guarantee at the storage layer, not just in the verifier.
-    pub fn insert_peer_pin(&self, peer: &str, fingerprint: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = unix_seconds()?;
-        // INSERT OR IGNORE so two racing first-contacts with the *same* cert
-        // both succeed; a conflicting fingerprint is caught by peer_pin checks.
-        conn.execute(
-            "INSERT OR IGNORE INTO peer_pins (peer, fingerprint, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![peer, fingerprint, now],
-        )
-        .context("inserting peer pin")?;
-        Ok(())
-    }
-
-    /// Delete the pin for `peer` so the next contact re-pins (one-tap re-pin).
-    /// Returns true if a row was removed.
-    pub fn delete_peer_pin(&self, peer: &str) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        let n = conn
-            .execute("DELETE FROM peer_pins WHERE peer = ?1", params![peer])
-            .context("deleting peer pin")?;
-        Ok(n > 0)
     }
 
     /// Read STT provider config. Seeds defaults and persists them on first call.
@@ -867,36 +823,6 @@ mod tests {
         db.remove_subscription("https://push.example/abc")
             .expect("remove");
         assert!(db.list_subscriptions().expect("list 3").is_empty());
-    }
-
-    #[test]
-    fn peer_pin_tofu_round_trip() {
-        let db = fresh_db();
-        assert_eq!(db.peer_pin("host-b:5151").expect("empty"), None);
-
-        db.insert_peer_pin("host-b:5151", "aa11")
-            .expect("first pin");
-        assert_eq!(
-            db.peer_pin("host-b:5151").expect("read").as_deref(),
-            Some("aa11")
-        );
-
-        // INSERT OR IGNORE: re-pinning the same peer keeps the original (the
-        // verifier, not the DB, decides whether a presented cert matches).
-        db.insert_peer_pin("host-b:5151", "bb22")
-            .expect("idempotent");
-        assert_eq!(
-            db.peer_pin("host-b:5151").expect("read").as_deref(),
-            Some("aa11"),
-            "first pin wins until explicitly deleted"
-        );
-
-        assert!(db.delete_peer_pin("host-b:5151").expect("delete"));
-        assert_eq!(db.peer_pin("host-b:5151").expect("after delete"), None);
-        assert!(
-            !db.delete_peer_pin("host-b:5151").expect("delete again"),
-            "deleting a missing pin reports no-op"
-        );
     }
 
     #[test]
