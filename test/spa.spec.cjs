@@ -669,3 +669,198 @@ test('mesh host picker is a native select with "This host" as default', async ({
   await expect(page.locator(".spa-host-dropdown")).toHaveCount(0);
   await expect(page.locator(".host-trigger")).toHaveCount(0);
 });
+
+// ── regression: host-switcher single source of truth ───────────────────────
+//
+// Before the fix, three independent components each had their own view of
+// "which host is active":
+//   1. HostPicker restored the saved peer silently (no event dispatch), so the
+//      select showed remote host A while the session list still showed local B.
+//   2. refresh() ran before mesh-client.js loaded → apiGet fell back to plain
+//      fetch → listed the local host regardless of the saved peer.
+//   3. open() called currentPeer() but mesh might not be loaded yet → built
+//      /s/<name> with NO host → terminal opened on the wrong host.
+//
+// The fix collapses to one source of truth: mesh-client.js's getPeer/setPeer,
+// with refresh() gated on mesh being loaded, and HostPicker dispatching
+// mobux:peer-changed on restore so the list always re-fetches from the correct
+// host at the same time the picker updates.
+//
+// These tests use page.route() to mock /api/peers and the relay sessions
+// endpoint so the smoke instance behaves as if a real peer is present without
+// actually needing a second mobux binary.
+
+// Fake peer used across all three regression tests.
+const MOCK_PEER = "127.0.0.1:8282";
+const MOCK_PEER_ENC = encodeURIComponent(MOCK_PEER);
+const MOCK_PEER_SESSIONS = [
+  { name: "peer-only-session", windows: 1, attached: 0 },
+];
+
+// Install the two route mocks that make the smoke instance pretend it has a
+// peer. Call before any navigation that should see the mocked peer.
+async function installPeerMocks(page) {
+  // /api/peers: return the fake peer so it appears as an <option>.
+  await page.route(/\/api\/peers(\?.*)?$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        peers: [
+          {
+            host: "127.0.0.1",
+            port: 8282,
+            name: "test-peer",
+            reachable: true,
+          },
+        ],
+      }),
+    }),
+  );
+
+  // relay sessions: return sessions that only exist on the fake peer.
+  await page.route(new RegExp(`/r/${MOCK_PEER_ENC}/api/sessions`), (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(MOCK_PEER_SESSIONS),
+    }),
+  );
+}
+
+// Seed the saved peer + a dummy cred in localStorage so HostPicker restores
+// it on load and open() doesn't block on ensurePeerCred.
+async function seedPeerStorage(page) {
+  await page.evaluate((peer) => {
+    localStorage.setItem("mobux:peer", peer);
+    // A dummy base64 cred (not checked by the mock route handler).
+    localStorage.setItem(`mobux:peer-cred:${peer}`, btoa("smoke:00000"));
+  }, MOCK_PEER);
+}
+
+async function clearPeerStorage(page) {
+  await page.evaluate((peer) => {
+    localStorage.removeItem("mobux:peer");
+    localStorage.removeItem(`mobux:peer-cred:${peer}`);
+  }, MOCK_PEER);
+}
+
+test("host-switcher: reload with persisted peer shows peer in select and fetches relay sessions", async ({
+  page,
+}) => {
+  // Load once to establish the page context, then seed peer storage and
+  // install mocks before reloading — this exercises the restore-on-load path.
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await seedPeerStorage(page);
+  await installPeerMocks(page);
+
+  // Capture which session-fetch URLs are actually requested.
+  const sessionUrls = [];
+  page.on("request", (r) => {
+    if (r.url().includes("api/sessions")) sessionUrls.push(r.url());
+  });
+
+  await page.reload({ waitUntil: "networkidle" });
+
+  // Picker must reflect the saved peer — not "This host".
+  const select = page.locator("select.host-select");
+  await expect(select).toHaveValue(MOCK_PEER);
+
+  // Session list must show the PEER's sessions (not the local smoke sessions).
+  await expect(page.locator("#sessionList .session-name")).toContainText(
+    "peer-only-session",
+    { timeout: 8000 },
+  );
+
+  // The relay path must have been fetched (not just the local /api/sessions).
+  expect(
+    sessionUrls.some((u) => u.includes(`/r/${MOCK_PEER_ENC}/api/sessions`)),
+  ).toBeTruthy();
+
+  await clearPeerStorage(page);
+});
+
+test("host-switcher: selecting a peer reliably refetches sessions from that peer", async ({
+  page,
+}) => {
+  await installPeerMocks(page);
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+
+  // Initially shows local sessions — seed session must be present.
+  await expect(page.locator("#sessionList .session-item").first()).toBeVisible({
+    timeout: 8000,
+  });
+  const localNames = await page
+    .locator("#sessionList .session-name")
+    .allTextContents();
+  // Local list must NOT contain the peer-only session before switching.
+  expect(localNames.some((n) => n.trim() === "peer-only-session")).toBeFalsy();
+
+  // Pre-seed cred so selectPeer doesn't open the CredDialog.
+  await page.evaluate((peer) => {
+    localStorage.setItem(`mobux:peer-cred:${peer}`, btoa("smoke:00000"));
+  }, MOCK_PEER);
+
+  // Select the peer via the native <select>.
+  await page.locator("select.host-select").selectOption(MOCK_PEER);
+
+  // Wait for the select's controlled value to reflect the new peer in Preact's
+  // state. This ensures the selectPeer() async chain (setPeer → notifyPeerChanged
+  // → refresh()) has had a chance to commit before we assert on the session list.
+  // Without this, toContainText may fail immediately with a strict-mode violation
+  // because the local-session list still has 2 rows while the relay fetch is in
+  // flight.
+  await expect(page.locator("select.host-select")).toHaveValue(MOCK_PEER, {
+    timeout: 3000,
+  });
+
+  // Session list must now show the PEER's sessions.
+  await expect(page.locator("#sessionList .session-name")).toContainText(
+    "peer-only-session",
+    { timeout: 8000 },
+  );
+
+  // And no longer contain the seed session (list is exclusively from the peer).
+  const peerNames = await page
+    .locator("#sessionList .session-name")
+    .allTextContents();
+  expect(peerNames.some((n) => n.trim() === SEED)).toBeFalsy();
+
+  await clearPeerStorage(page);
+});
+
+test("host-switcher: opening a remote session deep-links to /app#/s/<peer>/<name>", async ({
+  page,
+}) => {
+  await installPeerMocks(page);
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await seedPeerStorage(page);
+  await page.reload({ waitUntil: "networkidle" });
+
+  // Wait for the peer session row to appear.
+  await expect(page.locator("#sessionList .session-name")).toContainText(
+    "peer-only-session",
+    { timeout: 8000 },
+  );
+
+  // Clicking the session triggers window.location.href = '/app#/s/<peer>/<name>'
+  // followed by a reload. Capture the navigation before the reload completes.
+  const [navigation] = await Promise.all([
+    page.waitForNavigation({ waitUntil: "commit", timeout: 10000 }),
+    page
+      .locator(
+        '#sessionList .swipe-row[data-name="peer-only-session"] .session-item',
+      )
+      .click(),
+  ]);
+
+  const url = page.url();
+  // URL must carry the peer host so the terminal routes to the right node.
+  // MOCK_PEER is "127.0.0.1:8282" → encoded as "127.0.0.1%3A8282".
+  const encodedPeer = MOCK_PEER_ENC;
+  expect(url).toContain(`/s/${encodedPeer}/peer-only-session`);
+  // Must NOT be the no-host form (which would open on the local node).
+  expect(url).not.toMatch(/\/s\/peer-only-session$/);
+
+  await clearPeerStorage(page);
+});

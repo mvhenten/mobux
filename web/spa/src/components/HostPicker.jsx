@@ -1,41 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from "preact/hooks";
+import { ensureMeshClient } from "../lib/mesh.js";
 
 // App-shell host picker (native <select> variant).
-// Loads mesh-client.js once (app-wide), then renders a native <select> so
-// Android shows its own bottom-sheet picker instead of a custom overlay.
+// Loads mesh-client.js once (app-wide, deduped via lib/mesh.js), then renders
+// a native <select> so Android shows its own bottom-sheet picker instead of a
+// custom overlay.
 //
-// On peer change dispatches 'mobux:peer-changed' on window so Home (and any
-// other page) re-fetches against the new host. Also sets window.refreshSessions
-// for backwards-compat with anything still referencing the old host-picker.js.
+// On peer change (and on initial restore from localStorage) dispatches
+// 'mobux:peer-changed' on window so Home re-fetches against the correct host.
+// Also sets window.refreshSessions for backwards-compat with anything still
+// referencing the old host-picker.js.
 //
 // 401 re-prompt: mesh-client's apiFetch clears the stored cred and throws
 // err.meshKind === 'unauthorized'. Callers (e.g. Home's refresh()) can dispatch
 // 'mobux:peer-auth-required' on window with { detail: { peer } } to re-surface
 // this in-app credential dialog — the HostPicker listens and re-prompts.
-
-let meshLoaded = false;
-let meshLoadPromise = null;
-
-function ensureMeshClient() {
-  if (meshLoaded) return Promise.resolve();
-  if (meshLoadPromise) return meshLoadPromise;
-  meshLoadPromise = new Promise((resolve, reject) => {
-    if (window.MobuxMesh) {
-      meshLoaded = true;
-      return resolve();
-    }
-    const s = document.createElement("script");
-    s.src = "/static/mesh-client.js";
-    s.async = false;
-    s.onload = () => {
-      meshLoaded = true;
-      resolve();
-    };
-    s.onerror = () => reject(new Error("Failed to load mesh-client.js"));
-    document.body.appendChild(s);
-  });
-  return meshLoadPromise;
-}
 
 function getMesh() {
   return window.MobuxMesh || null;
@@ -113,6 +92,11 @@ export function HostPicker() {
   const [credDialog, setCredDialog] = useState(null);
 
   // Load mesh-client.js once on mount, then fetch peer list.
+  // NOTE: this effect must stay BEFORE notifyPeerChanged is declared so its
+  // dep array stays empty — referencing a const before its declaration is a
+  // TDZ error that crashes the whole component.
+  // Home.refresh() awaits ensureMeshClient() (lib/mesh.js) so it always
+  // fetches from the correct peer without needing a dispatch here.
   useEffect(() => {
     ensureMeshClient()
       .then(async () => {
