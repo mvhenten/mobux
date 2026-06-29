@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
+import { ensureMeshClient } from "../lib/mesh.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
 // (render_index + index.js): list tmux sessions with window/attached counts,
@@ -69,6 +70,17 @@ function ensurePeerCred(peer) {
 
 async function refresh() {
   try {
+    // Wait for mesh-client.js to be loaded before fetching. Without this,
+    // the first call runs while window.MobuxMesh is still undefined (it is
+    // loaded asynchronously by HostPicker), so apiGet falls back to a plain
+    // same-origin fetch and lists the LOCAL host regardless of the saved
+    // peer — causing picker/list mismatch. Awaiting here guarantees apiGet
+    // always routes through the correct peer.
+    try {
+      await ensureMeshClient();
+    } catch (_) {
+      // Mesh script failed to load — proceed with local same-origin fetch.
+    }
     const data = await apiGet("/api/sessions");
     sessions.value = Array.isArray(data) ? data : data.sessions || [];
     error.value = null;
