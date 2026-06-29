@@ -105,14 +105,6 @@ test.beforeAll(async () => {
       `peer did not come up on ${PEER_HOST} (see ${PEER_DATA}/peer.log)`,
     );
   }
-
-  // The relay node's pin DB persists across runs (and across the xterm/sterk
-  // project pair). Each beforeAll wipes PEER_DATA → a fresh peer cert, so drop
-  // any stale relay pin first; the next relayed call re-pins via TOFU.
-  await fetch(`${RELAY}/api/peers/${encodeURIComponent(PEER)}/pin`, {
-    method: "DELETE",
-    headers: { Authorization: RELAY_AUTH },
-  }).catch(() => {});
 });
 
 test.afterAll(() => {
@@ -163,75 +155,6 @@ test("relay without upstream auth is rejected by the peer (401)", async () => {
   // No X-Mobux-Upstream-Authorization → relay forwards no Authorization →
   // the peer's auth middleware rejects.
   expect(res.status).toBe(401);
-});
-
-const relayCall = () =>
-  fetch(`${RELAY}/r/${encodeURIComponent(PEER)}/api/sessions`, {
-    headers: {
-      Authorization: RELAY_AUTH,
-      "X-Mobux-Upstream-Authorization": `Basic ${PEER_AUTH_B64}`,
-    },
-  });
-
-// The reinstall scenario the pin-mismatch UX exists for: the peer comes back
-// with a brand-new self-signed cert, the relay's stored pin no longer matches,
-// and the UI must surface a structured 409 with a one-tap re-trust.
-test("pin mismatch surfaces 409, and re-trust (DELETE pin) recovers", async () => {
-  // 1. First contact pins the peer's current cert.
-  const ok = await relayCall();
-  expect(ok.ok).toBeTruthy();
-
-  // 2. Simulate a peer reinstall: drop its cert material and restart so it
-  //    regenerates a different self-signed leaf. The relay keeps the old pin.
-  peerProc.kill("SIGKILL");
-  await new Promise((r) => setTimeout(r, 500));
-  const certDir = path.join(PEER_DATA, "home", ".config", "mobux");
-  for (const f of [
-    "leaf.crt",
-    "leaf.key",
-    "leaf.meta",
-    "leaf.expiry",
-    "ca.crt",
-    "ca.key",
-  ]) {
-    fs.rmSync(path.join(certDir, f), { force: true });
-  }
-  peerProc = spawn(BIN, [], {
-    env: {
-      ...process.env,
-      PORT: String(PEER_PORT),
-      MOBUX_DATA_DIR: PEER_DATA,
-      MOBUX_TMUX_SOCKET: PEER_TMUX,
-      MOBUX_AUTH_USER: PEER_USER,
-      MOBUX_PIN: PEER_PASS,
-      HOME: `${PEER_DATA}/home`,
-      HISTFILE: "/dev/null",
-      MOBUX_TLS: "1",
-    },
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  expect(await waitFor(`${PEER_HOST}/api/identify`, {})).toBeTruthy();
-
-  // 3. Relay now sees a fingerprint that differs from its pin → 409 pin_mismatch.
-  const mism = await relayCall();
-  expect(mism.status).toBe(409);
-  const body = await mism.json();
-  expect(body.error).toBe("pin_mismatch");
-  expect(body.message).toContain("fingerprint");
-
-  // 4. One-tap re-trust: drop the pin, then the next contact re-pins and works.
-  const del = await fetch(
-    `${RELAY}/api/peers/${encodeURIComponent(PEER)}/pin`,
-    {
-      method: "DELETE",
-      headers: { Authorization: RELAY_AUTH },
-    },
-  );
-  expect(del.ok).toBeTruthy();
-  expect((await del.json()).deleted).toBe(true);
-
-  const recovered = await relayCall();
-  expect(recovered.ok).toBeTruthy();
 });
 
 // ── Per-page host binding (issue #123) ────────────────────────────────

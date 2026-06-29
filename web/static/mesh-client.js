@@ -216,8 +216,14 @@ async function apiFetch(path, opts = {}) {
   const res = await fetch(url, { ...opts, headers });
 
   if (peer && res.status === 401) {
-    // Peer rejected the creds — forget them so the next call re-prompts.
-    clearPeerCred(peer);
+    // Only wipe the stored cred when the 401 genuinely came from the upstream
+    // PEER, not from the relay's own auth middleware. The relay strips
+    // WWW-Authenticate from forwarded peer responses (see relay.rs
+    // is_stripped_response_header); its own auth rejection always includes it.
+    // No WWW-Authenticate header → the 401 is from the peer → safe to clear.
+    if (!res.headers.get('www-authenticate')) {
+      clearPeerCred(peer);
+    }
     const err = new Error('peer authentication failed');
     err.meshKind = 'unauthorized';
     err.peer = peer;
