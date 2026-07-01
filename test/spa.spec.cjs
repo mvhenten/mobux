@@ -332,6 +332,67 @@ test("control-key ribbon is horizontally scrollable (not wrapped/clipped)", asyn
   expect(moved).toBeGreaterThan(0);
 });
 
+// ── regression: mic button is wired and opens the overlay ──────────────────
+//
+// After the SPA migration, input-bar.js imported input-actions.js via the
+// absolute path /static/input-actions.js (likewise for telemetry.js and
+// mic-overlay.js). Under Vite's dev proxy and certain static-file scenarios
+// the absolute path resolution breaks the ES module import chain, leaving
+// createDictateAction undefined and the mic button unwired — clicking it did
+// nothing and the overlay never appeared. Fix: use relative paths (./…) so
+// the imports resolve correctly in every context.
+test("mic button opens the dictation overlay", async ({ page }) => {
+  const pageErrors = [];
+  page.on("pageerror", (err) => pageErrors.push(err.message));
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+
+  // Wait for the engine to attach.
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("terminal");
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+
+  // Reveal the input bar exactly as a double-tap would.
+  await page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    if (bar) bar.classList.remove("hidden");
+  });
+
+  // Mic button must be visible (computed, not just present in DOM).
+  const micBtn = page.locator("#micBtn");
+  await expect(micBtn).toBeVisible({ timeout: 5000 });
+  const bb = await micBtn.boundingBox();
+  expect(bb).not.toBeNull();
+  expect(bb.width).toBeGreaterThan(0);
+  expect(bb.height).toBeGreaterThan(0);
+
+  // Click the mic button — the overlay must appear regardless of whether
+  // getUserMedia succeeds (headless has no mic, so it shows a fault overlay).
+  await micBtn.click();
+  await expect(page.locator("#mobux-mic-overlay")).toBeAttached({
+    timeout: 5000,
+  });
+
+  // No JS module errors: a broken import chain leaves createDictateAction
+  // undefined and throws a TypeError when the button is clicked.
+  const moduleErrors = pageErrors.filter(
+    (m) =>
+      m.toLowerCase().includes("typeerror") ||
+      m.toLowerCase().includes("is not a function") ||
+      m.toLowerCase().includes("cannot read"),
+  );
+  expect(
+    moduleErrors,
+    `JS errors on mic click: ${moduleErrors.join("; ")}`,
+  ).toHaveLength(0);
+});
+
 // ── settings: every card renders and hits its endpoint ──────────────────────
 
 test("settings: every ported card renders and consumes its endpoint", async ({

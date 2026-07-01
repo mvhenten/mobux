@@ -7,7 +7,7 @@
 // - Text input: native keyboard with autocomplete/voice. Enter sends + clears.
 // - Bar appears on tap, hides when keyboard dismisses.
 
-import { createAttachAction, createDictateAction } from '/static/input-actions.js';
+import { createAttachAction, createDictateAction } from './input-actions.js';
 
 export function createInputBar(term, send) {
   const bar = document.getElementById('inputBar');

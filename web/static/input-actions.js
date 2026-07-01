@@ -12,8 +12,8 @@
 // visible; UI-only details (focus restore, error toasts) are injected via
 // callbacks so behavior stays identical per surface.
 
-import telemetry from '/static/telemetry.js';
-import { createMicOverlay } from '/static/mic-overlay.js';
+import telemetry from './telemetry.js';
+import { createMicOverlay } from './mic-overlay.js';
 
 // ── File attach (any file type) ─────────────────────────────────────
 // Owns a hidden <input type=file>, POSTs the picked file to /api/upload via
