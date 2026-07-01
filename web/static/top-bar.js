@@ -17,7 +17,7 @@
 // flex child at the TOP of `.term-body` so #terminal / #reader reflow below
 // it and it never overlaps terminal output.
 
-import { createAttachAction, createDictateAction } from '/static/input-actions.js';
+import { createAttachAction, createDictateAction } from './input-actions.js';
 
 const STYLE_ID = 'mobux-top-bar-style';
 
