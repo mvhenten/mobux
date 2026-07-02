@@ -738,10 +738,18 @@ async fn api_update_run(State(state): State<AppState>) -> Response {
         return (StatusCode::CONFLICT, Json(json!({ "error": err }))).into_response();
     }
 
-    match update::spawn_updater(&state.data_dir, &latest, state.port, state.use_tls) {
+    match update::spawn_updater(
+        &state.update,
+        &state.data_dir,
+        &latest,
+        state.port,
+        state.use_tls,
+    ) {
         Ok(log_path) => {
             // Keep the flag set: a successful update restarts the process, and
-            // until then no second run should start.
+            // until then no second run should start. If the detached updater
+            // fails without restarting us, spawn_updater's supervisor thread
+            // releases the flag so a retry isn't permanently blocked.
             (
                 StatusCode::ACCEPTED,
                 Json(json!({

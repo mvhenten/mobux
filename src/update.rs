@@ -104,8 +104,10 @@ impl UpdateState {
     /// first caller and `false` to any concurrent caller until the run
     /// finishes. The first caller owns the flag and must clear it (via
     /// [`UpdateState::end_run`]) if it does NOT go on to spawn a detached
-    /// updater — once the updater is spawned the flag stays set for this
-    /// process's lifetime, since a successful update restarts it anyway.
+    /// updater. Once the updater is spawned the flag stays set until either a
+    /// successful update restarts this process, or [`spawn_updater`]'s
+    /// supervisor thread observes the detached updater exit without a restart
+    /// and releases it so a retry is possible.
     pub fn try_begin_run(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.running
@@ -484,6 +486,7 @@ fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
 /// Refuses with [`RunError::NotSystemd`] when there's no resolvable unit (so we
 /// never strand the service down with no way to restart it).
 pub fn spawn_updater(
+    state: &UpdateState,
     data_dir: &Path,
     version: &str,
     port: u16,
@@ -550,11 +553,27 @@ pub fn spawn_updater(
         cmd.env("MOBUX_UPDATE_CARGO", cargo);
     }
 
-    cmd.spawn().map_err(|e| RunError::SpawnFailed {
+    let child = cmd.spawn().map_err(|e| RunError::SpawnFailed {
         message: format!("spawning updater (setsid bash {}): {e}", script.display()),
     })?;
 
+    supervise_updater(state.clone(), child);
+
     Ok(log_path)
+}
+
+/// Supervise the detached updater so a failed run doesn't wedge the in-process
+/// lock forever. `setsid` from util-linux execs bash in place (our process
+/// isn't a group leader), so `child` is the bash updater and can be waited on.
+/// If it exits while THIS process is still alive, it did not restart us → the
+/// update failed → release the lock so a retry is possible. On success the OS
+/// restarts/kills this process before `wait()` returns, so the thread dies with
+/// the process and never double-releases.
+fn supervise_updater(state: UpdateState, mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        state.end_run();
+    });
 }
 
 #[cfg(test)]
@@ -594,12 +613,41 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         // SAFETY: single-threaded test; we set+remove the env around the call.
         unsafe { std::env::set_var("MOBUX_UPDATE_DISABLE_RUN", "1") };
-        let res = spawn_updater(&tmp, "999.0.0", 8281, false);
+        let st = UpdateState::new();
+        let res = spawn_updater(&st, &tmp, "999.0.0", 8281, false);
         unsafe { std::env::remove_var("MOBUX_UPDATE_DISABLE_RUN") };
         assert!(matches!(res, Err(RunError::NotSystemd { .. })));
         // No updater script should have been written (guard runs first).
         assert!(!tmp.join("mobux-update.sh").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Regression: a detached updater that exits WITHOUT restarting us (e.g. the
+    // install failed) must not wedge the in-process lock. The supervisor thread
+    // waits on the child and releases the flag so a later POST /api/update/run
+    // isn't stuck returning 409 forever.
+    #[test]
+    fn supervisor_releases_lock_when_detached_updater_exits() {
+        let st = UpdateState::new();
+        assert!(st.try_begin_run(), "claim the lock as api_update_run does");
+        // `true` stands in for a detached updater that exits immediately
+        // without restarting this process.
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn `true`");
+        supervise_updater(st.clone(), child);
+        let mut freed = false;
+        for _ in 0..200 {
+            if st.try_begin_run() {
+                freed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            freed,
+            "supervisor must release the lock after the detached updater exits"
+        );
     }
 
     #[test]
