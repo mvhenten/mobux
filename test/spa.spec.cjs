@@ -685,6 +685,111 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
       "Retry must reuse the captured audio — no second getUserMedia call",
     ).toBe(1);
   });
+
+  // ── regression: no fault is ever silent — every kind gets a report link ──
+  //
+  // The mic button used to fail silently on a denied Android permission: the
+  // overlay rendered (or didn't, depending on state) but there was no way to
+  // tell "the server is fine, the mic permission is the problem" and nothing
+  // actionable to do about it. Every fault now carries a GitHub report link
+  // prefilled with the fault kind, so a dead mic is never a dead end.
+  test("a denied getUserMedia renders a loud, computed-visible fault with a GitHub report link", async ({
+    page,
+  }) => {
+    await page.route(/\/api\/stt\/status$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          kind: "local",
+          reachable: true,
+          installed: true,
+          local_process_running: true,
+        }),
+      }),
+    );
+    await page.addInitScript(() => {
+      const denyGetUserMedia = () =>
+        Promise.reject(
+          new DOMException("Permission denied", "NotAllowedError"),
+        );
+      if (navigator.mediaDevices) {
+        navigator.mediaDevices.getUserMedia = denyGetUserMedia;
+      } else {
+        Object.defineProperty(navigator, "mediaDevices", {
+          value: { getUserMedia: denyGetUserMedia },
+          configurable: true,
+        });
+      }
+    });
+
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    await page.evaluate(() => {
+      const bar = document.getElementById("inputBar");
+      if (bar) bar.classList.remove("hidden");
+    });
+    await page.locator("#micBtn").click();
+
+    const overlay = page.locator("#mobux-mic-overlay.fault");
+    await expect(overlay).toBeVisible({ timeout: 10000 });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Microphone permission is blocked",
+    );
+
+    // Computed visibility, not `.hidden` — a real box on screen, not display:none.
+    const box = await overlay.boundingBox();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    const display = await overlay.evaluate(
+      (el) => getComputedStyle(el).display,
+    );
+    expect(display).not.toBe("none");
+
+    const reportLink = page.locator("#mobux-mic-overlay .mo-report-link");
+    await expect(reportLink).toBeVisible();
+    const href = await reportLink.getAttribute("href");
+    const url = new URL(href);
+    expect(url.origin + url.pathname).toBe(
+      "https://github.com/mvhenten/mobux/issues/new",
+    );
+    expect(url.searchParams.get("title")).toContain("[dictation] denied");
+    expect(url.searchParams.get("body")).toContain("Fault kind: denied");
+  });
+
+  test("a transcription failure also renders a GitHub report link", async ({
+    page,
+  }) => {
+    await page.route(/\/transcribe$/, async (route) => {
+      await route.fulfill({ status: 500, body: "boom" });
+    });
+
+    await openRecording(page);
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Stop" })
+      .click();
+
+    const overlay = page.locator("#mobux-mic-overlay.fault");
+    await expect(overlay).toBeVisible({ timeout: 10000 });
+
+    const reportLink = page.locator("#mobux-mic-overlay .mo-report-link");
+    await expect(reportLink).toBeVisible();
+    const href = await reportLink.getAttribute("href");
+    const url = new URL(href);
+    expect(url.origin + url.pathname).toBe(
+      "https://github.com/mvhenten/mobux/issues/new",
+    );
+    expect(url.searchParams.get("title")).toContain("[dictation] http");
+    expect(url.searchParams.get("body")).toContain("Fault kind: http");
+  });
 });
 
 // ── settings: every card renders and hits its endpoint ──────────────────────

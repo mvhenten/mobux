@@ -13,7 +13,8 @@
 // callbacks so behavior stays identical per surface.
 
 import telemetry from './telemetry.js';
-import { createMicOverlay } from './mic-overlay.js';
+import { createMicOverlay, faultMessage } from './mic-overlay.js';
+import { openExternal } from './external-link.js';
 
 // ── File attach (any file type) ─────────────────────────────────────
 // Owns a hidden <input type=file>, POSTs the picked file to /api/upload via
@@ -133,16 +134,27 @@ export function createDictateAction({ send, button, onText } = {}) {
     },
     onSubmit: (text) => { submitText(text); },
     retryTranscription: () => { retryPendingTranscription(); },
+    openExternal,
   });
 
   // Show a fault: emit telemetry AND render the overlay so logs and UI agree.
+  // Never a no-op: if the overlay itself is missing or fails to render, fall
+  // back to a native alert so the failure is still loud, never silent.
   function micFault(kind, extra, opts) {
     telemetry.log('mic.fault', extra ? { kind, extra } : { kind });
     button?.classList.remove('mic-recording');
     mic.recording = false;
     mic.busy = false;
     micLabel('🎤');
-    micOverlay.showFault(kind, extra, opts);
+    try {
+      if (!micOverlay || typeof micOverlay.showFault !== 'function') {
+        throw new Error('mic overlay unavailable');
+      }
+      micOverlay.showFault(kind, extra, opts);
+    } catch (err) {
+      telemetry.log('mic.fault.overlay.err', { message: err?.message || String(err) });
+      window.alert(faultMessage(kind, extra).title);
+    }
   }
 
   // Merge captured Float32 chunks, downsample to 16 kHz, and PCM-encode a WAV.
@@ -210,14 +222,26 @@ export function createDictateAction({ send, button, onText } = {}) {
   // provider is surfaced immediately instead of after the user has already
   // talked into a recording that was never going to transcribe. Reuses the
   // same /api/stt/status endpoint the Settings → Speech-to-text card polls.
+  // Bounded by PROBE_TIMEOUT_MS so a hung request can't leave the tap looking
+  // dead — a timeout is treated the same as any other probe failure (proceed
+  // to getUserMedia; the real /transcribe call surfaces its own fault).
+  const PROBE_TIMEOUT_MS = 6000;
+
   async function probeSttBackend() {
     let status = null;
     try {
-      const res = await fetch('/api/stt/status');
-      status = await res.json();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+      try {
+        const res = await fetch('/api/stt/status', { signal: controller.signal });
+        status = await res.json();
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (err) {
-      // Probe itself failed (e.g. offline) — don't block recording on that;
-      // the real /transcribe call will surface its own fault if needed.
+      // Probe itself failed or timed out (e.g. offline) — don't block
+      // recording on that; the real /transcribe call will surface its own
+      // fault if needed.
       telemetry.log('mic.probe.err', { message: err?.message || 'network error' });
       return true;
     }
@@ -229,11 +253,26 @@ export function createDictateAction({ send, button, onText } = {}) {
     return false;
   }
 
+  // Every branch of the mic-open pipeline (secure-context check, backend
+  // probe, getUserMedia, AudioContext wiring) is expected to either start
+  // recording or call micFault — never fall through silently. This wrapper
+  // is the last line of defense: any unexpected throw still resets mic state
+  // and renders a loud, reportable fault instead of leaving a dead button.
   async function startRecording(opts) {
     if (mic.busy) return;
     // Claim busy immediately so a second tap during the probe/getUserMedia
     // await can't race into a second concurrent recording attempt.
     mic.busy = true;
+    try {
+      await attemptStartRecording(opts);
+    } catch (err) {
+      telemetry.log('mic.start.err', { message: err?.message || String(err) });
+      stopTracks();
+      micFault('mic', err?.message || 'unexpected recording error');
+    }
+  }
+
+  async function attemptStartRecording(opts) {
     // Dismiss the soft keyboard — the text input keeps focus otherwise and the
     // on-screen keyboard covers the recording overlay on mobile.
     document.activeElement?.blur?.();
