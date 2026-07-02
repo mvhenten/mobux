@@ -99,6 +99,7 @@ export function createDictateAction({ send, button, onText } = {}) {
   // Full-viewport overlay with five states.
   const micOverlay = createMicOverlay({
     onStop: () => { if (mic.recording) captureStop(); },
+    onFastSubmit: () => { if (mic.recording) captureStopAndSubmit(); },
     onPause: () => {
       mic.paused = true;
       telemetry.log('mic.pause');
@@ -118,45 +119,30 @@ export function createDictateAction({ send, button, onText } = {}) {
       button?.classList.remove('mic-recording');
       micLabel('🎤');
     },
+    // REVIEW state: user wants a different take — discard and record again.
     onRetry: () => { retryFresh(); },
-    onSubmit: (text) => { submitText(text); },
-    retryTranscription: async () => {
-      if (!mic.pendingChunks || !mic.pendingChunks.length) return;
-      const chunks = mic.pendingChunks;
-      const inputRate = mic.pendingRate;
-      const durationMs = mic.pendingDurationMs;
-      mic.pendingChunks = null;
-      try {
-        const wav = encodeWav(chunks, inputRate);
-        const form = new FormData();
-        form.append('audio', wav, 'speech.wav');
-        micLabel('…');
-        micOverlay.showTranscribing();
-        const res = await fetch('/transcribe', { method: 'POST', body: form });
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => '');
-          if (res.status === 503) { micFault('model', '503 ' + bodyText.slice(0, 120)); }
-          else { micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText)); }
-          return;
-        }
-        const { text } = await res.json();
-        micOverlay.showReview(text && text.trim() ? text : '');
-      } catch (err) {
-        micFault('mic', err?.message || 'retry error');
-      } finally {
-        mic.busy = false;
-      }
+    // FAULT state: reuse the captured audio if the failure happened after
+    // recording; only fall back to a fresh recording when there is nothing
+    // to resend (e.g. permission/secure-context faults raised before capture).
+    onFaultRetry: () => {
+      // pendingChunks is an array (possibly empty, if Stop landed before any
+      // audio buffer had fired) whenever a stop-capture already happened —
+      // only null once discarded/consumed. Check presence, not chunk count.
+      if (mic.pendingChunks !== null) retryPendingTranscription();
+      else retryFresh();
     },
+    onSubmit: (text) => { submitText(text); },
+    retryTranscription: () => { retryPendingTranscription(); },
   });
 
   // Show a fault: emit telemetry AND render the overlay so logs and UI agree.
-  function micFault(kind, extra) {
+  function micFault(kind, extra, opts) {
     telemetry.log('mic.fault', extra ? { kind, extra } : { kind });
     button?.classList.remove('mic-recording');
     mic.recording = false;
     mic.busy = false;
     micLabel('🎤');
-    micOverlay.showFault(kind, extra);
+    micOverlay.showFault(kind, extra, opts);
   }
 
   // Merge captured Float32 chunks, downsample to 16 kHz, and PCM-encode a WAV.
@@ -220,8 +206,34 @@ export function createDictateAction({ send, button, onText } = {}) {
     mic.processor = mic.source = mic.ctx = mic.stream = null;
   }
 
-  async function startRecording() {
+  // Probe /transcribe's backend before opening the mic, so a dead network STT
+  // provider is surfaced immediately instead of after the user has already
+  // talked into a recording that was never going to transcribe. Reuses the
+  // same /api/stt/status endpoint the Settings → Speech-to-text card polls.
+  async function probeSttBackend() {
+    let status = null;
+    try {
+      const res = await fetch('/api/stt/status');
+      status = await res.json();
+    } catch (err) {
+      // Probe itself failed (e.g. offline) — don't block recording on that;
+      // the real /transcribe call will surface its own fault if needed.
+      telemetry.log('mic.probe.err', { message: err?.message || 'network error' });
+      return true;
+    }
+    telemetry.log('mic.probe', { kind: status?.kind, reachable: !!status?.reachable });
+    if (status?.reachable) return true;
+    micFault('model', (status?.kind || 'unknown') + ' backend unreachable', {
+      onProceedAnyway: () => { startRecording({ skipProbe: true }); },
+    });
+    return false;
+  }
+
+  async function startRecording(opts) {
     if (mic.busy) return;
+    // Claim busy immediately so a second tap during the probe/getUserMedia
+    // await can't race into a second concurrent recording attempt.
+    mic.busy = true;
     // Dismiss the soft keyboard — the text input keeps focus otherwise and the
     // on-screen keyboard covers the recording overlay on mobile.
     document.activeElement?.blur?.();
@@ -235,6 +247,7 @@ export function createDictateAction({ send, button, onText } = {}) {
       micFault('insecure');
       return;
     }
+    if (!opts?.skipProbe && !(await probeSttBackend())) return;
     telemetry.log('mic.getusermedia.req');
     try {
       mic.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -290,30 +303,40 @@ export function createDictateAction({ send, button, onText } = {}) {
     mic.timer = setInterval(tick, 250);
   }
 
-  async function captureStop() {
-    if (!mic.recording) return;
+  // Stop capture and stash the audio in mic.pending* — kept around (never
+  // cleared on a transcription failure) so a fault can be retried against the
+  // same recording instead of forcing the user through a full re-record.
+  function stopCapture() {
+    if (!mic.recording) return false;
     mic.recording = false;
     button?.classList.remove('mic-recording');
     micLabel('…');
     telemetry.log('mic.stop');
 
     const chunks = mic.chunks;
-    const inputRate = mic.inputRate;
     const durationMs = mic.startedAt ? Date.now() - mic.startedAt : 0;
     mic.pendingChunks = chunks;
-    mic.pendingRate = inputRate;
+    mic.pendingRate = mic.inputRate;
     mic.pendingDurationMs = durationMs;
     stopTracks();
     mic.chunks = [];
     telemetry.log('mic.recording.stop', { durationMs, chunkCount: chunks.length });
+    return true;
+  }
 
+  // POST mic.pendingChunks to /transcribe. Resolves the transcript (possibly
+  // '') on success and clears mic.pendingChunks; on any failure it raises the
+  // matching fault (leaving mic.pendingChunks intact for a retry) and
+  // resolves null.
+  async function transcribePending() {
+    micLabel('…');
     micOverlay.showTranscribing();
 
     try {
-      const wav = encodeWav(chunks, inputRate);
+      const wav = encodeWav(mic.pendingChunks, mic.pendingRate);
       const form = new FormData();
       form.append('audio', wav, 'speech.wav');
-      telemetry.log('mic.transcribe.req', { bytes: wav.size, durationMs });
+      telemetry.log('mic.transcribe.req', { bytes: wav.size, durationMs: mic.pendingDurationMs });
 
       let res;
       try {
@@ -321,7 +344,7 @@ export function createDictateAction({ send, button, onText } = {}) {
       } catch (netErr) {
         telemetry.log('mic.transcribe.err', { stage: 'network', message: netErr?.message || '' });
         micFault('network', netErr?.message || 'network error');
-        return;
+        return null;
       }
       telemetry.log('mic.transcribe.resp', { status: res.status });
 
@@ -333,18 +356,53 @@ export function createDictateAction({ send, button, onText } = {}) {
         } else {
           micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText));
         }
-        return;
+        return null;
       }
 
       const { text } = await res.json();
       telemetry.log('mic.transcribe.ok', { textLength: (text || '').trim().length });
-      micOverlay.showReview(text && text.trim() ? text : '');
+      mic.pendingChunks = null;
+      return text && text.trim() ? text : '';
     } catch (err) {
       console.error('Transcription failed:', err);
       telemetry.log('mic.transcribe.err', { stage: 'exception', message: err?.message || String(err) });
       micFault('mic', err?.message || 'encode/transcribe error');
+      return null;
     }
+  }
+
+  // Stop → preview: transcribe, then show REVIEW for the user to edit/confirm.
+  async function captureStop() {
+    if (!stopCapture()) return;
+    const text = await transcribePending();
+    if (text === null) return; // fault already shown, audio preserved
+    micOverlay.showReview(text);
     // Note: mic.busy stays true until submit/cancel/retry resolves
+  }
+
+  // Stop → submit in one tap: transcribe and send straight through, no
+  // preview. Falls back to REVIEW when there's nothing to submit.
+  async function captureStopAndSubmit() {
+    if (!stopCapture()) return;
+    const text = await transcribePending();
+    if (text === null) return; // fault already shown, audio preserved
+    if (!text) {
+      micOverlay.showReview(text);
+      return;
+    }
+    submitText(text);
+    micOverlay.dismiss();
+  }
+
+  // Retry a transcription against already-captured audio (FAULT-state Retry
+  // with pending audio, and the auto-retry after installing/starting a local
+  // STT server). Always lands back on REVIEW — never auto-submits — so a
+  // second failure or an unexpected transcript still gets a human look.
+  async function retryPendingTranscription() {
+    if (mic.pendingChunks === null) return;
+    const text = await transcribePending();
+    if (text === null) return; // fault already shown, audio preserved
+    micOverlay.showReview(text);
   }
 
   function cancelRecording() {
