@@ -417,6 +417,19 @@ test("row-height parity: PTY rows match what actually fits, including after the 
   const captured = seedErrorCapture(page);
   await bootTerminal(page);
 
+  // On mobile, terminal.js now reveals the input bar eagerly on mount (see
+  // input-bar.js's reveal()), so it's already visible by the time bootTerminal
+  // resolves. Force it back to the hidden state — still a real, reachable
+  // state (input-bar.js auto-hides on keyboard dismiss / Escape) — so this
+  // test can still exercise the hidden→visible transition the regression
+  // comment above describes.
+  await page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    bar.classList.add("hidden");
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.waitForTimeout(500);
+
   // Snapshot the initial (bar hidden) invariant first, so a baseline
   // failure tells us the host geometry is busted before we even
   // toggle the bar.

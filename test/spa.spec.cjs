@@ -252,23 +252,36 @@ test("terminal island fills the viewport on mount (correct PTY rows)", async ({
 
   const geo = await page.evaluate(() => {
     const t = document.getElementById("terminal");
+    const bar = document.getElementById("inputBar");
     const r = t.getBoundingClientRect();
+    // On mobile the input bar (mic/ribbon) is revealed eagerly on mount
+    // (see terminal.js's `ensureInputBar().reveal()`) and sits below the
+    // terminal as a flex sibling, so it legitimately claims its own height
+    // at the bottom of the viewport instead of the terminal.
+    const barHeight =
+      bar && !bar.classList.contains("hidden")
+        ? bar.getBoundingClientRect().height
+        : 0;
     return {
       hostTop: r.top,
       hostBottom: r.bottom,
       hostHeight: r.height,
       viewportHeight: window.innerHeight,
+      barHeight,
       rows: window.__mobuxView?.test?.rows?.() ?? null,
     };
   });
 
-  // The terminal host fills essentially the whole viewport: it starts at the
-  // top (no SPA chrome on this route) and its bottom reaches the viewport
-  // bottom within a few px. A too-short host (status bar stranded mid-screen)
-  // leaves a large gap and fails this.
+  // The terminal host fills essentially the whole viewport above the (now
+  // eagerly visible) input bar: it starts at the top (no SPA chrome on this
+  // route) and its bottom reaches the input bar's top within a few px. A
+  // too-short host (status bar stranded mid-screen) leaves a large gap and
+  // fails this.
   expect(geo.hostTop).toBeLessThan(8);
   expect(geo.hostHeight).toBeGreaterThan(geo.viewportHeight * 0.85);
-  expect(Math.abs(geo.viewportHeight - geo.hostBottom)).toBeLessThan(8);
+  expect(
+    Math.abs(geo.viewportHeight - geo.barHeight - geo.hostBottom),
+  ).toBeLessThan(8);
 
   // And the PTY actually got enough rows for that height. Derive an expected
   // minimum from the host height; the ~13-row bug (top third only) fails this.
@@ -291,8 +304,10 @@ test("control-key ribbon is horizontally scrollable (not wrapped/clipped)", asyn
   });
   await expect(page.locator("#inputRibbon")).toHaveCount(1);
 
-  // The mobile input bar mounts lazily; reveal it the way a touch double-tap
-  // would so the ribbon is laid out and measurable.
+  // The mobile input bar is revealed automatically on boot (fix for the
+  // "mic button completely gone on mobile" regression). Guard against the
+  // bar still being hidden in the test environment by removing the class
+  // explicitly so the geometry checks below are always reliable.
   await page.evaluate(() => {
     const bar = document.getElementById("inputBar");
     if (bar) bar.classList.remove("hidden");
@@ -391,6 +406,62 @@ test("mic button opens the dictation overlay", async ({ page }) => {
     moduleErrors,
     `JS errors on mic click: ${moduleErrors.join("; ")}`,
   ).toHaveLength(0);
+});
+
+// ── mobile mic button: visible on mount + wired to dictation ────────────────
+//
+// Regression guard for the "mobile microphone button completely gone" bug
+// introduced in v0.6.0 (SPA cutover). Before the fix, #micBtn lived inside
+// #inputBar which started with class `hidden` (display:none), giving it a zero
+// bounding rect — effectively invisible with no discoverable way to activate it.
+//
+// The fix: terminal.js calls ensureInputBar().reveal() on mobile so the bar (and
+// the mic button) are visible the moment the terminal boots, without triggering
+// keyboard focus. This test FAILS on the broken state (bounding rect = 0) and
+// PASSES after the fix (bounding rect > 0, click triggers dictation overlay).
+test("mobile #micBtn is visible on mount and wired to the dictation flow", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+
+  // Wait for the terminal engine to boot — engine attaches child elements to
+  // #terminal when it initialises the PTY backend.
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("terminal");
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+  // Allow the post-mount resize + input-bar wiring to settle.
+  await page.waitForTimeout(300);
+
+  // 1. #micBtn must exist in the DOM (rendered by TerminalIsland scaffold).
+  await expect(page.locator("#micBtn")).toHaveCount(1);
+
+  // 2. #micBtn must be computed-visible — NOT inside a display:none container.
+  //    getBoundingClientRect() returns all-zeros for hidden elements.
+  const rect = await page.locator("#micBtn").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { width: r.width, height: r.height };
+  });
+  expect(rect.width, "#micBtn width must be > 0 (not hidden)").toBeGreaterThan(
+    0,
+  );
+  expect(
+    rect.height,
+    "#micBtn height must be > 0 (not hidden)",
+  ).toBeGreaterThan(0);
+
+  // 3. #micBtn must be wired to the dictation flow: clicking it must launch the
+  //    mic overlay. In the test environment getUserMedia may be blocked/denied,
+  //    but createDictateAction still surfaces a fault state via the overlay.
+  await page.locator("#micBtn").click();
+  await expect(page.locator("#mobux-mic-overlay")).toBeVisible({
+    timeout: 5000,
+  });
 });
 
 // ── settings: every card renders and hits its endpoint ──────────────────────
