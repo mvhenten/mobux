@@ -464,6 +464,229 @@ test("mobile #micBtn is visible on mount and wired to the dictation flow", async
   });
 });
 
+// ── mic: fast-submit button + retry-preserves-audio regression ─────────────
+//
+// Live-tested feedback on the dictation flow:
+//   1. Submitting always needed three taps (stop → preview → confirm). Fixed
+//      by adding a primary one-tap Submit button in the RECORDING overlay
+//      (stop + transcribe + submit, no preview) alongside the existing
+//      Stop→preview path.
+//   2. A transcription failure discarded the just-captured audio and forced
+//      a full re-record via the FAULT screen's Retry button. Fixed: Retry on
+//      a post-record fault now resends the same captured audio instead of
+//      calling getUserMedia again.
+//
+// Headless Chromium has no real mic and this suite runs with workers: 1 (no
+// per-file launchOptions override, see playwright.config.cjs), so these tests
+// replace navigator.mediaDevices.getUserMedia with a real, spec-compliant
+// MediaStream synthesized in-page (an AudioContext oscillator routed into a
+// MediaStreamAudioDestinationNode) — genuine PCM flows through the exact same
+// analyser/ScriptProcessor graph input-actions.js builds, no browser launch
+// flags or OS permission prompts required. /transcribe + /api/stt/status are
+// mocked to control outcomes deterministically.
+test.describe("mic dictation: fast submit + retry preserves audio", () => {
+  async function installFakeMic(page) {
+    await page.addInitScript(() => {
+      window.__gumCalls = 0;
+      const fakeGetUserMedia = () => {
+        window.__gumCalls++;
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AC();
+        const osc = ctx.createOscillator();
+        osc.frequency.value = 220;
+        const dest = ctx.createMediaStreamDestination();
+        osc.connect(dest);
+        osc.start();
+        return Promise.resolve(dest.stream);
+      };
+      if (navigator.mediaDevices) {
+        navigator.mediaDevices.getUserMedia = fakeGetUserMedia;
+      } else {
+        Object.defineProperty(navigator, "mediaDevices", {
+          value: { getUserMedia: fakeGetUserMedia },
+          configurable: true,
+        });
+      }
+    });
+  }
+
+  async function openRecording(page) {
+    // Backend probe (added alongside these fixes) must see a reachable
+    // provider or it raises a pre-record FAULT instead of opening the mic —
+    // that's its own behavior, tested separately; here we want RECORDING.
+    await page.route(/\/api\/stt\/status$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          kind: "local",
+          reachable: true,
+          installed: true,
+          local_process_running: true,
+        }),
+      }),
+    );
+    await installFakeMic(page);
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    await page.evaluate(() => {
+      const bar = document.getElementById("inputBar");
+      if (bar) bar.classList.remove("hidden");
+    });
+    await page.locator("#micBtn").click();
+    await expect(page.locator("#mobux-mic-overlay.recording")).toBeVisible({
+      timeout: 5000,
+    });
+  }
+
+  // Renderer-agnostic text search, same technique as critical-path.spec.cjs's
+  // keyboard-up marker check: walk #terminal's text nodes for a substring.
+  function waitForTerminalMarker(page, marker) {
+    return page.waitForFunction(
+      (m) => {
+        const t = document.getElementById("terminal");
+        if (!t) return false;
+        const walker = document.createTreeWalker(t, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (node.data && node.data.includes(m)) return true;
+        }
+        return false;
+      },
+      marker,
+      { timeout: 10000 },
+    );
+  }
+
+  test("RECORDING shows a primary Submit button, visually distinct from Stop/Cancel", async ({
+    page,
+  }) => {
+    await openRecording(page);
+
+    const submitBtn = page.locator("#mobux-mic-overlay .mo-btn-primary");
+    await expect(submitBtn).toBeVisible();
+    await expect(submitBtn).toHaveText("✓ Submit");
+    const box = await submitBtn.boundingBox();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+
+    const stopBtn = page.locator("#mobux-mic-overlay .mo-btn", {
+      hasText: "Stop",
+    });
+    await expect(stopBtn).toBeVisible();
+
+    // "Obvious primary affordance": computed styling must set it apart from
+    // the plain secondary buttons, not just be a same-looking extra button.
+    const [primaryBg, secondaryBg] = await Promise.all([
+      submitBtn.evaluate((el) => getComputedStyle(el).backgroundColor),
+      stopBtn.evaluate((el) => getComputedStyle(el).backgroundColor),
+    ]);
+    expect(
+      primaryBg,
+      "primary Submit must be visually distinct from the secondary row",
+    ).not.toBe(secondaryBg);
+  });
+
+  test("fast-submit stops + transcribes + submits in one tap, skipping the preview", async ({
+    page,
+  }) => {
+    let transcribeCalls = 0;
+    await page.route(/\/transcribe$/, async (route) => {
+      transcribeCalls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ text: "mobux fast submit marker" }),
+      });
+    });
+
+    await openRecording(page);
+    await page.locator("#mobux-mic-overlay .mo-btn-primary").click();
+
+    // Overlay closes on its own once the submit resolves — REVIEW never
+    // shows for the fast path.
+    await expect(page.locator("#mobux-mic-overlay")).toHaveCount(0, {
+      timeout: 10000,
+    });
+    expect(transcribeCalls).toBe(1);
+
+    // The transcript was sent straight through (typed + Enter), not held
+    // back for a confirm tap.
+    await waitForTerminalMarker(page, "mobux fast submit marker");
+  });
+
+  test("a transcription failure after Stop keeps the recording — Retry resends it instead of re-recording", async ({
+    page,
+  }) => {
+    let transcribeCalls = 0;
+    await page.route(/\/transcribe$/, async (route) => {
+      transcribeCalls++;
+      if (transcribeCalls === 1) {
+        await route.fulfill({ status: 500, body: "boom" });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ text: "mobux retry marker" }),
+      });
+    });
+
+    await openRecording(page);
+    const gumAfterOpen = await page.evaluate(() => window.__gumCalls);
+    expect(gumAfterOpen).toBe(1);
+
+    // Stop → preview path (kept for editing) — the failure must hit here.
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Stop" })
+      .click();
+
+    await expect(page.locator("#mobux-mic-overlay.fault")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Transcription failed",
+    );
+
+    // The bug: FAULT's Retry used to call getUserMedia again, discarding the
+    // just-captured audio and forcing a full re-record.
+    const gumAtFault = await page.evaluate(() => window.__gumCalls);
+    expect(
+      gumAtFault,
+      "a transcription fault must not itself trigger a new recording",
+    ).toBe(1);
+
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Retry" })
+      .click();
+
+    await expect(page.locator("#mobux-mic-overlay.review")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator("#mobux-mic-overlay .mo-review-text")).toHaveText(
+      "mobux retry marker",
+    );
+
+    expect(
+      transcribeCalls,
+      "Retry must resend the captured audio, not silently give up",
+    ).toBe(2);
+    const gumAfterRetry = await page.evaluate(() => window.__gumCalls);
+    expect(
+      gumAfterRetry,
+      "Retry must reuse the captured audio — no second getUserMedia call",
+    ).toBe(1);
+  });
+});
+
 // ── settings: every card renders and hits its endpoint ──────────────────────
 
 test("settings: every ported card renders and consumes its endpoint", async ({

@@ -1,10 +1,15 @@
 // mic-overlay.js — full-viewport recording / fault overlay for dictation.
 //
 // Five states:
-//   RECORDING   — waveform canvas, running timer, Pause/Resume/Stop/Cancel
+//   RECORDING   — waveform canvas, running timer, primary Submit (stop +
+//                 transcribe + submit in one tap) plus Pause/Resume/Stop/Cancel
+//                 (Stop still routes through the preview below, for editing)
 //   TRANSCRIBING — spinner, no buttons
 //   REVIEW      — returned text (or "Nothing captured"), Retry/Submit or Retry/Dismiss
-//   FAULT       — human error message, Retry + optional install/start flow
+//   FAULT       — human error message, Retry + optional install/start flow.
+//                 If reached with captured audio still pending, Retry re-sends
+//                 that audio instead of forcing a fresh recording. A pre-record
+//                 probe fault additionally offers "Record anyway".
 //
 // House style: muted, low-contrast palette. Android-only target.
 
@@ -153,6 +158,16 @@ function ensureStyles() {
   cursor: pointer;
   font-family: inherit;
 }
+#mobux-mic-overlay .mo-primary-row {
+  margin-top: 4px;
+}
+#mobux-mic-overlay .mo-btn-primary {
+  padding: 10px 30px;
+  font-size: 15px;
+  background: rgba(106, 138, 106, 0.2);
+  border: 1px solid rgba(106, 138, 106, 0.45);
+  color: #d3ddd3;
+}
 #mobux-mic-overlay .mo-canvas {
   width: 100%;
   max-width: 320px;
@@ -194,8 +209,14 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
-// createMicOverlay(handlers) → { showRecording(analyser), showTranscribing(), showReview(text), showFault(kind, extra), dismiss() }
-//   handlers = { onStop, onPause, onResume, onCancel, onRetry, onSubmit, retryTranscription }
+// createMicOverlay(handlers) → { showRecording(analyser), showTranscribing(), showReview(text), showFault(kind, extra, opts), dismiss() }
+//   handlers = { onStop, onFastSubmit, onPause, onResume, onCancel, onRetry,
+//                onFaultRetry, onSubmit, onDismiss, retryTranscription }
+//   onRetry       — REVIEW state's Retry: discard and record again.
+//   onFaultRetry  — FAULT state's Retry: caller decides fresh vs re-send
+//                   already-captured audio (see createDictateAction).
+//   showFault(kind, extra, { onProceedAnyway }) — onProceedAnyway renders a
+//   "Record anyway" action for faults raised before any audio was captured.
 export function createMicOverlay(handlers) {
   // Support legacy two-arg call: createMicOverlay(onStop, retryTranscription)
   if (typeof handlers === 'function') {
@@ -257,6 +278,16 @@ export function createMicOverlay(handlers) {
     canvas.width = 320;
     canvas.height = 60;
 
+    // Primary row: one-tap Submit — stop + transcribe + submit, no preview.
+    const primaryRow = document.createElement('div');
+    primaryRow.className = 'mo-btn-row mo-primary-row';
+
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'mo-btn mo-btn-primary';
+    submitBtn.textContent = '✓ Submit';
+
+    primaryRow.appendChild(submitBtn);
+
     // Button row: Pause (visible initially), Resume (hidden), Stop, Cancel
     const btnRow = document.createElement('div');
     btnRow.className = 'mo-btn-row';
@@ -286,6 +317,7 @@ export function createMicOverlay(handlers) {
     root.appendChild(statusEl);
     root.appendChild(canvas);
     root.appendChild(timerEl);
+    root.appendChild(primaryRow);
     root.appendChild(btnRow);
     document.body.appendChild(root);
 
@@ -345,6 +377,11 @@ export function createMicOverlay(handlers) {
     }
 
     // Button handlers
+    submitBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof handlers.onFastSubmit === 'function') handlers.onFastSubmit();
+    });
+
     pauseBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       paused = true;
@@ -458,8 +495,11 @@ export function createMicOverlay(handlers) {
   }
 
   // ── FAULT state ──────────────────────────────────────────────────────
-  // showFault(kind, extra) — render the mapped fault. Tap to dismiss.
-  function showFault(kind, extra) {
+  // showFault(kind, extra, opts) — render the mapped fault. Tap to dismiss.
+  //   opts.onProceedAnyway — when set, adds a "Record anyway" action (used
+  //   for the pre-record backend probe, where nothing has been captured yet).
+  function showFault(kind, extra, opts) {
+    opts = opts || {};
     stopRaf();
     if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
     if (root) { root.remove(); root = null; }
@@ -478,15 +518,28 @@ export function createMicOverlay(handlers) {
     root.querySelector('.mo-title').textContent = title;
     root.querySelector('.mo-detail').textContent = detail;
 
-    // Retry button
+    // Retry button — the caller decides whether this re-sends already
+    // captured audio or starts a fresh recording (see onFaultRetry).
     const retryBtn = document.createElement('button');
     retryBtn.className = 'mo-btn';
     retryBtn.textContent = '↻ Retry';
     retryBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (typeof handlers.onRetry === 'function') handlers.onRetry();
+      if (typeof handlers.onFaultRetry === 'function') handlers.onFaultRetry();
     });
     root.querySelector('.mo-fault-btn-row').appendChild(retryBtn);
+
+    if (typeof opts.onProceedAnyway === 'function') {
+      const proceedBtn = document.createElement('button');
+      proceedBtn.className = 'mo-install-btn';
+      proceedBtn.textContent = 'Record anyway';
+      proceedBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dismiss();
+        opts.onProceedAnyway();
+      });
+      root.querySelector('.mo-action-area').appendChild(proceedBtn);
+    }
 
     root.addEventListener('click', (e) => {
       if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') return;
