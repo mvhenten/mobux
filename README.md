@@ -104,7 +104,38 @@ A short product overview for the curious is in **[OVERVIEW.md](OVERVIEW.md)**.
 | `/api/push/devices` | GET | List subscribed devices |
 | `/api/push/notify` | POST | Send a push notification |
 | `/ws/:name` | WS | Terminal WebSocket |
-| `/install` | GET | Self-service install page (CA cert, APK, QR) |
+| `/install` | GET | Self-service install page (CA cert, APK, QR codes) — no auth |
+| `/install/mobux.apk` | GET | Built APK download — no auth |
+| `/install/mobux-ca.crt` | GET | Local CA cert for Android trust store — no auth |
+| `/.well-known/assetlinks.json` | GET | Digital Asset Links file proving the APK owns the domain — no auth |
+
+### Dev telemetry
+
+A dev-only client telemetry channel for debugging the frontend on a real
+device. It is **off by default and inert in production** — gated behind the
+`MOBUX_DEV` env var, read once at startup.
+
+- **Enable it:** start mobux with `MOBUX_DEV=1` (the `mobux-dev.service`
+  unit sets this). When set, the server logs `dev mode: ON` and exposes the
+  flag to the page as `window.MOBUX_DEV = true`.
+- **Where logs land:** the frontend POSTs lines to `POST /api/telemetry`
+  (same-origin, behind normal auth, body capped at 64KB). The server writes
+  each line to **stderr / the journal** prefixed `[telemetry HH:MM:SS.mmm]`.
+  Tail with `journalctl --user -u mobux-dev -f` (or `/tmp/mobux*.log` for a
+  `make` instance). When `MOBUX_DEV` is unset, `/api/telemetry` returns 404
+  and nothing is logged.
+- **From JS:** the module is `web/static/telemetry.js`, loaded once by the
+  SPA's entrypoint. It resolves the dev flag itself from `/api/build-info`
+  (no server-side HTML injection needed) and is a no-op until that resolves
+  true. Import it anywhere for logging:
+  ```js
+  import telemetry from '/static/telemetry.js';
+  telemetry.log('ws-open', { session });   // structured or a plain string
+  ```
+  Each line carries a per-page session id so they're correlatable.
+- **On-screen overlay:** add `?telemetry=1` to the URL, or run
+  `telemetry.overlay(true)` (also `window.mobuxTelemetry.overlay()` in dev).
+  The choice persists in `localStorage['mobux:telemetry']`.
 
 ## License
 
