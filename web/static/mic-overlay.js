@@ -20,14 +20,15 @@ export function faultMessage(kind, extra) {
   switch (kind) {
     case 'insecure':
       return {
-        title: 'Mic needs a secure (HTTPS) connection.',
-        detail: 'mediaDevices unavailable — open mobux over HTTPS.',
+        title: 'Mic needs a trusted, secure connection.',
+        detail:
+          'The browser will not expose the microphone on this connection. Open mobux over HTTPS with a trusted certificate (a self-signed cert is not enough).',
       };
     case 'denied': // NotAllowedError / SecurityError
       return {
-        title: 'Microphone blocked.',
+        title: 'Microphone permission is blocked.',
         detail:
-          'Microphone blocked. Allow mic for this site (tap the lock → Permissions → Microphone) and check Chrome → Site settings → Microphone, and the OS app permission.',
+          "If you are using the installed app, it may be missing the Android microphone permission — reinstall the latest app to re-grant it. In a browser, check the site's microphone permission (tap the lock icon → Permissions → Microphone).",
       };
     case 'notfound': // NotFoundError
       return { title: 'No microphone found.', detail: extra || 'NotFoundError' };
@@ -47,6 +48,58 @@ export function faultMessage(kind, extra) {
         detail: extra || 'microphone unavailable',
       };
   }
+}
+
+// ── Report-issue link ────────────────────────────────────────────────
+// Every fault gets a prefilled GitHub issue link so a dead mic is never a
+// dead end — the user can hand the exact context to a maintainer in one tap.
+const REPORT_REPO = 'mvhenten/mobux';
+
+function reportContextLines(kind, extra, buildInfo) {
+  const lines = [
+    `Fault kind: ${kind}`,
+    `Error: ${extra || '(none)'}`,
+  ];
+  if (buildInfo) {
+    lines.push(`App version: ${buildInfo.version || 'unknown'} (server bundle ${buildInfo.serverHash || 'unknown'}, loaded bundle ${buildInfo.feHash || 'unknown'})`);
+  }
+  lines.push(
+    `User agent: ${navigator.userAgent}`,
+    `Secure context: ${window.isSecureContext}`,
+    `getUserMedia available: ${!!navigator.mediaDevices?.getUserMedia}`,
+    `URL: ${location.href}`,
+  );
+  return lines;
+}
+
+function buildReportUrl(kind, extra, buildInfo) {
+  const errName = extra ? String(extra).slice(0, 80) : 'unknown';
+  const title = `[dictation] ${kind} — ${errName}`;
+  const body = reportContextLines(kind, extra, buildInfo).join('\n');
+  const params = new URLSearchParams({ title, body });
+  return `https://github.com/${REPORT_REPO}/issues/new?${params.toString()}`;
+}
+
+// Best-effort build/version info for the report body. Never throws — a
+// failed or slow fetch just means the link ships without version fields.
+async function fetchBuildInfo() {
+  const info = {};
+  await Promise.all([
+    fetch('/api/build-info')
+      .then((r) => r.json())
+      .then((d) => {
+        info.version = d?.version;
+        info.serverHash = d?.build_hash;
+      })
+      .catch(() => {}),
+    fetch('/static/build-info.json')
+      .then((r) => r.json())
+      .then((d) => {
+        info.feHash = d?.hash;
+      })
+      .catch(() => {}),
+  ]);
+  return info;
 }
 
 const STYLE_ID = 'mobux-mic-overlay-style';
@@ -88,17 +141,29 @@ function ensureStyles() {
 #mobux-mic-overlay .mo-hint {
   font-size: 14px; color: #7e857f; text-align: center; max-width: 22em;
 }
-/* Fault state — muted amber/clay, noticeable but not alarming. */
-#mobux-mic-overlay.fault { background: rgba(28, 22, 20, 0.94); }
+/* Fault state — muted amber/clay, loud through contrast/weight, not color. */
+#mobux-mic-overlay.fault {
+  background: rgba(28, 22, 20, 0.96);
+  border-top: 3px solid rgba(201, 180, 141, 0.55);
+}
 #mobux-mic-overlay.fault .mo-dot { background: #9a7b50; }
-#mobux-mic-overlay.fault .mo-status { color: #c9b48d; font-size: 17px; }
+#mobux-mic-overlay.fault .mo-status {
+  color: #ddc79a; font-size: 19px; font-weight: 600; letter-spacing: 0.4px;
+}
 #mobux-mic-overlay .mo-title {
-  font-size: 18px; color: #cdbfa6; text-align: center; max-width: 22em;
-  line-height: 1.35;
+  font-size: 19px; font-weight: 600; color: #e2d3ae; text-align: center;
+  max-width: 22em; line-height: 1.4;
 }
 #mobux-mic-overlay .mo-detail {
-  font-family: monospace; font-size: 12px; color: #877f6e;
+  font-family: monospace; font-size: 12px; color: #a4998a;
   text-align: center; max-width: 26em; word-break: break-word;
+}
+/* Selector needs the .mo-btn.mo-report-link compound (not just
+   .mo-report-link) to out-rank the plain .mo-btn rule declared below it. */
+#mobux-mic-overlay .mo-btn.mo-report-link {
+  font-size: 13px;
+  color: #cdbfa6;
+  border: 1px solid rgba(201, 180, 141, 0.4);
 }
 @keyframes moPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(176, 106, 106, 0.5); }
@@ -509,7 +574,7 @@ export function createMicOverlay(handlers) {
     root.id = 'mobux-mic-overlay';
     root.className = 'fault';
     root.innerHTML =
-      '<div class="mo-status"><span class="mo-dot"></span>Dictation failed</div>' +
+      '<div class="mo-status"><span class="mo-dot"></span>⚠ Dictation failed</div>' +
       '<div class="mo-title"></div>' +
       '<div class="mo-detail"></div>' +
       '<div class="mo-action-area"></div>' +
@@ -528,6 +593,30 @@ export function createMicOverlay(handlers) {
       if (typeof handlers.onFaultRetry === 'function') handlers.onFaultRetry();
     });
     root.querySelector('.mo-fault-btn-row').appendChild(retryBtn);
+
+    // Report-issue link — present for every fault kind, including
+    // transcribe errors, so a dead mic always has a way out. Defaults to a
+    // real target=_blank anchor (works even without JS handling); when the
+    // caller threaded in openExternal (TWA-safe system-browser launch), the
+    // click routes through that instead so the TWA doesn't trap it in a
+    // Custom Tab.
+    const reportLink = document.createElement('a');
+    reportLink.className = 'mo-btn mo-report-link';
+    reportLink.textContent = '⚑ Report issue';
+    reportLink.target = '_blank';
+    reportLink.rel = 'noopener noreferrer';
+    reportLink.href = buildReportUrl(kind, extra, null);
+    reportLink.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof handlers.openExternal !== 'function') return;
+      e.preventDefault();
+      handlers.openExternal(reportLink.href);
+    });
+    root.querySelector('.mo-fault-btn-row').appendChild(reportLink);
+    fetchBuildInfo().then((buildInfo) => {
+      if (!root) return;
+      reportLink.href = buildReportUrl(kind, extra, buildInfo);
+    });
 
     if (typeof opts.onProceedAnyway === 'function') {
       const proceedBtn = document.createElement('button');

@@ -4,6 +4,7 @@ import { createGestureRecognizer } from "./touch.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
+import { navigateToUrl, openExternal } from "./external-link.js";
 
 const session = window.MOBUX_SESSION;
 
@@ -106,49 +107,10 @@ const quotes = [
 }
 
 // ── External links ──────────────────────────────────────────────────
-// In a TWA (Trusted Web Activity, package id `io.github.mvhenten.mobux`),
-// external links should open in the user's system default browser (e.g.
-// Firefox, Chrome, whatever the user has configured), not Chrome Custom
-// Tabs. Android's intent:// URL scheme with action=VIEW and no package=
-// attribute forces the system to resolve through the default browser.
-//
-// TWA detection: document.referrer starts with 'android-app://' when
-// running inside the TWA shell.
-//
-// On desktop / regular browsers, this uses the standard anchor-click
-// new-tab behavior.
-
-// Helper for navigation - exposed for test stubbing
-function navigateToUrl(url) {
-  window.location.assign(url);
-}
-
-function openExternal(url) {
-  const isTWA = document.referrer.startsWith("android-app://");
-
-  if (isTWA && /^https?:\/\//.test(url)) {
-    // Build an intent:// URL that opens the link in the system default
-    // browser. Format:
-    // intent://<url>#Intent;action=android.intent.action.VIEW;scheme=<scheme>;S.browser_fallback_url=<url>;end;
-    const urlObj = new URL(url);
-    const intentUrl = `intent://${urlObj.host}${urlObj.pathname}${urlObj.search}${urlObj.hash}#Intent;action=android.intent.action.VIEW;scheme=${urlObj.protocol.replace(":", "")};S.browser_fallback_url=${encodeURIComponent(url)};end;`;
-    window.__mobuxNavigateToUrl(intentUrl);
-    return;
-  }
-
-  // Non-TWA or non-http(s) URLs: use anchor-click fallback
-  const a = document.createElement("a");
-  a.href = url;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-// Expose for tests
+// navigateToUrl/openExternal live in external-link.js (shared with
+// mic-overlay.js's fault "Report issue" link) — see that file for the TWA
+// intent:// rationale. Expose for tests (mirrors `window.__mobuxView` etc.).
 window.__mobuxNavigateToUrl = navigateToUrl;
-// Expose for smoke tests (mirrors `window.__mobuxView` etc.).
 window.__mobuxOpenExternal = openExternal;
 
 // ── Core ────────────────────────────────────────────────────────────
