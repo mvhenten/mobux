@@ -252,23 +252,36 @@ test("terminal island fills the viewport on mount (correct PTY rows)", async ({
 
   const geo = await page.evaluate(() => {
     const t = document.getElementById("terminal");
+    const bar = document.getElementById("inputBar");
     const r = t.getBoundingClientRect();
+    // On mobile the input bar (mic/ribbon) is revealed eagerly on mount
+    // (see terminal.js's `ensureInputBar().reveal()`) and sits below the
+    // terminal as a flex sibling, so it legitimately claims its own height
+    // at the bottom of the viewport instead of the terminal.
+    const barHeight =
+      bar && !bar.classList.contains("hidden")
+        ? bar.getBoundingClientRect().height
+        : 0;
     return {
       hostTop: r.top,
       hostBottom: r.bottom,
       hostHeight: r.height,
       viewportHeight: window.innerHeight,
+      barHeight,
       rows: window.__mobuxView?.test?.rows?.() ?? null,
     };
   });
 
-  // The terminal host fills essentially the whole viewport: it starts at the
-  // top (no SPA chrome on this route) and its bottom reaches the viewport
-  // bottom within a few px. A too-short host (status bar stranded mid-screen)
-  // leaves a large gap and fails this.
+  // The terminal host fills essentially the whole viewport above the (now
+  // eagerly visible) input bar: it starts at the top (no SPA chrome on this
+  // route) and its bottom reaches the input bar's top within a few px. A
+  // too-short host (status bar stranded mid-screen) leaves a large gap and
+  // fails this.
   expect(geo.hostTop).toBeLessThan(8);
   expect(geo.hostHeight).toBeGreaterThan(geo.viewportHeight * 0.85);
-  expect(Math.abs(geo.viewportHeight - geo.hostBottom)).toBeLessThan(8);
+  expect(
+    Math.abs(geo.viewportHeight - geo.barHeight - geo.hostBottom),
+  ).toBeLessThan(8);
 
   // And the PTY actually got enough rows for that height. Derive an expected
   // minimum from the host height; the ~13-row bug (top third only) fails this.
