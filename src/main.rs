@@ -47,6 +47,7 @@ mod push;
 mod relay;
 mod shell_integration;
 mod ssl;
+mod stt_debug;
 mod tmux;
 mod transcribe;
 mod update;
@@ -991,25 +992,55 @@ async fn api_transcribe(
 
     // Read config per-request — no restart needed after config change.
     // Use the active kind's per-kind settings.
-    let provider_cfg = tokio::task::spawn_blocking({
+    let (provider_cfg, debug_ctx) = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || -> anyhow::Result<transcribe::ProviderConfig> {
+        move || -> anyhow::Result<(transcribe::ProviderConfig, stt_debug::ProviderContext)> {
             let kind = db.stt_active_kind()?;
             let row = db
                 .stt_provider(&kind)?
                 .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-            Ok(transcribe::ProviderConfig {
+            let debug_ctx = stt_debug::ProviderContext {
+                kind: row.kind.clone(),
+                model: row.model.clone(),
+                host: row.host.clone(),
+                port: row.port.clone(),
+                url: row.transcription_url(),
+            };
+            let provider_cfg = transcribe::ProviderConfig {
                 url: row.transcription_url(),
                 model: row.model,
                 api_key: row.api_key,
-            })
+            };
+            Ok((provider_cfg, debug_ctx))
         }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
 
-    match transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await {
+    let debug_audio = audio.clone();
+    let debug_filename = filename.clone();
+    let data_dir = state.data_dir.clone();
+    let started = std::time::Instant::now();
+    let result = transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await;
+    let elapsed = started.elapsed();
+
+    let debug_outcome = match &result {
+        Ok(text) => Ok(text.clone()),
+        Err(e) => Err(e.to_string()),
+    };
+    tokio::task::spawn_blocking(move || {
+        stt_debug::store_clip(
+            &data_dir,
+            &debug_audio,
+            &debug_filename,
+            &debug_ctx,
+            elapsed,
+            &debug_outcome,
+        );
+    });
+
+    match result {
         Ok(text) => Ok(Json(json!({ "text": text }))),
         Err(transcribe::TranscribeError::ProviderUnavailable(msg)) => Err(AppError {
             status: StatusCode::SERVICE_UNAVAILABLE,
