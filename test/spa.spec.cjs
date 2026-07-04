@@ -289,6 +289,95 @@ test("terminal island fills the viewport on mount (correct PTY rows)", async ({
   expect(geo.rows).toBeGreaterThanOrEqual(Math.max(20, minRows));
 });
 
+// ── loading splash: reveal-on-data vs the no-output fallback ────────────────
+//
+// Regression guard: #loadquote was removed ONLY by the first `data` event on
+// the terminal core, so a session that's already sitting quietly at its
+// prompt (no output on attach) left the splash up forever. terminal.js now
+// also arms a fallback timer on the core's `open` event that calls the same
+// (idempotent) scheduleReveal(), so a silent session still reveals promptly.
+//
+// Both tests stub `window.WebSocket` before navigation so the terminal
+// core's `open`/`data` timing is deterministic instead of depending on real
+// tmux/PTY redraw behaviour. Only the terminal cores construct a WebSocket
+// (panes/history go over fetch), so this is otherwise transparent to the
+// rest of the boot sequence.
+
+function loadquoteGone(page) {
+  return page.evaluate(() => {
+    const el = document.getElementById("loadquote");
+    if (!el || !el.parentNode) return true;
+    return getComputedStyle(el).opacity === "0";
+  });
+}
+
+function installFakeSocket(page, { emitDataAfterMs = null } = {}) {
+  return page.addInitScript((emitDataAfterMs) => {
+    class FakeSocket extends EventTarget {
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = 0;
+        this.binaryType = "blob";
+        setTimeout(() => {
+          this.readyState = 1;
+          this.onopen?.(new Event("open"));
+          if (emitDataAfterMs != null) {
+            setTimeout(() => this.onmessage?.({ data: "$ " }), emitDataAfterMs);
+          }
+        }, 10);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+        this.onclose?.(new Event("close"));
+      }
+    }
+    FakeSocket.CONNECTING = 0;
+    FakeSocket.OPEN = 1;
+    FakeSocket.CLOSING = 2;
+    FakeSocket.CLOSED = 3;
+    window.WebSocket = FakeSocket;
+  }, emitDataAfterMs);
+}
+
+test("loading splash reveals on first data (unchanged data-triggered path)", async ({
+  page,
+}) => {
+  await installFakeSocket(page, { emitDataAfterMs: 50 });
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+
+  await expect(page.locator("#loadquote")).toHaveCount(1);
+  expect(await loadquoteGone(page)).toBe(false);
+
+  // Data arrives ~60ms after connect — reveals almost immediately, long
+  // before the no-output fallback (armed at 1.5s) could ever fire.
+  await expect.poll(() => loadquoteGone(page), { timeout: 1000 }).toBe(true);
+});
+
+test("loading splash still clears via the fallback timer when a session emits no output on attach", async ({
+  page,
+}) => {
+  // No `data` ever arrives on this fake socket — the quiet-shell-at-prompt
+  // scenario the fallback exists for.
+  await installFakeSocket(page);
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+
+  await expect(page.locator("#loadquote")).toHaveCount(1);
+  // Still up right after "open" — the fallback hasn't fired yet, so a
+  // chatty session's data-path reveal isn't being pre-empted.
+  expect(await loadquoteGone(page)).toBe(false);
+
+  // Only the fallback timer (armed on "open") can clear the splash now.
+  await expect.poll(() => loadquoteGone(page), { timeout: 4000 }).toBe(true);
+});
+
 // ── control-key ribbon: horizontally scrollable by touch ────────────────────
 //
 // Regression guard for the "ribbon won't scroll sideways" bug. The control-key

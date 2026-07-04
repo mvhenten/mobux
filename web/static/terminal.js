@@ -315,6 +315,17 @@ function scheduleReveal() {
 }
 core.addEventListener("data", scheduleReveal);
 
+// A quiet session (already sitting at its prompt) never fires `data`, so
+// the splash would otherwise stick forever. Back it up with a timeout that
+// starts once a connection actually opens — a chatty session still reveals
+// on its first `data` event well before this fires; this only catches the
+// silent case. `scheduleReveal` is idempotent, so racing with the data path
+// is harmless.
+const REVEAL_FALLBACK_MS = 1500;
+core.addEventListener("open", () => {
+  setTimeout(scheduleReveal, REVEAL_FALLBACK_MS);
+});
+
 // ── Mobile input bar ────────────────────────────────────────────────
 // `isMobile` is a one-shot guess at load time. It can be wrong: a device
 // may load as non-mobile and later become touch-primary (rotation, an
