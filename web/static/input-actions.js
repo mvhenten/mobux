@@ -485,6 +485,7 @@ export function createDictateAction({ send, button, onText } = {}) {
     },
     // Legacy compat
     toggle() {
+      telemetry.log('mic.toggle', { busy: mic.busy, recording: mic.recording });
       if (mic.busy) return;
       telemetry.log('mic.click', { action: mic.recording ? 'stop' : 'start' });
       if (mic.recording) captureStop();

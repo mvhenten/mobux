@@ -497,6 +497,52 @@ test("mic button opens the dictation overlay", async ({ page }) => {
   ).toHaveLength(0);
 });
 
+// ── regression: mic tap is observable even if the flow never starts ────────
+//
+// The dictation flow's first telemetry line used to fire deep inside
+// startRecording(), so a tap that never reached the click handler (bad
+// wiring, a dead listener) looked identical to a silent flow failure — no
+// way to tell them apart from telemetry alone. mic.tap now logs at the very
+// top of the click handler, before dictate.toggle() runs, closing that gap.
+test("mic button click posts a mic.tap telemetry line", async ({ page }) => {
+  await page.route(/\/api\/build-info$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ dev_mode: true }),
+    }),
+  );
+
+  const telemetryLines = [];
+  await page.route(/\/api\/telemetry$/, async (route) => {
+    telemetryLines.push(route.request().postData() || "");
+    await route.fulfill({ status: 204, body: "" });
+  });
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("terminal");
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+  await page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    if (bar) bar.classList.remove("hidden");
+  });
+
+  await page.locator("#micBtn").click();
+
+  await expect
+    .poll(() => telemetryLines.some((line) => line.includes("mic.tap")), {
+      timeout: 5000,
+    })
+    .toBe(true);
+});
+
 // ── mobile mic button: visible on mount + wired to dictation ────────────────
 //
 // Regression guard for the "mobile microphone button completely gone" bug

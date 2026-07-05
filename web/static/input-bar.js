@@ -8,6 +8,7 @@
 // - Bar appears on tap, hides when keyboard dismisses.
 
 import { createAttachAction, createDictateAction } from './input-actions.js';
+import telemetry from './telemetry.js';
 
 export function createInputBar(term, send) {
   const bar = document.getElementById('inputBar');
@@ -202,7 +203,18 @@ export function createInputBar(term, send) {
   });
   if (micBtn) {
     micBtn.addEventListener('mousedown', (e) => e.preventDefault());
-    micBtn.addEventListener('click', (e) => { e.preventDefault(); dictate.toggle(); });
+    micBtn.addEventListener('click', (e) => {
+      telemetry.log('mic.tap', {
+        hasButton: true,
+        isSecureContext: window.isSecureContext,
+        hasGetUserMedia: !!navigator.mediaDevices?.getUserMedia,
+        pointerType: e.pointerType || null,
+      });
+      e.preventDefault();
+      dictate.toggle();
+    });
+  } else {
+    telemetry.log('mic.wire.missing');
   }
 
   // Settings gear — direct navigation to /settings. Phones can't always rely
