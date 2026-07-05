@@ -1858,7 +1858,7 @@ async fn api_set_stt_config(
 async fn api_stt_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let (cfg, active_url, active_kind_str) = tokio::task::spawn_blocking({
+    let (cfg, provider_cfg, active_kind_str) = tokio::task::spawn_blocking({
         let db = state.db.clone();
         move || -> anyhow::Result<_> {
             let cfg = db.stt_config()?;
@@ -1866,15 +1866,23 @@ async fn api_stt_status(
             let row = db
                 .stt_provider(&kind)?
                 .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-            let url = row.transcription_url();
-            Ok((cfg, url, kind))
+            let provider_cfg = transcribe::ProviderConfig {
+                url: row.transcription_url(),
+                model: row.model,
+                api_key: row.api_key,
+            };
+            Ok((cfg, provider_cfg, kind))
         }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
 
-    let reachable = transcribe::probe_provider(&active_url).await;
+    // Probes the real transcribe endpoint, not just /health — see
+    // transcribe::probe_transcribe for why a health ping alone is a false
+    // green.
+    let reachable = transcribe::probe_transcribe(&provider_cfg).await;
+    let active_url = provider_cfg.url;
 
     // Check whether the mobux-stt podman container is running.
     let local_process_running = tokio::process::Command::new("podman")
