@@ -235,6 +235,14 @@ export function createDictateAction({ send, button, onText } = {}) {
   // any stream it hands back is stopped immediately so it doesn't leak.
   const GETUSERMEDIA_TIMEOUT_MS = 8000;
 
+  // /transcribe forwards to the STT backend, which can hang indefinitely if
+  // the backend is broken (e.g. it accepts the connection but never answers
+  // POST /v1/audio/transcriptions — /health can look fine while this is
+  // stuck). CPU transcription of a short clip normally takes a few seconds;
+  // this is generous headroom, not a normal-case budget. AbortController
+  // actually cancels the in-flight request instead of just abandoning it.
+  const TRANSCRIBE_TIMEOUT_MS = 30000;
+
   function getUserMediaWithTimeout(constraints) {
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -417,12 +425,21 @@ export function createDictateAction({ send, button, onText } = {}) {
       telemetry.log('mic.transcribe.req', { bytes: wav.size, durationMs: mic.pendingDurationMs });
 
       let res;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TRANSCRIBE_TIMEOUT_MS);
       try {
-        res = await fetch('/transcribe', { method: 'POST', body: form });
+        res = await fetch('/transcribe', { method: 'POST', body: form, signal: controller.signal });
       } catch (netErr) {
+        if (netErr?.name === 'AbortError') {
+          telemetry.log('mic.transcribe.err', { stage: 'timeout' });
+          micFault('transcribe-timeout');
+          return null;
+        }
         telemetry.log('mic.transcribe.err', { stage: 'network', message: netErr?.message || '' });
         micFault('network', netErr?.message || 'network error');
         return null;
+      } finally {
+        clearTimeout(timer);
       }
       telemetry.log('mic.transcribe.resp', { status: res.status });
 

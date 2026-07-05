@@ -38,6 +38,12 @@ export function faultMessage(kind, extra) {
         detail:
           'The app may be missing microphone permission — reinstall the latest app, or check the app\'s microphone permission.',
       };
+    case 'transcribe-timeout': // /transcribe never responded
+      return {
+        title: 'Transcription backend did not respond.',
+        detail:
+          'The speech-to-text backend accepted the audio but never returned a transcript. Check the backend status in Settings, or switch to a local provider.',
+      };
     case 'model': // /transcribe 503
       return {
         title: 'Speech provider not available.',

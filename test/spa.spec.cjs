@@ -1027,6 +1027,61 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     expect(url.searchParams.get("title")).toContain("[dictation] http");
     expect(url.searchParams.get("body")).toContain("Fault kind: http");
   });
+
+  // ── regression: a /transcribe that never responds must still fault loud ──
+  //
+  // The real bug (#170): a broken STT backend can accept the connection and
+  // never answer POST /v1/audio/transcriptions — /health looks fine, so the
+  // pre-record probe waves it through, and the client used to just sit on
+  // the "Transcribing…" spinner forever with no error. transcribePending now
+  // races the request against TRANSCRIBE_TIMEOUT_MS via AbortController, so a
+  // hang surfaces the same loud, reportable fault as any other failure.
+  test("a /transcribe that never responds still surfaces a loud, reportable fault within the timeout", async ({
+    page,
+  }) => {
+    test.setTimeout(50000);
+    // Never call route.fulfill/continue — the request stays pending,
+    // simulating a backend that accepted the audio but never answers.
+    await page.route(/\/transcribe$/, () => {});
+
+    await openRecording(page);
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Stop" })
+      .click();
+
+    await expect(page.locator("#mobux-mic-overlay.transcribing")).toBeVisible({
+      timeout: 5000,
+    });
+
+    const overlay = page.locator("#mobux-mic-overlay.fault");
+    await expect(overlay).toBeVisible({ timeout: 35000 });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Transcription backend did not respond",
+    );
+
+    // Computed visibility, not `.hidden` — a real box on screen, not display:none.
+    const box = await overlay.boundingBox();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    const display = await overlay.evaluate(
+      (el) => getComputedStyle(el).display,
+    );
+    expect(display).not.toBe("none");
+
+    const reportLink = page.locator("#mobux-mic-overlay .mo-report-link");
+    await expect(reportLink).toBeVisible();
+    const href = await reportLink.getAttribute("href");
+    const url = new URL(href);
+    expect(url.origin + url.pathname).toBe(
+      "https://github.com/mvhenten/mobux/issues/new",
+    );
+    expect(url.searchParams.get("title")).toContain(
+      "[dictation] transcribe-timeout",
+    );
+    expect(url.searchParams.get("body")).toContain(
+      "Fault kind: transcribe-timeout",
+    );
+  });
 });
 
 // ── settings: every card renders and hits its endpoint ──────────────────────
