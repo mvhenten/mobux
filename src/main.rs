@@ -86,10 +86,9 @@ struct AppState {
     use_tls: bool,
     /// In-memory cache of the latest crates.io version (self-update, #130).
     update: update::UpdateState,
-    /// Dev-mode flag (set via `MOBUX_DEV=1`). OFF in production. Gates the
-    /// dev-only client telemetry channel: when false, `/api/telemetry` is a
-    /// no-op 404 and the frontend is told (`window.MOBUX_DEV=false`) not to
-    /// post or render its overlay.
+    /// Dev-mode flag (set via `MOBUX_DEV=1`). OFF in production. No longer
+    /// gates client telemetry (`/api/telemetry` is always active) — kept for
+    /// other dev-only behavior and reported via `/api/build-info`.
     dev_mode: bool,
     /// SHA-256 prefix of the vendored JS bundles, computed by `web/build.js`
     /// and written to `web/static/build-info.json` at build time. Injected
@@ -145,8 +144,9 @@ async fn main() -> Result<()> {
         .unwrap_or(true);
 
     // Dev-mode toggle. OFF unless MOBUX_DEV is set to a truthy value (the
-    // `mobux-dev.service` unit sets `MOBUX_DEV=1`). Gates the dev-only client
-    // telemetry channel; absent/inert in production.
+    // `mobux-dev.service` unit sets `MOBUX_DEV=1`). No longer gates client
+    // telemetry (that's always on); reported via /api/build-info for any
+    // other dev-only behavior.
     let dev_mode = env::var("MOBUX_DEV")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -343,8 +343,10 @@ async fn main() -> Result<()> {
         println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
     }
 
+    println!("telemetry: /api/telemetry active, logs to stderr");
+
     if state.dev_mode {
-        println!("dev mode: ON (MOBUX_DEV) — /api/telemetry active, logs to stderr");
+        println!("dev mode: ON (MOBUX_DEV)");
     }
 
     if use_tls {
@@ -881,19 +883,15 @@ async fn api_tmux_command(
     Ok(Json(json!({"ok": true, "output": result})))
 }
 
-/// Dev-only client telemetry sink. A general-purpose channel for the frontend
-/// to forward diagnostic lines into the server journal during development.
-///
-/// Gated on `state.dev_mode` (`MOBUX_DEV=1`): when dev mode is OFF — i.e. in
-/// production — this returns 404 and logs nothing, so the route is inert.
-/// It stays behind the normal auth middleware (the page is same-origin, so the
-/// session cookie carries fine); it is NOT auth-exempt. Body is capped at 64KB
-/// by the route's `DefaultBodyLimit`. Lines land in the journal via `eprintln!`
-/// (matching the repo's existing logging convention) prefixed `[telemetry]`.
-async fn api_telemetry(State(state): State<AppState>, body: String) -> StatusCode {
-    if !state.dev_mode {
-        return StatusCode::NOT_FOUND;
-    }
+/// Built-in client telemetry sink. A general-purpose channel for the frontend
+/// to forward diagnostic lines into the server journal — always active, in
+/// every build. mobux is a self-hosted single-operator tool, so there's no
+/// privacy boundary to gate this behind. It stays behind the normal auth
+/// middleware (the page is same-origin, so the session cookie carries fine);
+/// it is NOT auth-exempt. Body is capped at 64KB by the route's
+/// `DefaultBodyLimit`. Lines land in the journal via `eprintln!` (matching the
+/// repo's existing logging convention) prefixed `[telemetry]`.
+async fn api_telemetry(body: String) -> StatusCode {
     let ts = chrono::Local::now().format("%H:%M:%S%.3f");
     // Single line per event keeps `journalctl`/`grep` friendly; the client
     // already JSON-encodes structured payloads onto one line.
@@ -2422,7 +2420,7 @@ mod tests {
     }
 
     /// Minimal AppState backed by a throwaway temp db, with `dev_mode`
-    /// configurable. Only the fields the telemetry handler touches matter.
+    /// configurable.
     fn test_state(dev_mode: bool) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Arc::new(db::Db::open(&dir.path().join("mobux.db")).expect("open db"));
@@ -2446,20 +2444,11 @@ mod tests {
         (state, dir)
     }
 
-    // /api/telemetry is inert (404, logs nothing) when dev mode is OFF — the
-    // production default. Holding the TempDir alive for the call's duration.
+    // /api/telemetry accepts the body (204) regardless of dev mode — it's an
+    // always-on diagnostic channel, not gated behind MOBUX_DEV.
     #[tokio::test]
-    async fn telemetry_endpoint_inert_when_dev_off() {
-        let (state, _dir) = test_state(false);
-        let status = api_telemetry(State(state), "hello".to_string()).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    // /api/telemetry accepts the body (204) when dev mode is ON (MOBUX_DEV=1).
-    #[tokio::test]
-    async fn telemetry_endpoint_active_when_dev_on() {
-        let (state, _dir) = test_state(true);
-        let status = api_telemetry(State(state), "hello".to_string()).await;
+    async fn telemetry_endpoint_active_without_dev_mode() {
+        let status = api_telemetry("hello".to_string()).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
@@ -2566,9 +2555,9 @@ mod tests {
         }
     }
 
-    // The dev flag is exposed via /api/build-info so the SPA can gate its
-    // telemetry module without server-side HTML injection (the old
-    // render_index/render_terminal_page pages are gone post-SPA-cutover).
+    // The dev flag is exposed via /api/build-info for any other dev-only
+    // behavior the SPA needs (it no longer gates client telemetry, which is
+    // always on).
     #[tokio::test]
     async fn build_info_reflects_dev_mode() {
         let (state, _dir) = test_state(true);

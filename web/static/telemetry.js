@@ -1,34 +1,20 @@
-// telemetry.js — dev-only client telemetry channel.
+// telemetry.js — built-in client telemetry channel.
 //
-// A small, general-purpose diagnostic channel for the frontend. It forwards
-// lines to the server journal via POST /api/telemetry (fire-and-forget) and
-// can render a toggleable on-screen overlay so you can watch events on the
-// device itself.
-//
-// HARD GATE: everything is a no-op unless dev mode is on. The SPA has no
-// server-rendered page to inject a `window.MOBUX_DEV` global into, so the
-// flag is fetched once from GET /api/build-info's `dev_mode` field (the same
-// mechanism the Build settings card uses to avoid server-side HTML
-// injection). In production the flag is false, so nothing posts and no
-// overlay renders — the /api/telemetry route is itself a 404 in prod anyway.
+// A small, general-purpose diagnostic channel for the frontend. Always on:
+// every telemetry.log() forwards a line to the server journal via
+// POST /api/telemetry (fire-and-forget) and can render a toggleable
+// on-screen overlay so you can watch events on the device itself. mobux is a
+// self-hosted single-operator tool, so there's no privacy boundary to gate
+// this behind — it ships live in every build, dev or not.
 //
 // Usage (from any module):
 //   import telemetry from '/static/telemetry.js';
 //   telemetry.log('ws-open', { session });        // structured
 //   telemetry.log('resize', `${cols}x${rows}`);   // or a plain string
 //
-// Overlay: on when dev mode is on AND (`?telemetry=1` in the URL OR
-// localStorage['mobux:telemetry'] === '1'). `telemetry.overlay(true|false)`
+// Overlay: off by default, on when `?telemetry=1` is in the URL or
+// localStorage['mobux:telemetry'] === '1'. `telemetry.overlay(true|false)`
 // toggles it at runtime (and persists the choice).
-
-let DEV = false;
-let devKnown = false;
-
-// log() calls made before the async /api/build-info check resolves are
-// buffered here and flushed (or dropped) once we know. Capped so a burst of
-// early calls can't grow this unbounded.
-const pendingCalls = [];
-const PENDING_CAP = 50;
 
 // Per-page session id so lines from one page load are correlatable in the
 // journal. Short random token; not security-sensitive.
@@ -48,7 +34,6 @@ const OVERLAY_KEY = 'mobux:telemetry';
 let overlayEl = null;
 
 function overlayEnabled() {
-  if (!DEV) return false;
   try {
     if (new URLSearchParams(window.location.search).get('telemetry') === '1') {
       return true;
@@ -117,18 +102,15 @@ function format(event, data) {
   return `${ts} [${SESSION_ID}] ${event}${payload ? ' ' + payload : ''}`;
 }
 
-// Actual send + overlay-render, assumed DEV === true by the time this runs.
-function emit(event, data) {
+function log(event, data) {
   const line = format(event, data);
 
-  // Fire-and-forget. Swallow all errors — never recurse on failure, never let
-  // telemetry break the page.
+  // Fire-and-forget. Swallow all errors — never let telemetry break the page.
   try {
     fetch('/api/telemetry', {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: line,
-      // same-origin so the auth cookie rides along; the server gates on dev.
       credentials: 'same-origin',
       keepalive: true,
     }).catch(() => {});
@@ -145,17 +127,8 @@ function emit(event, data) {
   }
 }
 
-function log(event, data) {
-  if (devKnown) {
-    if (DEV) emit(event, data);
-    return;
-  }
-  if (pendingCalls.length < PENDING_CAP) pendingCalls.push([event, data]);
-}
-
 // Runtime overlay toggle. Persists the choice; pass nothing to flip.
 function overlay(on) {
-  if (!DEV) return false;
   const next = on === undefined ? !overlayEnabled() : !!on;
   try {
     localStorage.setItem(OVERLAY_KEY, next ? '1' : '0');
@@ -174,48 +147,22 @@ function overlay(on) {
 const telemetry = {
   log,
   overlay,
-  get enabled() {
-    return DEV;
-  },
   sessionId: SESSION_ID,
 };
 
-// Resolve the dev flag once per page load, then flush anything buffered
-// during the round-trip. Never attached to window / never posts in
-// production.
-async function resolveDevMode() {
-  try {
-    const res = await fetch('/api/build-info', { credentials: 'same-origin' });
-    if (res.ok) {
-      const data = await res.json();
-      DEV = data && data.dev_mode === true;
-    }
-  } catch (_) {
-    /* stay off */
-  }
-  devKnown = true;
-
-  if (DEV) {
-    try {
-      window.mobuxTelemetry = telemetry;
-    } catch (_) {
-      /* ignore */
-    }
-    for (const [event, data] of pendingCalls) emit(event, data);
-    // If the overlay was already requested for this page, materialise it once
-    // the DOM is ready, without waiting for the first log() call.
-    if (overlayEnabled()) {
-      if (document.body) {
-        ensureOverlay();
-      } else {
-        document.addEventListener('DOMContentLoaded', () => ensureOverlay(), { once: true });
-      }
-    }
-  }
-  pendingCalls.length = 0;
+try {
+  window.mobuxTelemetry = telemetry;
+} catch (_) {
+  /* ignore */
 }
 
-const devReady = resolveDevMode();
+if (overlayEnabled()) {
+  if (document.body) {
+    ensureOverlay();
+  } else {
+    document.addEventListener('DOMContentLoaded', () => ensureOverlay(), { once: true });
+  }
+}
 
 export default telemetry;
-export { log, overlay, devReady };
+export { log, overlay };
