@@ -504,15 +504,11 @@ test("mic button opens the dictation overlay", async ({ page }) => {
 // wiring, a dead listener) looked identical to a silent flow failure — no
 // way to tell them apart from telemetry alone. mic.tap now logs at the very
 // top of the click handler, before dictate.toggle() runs, closing that gap.
+//
+// Telemetry is a built-in, always-on channel (no MOBUX_DEV gate, no dev_mode
+// mock needed here) — this smoke instance runs in normal mode and the POST
+// still lands.
 test("mic button click posts a mic.tap telemetry line", async ({ page }) => {
-  await page.route(/\/api\/build-info$/, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ dev_mode: true }),
-    }),
-  );
-
   const telemetryLines = [];
   await page.route(/\/api\/telemetry$/, async (route) => {
     telemetryLines.push(route.request().postData() || "");
@@ -541,6 +537,34 @@ test("mic button click posts a mic.tap telemetry line", async ({ page }) => {
       timeout: 5000,
     })
     .toBe(true);
+});
+
+// ── regression: /api/telemetry must not 404 in normal (non-dev) mode ───────
+//
+// Telemetry used to be hard-gated behind MOBUX_DEV: the route 404'd unless
+// dev mode was on. It's now an always-on diagnostic channel, so a POST must
+// be accepted (204) against this smoke instance, which never sets MOBUX_DEV.
+test("POST /api/telemetry is live without MOBUX_DEV", async ({ page }) => {
+  const res = await page.request.post(`${BASE}/api/telemetry`, {
+    data: "spa-spec-check",
+    headers: { "content-type": "text/plain" },
+  });
+  expect(res.status()).toBe(204);
+});
+
+// ── telemetry overlay stays on-demand ───────────────────────────────────────
+//
+// Data collection (the POSTs above) is always on, but the on-screen overlay
+// is still opt-in: only `?telemetry=1` (or the persisted localStorage
+// toggle) renders it. A plain page load must not show it.
+test("telemetry overlay only renders with ?telemetry=1", async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await expect(page.locator("#mobux-telemetry-overlay")).toHaveCount(0);
+
+  await page.goto(`${APP}?telemetry=1#/`, { waitUntil: "networkidle" });
+  await expect(page.locator("#mobux-telemetry-overlay")).toBeAttached({
+    timeout: 5000,
+  });
 });
 
 // ── mobile mic button: visible on mount + wired to dictation ────────────────
