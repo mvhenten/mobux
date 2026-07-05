@@ -32,6 +32,12 @@ export function faultMessage(kind, extra) {
       };
     case 'notfound': // NotFoundError
       return { title: 'No microphone found.', detail: extra || 'NotFoundError' };
+    case 'timeout': // getUserMedia never resolved or rejected
+      return {
+        title: 'Microphone access timed out.',
+        detail:
+          'The app may be missing microphone permission — reinstall the latest app, or check the app\'s microphone permission.',
+      };
     case 'model': // /transcribe 503
       return {
         title: 'Speech provider not available.',

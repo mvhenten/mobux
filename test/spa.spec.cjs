@@ -900,6 +900,84 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     expect(url.searchParams.get("body")).toContain("Fault kind: denied");
   });
 
+  // ── regression: a getUserMedia that never settles must still fault loud ──
+  //
+  // In a TWA/WebView missing the Android RECORD_AUDIO permission,
+  // getUserMedia can hang forever — neither resolving nor rejecting — so the
+  // try/catch in startRecording never fires and the mic tap looks dead: no
+  // error, no overlay, nothing. getUserMediaWithTimeout races the call
+  // against GETUSERMEDIA_TIMEOUT_MS so a hang surfaces the same loud,
+  // reportable fault a normal rejection produces.
+  test("a getUserMedia that never resolves still surfaces a loud, reportable fault", async ({
+    page,
+  }) => {
+    test.setTimeout(45000);
+    await page.route(/\/api\/stt\/status$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          kind: "local",
+          reachable: true,
+          installed: true,
+          local_process_running: true,
+        }),
+      }),
+    );
+    await page.addInitScript(() => {
+      const hangingGetUserMedia = () => new Promise(() => {});
+      if (navigator.mediaDevices) {
+        navigator.mediaDevices.getUserMedia = hangingGetUserMedia;
+      } else {
+        Object.defineProperty(navigator, "mediaDevices", {
+          value: { getUserMedia: hangingGetUserMedia },
+          configurable: true,
+        });
+      }
+    });
+
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    await page.evaluate(() => {
+      const bar = document.getElementById("inputBar");
+      if (bar) bar.classList.remove("hidden");
+    });
+    await page.locator("#micBtn").click();
+
+    const overlay = page.locator("#mobux-mic-overlay.fault");
+    await expect(overlay).toBeVisible({ timeout: 12000 });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Microphone access timed out",
+    );
+
+    // Computed visibility, not `.hidden` — a real box on screen, not display:none.
+    const box = await overlay.boundingBox();
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    const display = await overlay.evaluate(
+      (el) => getComputedStyle(el).display,
+    );
+    expect(display).not.toBe("none");
+
+    const reportLink = page.locator("#mobux-mic-overlay .mo-report-link");
+    await expect(reportLink).toBeVisible();
+    const href = await reportLink.getAttribute("href");
+    const url = new URL(href);
+    expect(url.origin + url.pathname).toBe(
+      "https://github.com/mvhenten/mobux/issues/new",
+    );
+    expect(url.searchParams.get("title")).toContain("[dictation] timeout");
+    expect(url.searchParams.get("body")).toContain("Fault kind: timeout");
+  });
+
   test("a transcription failure also renders a GitHub report link", async ({
     page,
   }) => {

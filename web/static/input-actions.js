@@ -227,6 +227,43 @@ export function createDictateAction({ send, button, onText } = {}) {
   // to getUserMedia; the real /transcribe call surfaces its own fault).
   const PROBE_TIMEOUT_MS = 6000;
 
+  // getUserMedia can hang forever — never resolve, never reject — in a
+  // TWA/WebView missing the Android RECORD_AUDIO permission, which leaves
+  // attemptStartRecording's try/catch with nothing to catch and the mic tap
+  // looking dead. Race it against a timeout so a hang always surfaces a
+  // fault. If the real promise settles after the timeout already fired,
+  // any stream it hands back is stopped immediately so it doesn't leak.
+  const GETUSERMEDIA_TIMEOUT_MS = 8000;
+
+  function getUserMediaWithTimeout(constraints) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(Object.assign(new Error('getUserMedia timed out'), { name: 'TimeoutError' }));
+      }, GETUSERMEDIA_TIMEOUT_MS);
+
+      navigator.mediaDevices.getUserMedia(constraints).then(
+        (stream) => {
+          clearTimeout(timer);
+          if (settled) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          settled = true;
+          resolve(stream);
+        },
+        (err) => {
+          clearTimeout(timer);
+          if (settled) return;
+          settled = true;
+          reject(err);
+        },
+      );
+    });
+  }
+
   async function probeSttBackend() {
     let status = null;
     try {
@@ -289,15 +326,17 @@ export function createDictateAction({ send, button, onText } = {}) {
     if (!opts?.skipProbe && !(await probeSttBackend())) return;
     telemetry.log('mic.getusermedia.req');
     try {
-      mic.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mic.stream = await getUserMediaWithTimeout({ audio: true });
     } catch (err) {
       const name = err?.name || 'Error';
       telemetry.log('mic.getusermedia.denied', { name, message: err?.message || '' });
-      // Map the DOMException to a fault kind.
+      // Map the DOMException (or our synthetic TimeoutError) to a fault kind.
       if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
         micFault('notfound', name);
       } else if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
         micFault('denied', name);
+      } else if (name === 'TimeoutError') {
+        micFault('timeout', name);
       } else {
         micFault('mic', name + ': ' + (err?.message || ''));
       }
