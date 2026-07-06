@@ -1,19 +1,22 @@
-// Emulated fleet node for e2e tests: a throwaway sshd on a high
-// 127.0.0.1 port with generated keys, an isolated HOME, and an
-// isolated tmux server. This is what issue #176 calls a "node" —
-// sshd + tmux, nothing else — so tests can drive the real
-// hub → ssh → tmux pipe without touching the host's ssh config, the
-// user's tmux server, or anything system-level. Everything lives in
-// one temp dir and is removed by `node.stop()`.
+// Emulated fleet node for e2e tests: a throwaway sshd + tmux container
+// on a random 127.0.0.1 port, reached with a generated keypair. This is
+// what issue #176 calls a "node" — sshd + tmux, nothing else — so tests
+// can drive the real hub → ssh → tmux pipe without touching the host's
+// ssh config, the user's tmux server, or anything system-level.
 //
-// tmux isolation works via TMUX_TMPDIR (pinned per-session through the
-// authorized_keys `environment=` option, like HOME): the hub proxy runs
-// plain `tmux ...` on the node — no `-L` — so scoping the DEFAULT
-// socket's directory is what keeps the node's tmux server away from the
-// real /tmp/tmux-<uid>/default one.
+// Isolation is structural, not env-based: each node is its own podman
+// container (test/fleet/Containerfile.fleet-node), so its tmux server
+// sits behind a real PID/mount-namespace boundary. Issue #183: the
+// previous host-native sshd used TMUX_TMPDIR (pinned via authorized_keys
+// `environment=`) to keep the node's tmux server away from the real
+// /tmp/tmux-<uid>/default one — but tmux prefers $TMUX over TMUX_TMPDIR,
+// and $TMUX leaks in from the caller's shell when the harness runs
+// inside a real tmux pane, so a teardown `kill-server` hit the host's
+// live session. A container has no path to the host's tmux socket at
+// all, so there is nothing to leak regardless of inherited env.
 //
-// Multiple nodes run concurrently: each gets its own temp dir, port,
-// and TMUX_TMPDIR, so there is nothing to collide on.
+// Multiple nodes run concurrently: each gets its own container and
+// published port, so there is nothing to collide on.
 //
 //   const { startNode } = require("./node.cjs");
 //   const node = await startNode({ name: "alpha" });
@@ -21,113 +24,122 @@
 //   node.tmux(["list-sessions"]); // same server, local shortcut
 //   await node.stop();
 
-const { spawn, execFileSync } = require("child_process");
+const { execFileSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
-const net = require("net");
 const os = require("os");
 const path = require("path");
 
-const SSHD = "/usr/sbin/sshd";
+const IMAGE = "localhost/mobux-fleet-node:dev";
+const FLEET_DIR = __dirname;
+const CONTAINERFILE = path.join(FLEET_DIR, "Containerfile.fleet-node");
+const NODE_USER = "node";
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-function waitForPort(port, timeoutMs) {
+// A raw TCP connect against the published port succeeds as soon as
+// podman's rootless port-forward is up, which can be well ahead of
+// sshd actually accepting inside the container — so instead of
+// sniffing the socket directly (which needs its own careful timeout
+// bookkeeping), just retry the real `ssh` invocation the caller is
+// going to use anyway. It's synchronous like every other setup step
+// here, and it proves the whole path — forward, sshd, and auth — not
+// just a banner.
+function waitForSsh(sshArgs, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    const attempt = () => {
-      const sock = net.connect(port, "127.0.0.1");
-      sock.once("connect", () => {
-        sock.destroy();
-        resolve();
-      });
-      sock.once("error", () => {
-        sock.destroy();
-        if (Date.now() > deadline)
-          reject(new Error(`port ${port} not accepting after ${timeoutMs}ms`));
-        else setTimeout(attempt, 100);
-      });
-    };
-    attempt();
-  });
+  for (;;) {
+    try {
+      execFileSync(
+        "ssh",
+        [...sshArgs, "-o", "ConnectTimeout=2", "--", "true"],
+        { stdio: "pipe" },
+      );
+      return;
+    } catch (err) {
+      if (Date.now() > deadline)
+        throw new Error(
+          `ssh not ready after ${timeoutMs}ms: ${err.stderr || err.message}`,
+        );
+    }
+  }
 }
 
 function keygen(file) {
   execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", file]);
 }
 
-async function startNode({ name = "node" } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `mobux-fleet-${name}-`));
-  const home = path.join(dir, "home");
-  fs.mkdirSync(home);
-  const tmuxTmpdir = path.join(dir, "tmux");
-  fs.mkdirSync(tmuxTmpdir);
-  const hostKey = path.join(dir, "host_key");
-  const identity = path.join(dir, "client_key");
-  keygen(hostKey);
-  keygen(identity);
+// Built once per test process and reused by every node — podman's own
+// layer cache makes repeat calls cheap, so this just guarantees the
+// image exists before the first container run.
+let imageReady;
+function ensureImage() {
+  if (!imageReady) {
+    imageReady = Promise.resolve().then(() => {
+      try {
+        execFileSync(
+          "podman",
+          ["build", "-t", IMAGE, "-f", CONTAINERFILE, FLEET_DIR],
+          { stdio: "pipe" },
+        );
+      } catch (err) {
+        throw new Error(
+          `podman build (fleet-node image) failed:\n${err.stderr}`,
+        );
+      }
+    });
+  }
+  return imageReady;
+}
 
-  // The `environment=` options (with PermitUserEnvironment) pin the
-  // session's HOME and TMUX_TMPDIR to the node's sandbox, so shells
-  // never read the real user's rc files or ~/.tmux.conf, and plain
-  // `tmux` — exactly what the hub proxy runs — gets its own server
-  // instead of the user's /tmp/tmux-<uid>/default one.
+async function startNode({ name = "node" } = {}) {
+  await ensureImage();
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `mobux-fleet-${name}-`));
+  const identity = path.join(dir, "client_key");
+  keygen(identity);
   const authorizedKeys = path.join(dir, "authorized_keys");
-  fs.writeFileSync(
-    authorizedKeys,
-    `environment="HOME=${home}",environment="TMUX_TMPDIR=${tmuxTmpdir}" ` +
-      fs.readFileSync(identity + ".pub"),
-    { mode: 0o600 },
-  );
+  fs.copyFileSync(identity + ".pub", authorizedKeys);
   const knownHosts = path.join(dir, "known_hosts");
   fs.writeFileSync(knownHosts, "");
 
-  const user = os.userInfo().username;
-  const log = path.join(dir, "sshd.log");
+  const container = `mobux-fleet-${name}-${process.pid}-${crypto
+    .randomBytes(4)
+    .toString("hex")}`;
 
-  // The free port can be stolen between probe and bind; retry with a
-  // fresh port if sshd dies immediately.
-  let port, sshd;
-  for (let attempt = 0; ; attempt++) {
-    port = await freePort();
-    fs.writeFileSync(
-      path.join(dir, "sshd_config"),
-      [
-        `Port ${port}`,
-        "ListenAddress 127.0.0.1",
-        `HostKey ${hostKey}`,
-        `PidFile ${path.join(dir, "sshd.pid")}`,
-        `AuthorizedKeysFile ${authorizedKeys}`,
-        "StrictModes no",
-        "UsePAM no",
-        "PasswordAuthentication no",
-        "KbdInteractiveAuthentication no",
-        "PubkeyAuthentication yes",
-        "PermitUserEnvironment yes",
-        "LogLevel ERROR",
-        "",
-      ].join("\n"),
-    );
-    const out = fs.openSync(log, "a");
-    sshd = spawn(SSHD, ["-f", path.join(dir, "sshd_config"), "-D", "-e"], {
-      stdio: ["ignore", out, out],
-    });
-    try {
-      await waitForPort(port, 5000);
-      break;
-    } catch (err) {
-      sshd.kill("SIGKILL");
-      if (attempt >= 2)
-        throw new Error(`${err.message}\nsshd log:\n${fs.readFileSync(log)}`);
-    }
+  execFileSync(
+    "podman",
+    [
+      "run",
+      "-d",
+      "--name",
+      container,
+      "-p",
+      "127.0.0.1::22",
+      "-v",
+      `${authorizedKeys}:/home/${NODE_USER}/.ssh/authorized_keys:ro`,
+      IMAGE,
+    ],
+    { stdio: "pipe" },
+  );
+
+  function abort(err) {
+    const logs = execFileSync("podman", ["logs", container], {
+      stdio: "pipe",
+    }).toString();
+    execFileSync("podman", ["rm", "-f", container], { stdio: "ignore" });
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error(`${err.message}\ncontainer logs:\n${logs}`);
+  }
+
+  let port;
+  try {
+    const portOut = execFileSync("podman", ["port", container, "22"], {
+      stdio: "pipe",
+    })
+      .toString()
+      .trim();
+    port = Number(portOut.split(":").pop());
+    if (!port) throw new Error(`could not parse published port: ${portOut}`);
+  } catch (err) {
+    abort(err);
   }
 
   const sshArgs = [
@@ -143,17 +155,22 @@ async function startNode({ name = "node" } = {}) {
     String(port),
     "-i",
     identity,
-    `${user}@127.0.0.1`,
+    `${NODE_USER}@127.0.0.1`,
   ];
+
+  try {
+    waitForSsh(sshArgs, 10000);
+  } catch (err) {
+    abort(err);
+  }
 
   let stopped = false;
   return {
     name,
     dir,
-    home,
-    tmuxTmpdir,
+    container,
     port,
-    user,
+    user: NODE_USER,
     identity,
     knownHosts,
     sshArgs,
@@ -163,37 +180,25 @@ async function startNode({ name = "node" } = {}) {
         stdio: "pipe",
       }).toString();
     },
-    // Local shortcut to the node's tmux server (same host, so no ssh
-    // needed for setup/teardown/inspection) — same TMUX_TMPDIR, same
-    // default socket the hub proxy talks to.
+    // Local shortcut to the node's tmux server: `podman exec` into the
+    // same container as the same user, so it lands on the same default
+    // socket the ssh session (and the hub proxy) talks to. Stripping
+    // TMUX/TMUX_PANE is cheap insurance — the container boundary is
+    // what actually keeps this off the host's tmux, not the env.
     tmux(args) {
       const { TMUX, TMUX_PANE, ...env } = process.env;
-      return execFileSync("tmux", args, {
-        stdio: "pipe",
-        env: {
-          ...env,
-          HOME: home,
-          TMUX_TMPDIR: tmuxTmpdir,
-          HISTFILE: "/dev/null",
-        },
-      }).toString();
+      return execFileSync(
+        "podman",
+        ["exec", "-u", NODE_USER, container, "tmux", ...args],
+        { stdio: "pipe", env },
+      ).toString();
     },
     async stop() {
       if (stopped) return;
       stopped = true;
       try {
-        this.tmux(["kill-server"]);
+        execFileSync("podman", ["rm", "-f", container], { stdio: "ignore" });
       } catch (_) {}
-      if (sshd.exitCode === null) {
-        const gone = new Promise((resolve) => sshd.once("exit", resolve));
-        sshd.kill("SIGTERM");
-        await Promise.race([
-          gone,
-          new Promise((r) => setTimeout(r, 2000)).then(() =>
-            sshd.kill("SIGKILL"),
-          ),
-        ]);
-      }
       fs.rmSync(dir, { recursive: true, force: true });
     },
   };

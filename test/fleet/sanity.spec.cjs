@@ -21,25 +21,33 @@ test("ssh into an emulated node and reach its isolated tmux", async () => {
   try {
     // Single exec channel, exactly what the hub proxy does: authenticate
     // with the generated key, no agent, no known_hosts pollution, then
-    // plain `tmux` — the node's TMUX_TMPDIR keeps its default socket
-    // away from the user's real /tmp/tmux-<uid>/default server.
+    // plain `tmux` — the node's own container is the isolation boundary,
+    // so there is no TMUX_TMPDIR trick to rely on.
     const out = node.ssh("tmux new-session -d && tmux list-sessions");
     expect(out).toMatch(/^0: \d+ windows/m);
     // The session lives on the node's own server, visible locally
-    // through the same TMUX_TMPDIR…
+    // through the same container/user…
     expect(node.tmux(["list-sessions"])).toMatch(/^0: \d+ windows/m);
-    // …whose socket really sits inside the node's sandbox.
+    // …whose socket sits inside the container's own filesystem — a
+    // normal default tmux path, but namespaced away from the host's
+    // (the container has its own /tmp, own PID 1, own everything). We
+    // deliberately don't probe this path from the host to "prove" that:
+    // the container's uid can coincidentally match the host's, in which
+    // case the string would collide with the host's REAL default socket
+    // (e.g. /tmp/tmux-1000/default) — exactly the live server this whole
+    // harness exists to never touch.
     const socketPath = node.ssh("tmux display -p '#{socket_path}'").trim();
-    expect(socketPath.startsWith(node.dir)).toBe(true);
+    expect(socketPath).toMatch(/^\/tmp\/tmux-\d+\/default$/);
   } finally {
     await node.stop();
   }
 });
 
-test("node sessions get the sandboxed HOME, not the real one", async () => {
+test("node sessions run as the container's own user, not the host's", async () => {
   const node = await startNode({ name: "home" });
   try {
-    expect(node.ssh("echo $HOME").trim()).toBe(node.home);
+    expect(node.ssh("whoami").trim()).toBe(node.user);
+    expect(node.ssh("echo $HOME").trim()).toBe(`/home/${node.user}`);
   } finally {
     await node.stop();
   }
@@ -52,7 +60,7 @@ test("two nodes run concurrently without colliding", async () => {
   ]);
   try {
     expect(alpha.port).not.toBe(beta.port);
-    expect(alpha.tmuxTmpdir).not.toBe(beta.tmuxTmpdir);
+    expect(alpha.container).not.toBe(beta.container);
     alpha.ssh("tmux new-session -d -s only-alpha");
     beta.ssh("tmux new-session -d -s only-beta");
     const alphaSessions = alpha.tmux(["list-sessions"]);

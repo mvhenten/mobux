@@ -1,0 +1,28 @@
+# Minimal sshd + tmux image for the fleet-node e2e emulator
+# (test/fleet/node.cjs): "just sshd + tmux, nothing else" per the
+# EDD for issue #176. Each node is its own container, so its tmux
+# server sits behind a real namespace boundary instead of an env-var
+# trick — see issue #183, where the previous host-native sshd +
+# TMUX_TMPDIR isolation leaked because $TMUX outranks TMUX_TMPDIR when
+# the harness runs from inside a real tmux pane. A container has no
+# path to the host's tmux socket at all, so there is nothing to leak.
+#
+# Not the main app image — see ../../Containerfile / `make podman-*`
+# for that (full mobux build, different purpose).
+
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-server tmux \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /bin/bash node \
+ && usermod -p '*' node \
+ && mkdir -p /home/node/.ssh \
+ && chown node:node /home/node/.ssh \
+ && chmod 700 /home/node/.ssh
+
+COPY fleet-node-sshd_config /etc/ssh/sshd_config
+COPY fleet-node-entrypoint.sh /usr/local/bin/fleet-node-entrypoint.sh
+RUN chmod +x /usr/local/bin/fleet-node-entrypoint.sh
+
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/fleet-node-entrypoint.sh"]
