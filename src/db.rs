@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use p256::ecdsa::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 
 /// Raw VAPID keypair as stored in the database.
 ///
@@ -36,6 +37,16 @@ pub struct Subscription {
     pub label: Option<String>,
     pub created_at: i64,
     pub last_seen_at: i64,
+}
+
+/// A configured fleet node (issue #176 phase 2): a human name and the `ssh`
+/// target the hub dials to reach its tmux. The hub authenticates to nodes
+/// with its own SSH keys — no browser credentials involved.
+#[derive(Debug, Clone, Serialize)]
+pub struct Node {
+    pub name: String,
+    pub target: String,
+    pub created_at: i64,
 }
 
 /// New subscription payload for `insert_subscription`.
@@ -148,6 +159,15 @@ impl Db {
             CREATE TABLE IF NOT EXISTS stt_active_kind (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 kind TEXT NOT NULL DEFAULT 'local'
+            );
+
+            -- Configured fleet nodes (issue #176 phase 2). target is
+            -- whatever `ssh <target>` accepts (user@host, user@host:port,
+            -- or an ssh_config alias) — validated at write time, not here.
+            CREATE TABLE IF NOT EXISTS nodes (
+                name TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );",
         )
         .context("initializing sqlite schema")?;
@@ -369,6 +389,67 @@ impl Db {
             params![endpoint],
         )
         .context("deleting push subscription")?;
+        Ok(())
+    }
+
+    /// List configured fleet nodes, oldest first.
+    pub fn list_nodes(&self) -> Result<Vec<Node>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT name, target, created_at FROM nodes ORDER BY created_at ASC")
+            .context("preparing list_nodes")?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Node {
+                    name: row.get(0)?,
+                    target: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            })
+            .context("executing list_nodes")?;
+
+        let mut out: Vec<Node> = Vec::new();
+        for row in rows {
+            out.push(row.context("decoding node row")?);
+        }
+        Ok(out)
+    }
+
+    /// Look up a single node by name.
+    pub fn get_node(&self, name: &str) -> Result<Option<Node>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT name, target, created_at FROM nodes WHERE name = ?1",
+            params![name],
+            |row| {
+                Ok(Node {
+                    name: row.get(0)?,
+                    target: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("reading node")
+    }
+
+    /// Replace the entire node list atomically (used by `PUT
+    /// /api/settings/nodes`, which is a full-list replace, not a patch).
+    pub fn replace_nodes(&self, nodes: Vec<(String, String)>) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let now = unix_seconds()?;
+        let tx = conn.transaction().context("starting nodes transaction")?;
+        tx.execute("DELETE FROM nodes", [])
+            .context("clearing nodes")?;
+        for (name, target) in nodes {
+            tx.execute(
+                "INSERT INTO nodes (name, target, created_at) VALUES (?1, ?2, ?3)",
+                params![name, target, now],
+            )
+            .context("inserting node")?;
+        }
+        tx.commit().context("committing nodes transaction")?;
         Ok(())
     }
 
@@ -792,6 +873,59 @@ mod tests {
         db.remove_subscription("https://push.example/abc")
             .expect("remove");
         assert!(db.list_subscriptions().expect("list 3").is_empty());
+    }
+
+    #[test]
+    fn node_read_helpers_reflect_stored_rows() {
+        let db = fresh_db();
+        assert!(db.list_nodes().expect("empty list").is_empty());
+        assert!(db.get_node("gpu-box").expect("get missing").is_none());
+
+        db.replace_nodes(vec![(
+            "gpu-box".to_string(),
+            "mvhenten@gpu-box.local".to_string(),
+        )])
+        .expect("seed");
+
+        let nodes = db.list_nodes().expect("list");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "gpu-box");
+        assert_eq!(nodes[0].target, "mvhenten@gpu-box.local");
+
+        let got = db.get_node("gpu-box").expect("get").expect("present");
+        assert_eq!(got.target, "mvhenten@gpu-box.local");
+    }
+
+    #[test]
+    fn replace_nodes_is_a_full_swap() {
+        let db = fresh_db();
+        db.replace_nodes(vec![(
+            "stale".to_string(),
+            "mvhenten@stale.local".to_string(),
+        )])
+        .expect("seed");
+
+        db.replace_nodes(vec![
+            ("gpu-box".to_string(), "mvhenten@gpu-box.local".to_string()),
+            ("devbox".to_string(), "mvhenten@devbox.local".to_string()),
+        ])
+        .expect("replace");
+
+        let nodes = db.list_nodes().expect("list");
+        assert_eq!(
+            nodes.len(),
+            2,
+            "stale node is gone, replaced by the PUT body"
+        );
+        assert!(nodes.iter().any(|n| n.name == "gpu-box"));
+        assert!(nodes.iter().any(|n| n.name == "devbox"));
+        assert!(db.get_node("stale").expect("get stale").is_none());
+
+        db.replace_nodes(vec![]).expect("replace with empty list");
+        assert!(db
+            .list_nodes()
+            .expect("list after empty replace")
+            .is_empty());
     }
 
     #[test]

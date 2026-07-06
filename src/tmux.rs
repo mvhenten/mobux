@@ -7,17 +7,62 @@ use tokio::process::Command;
 
 use crate::shell_integration::{detect_session_shell, v2_snippet, Shell};
 
-/// Build a `tmux` Command, prefixed with `-L <socket>` when
-/// `MOBUX_TMUX_SOCKET` is set. Lets tests run against a dedicated tmux
-/// server without colliding with the host's default server.
-pub fn tmux_command() -> Command {
-    let mut cmd = Command::new("tmux");
-    if let Ok(socket) = std::env::var("MOBUX_TMUX_SOCKET") {
-        if !socket.is_empty() {
-            cmd.arg("-L").arg(socket);
+/// Single-quote a shell word so it survives a remote shell's word-splitting
+/// unchanged (embedded `'` becomes `'\''`, the standard POSIX escape).
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Build the command every tmux-invoking function runs, with `tmux_args` as
+/// the full subcommand (e.g. `["list-sessions", "-F", "..."]`).
+///
+/// `target = None` runs `tmux` locally (prefixed with `-L <socket>` when
+/// `MOBUX_TMUX_SOCKET` is set, so tests can use a dedicated tmux server
+/// without colliding with the host's default one).
+///
+/// `target = Some(ssh_target)` runs the SAME tmux subcommand over a
+/// one-shot, non-interactive `ssh` exec — no pty, no prompt: `BatchMode=yes`
+/// refuses rather than hangs on a password/host-key prompt, and
+/// `ConnectTimeout=3` bounds how long a dead node can stall a request. This
+/// is deliberately a different path from the interactive PTY attach (see
+/// `nodes::build_attach_command`), which does need a pty for resize
+/// passthrough; listing/killing/renaming a session never does.
+///
+/// `tmux_args` are individually shell-quoted and joined into ONE command
+/// string before being handed to `ssh` — ssh joins trailing argv with a bare
+/// space when building the remote command line, which would otherwise
+/// mis-tokenize any argument containing whitespace. The `-F` format strings
+/// below use literal tabs as field separators, so this isn't a hypothetical:
+/// without quoting, the remote shell's word-splitting (tabs count as IFS,
+/// same as spaces) shreds the format string into several bogus arguments.
+pub fn tmux_command(target: Option<&str>, tmux_args: &[&str]) -> Command {
+    match target {
+        None => {
+            let mut cmd = Command::new("tmux");
+            if let Ok(socket) = std::env::var("MOBUX_TMUX_SOCKET") {
+                if !socket.is_empty() {
+                    cmd.arg("-L").arg(socket);
+                }
+            }
+            cmd.args(tmux_args);
+            cmd
+        }
+        Some(ssh_target) => {
+            let mut cmd = Command::new("ssh");
+            let quoted: Vec<String> = tmux_args.iter().map(|a| shell_quote(a)).collect();
+            let remote_cmd = format!("tmux {}", quoted.join(" "));
+            cmd.args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                ssh_target,
+                "--",
+                &remote_cmd,
+            ]);
+            cmd
         }
     }
-    cmd
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,16 +84,18 @@ fn is_no_server_error(msg: &str) -> bool {
         || msg.contains("error connecting to")
 }
 
-pub async fn list_sessions() -> Result<Vec<Session>> {
-    let output = tmux_command()
-        .args([
+pub async fn list_sessions(target: Option<&str>) -> Result<Vec<Session>> {
+    let output = tmux_command(
+        target,
+        &[
             "list-sessions",
             "-F",
             "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}",
-        ])
-        .output()
-        .await
-        .context("failed to execute tmux")?;
+        ],
+    )
+    .output()
+    .await
+    .context("failed to execute tmux")?;
 
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -80,26 +127,56 @@ pub async fn list_sessions() -> Result<Vec<Session>> {
 /// Build the `tmux new-session` arguments. Sessions start in the user's
 /// home directory (when resolvable) rather than wherever the mobux server
 /// happens to run; new windows inherit this start directory from the
-/// session, so they are covered too.
-fn new_session_args(name: &str, shell_cmd: &str, home: Option<&Path>) -> Vec<String> {
+/// session, so they are covered too. `shell_cmd` is omitted entirely
+/// (tmux starts the default shell) when `None`.
+fn new_session_args(name: &str, shell_cmd: Option<&str>, home: Option<&Path>) -> Vec<String> {
     let mut args: Vec<String> = vec!["new-session".into(), "-d".into()];
     if let Some(home) = home {
         args.push("-c".into());
         args.push(home.display().to_string());
     }
-    args.extend(["-s".into(), name.into(), shell_cmd.into()]);
+    args.push("-s".into());
+    args.push(name.into());
+    if let Some(cmd) = shell_cmd {
+        args.push(cmd.into());
+    }
     args
 }
 
-pub async fn new_session(name: &str) -> Result<()> {
-    let (shell_type, shell_path) = detect_session_shell();
-    let shell_cmd = prepare_shell_with_osc133(shell_type, &shell_path)?;
+pub async fn new_session(name: &str, target: Option<&str>) -> Result<()> {
+    // Remote node: the OSC-133 rcfile lives on the hub's local disk, so it
+    // can't be injected into a session on another machine, and the hub's
+    // $HOME has no meaning there either — start the node's default shell
+    // in its own default directory instead.
+    let Some(ssh_target) = target else {
+        let (shell_type, shell_path) = detect_session_shell();
+        let shell_cmd = prepare_shell_with_osc133(shell_type, &shell_path)?;
+        let home = home_dir().ok();
+        let args = new_session_args(name, Some(&shell_cmd), home.as_deref());
+        let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = tmux_command(None, &args_ref)
+            .output()
+            .await
+            .context("failed to execute tmux")?;
+        if !output.status.success() {
+            let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(anyhow!("tmux new-session failed: {}", msg));
+        }
 
-    // Create the session with our OSC 133-enabled shell command,
-    // starting in the user's home directory.
-    let home = home_dir().ok();
-    let output = tmux_command()
-        .args(new_session_args(name, &shell_cmd, home.as_deref()))
+        // Set default-command so new windows in this session also get OSC 133
+        let _ = tmux_command(
+            None,
+            &["set-option", "-t", name, "default-command", &shell_cmd],
+        )
+        .output()
+        .await; // Ignore errors; worst case, new windows won't have OSC 133
+
+        return Ok(());
+    };
+
+    let args = new_session_args(name, None, None);
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = tmux_command(Some(ssh_target), &args_ref)
         .output()
         .await
         .context("failed to execute tmux")?;
@@ -107,13 +184,6 @@ pub async fn new_session(name: &str) -> Result<()> {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(anyhow!("tmux new-session failed: {}", msg));
     }
-
-    // Set default-command so new windows in this session also get OSC 133
-    let _ = tmux_command()
-        .args(["set-option", "-t", name, "default-command", &shell_cmd])
-        .output()
-        .await; // Ignore errors; worst case, new windows won't have OSC 133
-
     Ok(())
 }
 
@@ -266,9 +336,8 @@ fn home_dir() -> Result<PathBuf> {
         .map_err(|_| anyhow!("HOME not set"))
 }
 
-pub async fn kill_session(name: &str) -> Result<()> {
-    let output = tmux_command()
-        .args(["kill-session", "-t", name])
+pub async fn kill_session(name: &str, target: Option<&str>) -> Result<()> {
+    let output = tmux_command(target, &["kill-session", "-t", name])
         .output()
         .await
         .context("failed to execute tmux")?;
@@ -279,9 +348,8 @@ pub async fn kill_session(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn rename_session(old_name: &str, new_name: &str) -> Result<()> {
-    let output = tmux_command()
-        .args(["rename-session", "-t", old_name, new_name])
+pub async fn rename_session(old_name: &str, new_name: &str, target: Option<&str>) -> Result<()> {
+    let output = tmux_command(target, &["rename-session", "-t", old_name, new_name])
         .output()
         .await
         .context("failed to execute tmux")?;
@@ -301,19 +369,21 @@ pub struct Pane {
     pub active: bool,
 }
 
-pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
+pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>> {
     // List windows (the main navigable units in tmux)
-    let output = tmux_command()
-        .args([
+    let output = tmux_command(
+        target,
+        &[
             "list-windows",
             "-t",
             session,
             "-F",
             "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}",
-        ])
-        .output()
-        .await
-        .context("failed to execute tmux")?;
+        ],
+    )
+    .output()
+    .await
+    .context("failed to execute tmux")?;
 
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -337,10 +407,9 @@ pub async fn list_panes(session: &str) -> Result<Vec<Pane>> {
     Ok(out)
 }
 
-pub async fn select_pane(session: &str, window_index: &str) -> Result<()> {
-    let target = format!("{}:{}", session, window_index);
-    let output = tmux_command()
-        .args(["select-window", "-t", &target])
+pub async fn select_pane(session: &str, window_index: &str, target: Option<&str>) -> Result<()> {
+    let window_target = format!("{}:{}", session, window_index);
+    let output = tmux_command(target, &["select-window", "-t", &window_target])
         .output()
         .await
         .context("failed to execute tmux")?;
@@ -352,27 +421,26 @@ pub async fn select_pane(session: &str, window_index: &str) -> Result<()> {
 }
 
 /// Run a tmux command against a session.
-pub async fn run_command(session: &str, command: &str) -> Result<String> {
+pub async fn run_command(session: &str, command: &str, target: Option<&str>) -> Result<String> {
     // Append ':' so tmux treats it as a session target, not a window index
     // (e.g. session "0" would otherwise target window 0)
-    let target = format!("{}:", session);
+    let win_target = format!("{}:", session);
     let args: Vec<String> = match command {
-        "new-window" => vec!["new-window".into(), "-t".into(), target],
-        "kill-window" => vec!["kill-window".into(), "-t".into(), target],
-        "split-h" => vec!["split-window".into(), "-h".into(), "-t".into(), target],
-        "split-v" => vec!["split-window".into(), "-v".into(), "-t".into(), target],
-        "next-window" => vec!["next-window".into(), "-t".into(), target],
-        "prev-window" => vec!["previous-window".into(), "-t".into(), target],
+        "new-window" => vec!["new-window".into(), "-t".into(), win_target],
+        "kill-window" => vec!["kill-window".into(), "-t".into(), win_target],
+        "split-h" => vec!["split-window".into(), "-h".into(), "-t".into(), win_target],
+        "split-v" => vec!["split-window".into(), "-v".into(), "-t".into(), win_target],
+        "next-window" => vec!["next-window".into(), "-t".into(), win_target],
+        "prev-window" => vec!["previous-window".into(), "-t".into(), win_target],
         "next-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
         "prev-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
-        "kill-pane" => vec!["kill-pane".into(), "-t".into(), target],
-        "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), target],
+        "kill-pane" => vec!["kill-pane".into(), "-t".into(), win_target],
+        "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), win_target],
         _ => return Err(anyhow!("unknown command: {}", command)),
     };
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let output = tmux_command()
-        .args(&args_ref)
+    let output = tmux_command(target, &args_ref)
         .output()
         .await
         .context("failed to execute tmux")?;
@@ -438,10 +506,11 @@ pub async fn install_bell_hook(port: u16, token: &str) -> Result<()> {
 
 /// Capture the scrollback history of the active pane in a session.
 /// Returns the content with ANSI escape sequences preserved.
-pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
+pub async fn capture_history(session: &str, lines: i32, target: Option<&str>) -> Result<String> {
     let start = format!("-{}", lines);
-    let output = tmux_command()
-        .args([
+    let output = tmux_command(
+        target,
+        &[
             "capture-pane",
             "-p", // print to stdout
             "-e", // include escape sequences (colors)
@@ -449,10 +518,11 @@ pub async fn capture_history(session: &str, lines: i32) -> Result<String> {
             &start, // start N lines back
             "-t",
             session,
-        ])
-        .output()
-        .await
-        .context("failed to execute tmux capture-pane")?;
+        ],
+    )
+    .output()
+    .await
+    .context("failed to execute tmux capture-pane")?;
 
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -484,7 +554,7 @@ mod tests {
 
     #[test]
     fn new_session_starts_in_home_directory() {
-        let args = new_session_args("work", "bash", Some(Path::new("/home/alice")));
+        let args = new_session_args("work", Some("bash"), Some(Path::new("/home/alice")));
         assert_eq!(
             args,
             vec![
@@ -501,7 +571,82 @@ mod tests {
 
     #[test]
     fn new_session_without_home_omits_start_directory() {
-        let args = new_session_args("work", "bash", None);
+        let args = new_session_args("work", Some("bash"), None);
         assert_eq!(args, vec!["new-session", "-d", "-s", "work", "bash"]);
+    }
+
+    #[test]
+    fn new_session_remote_omits_shell_cmd_and_home() {
+        // Remote node sessions get no OSC-133 shell_cmd (it references a
+        // local rcfile path) and no home-dir override (the hub's $HOME has
+        // no meaning on another machine) — tmux just starts its default.
+        let args = new_session_args("work", None, None);
+        assert_eq!(args, vec!["new-session", "-d", "-s", "work"]);
+    }
+
+    fn argv(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn tmux_command_local_is_plain_tmux() {
+        std::env::remove_var("MOBUX_TMUX_SOCKET");
+        let cmd = tmux_command(None, &["list-sessions"]);
+        assert_eq!(
+            cmd.as_std().get_program().to_string_lossy(),
+            "tmux",
+            "no target => plain local tmux"
+        );
+        assert_eq!(argv(&cmd), vec!["list-sessions"]);
+    }
+
+    #[test]
+    fn tmux_command_remote_wraps_in_batch_mode_ssh() {
+        let cmd = tmux_command(Some("mvhenten@devbox"), &["kill-session", "-t", "work"]);
+        assert_eq!(cmd.as_std().get_program().to_string_lossy(), "ssh");
+        assert_eq!(
+            argv(&cmd),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "mvhenten@devbox",
+                "--",
+                "tmux 'kill-session' '-t' 'work'",
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_command_remote_quotes_tab_containing_format_strings() {
+        // Regression test: ssh joins trailing argv with a bare space when
+        // building the remote command line. Without per-arg quoting, the
+        // literal tabs in tmux's -F format strings get word-split by the
+        // remote shell (tab is IFS, same as space), shredding "-F" from its
+        // value and producing "command list-sessions: -F expects an
+        // argument" on the actual remote tmux. Reproduced live against a
+        // loopback sshd before this fix landed.
+        let cmd = tmux_command(
+            Some("devbox"),
+            &["list-sessions", "-F", "#{session_name}\t#{session_windows}"],
+        );
+        let remote_cmd = argv(&cmd).pop().expect("remote command string");
+        assert_eq!(
+            remote_cmd,
+            "tmux 'list-sessions' '-F' '#{session_name}\t#{session_windows}'",
+        );
+        // The whole format string survives as ONE single-quoted word — a
+        // naive space-join would have split it at the tab.
+        assert_eq!(remote_cmd.matches('\'').count(), 6, "3 quoted words");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }
