@@ -27,13 +27,14 @@ const AUTH =
     ? "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64")
     : null;
 
+const { createTmuxRunner } = require("./lib/tmux.cjs");
+
 // Dedicated tmux server/session, identical convention to smoke.spec.cjs, so
 // SPA session ops drive the smoke instance's tmux without colliding with the
 // host's default tmux server.
-const TMUX_CMD = process.env.MOBUX_TEST_TMUX || "tmux -L mobux-test";
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = (args) => execSync(`${TMUX_CMD} ${args}`, { stdio: "pipe" });
+const tmux = createTmuxRunner("mobux-test");
 
 // Unique session names per run so the create/rename/kill lifecycle never
 // collides with a leftover from a previous run or the smoke seed session.

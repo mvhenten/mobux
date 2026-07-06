@@ -28,10 +28,11 @@ const AUTH =
     : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-critical";
 
-const TMUX_CMD = process.env.MOBUX_TEST_TMUX || "tmux -L mobux-test";
+const { createTmuxRunner } = require("./lib/tmux.cjs");
+
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = (args) => execSync(`${TMUX_CMD} ${args}`, { stdio: "pipe" });
+const tmux = createTmuxRunner("mobux-test");
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
@@ -189,7 +190,7 @@ test("PTY roundtrip: tmux split-window produces a second pane", async ({
   await bootTerminal(page);
   // Snapshot pane count from tmux directly (source of truth).
   const before = parseInt(
-    execSync(`${TMUX_CMD} list-panes -t ${SESSION} | wc -l`).toString().trim(),
+    tmux(`list-panes -t ${SESSION} | wc -l`).toString().trim(),
     10,
   );
   // Send tmux prefix (Ctrl-B) then '|' to split-window -h.
@@ -199,7 +200,7 @@ test("PTY roundtrip: tmux split-window produces a second pane", async ({
   await page.evaluate(() => window.__mobuxView.send('"')); // default split-window vertical
   await page.waitForTimeout(500);
   const after = parseInt(
-    execSync(`${TMUX_CMD} list-panes -t ${SESSION} | wc -l`).toString().trim(),
+    tmux(`list-panes -t ${SESSION} | wc -l`).toString().trim(),
     10,
   );
   expect(after, "tmux pane count should increase after split").toBeGreaterThan(

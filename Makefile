@@ -146,7 +146,7 @@ smoke-start: build
 
 smoke-stop:
 	@if [ -n "$(SMOKE_PID)" ]; then kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"; else echo "smoke not running"; fi
-	@tmux -L mobux-test kill-server 2>/dev/null || true
+	@env -u TMUX -u TMUX_PANE tmux -L mobux-test kill-server 2>/dev/null || true
 
 smoke-logs:
 	@tail -f /tmp/mobux-smoke/mobux.log
