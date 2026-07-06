@@ -10,15 +10,16 @@ const AUTH =
     : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-smoke";
 
-// Tmux command used to set up/tear down the test session. Defaults to a
-// dedicated tmux server (`tmux -L mobux-test`) so tests never touch the
-// host's default tmux server. Override with `MOBUX_TEST_TMUX` to target
-// a containerized mobux's tmux server, e.g.
+const { createTmuxRunner } = require("./lib/tmux.cjs");
+
+// Runs against a dedicated tmux server (`tmux -L mobux-test`) so tests
+// never touch the host's default tmux server — see test/lib/tmux.cjs for
+// the isolation guarantees. Override with `MOBUX_TEST_TMUX` to target a
+// containerized mobux's tmux server, e.g.
 // `MOBUX_TEST_TMUX="podman exec mobux-podman tmux"` for `make podman-test`.
-const TMUX_CMD = process.env.MOBUX_TEST_TMUX || "tmux -L mobux-test";
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = (args) => execSync(`${TMUX_CMD} ${args}`, { stdio: "pipe" });
+const tmux = createTmuxRunner("mobux-test");
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
@@ -909,7 +910,7 @@ test("OSC 133 ; A marks lines without a sigil as prompts", async ({ page }) => {
 //      output filter and is parsed by libterm's OSC dispatcher.
 // If either layer regresses, oscDetected stays false and the assertion
 // fires. Skips when the test server can't reach `tmux send-keys`
-// (podman target leaves TMUX_CMD unset for those tests).
+// (the podman target routes through MOBUX_TEST_TMUX instead).
 // FAILING SPEC: OSC 133 must work out-of-the-box for sessions mobux
 // creates itself, regardless of whether the user has installed the
 // shell-integration snippet into their RC files.
@@ -1048,9 +1049,7 @@ test("OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm", async ({
     // its bytes through tmux while passthrough is still off.
     let allowPassthroughOn = false;
     for (let i = 0; i < 50; i++) {
-      const v = execSync(
-        `${TMUX_CMD} show-option -gv allow-passthrough 2>/dev/null || true`,
-      )
+      const v = tmux("show-option -gv allow-passthrough 2>/dev/null || true")
         .toString()
         .trim();
       if (v === "on") {
