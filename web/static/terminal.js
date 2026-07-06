@@ -8,6 +8,13 @@ import { navigateToUrl, openExternal } from "./external-link.js";
 
 const session = window.MOBUX_SESSION;
 
+// Hub → node SSH proxying (#176): TerminalIsland pins window.MOBUX_NODE from
+// the Home picker; tmux calls made here carry ?node=<name>. Absent ⇒ local.
+function nodeQuery() {
+  const node = window.MOBUX_NODE;
+  return node ? `?node=${encodeURIComponent(node)}` : "";
+}
+
 const termEl = document.getElementById("terminal");
 const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");
@@ -615,7 +622,7 @@ updateToggleLabel();
 function selectWindow(windowIndex) {
   if (windowIndex == null || windowIndex === "") return;
   fetch(
-    `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select`,
+    `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select${nodeQuery()}`,
     { method: "POST" },
   )
     .then(() => {

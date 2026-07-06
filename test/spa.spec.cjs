@@ -1102,6 +1102,7 @@ test("settings: every ported card renders and consumes its endpoint", async ({
   await expect(page.locator("#renderer-picker")).toBeVisible();
   await expect(page.locator("#theme-picker")).toBeVisible();
   await expect(page.locator("#shell-integration")).toBeVisible();
+  await expect(page.locator("#nodes-settings")).toBeVisible();
   await expect(page.locator("#stt-provider")).toBeVisible();
   await expect(page.locator("section#install-app")).toBeVisible();
   await expect(page.locator('input[name="bell"]')).toHaveCount(1);
@@ -1138,6 +1139,7 @@ test("settings: every ported card renders and consumes its endpoint", async ({
     "GET /api/settings/notifications",
     "GET /api/shell-integration/status",
     "GET /api/settings/stt",
+    "GET /api/settings/nodes",
     "GET /api/build-info",
     "GET /static/build-info.json",
   ]) {
@@ -1317,6 +1319,299 @@ test("second terminal open renders without engine boot error", async ({
       tmux(`kill-session -t ${SEED2}`);
     } catch (_) {}
   }
+});
+
+// ── node picker + nodes settings (#176 phase 3) ─────────────────────────────
+//
+// The backend side (/api/nodes, GET/PUT /api/settings/nodes, ?node= on the
+// sessions API and the PTY WebSocket) lands in the node-inventory PR; these
+// tests mock those endpoints at the page level so the UI contract is pinned
+// regardless of merge order — and keep passing against a real backend after.
+
+const NODE_FIXTURE = {
+  nodes: [
+    { name: "devbox", target: "mvhenten@devbox", reachable: true },
+    { name: "lab", target: "ubuntu@lab", reachable: false },
+  ],
+};
+
+function mockNodes(page, fixture = NODE_FIXTURE) {
+  return page.route(/\/api\/nodes$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fixture),
+    }),
+  );
+}
+
+test("home renders no node picker when zero nodes are configured", async ({
+  page,
+}) => {
+  // Against the real backend first: pre-node-inventory it 404s /api/nodes,
+  // which must mean "zero nodes", not an error — the UI is identical to today.
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await expect(page.locator("#sessionList .session-item").first()).toBeVisible({
+    timeout: 8000,
+  });
+  await expect(page.locator("#nodePicker")).toHaveCount(0);
+
+  // An explicit empty inventory renders no picker either.
+  await mockNodes(page, { nodes: [] });
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(page.locator("#sessionList .session-item").first()).toBeVisible({
+    timeout: 8000,
+  });
+  await expect(page.locator("#nodePicker")).toHaveCount(0);
+});
+
+test("node picker: renders nodes, marks unreachable, threads ?node, persists selection", async ({
+  page,
+}) => {
+  await mockNodes(page);
+  const sessionQueries = [];
+  await page.route(/\/api\/sessions(\?[^/]*)?$/, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const u = new URL(route.request().url());
+    const node = u.searchParams.get("node");
+    sessionQueries.push(node);
+    if (node === "devbox") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { name: "remote-sess", windows: 1, attached: 0 },
+        ]),
+      });
+    }
+    if (node === "lab") {
+      return route.fulfill({ status: 502, body: "ssh: connect refused" });
+    }
+    return route.continue();
+  });
+
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+
+  const picker = page.locator("#nodePicker");
+  await expect(picker).toBeVisible();
+  await expect(picker.locator(".node-chip")).toHaveCount(3); // local + 2 nodes
+  await expect(picker.locator('.node-chip[data-node=""]')).toHaveClass(
+    /active/,
+  );
+
+  // Unreachable node is clearly marked — computed-visible, not just a class.
+  const dead = picker.locator('.node-chip[data-node="lab"] .node-dead');
+  await expect(dead).toHaveText("unreachable");
+  const deadBox = await dead.boundingBox();
+  expect(deadBox.width).toBeGreaterThan(0);
+
+  // Pick devbox → the session list refetches with ?node=devbox and shows the
+  // remote list.
+  await picker.locator('.node-chip[data-node="devbox"]').click();
+  await expect(
+    page.locator('#sessionList .swipe-row[data-name="remote-sess"]'),
+  ).toBeVisible({ timeout: 8000 });
+  expect(sessionQueries).toContain("devbox");
+
+  // Device-level persistence: localStorage, survives a reload.
+  expect(await page.evaluate(() => localStorage.getItem("mobux:node"))).toBe(
+    "devbox",
+  );
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(
+    page.locator('#nodePicker .node-chip[data-node="devbox"]'),
+  ).toHaveClass(/active/);
+  await expect(
+    page.locator('#sessionList .swipe-row[data-name="remote-sess"]'),
+  ).toBeVisible({ timeout: 8000 });
+
+  // An unreachable node is still selectable — the failure is loud at connect,
+  // never a silent no-op.
+  await page.locator('#nodePicker .node-chip[data-node="lab"]').click();
+  await expect(
+    page.locator('#nodePicker .node-chip[data-node="lab"]'),
+  ).toHaveClass(/active/);
+  await expect(page.locator("#sessionList .hint")).toContainText(
+    "Failed to load sessions",
+    { timeout: 8000 },
+  );
+
+  // Back to local → the plain sessions API (no ?node) serves the seed again.
+  await page.locator('#nodePicker .node-chip[data-node=""]').click();
+  await expect(
+    page.locator(`#sessionList .swipe-row[data-name="${SEED}"]`),
+  ).toBeVisible({ timeout: 8000 });
+  expect(await page.evaluate(() => localStorage.getItem("mobux:node"))).toBe(
+    null,
+  );
+});
+
+test("creating a session targets the selected node", async ({ page }) => {
+  await mockNodes(page, {
+    nodes: [{ name: "devbox", target: "mvhenten@devbox", reachable: true }],
+  });
+  await page.addInitScript(() => localStorage.setItem("mobux:node", "devbox"));
+  const posts = [];
+  await page.route(/\/api\/sessions(\?[^/]*)?$/, async (route) => {
+    const u = new URL(route.request().url());
+    if (route.request().method() === "POST") {
+      posts.push(u.searchParams.get("node"));
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    }
+    if (u.searchParams.get("node") === "devbox") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      });
+    }
+    return route.continue();
+  });
+
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await page.locator("#fabNew").click();
+  await page.locator("#sessionName").fill("on-devbox");
+  await page.locator("#newSessionForm .btn-create").click();
+
+  await expect.poll(() => posts.length, { timeout: 8000 }).toBeGreaterThan(0);
+  expect(posts[0]).toBe("devbox");
+});
+
+test("terminal PTY websocket and pane calls carry ?node= for the selected node", async ({
+  page,
+}) => {
+  // FakeSocket (same shape as the splash tests') so the assertion doesn't
+  // depend on the backend accepting the ?node param: it records the URL and
+  // fires `open`, which triggers the engine's refreshPanes fetch.
+  await page.addInitScript(() => {
+    localStorage.setItem("mobux:node", "devbox");
+    window.__wsUrls = [];
+    class FakeSocket extends EventTarget {
+      constructor(url) {
+        super();
+        window.__wsUrls.push(String(url));
+        this.url = url;
+        this.readyState = 0;
+        this.binaryType = "blob";
+        setTimeout(() => {
+          this.readyState = 1;
+          this.onopen?.(new Event("open"));
+        }, 10);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+        this.onclose?.(new Event("close"));
+      }
+    }
+    FakeSocket.CONNECTING = 0;
+    FakeSocket.OPEN = 1;
+    FakeSocket.CLOSING = 2;
+    FakeSocket.CLOSED = 3;
+    window.WebSocket = FakeSocket;
+  });
+
+  const paneCalls = [];
+  page.on("request", (r) => {
+    const u = new URL(r.url());
+    if (u.pathname.endsWith("/panes")) paneCalls.push(u.search);
+  });
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+
+  await page.waitForFunction(
+    () => (window.__wsUrls || []).some((u) => u.includes("/ws/")),
+    { timeout: 15000 },
+  );
+  const wsUrl = (await page.evaluate(() => window.__wsUrls)).find((u) =>
+    u.includes("/ws/"),
+  );
+  expect(wsUrl).toContain(`/ws/${encodeURIComponent(SEED)}?node=devbox`);
+
+  await expect
+    .poll(() => paneCalls.length, { timeout: 15000 })
+    .toBeGreaterThan(0);
+  expect(paneCalls[0]).toContain("node=devbox");
+});
+
+test("settings: nodes card lists, adds, and removes nodes via PUT /api/settings/nodes", async ({
+  page,
+}) => {
+  let stored = { nodes: [{ name: "devbox", target: "mvhenten@devbox" }] };
+  const puts = [];
+  await page.route(/\/api\/settings\/nodes$/, async (route) => {
+    if (route.request().method() === "PUT") {
+      stored = JSON.parse(route.request().postData());
+      puts.push(stored);
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(stored),
+    });
+  });
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator("#nodes-settings");
+  await expect(card).toBeVisible();
+
+  // The SSH-key stance is stated on the card — keys are the operator's job,
+  // no key-management UI.
+  await expect(card.locator(".settings-lede")).toContainText("SSH key");
+
+  await expect(card.locator(".node-row")).toHaveCount(1);
+  await expect(card.locator('.node-row[data-name="devbox"]')).toContainText(
+    "mvhenten@devbox",
+  );
+
+  // ADD replaces the whole list with the new entry appended.
+  await card.locator("#nodeName").fill("lab");
+  await card.locator("#nodeTarget").fill("ubuntu@lab");
+  await card.locator("#nodeAddBtn").click();
+  await expect(card.locator(".node-row")).toHaveCount(2);
+  expect(puts[0].nodes).toEqual([
+    { name: "devbox", target: "mvhenten@devbox" },
+    { name: "lab", target: "ubuntu@lab" },
+  ]);
+
+  // REMOVE puts the list without the removed node.
+  await card.locator('.node-row[data-name="devbox"] .node-remove').click();
+  await expect(card.locator(".node-row")).toHaveCount(1);
+  expect(puts[1].nodes).toEqual([{ name: "lab", target: "ubuntu@lab" }]);
+});
+
+test("settings: a failed nodes save is loud and keeps the old list", async ({
+  page,
+}) => {
+  await page.route(/\/api\/settings\/nodes$/, async (route) => {
+    if (route.request().method() === "PUT") {
+      return route.fulfill({ status: 500, body: "boom" });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ nodes: [] }),
+    });
+  });
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator("#nodes-settings");
+  await card.locator("#nodeName").fill("lab");
+  await card.locator("#nodeTarget").fill("ubuntu@lab");
+  await card.locator("#nodeAddBtn").click();
+
+  const status = page.locator("#nodesStatus");
+  await expect(status).toContainText("Save failed", { timeout: 5000 });
+  // Computed-visible, and the phantom node was not added.
+  const box = await status.boundingBox();
+  expect(box.width).toBeGreaterThan(0);
+  await expect(card.locator(".node-row")).toHaveCount(0);
 });
 
 // ── install page: QR codes ──────────────────────────────────────────────────

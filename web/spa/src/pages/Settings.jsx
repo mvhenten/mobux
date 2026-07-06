@@ -4,6 +4,7 @@ import { NotificationsCard } from "../components/settings/Notifications.jsx";
 import { RendererCard } from "../components/settings/Renderer.jsx";
 import { ThemeCard } from "../components/settings/Theme.jsx";
 import { ShellIntegrationCard } from "../components/settings/ShellIntegration.jsx";
+import { NodesCard } from "../components/settings/Nodes.jsx";
 import { SttCard } from "../components/settings/Stt.jsx";
 import { ListenCard } from "../components/settings/Listen.jsx";
 import { BuildInfoCard } from "../components/settings/BuildInfo.jsx";
@@ -11,7 +12,7 @@ import { BuildInfoCard } from "../components/settings/BuildInfo.jsx";
 // Settings page. Composes the ported cards in the same order as the
 // Rust-rendered /settings page (settings_page in src/main.rs): software update,
 // install-app link, notifications, terminal renderer, theme, shell integration,
-// speech-to-text, listen, build info.
+// nodes, speech-to-text, listen, build info.
 
 export function SettingsPage() {
   return (
@@ -33,6 +34,7 @@ export function SettingsPage() {
       <RendererCard />
       <ThemeCard />
       <ShellIntegrationCard />
+      <NodesCard />
       <SttCard />
       <ListenCard />
       <BuildInfoCard />
