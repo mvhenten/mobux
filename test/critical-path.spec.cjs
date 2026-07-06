@@ -785,6 +785,131 @@ test("soft keyboard: terminal bottom stays visible when visualViewport shrinks",
   assertNoFailures(captured);
 });
 
+test("soft keyboard: resizes-content contract keeps input bar and bottom rows visible (issue #167)", async ({
+  page,
+}, testInfo) => {
+  // Regression for issue #167 — bottom terminal rows and the input bar's
+  // text row clipped behind the Android soft keyboard + Chrome's autofill
+  // accessory bar. Root cause: under the Chrome 108+ default
+  // (interactive-widget=resizes-visual) the page must reconstruct the
+  // visible height from visualViewport.height, and on real devices that
+  // value does not account for the keyboard accessory bar — so the
+  // body-height tracking in terminal.js left ~an accessory-bar's worth of
+  // layout hidden behind the keyboard. No vv-event handler can fix a wrong
+  // reported height; the fix is interactive-widget=resizes-content, which
+  // makes Android resize the LAYOUT viewport from the OS window insets.
+  //
+  // Two halves:
+  //   1. Contract: the served SPA HTML must declare
+  //      interactive-widget=resizes-content. This is the device-behavior
+  //      switch — dropping it silently reintroduces #167.
+  //   2. Geometry: simulate what resizes-content does on-device (the
+  //      layout viewport shrinks to the space above the keyboard) via
+  //      setViewportSize, then assert by getBoundingClientRect +
+  //      getComputedStyle that the input bar's text row and the last
+  //      terminal row sit fully inside the shrunk viewport.
+  const captured = seedErrorCapture(page);
+
+  const html = await page.request.get(`${BASE}/app`).then((r) => r.text());
+  const viewportMeta = html.match(
+    /<meta[^>]*name="viewport"[^>]*content="([^"]*)"/,
+  );
+  expect(viewportMeta, "SPA HTML must have a viewport meta").toBeTruthy();
+  expect(
+    viewportMeta[1],
+    "viewport meta must opt into layout-viewport keyboard resize",
+  ).toContain("interactive-widget=resizes-content");
+
+  await bootTerminal(page);
+
+  const marker = `MOBUX_167_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect
+    .poll(() => visibleTerminalText(page), {
+      timeout: 10000,
+      intervals: [200, 400, 800],
+    })
+    .toContain(marker);
+
+  // Keyboard-up on a Pixel-class device leaves roughly half the height.
+  // On-device, resizes-content delivers exactly this: a smaller layout
+  // viewport (innerHeight shrinks, dvh shrinks, window resize fires).
+  const { width } = page.viewportSize();
+  const KEYBOARD_UP_HEIGHT = 445;
+  await page.setViewportSize({ width, height: KEYBOARD_UP_HEIGHT });
+
+  // Let the reflow + PTY resize round-trip land, then read the geometry.
+  const geometry = () =>
+    page.evaluate((m) => {
+      const within = (rect, limit) =>
+        rect.height > 0 && rect.bottom <= limit + 2;
+      const visible = (el) => {
+        const cs = getComputedStyle(el);
+        return cs.display !== "none" && cs.visibility !== "hidden";
+      };
+      const bar = document.getElementById("inputBar");
+      const input = document.getElementById("inputText");
+      const term = document.getElementById("terminal");
+      const barRect = bar.getBoundingClientRect();
+      const inputRect = input.getBoundingClientRect();
+      const termRect = term.getBoundingClientRect();
+      let markerBottom = null;
+      const walker = document.createTreeWalker(term, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.data && node.data.includes(m)) {
+          const r = document.createRange();
+          const idx = node.data.indexOf(m);
+          r.setStart(node, idx);
+          r.setEnd(node, idx + m.length);
+          const rect = r.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) markerBottom = rect.bottom;
+        }
+      }
+      return {
+        innerHeight: window.innerHeight,
+        barVisible: visible(bar) && visible(input),
+        barFits: within(barRect, window.innerHeight),
+        inputFits: within(inputRect, window.innerHeight),
+        termAboveBar: termRect.bottom <= barRect.top + 2,
+        barTop: barRect.top,
+        inputBottom: inputRect.bottom,
+        termBottom: termRect.bottom,
+        markerBottom,
+      };
+    }, marker);
+
+  await expect
+    .poll(async () => (await geometry()).markerBottom !== null, {
+      timeout: 10000,
+      intervals: [200, 400, 800],
+    })
+    .toBe(true);
+  const geo = await geometry();
+
+  const screenshotPath = `.tmp/keyboard-167-${testInfo.project.name}.png`;
+  await page.screenshot({ path: screenshotPath, fullPage: false });
+
+  expect(geo.innerHeight, "layout viewport must have shrunk").toBe(
+    KEYBOARD_UP_HEIGHT,
+  );
+  expect(geo.barVisible, "input bar + text input computed-visible").toBe(true);
+  expect(
+    geo.barFits && geo.inputFits,
+    `input bar text row must sit inside the viewport: input bottom ${geo.inputBottom}, innerHeight ${geo.innerHeight}; screenshot: ${screenshotPath}`,
+  ).toBe(true);
+  expect(
+    geo.termAboveBar,
+    `#terminal (bottom ${geo.termBottom}) must not extend under the input bar (top ${geo.barTop})`,
+  ).toBe(true);
+  expect(
+    geo.markerBottom,
+    `last output row (bottom ${geo.markerBottom}) must sit above the input bar (top ${geo.barTop}); screenshot: ${screenshotPath}`,
+  ).toBeLessThanOrEqual(geo.barTop + 2);
+
+  assertNoFailures(captured);
+});
+
 test("tap-to-snap: a tap snaps to bottom, a swipe does not", async ({
   page,
 }, testInfo) => {

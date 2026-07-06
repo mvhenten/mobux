@@ -2,9 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- interactive-widget=resizes-content: Android Chrome resizes the LAYOUT
+         viewport when the soft keyboard opens, sized from the OS window insets
+         (keyboard + Chrome's autofill accessory bar included). The default
+         (resizes-visual) only shrinks visualViewport, whose reported height
+         does not account for the accessory bar — the JS body-height tracking
+         in terminal.js then leaves the input bar and bottom terminal rows
+         clipped behind the keyboard (issue #167). -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no"
+      content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content"
     />
     <title>Mobux</title>
     <link
