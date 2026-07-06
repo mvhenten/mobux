@@ -15,6 +15,14 @@ const WINDOW_SWITCH_CMDS = new Set([
   "kill-window",
 ]);
 
+// Hub → node SSH proxying (#176): when the SPA picked a remote node it pins
+// window.MOBUX_NODE before the engine boots, and every PTY/tmux call carries
+// ?node=<name>. Absent ⇒ the local host, exactly the pre-node behavior.
+function nodeQuery() {
+  const node = window.MOBUX_NODE;
+  return node ? `?node=${encodeURIComponent(node)}` : "";
+}
+
 export class TerminalCoreXterm extends EventTarget {
   constructor({ session, host }) {
     super();
@@ -125,7 +133,7 @@ export class TerminalCoreXterm extends EventTarget {
     this.intentionalClose = false;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     this.ws = new WebSocket(
-      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}`,
+      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${nodeQuery()}`,
     );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
@@ -270,7 +278,7 @@ export class TerminalCoreXterm extends EventTarget {
   async refreshPanes() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/panes`,
+        `/api/sessions/${encodeURIComponent(this.session)}/panes${nodeQuery()}`,
       );
       if (!res.ok) return;
       this.panes = await res.json();
@@ -317,7 +325,7 @@ export class TerminalCoreXterm extends EventTarget {
   async runTmuxCmd(command) {
     try {
       await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/command`,
+        `/api/sessions/${encodeURIComponent(this.session)}/command${nodeQuery()}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -339,7 +347,7 @@ export class TerminalCoreXterm extends EventTarget {
   async reloadHistory() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/history`,
+        `/api/sessions/${encodeURIComponent(this.session)}/history${nodeQuery()}`,
       );
       if (!res.ok) return;
       const history = await res.text();

@@ -1,22 +1,75 @@
 import { useEffect, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
+import { getSelectedNode, setSelectedNode, withNode } from "../lib/nodes.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
 // (render_index + index.js): list tmux sessions with window/attached counts,
 // create a session (FAB → dialog), kill, and rename. Tapping a session opens
 // the terminal island.
+//
+// Node picker (#176 phase 3): when nodes are configured the list grows a
+// compact local/node switch, and every sessions call carries ?node=<name> so
+// the hub proxies it over SSH. Zero nodes ⇒ no picker, UI identical to before.
 
 const sessions = signal(null);
 const error = signal(null);
+const nodes = signal(null); // null until /api/nodes answers
+const nodeError = signal(null);
+const selectedNode = signal(getSelectedNode());
 
 async function refresh() {
   try {
-    const data = await apiGet("/api/sessions");
+    const data = await apiGet(withNode("/api/sessions", selectedNode.value));
     sessions.value = Array.isArray(data) ? data : data.sessions || [];
     error.value = null;
   } catch (e) {
     error.value = String(e.message || e);
+  }
+}
+
+// Never rejects — refresh() must run regardless of node support.
+// redirect:"manual" because an absent API route lands on the server's
+// catch-all 307; following it would leave an abandoned response body in
+// flight, which stalls the page's network-idle state.
+async function loadNodes() {
+  let res;
+  try {
+    res = await fetch("/api/nodes", {
+      headers: { Accept: "application/json" },
+      redirect: "manual",
+    });
+  } catch (e) {
+    nodeError.value = String(e.message || e);
+    return;
+  }
+  // A backend without node support means zero nodes configured — same UI as
+  // today, not an error.
+  if (res.status === 404 || res.type === "opaqueredirect") {
+    nodes.value = [];
+    return;
+  }
+  if (!res.ok) {
+    res.text().catch(() => {});
+    nodeError.value = `GET /api/nodes -> ${res.status}`;
+    return;
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    nodeError.value = `GET /api/nodes: ${String(e.message || e)}`;
+    return;
+  }
+  nodes.value = data.nodes || [];
+  nodeError.value = null;
+  // A persisted selection for a since-removed node falls back to local.
+  if (
+    selectedNode.value &&
+    !nodes.value.some((n) => n.name === selectedNode.value)
+  ) {
+    selectedNode.value = "";
+    setSelectedNode("");
   }
 }
 
@@ -25,8 +78,19 @@ export function HomePage() {
   const nameRef = useRef(null);
 
   useEffect(() => {
-    refresh();
+    // Nodes first: a stale persisted selection must be reset before the
+    // session list is fetched with it.
+    loadNodes().then(refresh);
   }, []);
+
+  const pickNode = (name) => {
+    if (name === selectedNode.value) return;
+    selectedNode.value = name;
+    setSelectedNode(name);
+    sessions.value = null;
+    error.value = null;
+    refresh();
+  };
 
   const open = async (name) => {
     // Hard-load so terminal.js always gets a fresh execution context.
@@ -41,7 +105,7 @@ export function HomePage() {
     const name = (nameRef.current?.value || "").trim();
     if (!name) return;
     try {
-      await apiSend("/api/sessions", {
+      await apiSend(withNode("/api/sessions", selectedNode.value), {
         method: "POST",
         body: JSON.stringify({ name }),
       });
@@ -56,9 +120,13 @@ export function HomePage() {
   const kill = async (name) => {
     if (!confirm(`Kill session '${name}'?`)) return;
     try {
-      await apiSend(`/api/sessions/${encodeURIComponent(name)}/kill`, {
-        method: "POST",
-      });
+      await apiSend(
+        withNode(
+          `/api/sessions/${encodeURIComponent(name)}/kill`,
+          selectedNode.value,
+        ),
+        { method: "POST" },
+      );
       await refresh();
     } catch (err) {
       alert(`Kill failed: ${err.message}`);
@@ -69,10 +137,16 @@ export function HomePage() {
     const newName = prompt(`Rename '${oldName}' to:`, oldName);
     if (!newName || newName === oldName) return;
     try {
-      await apiSend(`/api/sessions/${encodeURIComponent(oldName)}/rename`, {
-        method: "POST",
-        body: JSON.stringify({ name: newName }),
-      });
+      await apiSend(
+        withNode(
+          `/api/sessions/${encodeURIComponent(oldName)}/rename`,
+          selectedNode.value,
+        ),
+        {
+          method: "POST",
+          body: JSON.stringify({ name: newName }),
+        },
+      );
       await refresh();
     } catch (err) {
       alert(`Rename failed: ${err.message}`);
@@ -132,9 +206,40 @@ export function HomePage() {
   };
 
   const list = sessions.value;
+  const nodeList = nodes.value;
 
   return (
     <>
+      {nodeError.value && (
+        <p class="hint">Failed to load nodes: {nodeError.value}</p>
+      )}
+      {nodeList && nodeList.length > 0 && (
+        <div id="nodePicker" class="node-picker" aria-label="Node">
+          <button
+            type="button"
+            class={`node-chip${selectedNode.value === "" ? " active" : ""}`}
+            data-node=""
+            onClick={() => pickNode("")}
+          >
+            local
+          </button>
+          {nodeList.map((n) => (
+            <button
+              type="button"
+              key={n.name}
+              class={`node-chip${selectedNode.value === n.name ? " active" : ""}${n.reachable === false ? " unreachable" : ""}`}
+              data-node={n.name}
+              title={n.target}
+              onClick={() => pickNode(n.name)}
+            >
+              {n.name}
+              {n.reachable === false && (
+                <span class="node-dead">unreachable</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
       <div id="sessionList" class="session-list">
         {error.value && (
           <p class="hint">Failed to load sessions: {error.value}</p>
