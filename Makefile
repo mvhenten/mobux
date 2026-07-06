@@ -24,7 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-mesh test-update-runner test-spa test-stt-ux test-stt-per-kind test-e2e \
+        test-smoke test-critical-path test-update-runner test-spa test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -177,14 +177,6 @@ test-critical-path:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
-
-# The cross-host peer relay was removed (phase 1 of #176 — mobux is moving to
-# a hub model instead). Kept as a no-op so CI's existing "make test-mesh" step
-# still resolves; drop this target and that CI step together once the
-# workflow change is approved.
-.PHONY: test-mesh
-test-mesh:
-	@echo "test-mesh: peer relay removed, see #176 — nothing to test"
 
 # Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
 # against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,
