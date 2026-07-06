@@ -217,6 +217,15 @@ test-spa:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/spa.spec.cjs
 
+# Fleet-node emulator sanity (issue #176 PR 4): boots throwaway sshd
+# "nodes" with generated keys, isolated HOME and scoped tmux sockets,
+# and proves the ssh → tmux pipe the hub proxy will ride. No mobux
+# instance and no browser involved, so no smoke-start and no build —
+# it only needs sshd, ssh-keygen and tmux on the host.
+.PHONY: test-fleet
+test-fleet:
+	npx playwright test test/fleet/sanity.spec.cjs --project=xterm
+
 .PHONY: test-e2e
 test-e2e:
 	@$(MAKE) smoke-start
