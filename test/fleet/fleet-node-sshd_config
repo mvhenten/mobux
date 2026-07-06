@@ -1,0 +1,8 @@
+Port 22
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+StrictModes no
+AuthorizedKeysFile /home/node/.ssh/authorized_keys
+LogLevel ERROR

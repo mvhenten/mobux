@@ -217,6 +217,18 @@ test-spa:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/spa.spec.cjs
 
+# Fleet e2e (issue #176 phase 4): emulated fleet of throwaway sshd+tmux
+# "nodes", each its own podman container (test/fleet/node.cjs,
+# Containerfile.fleet-node — see issue #183 for why a container and not
+# a host-native sshd), plus an isolated hub mobux on a random scratch
+# port. sanity.spec.cjs proves the node harness alone; hub-proxy.spec.cjs
+# drives the real browser → hub → ssh → tmux pipe with I/O round-trip
+# and resize assertions. Boots its own instances, so no smoke-start —
+# but the hub needs the built binary and embedded SPA, hence `build`.
+.PHONY: test-fleet
+test-fleet: build
+	npx playwright test test/fleet
+
 .PHONY: test-e2e
 test-e2e:
 	@$(MAKE) smoke-start
