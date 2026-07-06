@@ -1,4 +1,5 @@
 import { useRef, useLayoutEffect } from "preact/hooks";
+import { getSelectedNode } from "../lib/nodes.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -51,8 +52,11 @@ export function TerminalIsland({ session }) {
     if (bootedRef.current) return; // never boot twice
     bootedRef.current = true;
 
-    // 1. Globals the engine reads at module-eval time.
+    // 1. Globals the engine reads at module-eval time. MOBUX_NODE routes the
+    //    PTY WebSocket and every tmux call through the hub's SSH proxy to the
+    //    node picked on Home; unset ⇒ local host.
     window.MOBUX_SESSION = session;
+    window.MOBUX_NODE = getSelectedNode();
     window.MOBUX_DEV = false;
 
     // 2. Resolve the renderer choice exactly like the Rust page's inline
