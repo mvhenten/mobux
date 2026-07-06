@@ -89,9 +89,10 @@ struct AppState {
     /// other dev-only behavior and reported via `/api/build-info`.
     dev_mode: bool,
     /// SHA-256 prefix of the vendored JS bundles, computed by `web/build.js`
-    /// and written to `web/static/build-info.json` at build time. Injected
-    /// into the settings page so operators can verify whether the bundle on
-    /// disk matches what the browser has loaded.
+    /// and written to `web/static/build-info.json` at build time. Read from
+    /// the embedded copy of that file so released binaries carry the hash
+    /// wherever they run. Injected into the settings page so operators can
+    /// verify whether the bundle matches what the browser has loaded.
     build_hash: String,
     /// Tracks background STT install state (phase + rolling output tail).
     stt_install: Arc<tokio::sync::Mutex<SttInstallState>>,
@@ -149,13 +150,15 @@ async fn main() -> Result<()> {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let build_hash = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static/build-info.json"),
-    )
-    .ok()
-    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    .and_then(|v| v["hash"].as_str().map(str::to_owned))
-    .unwrap_or_else(|| "unknown".to_string());
+    // Read from the RustEmbed copy, not the source tree: `CARGO_MANIFEST_DIR`
+    // is the build machine's path, which doesn't exist where a released
+    // binary runs (#172). The embedded file is also exactly what the server
+    // serves at /static/build-info.json, so server and FE hashes match by
+    // construction.
+    let build_hash = StaticAssets::get("build-info.json")
+        .and_then(|f| serde_json::from_slice::<serde_json::Value>(&f.data).ok())
+        .and_then(|v| v["hash"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_string());
 
     let update_state = update::UpdateState::new();
     // Kick off the background crates.io poller (polls now, then every ~6h).

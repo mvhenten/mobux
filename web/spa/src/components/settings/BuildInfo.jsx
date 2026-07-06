@@ -13,6 +13,10 @@ const feHash = signal(null); // from /static/build-info.json
 
 const stale = computed(() => {
   if (!info.value || !feHash.value) return false;
+  // "unknown" means the server has no hash to compare against (e.g. a build
+  // without build-info.json embedded) — that's not evidence of staleness.
+  if (!info.value.build_hash || info.value.build_hash === "unknown")
+    return false;
   return info.value.build_hash !== feHash.value;
 });
 

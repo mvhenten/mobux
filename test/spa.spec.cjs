@@ -1209,10 +1209,14 @@ test("settings: build-info card shows version and matching hashes", async ({
   await expect(page.locator("#buildFeHash")).not.toHaveText("—", {
     timeout: 6000,
   });
-  // Fresh build: server hash and FE hash agree.
+  // Fresh build: server hash and FE hash agree. "unknown" means the binary
+  // lost its embedded build-info.json (#172) — never acceptable on a build
+  // that just served the matching FE bundle.
   const srv = await page.locator("#buildServerHash").textContent();
   const fe = await page.locator("#buildFeHash").textContent();
+  expect(srv.trim()).not.toBe("unknown");
   expect(srv.trim()).toBe(fe.trim());
+  await expect(page.locator("#buildStaleRow")).toHaveCount(0);
 });
 
 // ── regression: second terminal session renders after navigating home → terminal → home → terminal
