@@ -90,6 +90,27 @@ test("terminal I/O round-trips through the ssh proxy", async ({ page }) => {
   expect(pane).toContain(marker);
 });
 
+// Exit condition 2 of #176: the 3-prompt bug is unreproducible — a
+// whole hub → remote-node session costs at most one auth challenge.
+// The Authorization header is set up-front, so ANY 401 here means the
+// proxy leaked a second auth boundary.
+test("no extra auth challenge crossing to the node", async ({ page }) => {
+  const challenges = [];
+  page.on("response", (res) => {
+    if (res.status() === 401) challenges.push(res.url());
+  });
+  await bootRemoteTerminal(page);
+  const marker = `MOBUX_FLEET_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect
+    .poll(() => node.tmux(["capture-pane", "-p", "-t", SESSION]), {
+      timeout: 10000,
+      intervals: [200, 400, 800],
+    })
+    .toContain(marker);
+  expect(challenges, "unexpected 401s during fleet session").toEqual([]);
+});
+
 test("resize reaches the remote PTY", async ({ page }) => {
   await bootRemoteTerminal(page);
   const dims = () =>
