@@ -4,6 +4,13 @@
 // smoke instance, or the shared sqlite config. Mirrors the env of
 // `make smoke-start` minus the fixed port and /tmp/mobux-smoke paths.
 //
+// Fleet wiring: the backend dials nodes with plain `ssh <target>`
+// (src/nodes.rs, src/tmux.rs), so each emulated node becomes a Host
+// alias in the hub's sandboxed ~/.ssh/config carrying the port,
+// identity and known-hosts scoping — then the node's inventory target
+// is just the alias. The inventory itself goes in through the real
+// surface, PUT /api/settings/nodes, after boot.
+//
 //   const { startHub } = require("./hub.cjs");
 //   const hub = await startHub({ nodes: [node] });
 //   hub.base; // http://127.0.0.1:<port>
@@ -44,20 +51,32 @@ async function waitForHttp(base, timeoutMs) {
   }
 }
 
-// TODO(feat/node-inventory-ssh-proxy): translate the emulated nodes
-// into whatever the backend reads its inventory from (env / config
-// file / DB seed). This seam is the only place the wiring lands; each
-// node exposes { name, port, user, identity, socket } — enough for a
-// `ssh -p <port> -i <identity> <user>@127.0.0.1` target definition.
-function nodeInventoryEnv(nodes) {
-  void nodes;
-  return {};
+function writeSshConfig(home, nodes) {
+  const sshDir = path.join(home, ".ssh");
+  fs.mkdirSync(sshDir, { mode: 0o700 });
+  const blocks = nodes.map((node) =>
+    [
+      `Host ${node.name}`,
+      "  HostName 127.0.0.1",
+      `  Port ${node.port}`,
+      `  User ${node.user}`,
+      `  IdentityFile ${node.identity}`,
+      `  UserKnownHostsFile ${node.knownHosts}`,
+      "  StrictHostKeyChecking no",
+      "  IdentitiesOnly yes",
+      "",
+    ].join("\n"),
+  );
+  fs.writeFileSync(path.join(sshDir, "config"), blocks.join("\n"), {
+    mode: 0o600,
+  });
 }
 
 async function startHub({ nodes = [] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mobux-fleet-hub-"));
   const home = path.join(dir, "home");
   fs.mkdirSync(home);
+  writeSshConfig(home, nodes);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const log = path.join(dir, "mobux.log");
@@ -76,10 +95,26 @@ async function startHub({ nodes = [] } = {}) {
       PORT: String(port),
       MOBUX_AUTH_USER: HUB_USER,
       MOBUX_PIN: HUB_PIN,
-      ...nodeInventoryEnv(nodes),
     },
   });
   await waitForHttp(base, 10000);
+
+  const authHeader =
+    "Basic " + Buffer.from(`${HUB_USER}:${HUB_PIN}`).toString("base64");
+
+  if (nodes.length > 0) {
+    const res = await fetch(base + "/api/settings/nodes", {
+      method: "PUT",
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        nodes: nodes.map((node) => ({ name: node.name, target: node.name })),
+      }),
+    });
+    if (!res.ok) throw new Error(`PUT /api/settings/nodes -> ${res.status}`);
+  }
 
   let stopped = false;
   return {
@@ -89,8 +124,7 @@ async function startHub({ nodes = [] } = {}) {
     log,
     user: HUB_USER,
     pass: HUB_PIN,
-    authHeader:
-      "Basic " + Buffer.from(`${HUB_USER}:${HUB_PIN}`).toString("base64"),
+    authHeader,
     async stop() {
       if (stopped) return;
       stopped = true;
@@ -109,4 +143,7 @@ async function startHub({ nodes = [] } = {}) {
   };
 }
 
-module.exports = { startHub };
+const HUB_AUTH =
+  "Basic " + Buffer.from(`${HUB_USER}:${HUB_PIN}`).toString("base64");
+
+module.exports = { startHub, HUB_AUTH };

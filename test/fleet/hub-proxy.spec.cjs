@@ -1,41 +1,33 @@
-// PENDING — full fleet e2e: browser → hub mobux → `?node=` ssh proxy →
-// emulated node's tmux (issue #176, PR 4). The hub-side node inventory
-// + transparent ssh proxy is being built on feat/node-inventory-ssh-proxy;
-// until it lands these tests are skipped. Wiring them up when it does:
+// Full fleet e2e (issue #176 phase 4): browser → hub mobux → transparent
+// SSH proxy → emulated node's tmux. The node is a real throwaway sshd
+// (test/fleet/node.cjs); the hub is a real isolated mobux instance
+// (test/fleet/hub.cjs) that reaches the node exactly like production —
+// its own ssh binary, its own ~/.ssh/config, keys it holds itself.
 //
-//   1. fill in `nodeInventoryEnv()` in test/fleet/hub.cjs — the only
-//      seam that knows how the hub learns about nodes,
-//   2. fix `nodeParam()` below if the URL shape differs from
-//      `/app#/s/<session>?node=<name>`,
-//   3. flip PROXY_LANDED to true.
+// The SPA picks the node the way a user does: the Home picker persists
+// `localStorage["mobux:node"]`, TerminalIsland pins window.MOBUX_NODE
+// from it, and every PTY/tmux call carries ?node=<name>. The spec seeds
+// that key instead of clicking through the picker — the picker UI has
+// its own coverage in test/spa.spec.cjs.
 //
-// Everything else (node emulation, isolated hub boot, the assertions)
-// is already exercised — the node harness by sanity.spec.cjs, the hub
-// boot env by `make smoke-start` which it mirrors.
-
-const PROXY_LANDED = false;
+// Run with: make test-fleet
 
 const { test, expect } = require("../fixtures.cjs");
 const { startNode } = require("./node.cjs");
-const { startHub } = require("./hub.cjs");
+const { startHub, HUB_AUTH } = require("./hub.cjs");
 
 const SESSION = "fleet-e2e";
 
 let node, hub;
 
-test.skip(
-  !PROXY_LANDED,
-  "pending backend: feat/node-inventory-ssh-proxy (#176)",
-);
+test.use({ extraHTTPHeaders: { Authorization: HUB_AUTH } });
 
 test.beforeAll(async () => {
   node = await startNode({ name: "remote" });
   hub = await startHub({ nodes: [node] });
   // The session lives on the NODE's tmux server — the hub has no
   // session of this name, so any output we see must have crossed ssh.
-  node.ssh(
-    `tmux -L ${node.socket} new-session -d -s ${SESSION} 'bash --norc --noprofile'`,
-  );
+  node.ssh(`tmux new-session -d -s ${SESSION} 'bash --norc --noprofile'`);
   node.tmux(["send-keys", "-t", SESSION, "PS1='$ '", "Enter"]);
   node.tmux(["send-keys", "-t", SESSION, "clear", "Enter"]);
 });
@@ -45,13 +37,13 @@ test.afterAll(async () => {
   if (node) await node.stop();
 });
 
-function nodeParam(session) {
-  return `/app#/s/${session}?node=${node.name}`;
-}
-
 async function bootRemoteTerminal(page) {
-  await page.setExtraHTTPHeaders({ Authorization: hub.authHeader });
-  await page.goto(hub.base + nodeParam(SESSION), { waitUntil: "load" });
+  await page.addInitScript((name) => {
+    try {
+      localStorage.setItem("mobux:node", name);
+    } catch (_) {}
+  }, node.name);
+  await page.goto(`${hub.base}/app#/s/${SESSION}`, { waitUntil: "load" });
   await page.waitForFunction(
     () => {
       const t = document.getElementById("terminal");

@@ -1,6 +1,6 @@
 // Sanity spec for the fleet-node emulator (test/fleet/node.cjs): boots
-// a throwaway sshd, drives its scoped tmux over the real ssh pipe, and
-// tears down. This proves the harness itself — no mobux backend
+// a throwaway sshd, drives its isolated tmux over the real ssh pipe,
+// and tears down. This proves the harness itself — no mobux backend
 // involved — so the hub-proxy e2e (hub-proxy.spec.cjs) only has to
 // assert the proxy, not debug sshd plumbing.
 //
@@ -16,19 +16,21 @@ test.beforeEach(({}, testInfo) => {
   test.skip(testInfo.project.name !== "xterm", "renderer-independent");
 });
 
-test("ssh into an emulated node and reach its scoped tmux", async () => {
+test("ssh into an emulated node and reach its isolated tmux", async () => {
   const node = await startNode({ name: "sanity" });
   try {
-    // Single exec channel, exactly what the hub proxy will do:
-    // authenticate with the generated key, no agent, no known_hosts
-    // pollution, then talk to the node's own tmux server.
-    const out = node.ssh(
-      `tmux -L ${node.socket} new-session -d && tmux -L ${node.socket} list-sessions`,
-    );
+    // Single exec channel, exactly what the hub proxy does: authenticate
+    // with the generated key, no agent, no known_hosts pollution, then
+    // plain `tmux` — the node's TMUX_TMPDIR keeps its default socket
+    // away from the user's real /tmp/tmux-<uid>/default server.
+    const out = node.ssh("tmux new-session -d && tmux list-sessions");
     expect(out).toMatch(/^0: \d+ windows/m);
-    // The session lives on the node's scoped server, visible locally
-    // through the same socket.
+    // The session lives on the node's own server, visible locally
+    // through the same TMUX_TMPDIR…
     expect(node.tmux(["list-sessions"])).toMatch(/^0: \d+ windows/m);
+    // …whose socket really sits inside the node's sandbox.
+    const socketPath = node.ssh("tmux display -p '#{socket_path}'").trim();
+    expect(socketPath.startsWith(node.dir)).toBe(true);
   } finally {
     await node.stop();
   }
@@ -50,9 +52,9 @@ test("two nodes run concurrently without colliding", async () => {
   ]);
   try {
     expect(alpha.port).not.toBe(beta.port);
-    expect(alpha.socket).not.toBe(beta.socket);
-    alpha.ssh(`tmux -L ${alpha.socket} new-session -d -s only-alpha`);
-    beta.ssh(`tmux -L ${beta.socket} new-session -d -s only-beta`);
+    expect(alpha.tmuxTmpdir).not.toBe(beta.tmuxTmpdir);
+    alpha.ssh("tmux new-session -d -s only-alpha");
+    beta.ssh("tmux new-session -d -s only-beta");
     const alphaSessions = alpha.tmux(["list-sessions"]);
     const betaSessions = beta.tmux(["list-sessions"]);
     expect(alphaSessions).toContain("only-alpha");

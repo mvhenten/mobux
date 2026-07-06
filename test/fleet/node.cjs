@@ -1,17 +1,23 @@
 // Emulated fleet node for e2e tests: a throwaway sshd on a high
-// 127.0.0.1 port with generated keys, an isolated HOME, and its own
-// tmux server (`tmux -L <socket>`). This is what issue #176 calls a
-// "node" — sshd + tmux, nothing else — so tests can drive the real
+// 127.0.0.1 port with generated keys, an isolated HOME, and an
+// isolated tmux server. This is what issue #176 calls a "node" —
+// sshd + tmux, nothing else — so tests can drive the real
 // hub → ssh → tmux pipe without touching the host's ssh config, the
 // user's tmux server, or anything system-level. Everything lives in
 // one temp dir and is removed by `node.stop()`.
 //
+// tmux isolation works via TMUX_TMPDIR (pinned per-session through the
+// authorized_keys `environment=` option, like HOME): the hub proxy runs
+// plain `tmux ...` on the node — no `-L` — so scoping the DEFAULT
+// socket's directory is what keeps the node's tmux server away from the
+// real /tmp/tmux-<uid>/default one.
+//
 // Multiple nodes run concurrently: each gets its own temp dir, port,
-// and tmux socket name, so there is nothing to collide on.
+// and TMUX_TMPDIR, so there is nothing to collide on.
 //
 //   const { startNode } = require("./node.cjs");
 //   const node = await startNode({ name: "alpha" });
-//   node.ssh("tmux -L " + node.socket + " list-sessions");
+//   node.ssh("tmux new-session -d && tmux list-sessions");
 //   node.tmux(["list-sessions"]); // same server, local shortcut
 //   await node.stop();
 
@@ -62,22 +68,23 @@ async function startNode({ name = "node" } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `mobux-fleet-${name}-`));
   const home = path.join(dir, "home");
   fs.mkdirSync(home);
+  const tmuxTmpdir = path.join(dir, "tmux");
+  fs.mkdirSync(tmuxTmpdir);
   const hostKey = path.join(dir, "host_key");
   const identity = path.join(dir, "client_key");
   keygen(hostKey);
   keygen(identity);
 
-  // The socket name inherits the temp dir's random suffix, so two
-  // nodes on the same uid never share a tmux server.
-  const socket = `mobux-fleet-${path.basename(dir).slice(-6)}`;
-
-  // The `environment=` option (with PermitUserEnvironment) pins the
-  // session's HOME to the node's sandbox, so shells and the node's
-  // tmux server never read the real user's rc files or ~/.tmux.conf.
+  // The `environment=` options (with PermitUserEnvironment) pin the
+  // session's HOME and TMUX_TMPDIR to the node's sandbox, so shells
+  // never read the real user's rc files or ~/.tmux.conf, and plain
+  // `tmux` — exactly what the hub proxy runs — gets its own server
+  // instead of the user's /tmp/tmux-<uid>/default one.
   const authorizedKeys = path.join(dir, "authorized_keys");
   fs.writeFileSync(
     authorizedKeys,
-    `environment="HOME=${home}" ${fs.readFileSync(identity + ".pub")}`,
+    `environment="HOME=${home}",environment="TMUX_TMPDIR=${tmuxTmpdir}" ` +
+      fs.readFileSync(identity + ".pub"),
     { mode: 0o600 },
   );
   const knownHosts = path.join(dir, "known_hosts");
@@ -144,8 +151,8 @@ async function startNode({ name = "node" } = {}) {
     name,
     dir,
     home,
+    tmuxTmpdir,
     port,
-    socket,
     user,
     identity,
     knownHosts,
@@ -156,19 +163,26 @@ async function startNode({ name = "node" } = {}) {
         stdio: "pipe",
       }).toString();
     },
-    // Local shortcut to the node's scoped tmux server (same host, so
-    // no ssh needed for setup/teardown/inspection).
+    // Local shortcut to the node's tmux server (same host, so no ssh
+    // needed for setup/teardown/inspection) — same TMUX_TMPDIR, same
+    // default socket the hub proxy talks to.
     tmux(args) {
-      return execFileSync("tmux", ["-L", socket, ...args], {
+      const { TMUX, TMUX_PANE, ...env } = process.env;
+      return execFileSync("tmux", args, {
         stdio: "pipe",
-        env: { ...process.env, HOME: home, HISTFILE: "/dev/null" },
+        env: {
+          ...env,
+          HOME: home,
+          TMUX_TMPDIR: tmuxTmpdir,
+          HISTFILE: "/dev/null",
+        },
       }).toString();
     },
     async stop() {
       if (stopped) return;
       stopped = true;
       try {
-        execFileSync("tmux", ["-L", socket, "kill-server"], { stdio: "pipe" });
+        this.tmux(["kill-server"]);
       } catch (_) {}
       if (sshd.exitCode === null) {
         const gone = new Promise((resolve) => sshd.once("exit", resolve));
