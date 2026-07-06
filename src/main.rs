@@ -22,8 +22,8 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64URL},
     Engine,
 };
-use futures_util::{SinkExt, StreamExt};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use futures_util::{future, SinkExt, StreamExt};
+use portable_pty::{native_pty_system, PtySize};
 use rand::{distr::Alphanumeric, Rng};
 use regex::Regex;
 use serde::Deserialize;
@@ -42,6 +42,7 @@ use serde_json::json;
 struct StaticAssets;
 
 mod db;
+mod nodes;
 mod push;
 mod shell_integration;
 mod ssl;
@@ -225,6 +226,11 @@ async fn main() -> Result<()> {
         )
         .route("/api/sessions/{name}/history", get(api_session_history))
         .route("/api/sessions/{name}/command", post(api_tmux_command))
+        .route(
+            "/api/settings/nodes",
+            get(api_get_settings_nodes).put(api_set_settings_nodes),
+        )
+        .route("/api/nodes", get(api_nodes_status))
         .route(
             "/api/telemetry",
             post(api_telemetry).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
@@ -626,8 +632,14 @@ async fn root_redirect() -> impl IntoResponse {
 // Old `index` handler removed — the root path now redirects to `/app` via
 // `root_redirect`. `render_index` is also removed; the SPA Home page is canonical.
 
-async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
-    let sessions = tmux::list_sessions().await.map_err(AppError::bad_request)?;
+async fn api_sessions(
+    State(state): State<AppState>,
+    Query(q): Query<NodeQuery>,
+) -> Result<Json<Vec<tmux::Session>>, AppError> {
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    let sessions = tmux::list_sessions(target.as_deref())
+        .await
+        .map_err(AppError::bad_request)?;
     Ok(Json(sessions))
 }
 
@@ -756,11 +768,13 @@ struct CreateReq {
 
 async fn api_create_session(
     State(state): State<AppState>,
+    Query(q): Query<NodeQuery>,
     Json(payload): Json<CreateReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let name = payload.name.trim();
     validate_session_name(&state, name)?;
-    tmux::new_session(name)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    tmux::new_session(name, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true, "name": name})))
@@ -769,9 +783,11 @@ async fn api_create_session(
 async fn api_kill_session(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(q): Query<NodeQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
-    tmux::kill_session(&name)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    tmux::kill_session(&name, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true})))
@@ -785,11 +801,13 @@ struct RenameReq {
 async fn api_rename_session(
     State(state): State<AppState>,
     Path(old_name): Path<String>,
+    Query(q): Query<NodeQuery>,
     Json(payload): Json<RenameReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &old_name)?;
     validate_session_name(&state, &payload.name)?;
-    tmux::rename_session(&old_name, &payload.name)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    tmux::rename_session(&old_name, &payload.name, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true})))
@@ -798,9 +816,11 @@ async fn api_rename_session(
 async fn api_list_panes(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(q): Query<NodeQuery>,
 ) -> Result<Json<Vec<tmux::Pane>>, AppError> {
     validate_session_name(&state, &name)?;
-    let panes = tmux::list_panes(&name)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    let panes = tmux::list_panes(&name, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(panes))
@@ -809,9 +829,11 @@ async fn api_list_panes(
 async fn api_select_pane(
     State(state): State<AppState>,
     Path((name, pane)): Path<(String, String)>,
+    Query(q): Query<NodeQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
-    tmux::select_pane(&name, &pane)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    tmux::select_pane(&name, &pane, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true})))
@@ -820,9 +842,11 @@ async fn api_select_pane(
 async fn api_session_history(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(q): Query<NodeQuery>,
 ) -> Result<String, AppError> {
     validate_session_name(&state, &name)?;
-    let history = tmux::capture_history(&name, 10000)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    let history = tmux::capture_history(&name, 10000, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(history)
@@ -836,10 +860,12 @@ struct CommandReq {
 async fn api_tmux_command(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(q): Query<NodeQuery>,
     Json(payload): Json<CommandReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
-    let result = tmux::run_command(&name, &payload.command)
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
+    let result = tmux::run_command(&name, &payload.command, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true, "output": result})))
@@ -1461,14 +1487,49 @@ async fn serve_file_or_404(
     resp
 }
 
+/// Optional `?node=<name>` accepted by the terminal WS and every
+/// `/api/sessions*` route. Absent means today's behavior (local tmux);
+/// naming a node that isn't configured is a hard error — never a silent
+/// fall-back to local.
+#[derive(Deserialize)]
+struct NodeQuery {
+    node: Option<String>,
+}
+
+/// Resolve a `?node=` query value to the node's ssh target. `None` in ->
+/// `None` out (local). `Some(name)` that isn't a configured node is a 400 —
+/// callers must never silently fall back to local for a typo'd node name.
+async fn resolve_node_target(
+    state: &AppState,
+    node: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(name) = node else { return Ok(None) };
+    let name = name.to_string();
+    let found = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        let name = name.clone();
+        move || db.get_node(&name)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    found.map(|n| Some(n.target)).ok_or_else(|| {
+        AppError::bad_request(anyhow::anyhow!(
+            "unknown node {name:?} — check Settings › Nodes"
+        ))
+    })
+}
+
 async fn terminal_ws(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(q): Query<NodeQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     validate_session_name(&state, &name)?;
+    let ssh_target = resolve_node_target(&state, q.node.as_deref()).await?;
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_ws(socket, name).await {
+        if let Err(err) = handle_ws(socket, name, ssh_target).await {
             eprintln!("ws error: {err:#}");
         }
     }))
@@ -1482,7 +1543,11 @@ struct ResizeMsg {
     rows: u16,
 }
 
-async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -> Result<()> {
+async fn handle_ws(
+    socket: axum::extract::ws::WebSocket,
+    session_name: String,
+    ssh_target: Option<String>,
+) -> Result<()> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -1491,9 +1556,11 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -
         pixel_height: 0,
     })?;
 
-    let mut cmd = CommandBuilder::new("bash");
-    let tmux_bin = match std::env::var("MOBUX_TMUX_SOCKET") {
-        Ok(s) if !s.is_empty() => format!("tmux -L {}", s),
+    // MOBUX_TMUX_SOCKET is hub-local test isolation (a dedicated tmux server
+    // for the test suite) — meaningless on a remote node, so it only applies
+    // to the local path.
+    let tmux_bin = match (&ssh_target, std::env::var("MOBUX_TMUX_SOCKET")) {
+        (None, Ok(s)) if !s.is_empty() => format!("tmux -L {}", s),
         _ => "tmux".to_string(),
     };
     // Force a real terminfo entry on the spawned PTY. The host's TERM
@@ -1503,19 +1570,18 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -
     // clear`, the bash subprocess exits 1, and the WS gets nothing past
     // the 57-byte init handshake. The browser-side renderer (aceterm /
     // libterm) is xterm-256color compatible, so use that unconditionally.
-    cmd.env("TERM", "xterm-256color");
     // `allow-passthrough on` is required for the OSC 133 shell-integration
     // snippet's tmux DCS-passthrough wrap (\ePtmux;\e<seq>\e\\) to reach
     // the outer terminal. tmux 3.4 defaults this off, and silently drops
     // OSC 133 entirely without it; tmux 3.5+ also honours the option.
-    cmd.args([
-        "-c",
-        &format!(
-            "{tmux} set-option -g mouse on 2>/dev/null; {tmux} set-option -g allow-passthrough on 2>/dev/null; {tmux} set-window-option -g aggressive-resize on 2>/dev/null; {tmux} attach-session -t {session}",
-            tmux = tmux_bin,
-            session = session_name,
-        ),
-    ]);
+    //
+    // Local vs. remote (node) is the ONLY difference: same PTY, same tmux
+    // setup commands, same resize path — just `bash -c "..."` vs.
+    // `ssh -tt <target> "..."` (see nodes::build_attach_command). A failed
+    // ssh connect prints its own diagnostic to the pty and exits, which
+    // flows through unchanged — the same "command exited, here's why" path
+    // a dead local tmux server already takes.
+    let cmd = nodes::build_attach_command(ssh_target.as_deref(), &tmux_bin, &session_name);
     let mut child = pair.slave.spawn_command(cmd)?;
 
     let mut reader = pair.master.try_clone_reader()?;
@@ -1608,6 +1674,125 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+// ── Node inventory (issue #176 phase 2) ───────────────────────────────
+
+#[derive(serde::Serialize, Deserialize)]
+struct NodeJson {
+    name: String,
+    target: String,
+}
+
+#[derive(serde::Serialize)]
+struct NodesGetJson {
+    nodes: Vec<NodeJson>,
+}
+
+#[derive(Deserialize)]
+struct NodesPutJson {
+    nodes: Vec<NodeJson>,
+}
+
+/// GET /api/settings/nodes — the configured node list, name + ssh target.
+/// Mirrors GET /api/settings/stt: read-only reflection of what's stored.
+async fn api_get_settings_nodes(
+    State(state): State<AppState>,
+) -> Result<Json<NodesGetJson>, AppError> {
+    let nodes = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.list_nodes()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    Ok(Json(NodesGetJson {
+        nodes: nodes
+            .into_iter()
+            .map(|n| NodeJson {
+                name: n.name,
+                target: n.target,
+            })
+            .collect(),
+    }))
+}
+
+/// PUT /api/settings/nodes — replaces the whole node list (not a patch),
+/// mirroring how the rest of the settings surface treats a PUT as "this is
+/// now the full config". "No nodes configured" (an empty list) is the
+/// default and behaves exactly like today's single-host mobux.
+async fn api_set_settings_nodes(
+    State(state): State<AppState>,
+    Json(req): Json<NodesPutJson>,
+) -> Result<StatusCode, AppError> {
+    let mut seen = std::collections::HashSet::new();
+    for n in &req.nodes {
+        if n.name.trim().is_empty() || n.target.trim().is_empty() {
+            return Err(AppError::bad_request(anyhow::anyhow!(
+                "node name and target must not be empty"
+            )));
+        }
+        if !seen.insert(n.name.clone()) {
+            return Err(AppError::bad_request(anyhow::anyhow!(
+                "duplicate node name: {}",
+                n.name
+            )));
+        }
+    }
+
+    tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        let pairs = req.nodes.into_iter().map(|n| (n.name, n.target)).collect();
+        move || db.replace_nodes(pairs)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Serialize)]
+struct NodeStatusJson {
+    name: String,
+    target: String,
+    reachable: bool,
+}
+
+#[derive(serde::Serialize)]
+struct NodesStatusJson {
+    nodes: Vec<NodeStatusJson>,
+}
+
+/// GET /api/nodes — configured nodes plus a live reachability flag, probed
+/// concurrently (`ConnectTimeout=3` per node, see `nodes::probe_reachable`)
+/// so one dead node never delays the others or blocks the response.
+async fn api_nodes_status(
+    State(state): State<AppState>,
+) -> Result<Json<NodesStatusJson>, AppError> {
+    let db_nodes = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.list_nodes()
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let probes = db_nodes
+        .iter()
+        .map(|n| nodes::probe_reachable(&n.target, std::time::Duration::from_secs(3)));
+    let reachable = future::join_all(probes).await;
+
+    let out = db_nodes
+        .into_iter()
+        .zip(reachable)
+        .map(|(n, reachable)| NodeStatusJson {
+            name: n.name,
+            target: n.target,
+            reachable,
+        })
+        .collect();
+    Ok(Json(NodesStatusJson { nodes: out }))
 }
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
