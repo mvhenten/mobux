@@ -4,20 +4,20 @@ import { useRef, useLayoutEffect } from "preact/hooks";
 //
 // Wraps the EXISTING mobux terminal engine instead of reimplementing it. The
 // engine (`/static/terminal.js`) is a side-effecting ES module that, on load:
-//   * reads window.MOBUX_SESSION / MOBUX_PEER / MOBUX_DEV,
+//   * reads window.MOBUX_SESSION / MOBUX_DEV,
 //   * binds to a fixed set of DOM ids (#terminal, #reader, #loadquote, the
 //     #inputBar ribbon, the #cmdPickList overlay, …),
-//   * constructs TerminalCore (xterm or sterk), opens the PTY WebSocket via
-//     window.MobuxMesh.wsUrl(), and wires every gesture / input-bar handler.
+//   * constructs TerminalCore (xterm or sterk), opens the PTY WebSocket, and
+//     wires every gesture / input-bar handler.
 //
 // So the island's job is purely a HOST:
 //   1. Render the exact DOM scaffold the engine expects (mirrors the markup in
 //      the Rust `render_terminal_page`).
 //   2. Set the window globals.
 //   3. Load the same script chain, in order, that the Rust page loads:
-//        renderer-picker  → vendor bundle (xterm|sterk) → mesh-client.js
-//        → host-picker.js → terminal.js (module). All served by the backend
-//        through the Vite proxy, so the REAL engine bundle runs unchanged.
+//        renderer-picker → vendor bundle (xterm|sterk) → terminal.js (module).
+//        All served by the backend through the Vite proxy, so the REAL engine
+//        bundle runs unchanged.
 //
 // This runs ONCE in a layout effect. Preact never re-renders the inner DOM
 // (no children, the ref'd subtree is owned by the engine), so the terminal is
@@ -42,7 +42,7 @@ function loadScript(src, { module = false } = {}) {
   });
 }
 
-export function TerminalIsland({ session, peer = "" }) {
+export function TerminalIsland({ session }) {
   const rootRef = useRef(null);
   const bootedRef = useRef(false);
   const resizeObsRef = useRef(null);
@@ -53,7 +53,6 @@ export function TerminalIsland({ session, peer = "" }) {
 
     // 1. Globals the engine reads at module-eval time.
     window.MOBUX_SESSION = session;
-    window.MOBUX_PEER = peer || "";
     window.MOBUX_DEV = false;
 
     // 2. Resolve the renderer choice exactly like the Rust page's inline
@@ -76,18 +75,10 @@ export function TerminalIsland({ session, peer = "" }) {
     }
 
     // 3. Load the chain in order. Vendor bundle (sets window.Terminal /
-    //    window.Sterk) → mesh-client (window.MobuxMesh) → host-picker →
-    //    the engine module. The engine boots itself on load.
+    //    window.Sterk) → the engine module. The engine boots itself on load.
     (async () => {
       try {
         await loadScript(`/static/vendor/${bundle}${v}`);
-        // Skip if HostPicker (or a prior terminal mount) already loaded it —
-        // mesh-client.js uses top-level `const` declarations that throw a
-        // SyntaxError if the same script body executes twice in the same page.
-        if (!window.MobuxMesh) {
-          await loadScript(`/static/mesh-client.js${v}`);
-        }
-        await loadScript(`/static/host-picker.js${v}`);
         await loadScript(`/static/terminal.js${v}`, { module: true });
         // chime.js sets up the in-page bell that plays when the SW delivers a
         // push notification. It self-boots via IIFE (attaches to SW messages),

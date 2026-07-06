@@ -57,46 +57,18 @@ test("index loads", async ({ page }) => {
   await expect(page).toHaveTitle(/Mobux/);
 });
 
-// Per-host link pinning (issue #123): clicking a session row navigates to
-// /app#/s/<name> with no peer, or /app#/s/<host>/<name> with a peer.
-// Home.jsx open() assigns window.location.href then calls location.reload().
-// We let both happen and catch the landed URL via page.waitForURL.
-test("sessionRow pins /app#/s/<host>/<name> when a peer is selected, plain when not", async ({
-  page,
-}) => {
-  // Case 1: no peer → /app#/s/<name> (single segment, no host).
+// Clicking a session row navigates to /app#/s/<name>. Home.jsx open() assigns
+// window.location.href then calls location.reload(); we let both happen and
+// catch the landed URL via page.waitForURL.
+test("sessionRow navigates to /app#/s/<name>", async ({ page }) => {
   await page.goto(`${BASE}/app#/`);
-  // HostPicker loads mesh-client.js async; wait for it before touching it.
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
   await page.waitForSelector(".session-item", { timeout: 8000 });
-  // Clear any leftover peer from a previous run.
-  await page.evaluate(() => window.MobuxMesh.setPeer(""));
 
   await Promise.all([
     page.waitForURL(/\/app#\/s\//, { timeout: 5000 }),
     page.locator(".session-item").first().click(),
   ]);
   expect(page.url()).toMatch(/\/app#\/s\/[^/]+$/);
-
-  // Case 2: peer 'box:8443' → /app#/s/box%3A8443/<name>.
-  await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  await page.waitForSelector(".session-item", { timeout: 8000 });
-  // Inject peer + cred so ensurePeerCred resolves without a dialog.
-  await page.evaluate(() => {
-    window.MobuxMesh.setPeer("box:8443");
-    window.MobuxMesh.setPeerCred("box:8443", "u", "x");
-  });
-
-  await Promise.all([
-    page.waitForURL(/\/app#\/s\//, { timeout: 5000 }),
-    page.locator(".session-item").first().click(),
-  ]);
-  expect(page.url()).toMatch(/\/app#\/s\/box%3A8443\//);
 });
 
 test("sessions API works", async ({ page }) => {
@@ -2564,136 +2536,23 @@ test("rb-speaking survives a buffer-change re-render mid-speech", async ({
   expect(after.speakingCount).toBe(1);
 });
 
-// ── Host picker (mesh EDD phase 3) ──────────────────────────────────
-// These run against the single smoke instance: tailscale is typically
-// unavailable in the test env, which exercises the error-surfacing path
-// (a structured 502, never an empty picker). The current node ("This
-// host") is always the first option and the zero-config default.
-
-// SPA uses a native <select class="host-select"> inside .spa-host-picker instead
-// of the legacy .host-trigger + .host-dropdown + .peer-option DOM. MobuxMesh is
-// loaded asynchronously by HostPicker.jsx on mount; each test waits for it.
-
-test("host picker: trigger renders, current node listed first", async ({
+test("session list: error body renders as text, not HTML (XSS)", async ({
   page,
 }) => {
-  await page.goto(`${BASE}/app#/`);
-  // Wait for HostPicker to load mesh-client.js and set window.MobuxMesh.
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  // SPA renders a native <select> in .spa-host-picker — no popover trigger.
-  await expect(page.locator(".spa-host-picker .host-select")).toBeVisible();
-  // Default: no peer stored.
-  const peer = await page.evaluate(() => window.MobuxMesh.getPeer());
-  expect(peer).toBe("");
-  // The select's first and currently-selected option is "This host" (value='').
-  const firstOptText = await page
-    .locator(".host-select option")
-    .first()
-    .textContent();
-  expect(firstOptText).toContain("This host");
-  const selectedVal = await page.$eval(".host-select", (el) => el.value);
-  expect(selectedVal).toBe("");
-});
-
-test("host picker: never shows an empty picker (error or hint)", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  // The select must always have at least one option ("This host") and be visible.
-  await expect(page.locator(".host-select")).toBeVisible();
-  const optCount = await page.locator(".host-select option").count();
-  expect(optCount).toBeGreaterThan(0);
-  // "This host" always present regardless of peers API result.
-  const firstOpt = await page
-    .locator(".host-select option")
-    .first()
-    .textContent();
-  expect(firstOpt.trim().length).toBeGreaterThan(0);
-});
-
-test("host picker: selecting current node changes nothing (same-origin)", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  // Select "This host" (value '') via the native select — same as the default.
-  await page.selectOption(".host-select", { value: "" });
-  // Still same-origin: no peer stored, API paths stay non-relayed.
-  const state = await page.evaluate(() => ({
-    peer: window.MobuxMesh.getPeer(),
-    apiPath: window.MobuxMesh.apiPath("/api/sessions"),
-    ws: window.MobuxMesh.wsUrl("demo"),
-  }));
-  expect(state.peer).toBe("");
-  expect(state.apiPath).toBe("/api/sessions");
-  expect(state.ws).not.toContain("/r/");
-  expect(state.ws).not.toContain("upstream_auth");
-  // Sessions still load over the plain path.
-  const res = await page.request.get(`${BASE}/api/sessions`);
-  expect(res.ok()).toBeTruthy();
-});
-
-test("mesh client: peer selection rewrites API + WS paths and carries creds", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  const out = await page.evaluate(() => {
-    const m = window.MobuxMesh;
-    m.setPeer("peerhost:5151");
-    m.setPeerCred("peerhost:5151", "bob", "12345");
-    const result = {
-      apiPath: m.apiPath("/api/sessions"),
-      ws: m.wsUrl("demo"),
-      cred: m.getPeerCred("peerhost:5151"),
+  // Make the initial /api/sessions fetch reject with attacker-controlled
+  // content. Home.jsx's error.value renders through Preact text
+  // interpolation, so this must land as text, never as parsed markup.
+  await page.addInitScript(() => {
+    const origFetch = window.fetch;
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/api/sessions") && (!init || !init.method)) {
+        return Promise.reject(new Error("<img src=x onerror=window.__xss=1>"));
+      }
+      return origFetch(input, init);
     };
-    // Clean up so other tests start from the current node.
-    m.setPeer("");
-    m.clearPeerCred("peerhost:5151");
-    return result;
   });
-  // The peer segment is base64url-encoded (encodePeer in mesh-client.js), so
-  // "peerhost:5151" relays as its base64url form — the colon never reaches the
-  // URL path. Compute it the same way the client does instead of hardcoding.
-  const encPeer = btoa("peerhost:5151")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=/g, "");
-  expect(out.apiPath).toBe(`/r/${encPeer}/api/sessions`);
-  expect(out.ws).toContain(`/r/${encPeer}/ws/demo`);
-  expect(out.ws).toContain("upstream_auth=");
-  // base64("bob:12345")
-  expect(out.cred).toBe(btoa("bob:12345"));
-});
-
-test("session list: relayed error body renders as text, not HTML (XSS)", async ({
-  page,
-}) => {
   await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(
-    () => typeof window.refreshSessions === "function",
-  );
-  // Wait for MobuxMesh too — apiFetchJSON stub relies on it.
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  // Force refreshSessions() down its catch branch with a peer-controlled
-  // error message that contains markup. It must land as text, not nodes.
-  await page.evaluate(() => {
-    window.MobuxMesh.apiFetchJSON = async () => {
-      throw new Error("<img src=x onerror=window.__xss=1>");
-    };
-    return window.refreshSessions();
-  });
   const list = page.locator("#sessionList");
   // The payload appears verbatim as text…
   await expect(list.locator(".hint")).toContainText("<img src=x onerror=");
@@ -2702,65 +2561,27 @@ test("session list: relayed error body renders as text, not HTML (XSS)", async (
   expect(await page.evaluate(() => window.__xss)).toBeUndefined();
 });
 
-test("session list: peer-controlled session names are escaped", async ({
-  page,
-}) => {
+test("session list: session names are escaped", async ({ page }) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ name: "<b>pwn</b>", windows: 1, attached: 0 }]),
+    });
+  });
   await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(
-    () => typeof window.refreshSessions === "function",
-  );
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  await page.evaluate(() => {
-    window.MobuxMesh.apiFetchJSON = async () => [
-      { name: "<b>pwn</b>", windows: 1, attached: 0 },
-    ];
-    return window.refreshSessions();
-  });
   const list = page.locator("#sessionList");
   await expect(list.locator(".session-name")).toHaveText("<b>pwn</b>");
   // No injected <b> element from the name.
   expect(await list.locator(".session-name b").count()).toBe(0);
 });
 
-// MobuxMesh client API (addManualPeer / getManualPeers / removeManualPeer /
-// normalizeManualPeer) works correctly at the JS level.
-test("mesh client: manual peer add / normalize / remove APIs work", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-
-  const added = await page.evaluate(() => {
-    const m = window.MobuxMesh;
-    m.removeManualPeer("manualbox:7000"); // start clean
-    return { id: m.addManualPeer("manualbox:7000"), list: m.getManualPeers() };
-  });
-  expect(added.id).toBe("manualbox:7000");
-  expect(added.list).toContain("manualbox:7000");
-
-  // Bare host normalizes to host:port.
-  const norm = await page.evaluate(() =>
-    window.MobuxMesh.normalizeManualPeer("barehost"),
-  );
-  expect(norm).toMatch(/^barehost:\d+$/);
-
-  // Remove and confirm gone from storage.
-  const after = await page.evaluate(() => {
-    window.MobuxMesh.removeManualPeer("manualbox:7000");
-    return window.MobuxMesh.getManualPeers();
-  });
-  expect(after).not.toContain("manualbox:7000");
-});
-
 // ── Legacy route redirect tests (SPA cutover) ─────────────────────────────
 //
-// The old server-rendered pages at /settings, /s/<name>, /s/<host>/<name>, and
-// /install now 307-redirect into the SPA. These tests assert the redirects so
-// that deep-links, bookmarks, and the installed TWA keep working.
+// The old server-rendered pages at /settings, /s/<name>, and /install now
+// 307-redirect into the SPA. These tests assert the redirects so that
+// deep-links, bookmarks, and the installed TWA keep working.
 
 test("GET /settings 307-redirects to /app#/settings", async ({ page }) => {
   const resp = await page.request.get(`${BASE}/settings`, {
@@ -2784,45 +2605,4 @@ test("GET /install 307-redirects to /app#/install", async ({ page }) => {
   });
   expect(resp.status()).toBe(307);
   expect(resp.headers()["location"]).toBe("/app#/install");
-});
-
-test("GET /s/<host>/<name> 307-redirects to /app#/s/<encoded-host>/<name>", async ({
-  page,
-}) => {
-  // host:port → colon is percent-encoded to %3A (same as the SPA's encodeURIComponent)
-  const resp = await page.request.get(`${BASE}/s/box:8443/${SESSION}`, {
-    maxRedirects: 0,
-  });
-  expect(resp.status()).toBe(307);
-  expect(resp.headers()["location"]).toBe(`/app#/s/box%3A8443/${SESSION}`);
-});
-
-test.fixme("host picker: manual add host appears in picker with label and remove button", async ({
-  page,
-}) => {
-  // PARITY GAP: SPA HostPicker renders a native <select> populated from
-  // GET /api/peers; manually-added peers (MobuxMesh.addManualPeer) live in
-  // mesh-client localStorage but are not surfaced through /api/peers, so they
-  // never appear as <option> elements. The old custom-dropdown showed them with
-  // a "manual" badge and a remove button (.peer-sub / .peer-remove). Unblock by
-  // either: (a) teaching HostPicker to merge manual peers into the select, or
-  // (b) adding a separate UI for manual peers.
-  await page.goto(`${BASE}/app#/`);
-  await page.waitForFunction(() => typeof window.MobuxMesh !== "undefined", {
-    timeout: 8000,
-  });
-  await page.evaluate(() => {
-    const m = window.MobuxMesh;
-    m.removeManualPeer("manualbox:7000");
-    m.addManualPeer("manualbox:7000");
-  });
-  // Legacy selectors — not present in SPA:
-  await page.locator(".host-trigger").click();
-  await expect(
-    page.locator(".peer-list .hint", { hasText: "Loading" }),
-  ).toHaveCount(0);
-  const manualOpt = page.locator(".peer-option", { hasText: "manualbox:7000" });
-  await expect(manualOpt).toBeVisible();
-  await expect(manualOpt.locator(".peer-sub")).toHaveText("manual");
-  await expect(manualOpt.locator(".peer-remove")).toBeVisible();
 });

@@ -24,7 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-mesh test-update-runner test-spa test-stt-ux test-stt-per-kind test-e2e \
+        test-smoke test-critical-path test-update-runner test-spa test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -177,18 +177,6 @@ test-critical-path:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
-
-# Mesh relay flow: smoke instance is the relay node, the spec spins up a
-# second TLS instance (the peer) on its own port/data-dir/tmux socket and
-# drives it through the relay. Proves peer selection → relay → upstream-auth
-# → TOFU pin → pin-mismatch recovery end to end.
-.PHONY: test-mesh
-test-mesh:
-	@$(MAKE) smoke-start
-	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
-		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/mesh-relay.spec.cjs
 
 # Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
 # against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,

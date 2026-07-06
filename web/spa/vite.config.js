@@ -46,9 +46,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      // PTY WebSocket + relay WS. ws:true so the upgrade is forwarded.
+      // PTY WebSocket. ws:true so the upgrade is forwarded.
       '/ws': target(true),
-      '/r': target(true), // mesh relay (HTTP + WS under /r/<peer>/...)
       // REST API surface.
       '/api': target(),
       // STT transcription (OpenAI-compatible) + legacy upload/transcribe.
@@ -60,9 +59,9 @@ export default defineConfig({
       // load the real engine bundle unchanged.
       '/sw.js': target(),
       // The SPA's own assets live under /static/spa/ (its base). Everything
-      // else under /static/ (vendor bundles, terminal.js, mesh-client.js,
-      // style.css, …) is the backend's — proxy it, but let Vite serve its own
-      // base. `bypass` returning the path tells the proxy to skip forwarding.
+      // else under /static/ (vendor bundles, terminal.js, style.css, …) is
+      // the backend's — proxy it, but let Vite serve its own base. `bypass`
+      // returning the path tells the proxy to skip forwarding.
       '/static': {
         ...target(),
         bypass(req) {

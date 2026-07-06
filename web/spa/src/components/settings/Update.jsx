@@ -7,8 +7,8 @@ import { localFetch } from "../../lib/api.js";
 // (POST /api/update/run), then polls /api/identify until the version changes
 // (or times out) and prompts a reload.
 //
-// Deliberately NOT mesh-aware: update always acts on the host that served the
-// page — uses the host-pinned helper (localFetch), never the mesh peer.
+// Update always acts on the host that served the page — uses the host-pinned
+// helper (localFetch).
 
 const info = signal(null); // /api/update/status payload
 const status = signal(null); // { msg, kind }
@@ -115,8 +115,7 @@ export function UpdateCard() {
         mobux checks crates.io for newer published versions. Updating installs
         the new version with <code>cargo install</code>, restarts the systemd
         service, health-checks it, and rolls back automatically if the new
-        version doesn't come up. This acts on <strong>this host only</strong> —
-        to update a peer, open its own settings page.
+        version doesn't come up. This acts on <strong>this host only</strong>.
       </p>
       <div class="settings-row">
         <span class="settings-label">

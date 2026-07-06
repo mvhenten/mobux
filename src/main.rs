@@ -15,7 +15,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{get, post},
     Extension, Json, Router,
 };
 use base64::{
@@ -42,9 +42,7 @@ use serde_json::json;
 struct StaticAssets;
 
 mod db;
-mod mesh;
 mod push;
-mod relay;
 mod shell_integration;
 mod ssl;
 mod stt_debug;
@@ -77,8 +75,7 @@ struct AppState {
     /// startup; the hook is reinstalled with the new value.
     internal_token: Arc<String>,
     /// The TCP port this instance serves on. Used for self-update health-checks
-    /// and the detached updater spawn; NOT used for mesh peer probing (see
-    /// `mesh_peer_port` in the DB — defaults to 5151, the fleet-standard port).
+    /// and the detached updater spawn.
     port: u16,
     /// Where mobux persists state — used to write/spawn the detached updater.
     data_dir: PathBuf,
@@ -218,7 +215,6 @@ async fn main() -> Result<()> {
         .route("/", get(root_redirect))
         .route("/api/identify", get(api_identify))
         .route("/api/build-info", get(api_build_info))
-        .route("/api/peers", get(api_peers))
         .route("/api/sessions", get(api_sessions).post(api_create_session))
         .route("/api/sessions/{name}/kill", post(api_kill_session))
         .route("/api/sessions/{name}/rename", post(api_rename_session))
@@ -259,10 +255,6 @@ async fn main() -> Result<()> {
             "/api/settings/stt",
             get(api_get_stt_config).put(api_set_stt_config),
         )
-        .route(
-            "/api/settings/mesh",
-            get(api_get_mesh_settings).put(api_set_mesh_settings),
-        )
         .route("/api/stt/status", get(api_stt_status))
         .route("/api/stt/models", get(api_stt_models))
         .route(
@@ -284,24 +276,12 @@ async fn main() -> Result<()> {
             "/api/shell-integration/uninstall",
             post(api_shell_integration_uninstall),
         )
-        // Self-update (#130). Plain /api routes so they ride the mesh relay —
-        // any node is updatable from one UI.
+        // Self-update (#130).
         .route("/api/update/status", get(api_update_status))
         .route("/api/update/check", post(api_update_check))
         .route("/api/update/run", post(api_update_run))
-        // Mesh relay (EDD phase 2). The WS route is more specific than the
-        // catch-all HTTP relay so the upgrade lands on the right handler.
-        .route("/r/{peer}/ws/{*rest}", get(relay::relay_ws))
-        .route("/r/{peer}/{*rest}", any(relay::relay_http))
         .route("/settings", get(settings_page))
         .route("/s/{name}", get(terminal_page))
-        // Host-pinned terminal page (issue #123): the peer the session lives
-        // on is canonical in the path so the page binds to the right host
-        // regardless of the global host-picker selection. The server does NOT
-        // route by host (the relay still does) — it only surfaces the host to
-        // the client so it can pin the peer. One- vs two-segment patterns
-        // disambiguate cleanly in axum.
-        .route("/s/{host}/{name}", get(terminal_page_pinned))
         .route("/ws/{name}", get(terminal_ws))
         .route("/sw.js", get(serve_sw))
         .route("/install", get(install_page))
@@ -534,9 +514,9 @@ fn load_auth_config() -> Option<AuthConfig> {
 /// must be reachable for the SW registration request — some Android
 /// browsers fetch /sw.js without page credentials.
 ///
-/// `/api/identify` is intentionally unauthenticated (mesh EDD): peers probe
-/// it for app+version discovery before any credentials exist. It leaks
-/// nothing beyond "this is mobux, version X".
+/// `/api/identify` is intentionally unauthenticated: the self-update health
+/// check polls it on a freshly-restarted binary before any credentials exist.
+/// It leaks nothing beyond "this is mobux, version X".
 fn is_public_path(path: &str) -> bool {
     path == "/api/identify"
         // Test-only update-index fixture: the background poller fetches it
@@ -651,10 +631,18 @@ async fn api_sessions() -> Result<Json<Vec<tmux::Session>>, AppError> {
     Ok(Json(sessions))
 }
 
-/// Unauthenticated mesh discovery probe. Returns only the app name and crate
-/// version — nothing else leaks. Bypasses auth via `is_public_path`.
-async fn api_identify() -> Json<mesh::Identify> {
-    Json(mesh::Identify {
+/// Shape returned by `/api/identify`.
+#[derive(serde::Serialize)]
+struct Identify {
+    app: String,
+    version: String,
+}
+
+/// Unauthenticated identify probe (self-update health-check). Returns only the
+/// app name and crate version — nothing else leaks. Bypasses auth via
+/// `is_public_path`.
+async fn api_identify() -> Json<Identify> {
+    Json(Identify {
         app: "mobux".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
@@ -669,33 +657,6 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
         "build_hash": state.build_hash,
         "dev_mode": state.dev_mode,
     }))
-}
-
-/// Authenticated tailnet peer enumeration. On tailscale failure, returns a
-/// structured error (HTTP 502) the UI can show — never a silent empty list.
-/// An empty `peers` array means "tailscale fine, nothing found"; the error
-/// path means "tailscale unavailable".
-///
-/// Probes peers on the configured `mesh_peer_port` (default 5151 — the
-/// fleet-standard mobux port). Configurable via GET/PUT /api/settings/mesh
-/// so preview instances on non-standard ports probe the right port.
-async fn api_peers(State(state): State<AppState>) -> Response {
-    let probe_port = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || db.mesh_peer_port()
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .unwrap_or(5151);
-    match mesh::enumerate(probe_port).await {
-        Ok(peers) => Json(json!({ "peers": peers })).into_response(),
-        Err(err) => {
-            // 502: this node is up, but the upstream dependency (tailscaled)
-            // it relies on to enumerate peers is not cooperating.
-            (StatusCode::BAD_GATEWAY, Json(json!({ "error": err }))).into_response()
-        }
-    }
 }
 
 // ── self-update (#130) ─────────────────────────────────────────────────────
@@ -1336,48 +1297,6 @@ async fn terminal_page(
     ))
 }
 
-// Host-pinned variant: `/s/{host}/{name}`. Deep-link bookmarks and the TWA
-// keep working — the route stays, we just redirect into the SPA hash.
-async fn terminal_page_pinned(
-    State(state): State<AppState>,
-    Path((host, name)): Path<(String, String)>,
-) -> Result<impl IntoResponse, AppError> {
-    validate_session_name(&state, &name)?;
-    // Validate host (rejects XSS / bad chars) AND canonicalize to host:port.
-    let peer = validate_pinned_host(&host)?;
-    // The SPA router expects the colon in host:port to be percent-encoded
-    // (e.g. box%3A8443) — same as Home.jsx uses encodeURIComponent(peer).
-    let peer_enc = peer.replace(':', "%3A");
-    let location = format!("/app#/s/{peer_enc}/{name}");
-    Ok((
-        axum::http::StatusCode::TEMPORARY_REDIRECT,
-        [
-            (axum::http::header::LOCATION, location),
-            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
-        ],
-    ))
-}
-
-/// Validate + canonicalize a `host` path segment for the pinned terminal route.
-///
-/// Reuses the relay's `canonical_peer` (legal `host[:port]` shape) and then
-/// enforces the conservative peer charset `[A-Za-z0-9.:_-]`. `canonical_peer`
-/// alone rejects slashes and spaces but still admits markup metacharacters
-/// (e.g. `<img>` → `<img>:8080`), which would break out of the inline
-/// `window.MOBUX_PEER` script — so the charset gate is the load-bearing
-/// defence here. Returns the canonical `host:port`, or a 400 on reject.
-fn validate_pinned_host(host: &str) -> Result<String, AppError> {
-    let peer = relay::canonical_peer(host)
-        .map_err(|e| AppError::bad_request(anyhow::anyhow!("invalid host: {e}")))?;
-    if !peer
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_' | '-'))
-    {
-        return Err(AppError::bad_request(anyhow::anyhow!("invalid host")));
-    }
-    Ok(peer)
-}
-
 // Serve sw.js with the per-restart cache_bust appended as a comment.
 // Chrome considers a service worker "updated" when its bytes differ
 // from the cached copy; without this, a release that only changes JS
@@ -1692,51 +1611,6 @@ fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
 }
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
-
-/// Shape returned by GET /api/settings/mesh.
-#[derive(serde::Serialize)]
-struct MeshSettingsJson {
-    /// Port used to probe tailnet peers for mobux. Default 5151.
-    peer_port: u16,
-}
-
-/// Shape accepted by PUT /api/settings/mesh.
-#[derive(serde::Deserialize)]
-struct MeshSettingsPutJson {
-    peer_port: u16,
-}
-
-async fn api_get_mesh_settings(
-    State(state): State<AppState>,
-) -> Result<Json<MeshSettingsJson>, AppError> {
-    let peer_port = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || db.mesh_peer_port()
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
-    Ok(Json(MeshSettingsJson { peer_port }))
-}
-
-async fn api_set_mesh_settings(
-    State(state): State<AppState>,
-    Json(req): Json<MeshSettingsPutJson>,
-) -> Result<StatusCode, AppError> {
-    if req.peer_port == 0 {
-        return Err(AppError::bad_request(anyhow::anyhow!(
-            "peer_port must be 1–65535"
-        )));
-    }
-    tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || db.set_mesh_peer_port(req.peer_port)
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 /// Per-kind provider info returned by GET /api/settings/stt.
 /// api_key is NEVER returned; has_key is a boolean indicator.
@@ -2404,32 +2278,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pinned_host_rejects_script_breakout() {
-        // Reflected-XSS guard for /s/{host}/{name}: the host is echoed into an
-        // inline <script> as window.MOBUX_PEER, and serde_json does not escape
-        // markup metacharacters. A host carrying </script>, '<' or '>' (or
-        // quotes) must be rejected as 400, never rendered.
-        for bad in [
-            "</script><script>alert(1)</script>",
-            "<img src=x onerror=alert(1)>",
-            "<svg",
-            "a>b",
-            "a\"b",
-            "a'b",
-            "",
-        ] {
-            let err = validate_pinned_host(bad).expect_err(&format!("should reject {bad:?}"));
-            assert_eq!(err.status, StatusCode::BAD_REQUEST, "for {bad:?}");
-        }
-        // Legal peers still pass and canonicalize to host:port.
-        assert_eq!(validate_pinned_host("box:8443").unwrap(), "box:8443");
-        assert_eq!(
-            validate_pinned_host("host-1.tailnet.ts.net").unwrap(),
-            "host-1.tailnet.ts.net:8080"
-        );
-    }
-
     /// Minimal AppState backed by a throwaway temp db, with `dev_mode`
     /// configurable.
     fn test_state(dev_mode: bool) -> (AppState, tempfile::TempDir) {
@@ -2466,9 +2314,9 @@ mod tests {
     // ── session cookie Secure attribute ──────────────────────────────────────
     //
     // Regression test for the recurring home-login prompt: on a plain-HTTP
-    // bind, `Secure` cookies are never stored by the browser, so every relayed
-    // request fell back to Basic-auth. `Secure` must be omitted on HTTP and
-    // present only when TLS is actually serving.
+    // bind, `Secure` cookies are never stored by the browser, so every
+    // subsequent request fell back to Basic-auth. `Secure` must be omitted on
+    // HTTP and present only when TLS is actually serving.
 
     #[test]
     fn session_cookie_no_secure_on_plain_http() {

@@ -54,11 +54,9 @@ body.term-body #app {
   flex: 0 0 auto;
 }
 
-/* Wordmark = home link. The old header gave h1 `flex: 1` to shove the lone gear
-   to the far edge; here the host picker owns that stretch (margin-left: auto),
-   so the wordmark hugs the left instead. */
+/* Wordmark = home link. `.app-header h1` already has `flex: 1` (style.css),
+   which shoves the lone gear to the far edge — just add the pointer cursor. */
 .app-header .app-wordmark {
-  flex: 0 0 auto;
   cursor: pointer;
 }
 
@@ -66,33 +64,6 @@ body.term-body #app {
   padding: 1rem;
   max-width: 640px;
   margin: 0 auto;
-}
-
-/* Host picker — native <select> in the header. Pushed to the right so the gear
-   button can anchor flush to the far edge. Shrinks before the gear does. */
-.spa-host-picker {
-  margin-left: auto;
-  min-width: 0;
-  flex-shrink: 1;
-}
-.host-select {
-  background: var(--bg);
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.3rem 0.5rem;
-  font-size: 0.9rem;
-  cursor: pointer;
-  /* Constrain width so the gear button is never pushed off-screen */
-  max-width: 48vw;
-  min-width: 0;
-  /* Let Android/Chrome use its native picker styling */
-  -webkit-appearance: menulist;
-  appearance: menulist;
-}
-.host-select:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 /* Gear — a <button> that wears the old `.header-icon` look (color/font-size/
@@ -109,63 +80,4 @@ body.term-body #app {
   min-width: 2rem;
   min-height: 2rem;
   font-family: inherit;
-}
-
-/* Mesh settings card — manual host list and add-host form. */
-.mesh-hosts-heading {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #6a7485;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 1.25rem 0 0.5rem;
-}
-.mesh-host-list {
-  list-style: none;
-  margin: 0 0 0.75rem;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-.mesh-host-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: #1a1e2a;
-  border: 1px solid #2e3447;
-  border-radius: 4px;
-  padding: 0.35rem 0.6rem;
-}
-.mesh-host-label {
-  font-size: 0.9rem;
-  color: #9aa4b2;
-  font-family: monospace;
-}
-.mesh-host-remove {
-  background: none;
-  border: none;
-  color: #6a7485;
-  cursor: pointer;
-  font-size: 0.85rem;
-  padding: 0.1rem 0.3rem;
-  border-radius: 3px;
-  line-height: 1;
-}
-.mesh-host-remove:hover {
-  color: #c87e7e;
-  background: #2a1e1e;
-}
-.mesh-add-host {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
-}
-.mesh-add-input {
-  flex: 1;
-  min-width: 0;
-}
-.mesh-add-btn {
-  white-space: nowrap;
-  flex-shrink: 0;
 }

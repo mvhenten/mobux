@@ -6,7 +6,6 @@ import { ThemeCard } from "../components/settings/Theme.jsx";
 import { ShellIntegrationCard } from "../components/settings/ShellIntegration.jsx";
 import { SttCard } from "../components/settings/Stt.jsx";
 import { ListenCard } from "../components/settings/Listen.jsx";
-import { MeshCard } from "../components/settings/Mesh.jsx";
 import { BuildInfoCard } from "../components/settings/BuildInfo.jsx";
 
 // Settings page. Composes the ported cards in the same order as the
@@ -36,7 +35,6 @@ export function SettingsPage() {
       <ShellIntegrationCard />
       <SttCard />
       <ListenCard />
-      <MeshCard />
       <BuildInfoCard />
     </main>
   );

@@ -123,8 +123,10 @@ export class TerminalCoreXterm extends EventTarget {
       this._reconnectTimer = null;
     }
     this.intentionalClose = false;
-    // Same-origin by default; routed through the relay when a peer is picked.
-    this.ws = new WebSocket(window.MobuxMesh.wsUrl(this.session));
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    this.ws = new WebSocket(
+      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}`,
+    );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
       // A clean open resets the backoff window.
@@ -267,7 +269,7 @@ export class TerminalCoreXterm extends EventTarget {
   // ── Panes (= tmux windows) ────────────────────────────────────────
   async refreshPanes() {
     try {
-      const res = await window.MobuxMesh.apiFetch(
+      const res = await fetch(
         `/api/sessions/${encodeURIComponent(this.session)}/panes`,
       );
       if (!res.ok) return;
@@ -314,7 +316,7 @@ export class TerminalCoreXterm extends EventTarget {
 
   async runTmuxCmd(command) {
     try {
-      await window.MobuxMesh.apiFetch(
+      await fetch(
         `/api/sessions/${encodeURIComponent(this.session)}/command`,
         {
           method: "POST",
@@ -336,7 +338,7 @@ export class TerminalCoreXterm extends EventTarget {
   // ── History ───────────────────────────────────────────────────────
   async reloadHistory() {
     try {
-      const res = await window.MobuxMesh.apiFetch(
+      const res = await fetch(
         `/api/sessions/${encodeURIComponent(this.session)}/history`,
       );
       if (!res.ok) return;

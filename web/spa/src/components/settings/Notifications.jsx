@@ -5,7 +5,7 @@ import { localGet, localFetch } from "../../lib/api.js";
 // Notifications card. Ports settings.js: reads + writes
 // GET|PUT /api/settings/notifications (snake_case fields), auto-saves on every
 // checkbox change. Prefs act on the host that served the page, so this uses the
-// host-pinned helpers (never the mesh peer).
+// host-pinned helpers.
 
 const FIELDS = ["bell", "bell_emoji", "program_exit", "program_exit_nonzero"];
 const prefs = signal({});

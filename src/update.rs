@@ -15,7 +15,7 @@
 //!     on failure. Everything is parameterized — no hardcoded prod port or
 //!     unit name.
 //!
-//! Design decisions (from #130 + mesh-edd):
+//! Design decisions (from #130):
 //!   * Installs the prebuilt Linux x86_64 release asset (seconds instead of a
 //!     5-10 min release compile); `cargo install` remains the fallback.
 //!   * Rollback runs in a process that outlives the server, since the restart

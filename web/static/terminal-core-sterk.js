@@ -58,8 +58,10 @@ export class TerminalCoreSterk extends EventTarget {
       this._reconnectTimer = null;
     }
     this.intentionalClose = false;
-    // Same-origin by default; routed through the relay when a peer is picked.
-    this.ws = new WebSocket(window.MobuxMesh.wsUrl(this.session));
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    this.ws = new WebSocket(
+      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}`,
+    );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
       // A clean open resets the backoff window.
@@ -236,7 +238,7 @@ export class TerminalCoreSterk extends EventTarget {
   // ── Panes (= tmux windows) ────────────────────────────────────────
   async refreshPanes() {
     try {
-      const res = await window.MobuxMesh.apiFetch(
+      const res = await fetch(
         `/api/sessions/${encodeURIComponent(this.session)}/panes`,
       );
       if (!res.ok) return;
@@ -279,14 +281,11 @@ export class TerminalCoreSterk extends EventTarget {
 
   async runTmuxCmd(command) {
     try {
-      await window.MobuxMesh.apiFetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/command`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command }),
-        },
-      );
+      await fetch(`/api/sessions/${encodeURIComponent(this.session)}/command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
     } catch (_) {}
     if (WINDOW_SWITCH_CMDS.has(command)) {
       this.clear();
@@ -300,7 +299,7 @@ export class TerminalCoreSterk extends EventTarget {
 
   async reloadHistory() {
     try {
-      const res = await window.MobuxMesh.apiFetch(
+      const res = await fetch(
         `/api/sessions/${encodeURIComponent(this.session)}/history`,
       );
       if (!res.ok) return;

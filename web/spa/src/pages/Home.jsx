@@ -1,94 +1,21 @@
 import { useEffect, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
-import { ensureMeshClient } from "../lib/mesh.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
 // (render_index + index.js): list tmux sessions with window/attached counts,
 // create a session (FAB → dialog), kill, and rename. Tapping a session opens
 // the terminal island.
-//
-// Peer pinning (issue #123): when MobuxMesh has a peer selected, session links
-// carry the host in the path (`/s/<host>/<name>`) so the opened terminal drives
-// that host for its whole lifetime. With no peer (current node) links stay
-// plain (`/s/<name>`), byte-identical to same-origin behaviour. apiGet/apiSend
-// already route through the relay when a peer is selected.
 
 const sessions = signal(null);
 const error = signal(null);
 
-function currentPeer() {
-  try {
-    return window.MobuxMesh ? window.MobuxMesh.getPeer() : "";
-  } catch (_) {
-    return "";
-  }
-}
-
-// A peer relay 401 reaches us as meshKind=unauthorized (mesh-client has already
-// cleared the stored cred). Re-surface the in-app credential dialog rather than
-// an alert/text error so the browser's native auth prompt never gets a chance.
-// Returns true when the error was an auth failure we handled, so callers can
-// bail out of their own error path.
-function handlePeerAuthError(e) {
-  if (e && e.meshKind === "unauthorized") {
-    window.dispatchEvent(
-      new CustomEvent("mobux:peer-auth-required", { detail: { peer: e.peer } }),
-    );
-    return true;
-  }
-  return false;
-}
-
-// Before opening/creating a session on a peer with no stored creds, show the
-// in-app dialog first so the very first relayed request already carries them and
-// the browser never sees a bare 401. Resolves true once creds are stored (or the
-// target is the current node), false if the user cancelled.
-function ensurePeerCred(peer) {
-  const m = window.MobuxMesh;
-  if (!peer || !m) return Promise.resolve(true);
-  if (m.getPeerCred(peer)) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const done = (ok) => {
-      window.removeEventListener("mobux:peer-cred-stored", onStored);
-      window.removeEventListener("mobux:peer-cred-cancelled", onCancel);
-      resolve(ok);
-    };
-    const onStored = (ev) => {
-      if (!ev.detail || ev.detail.peer === peer) done(true);
-    };
-    const onCancel = (ev) => {
-      if (!ev.detail || ev.detail.peer === peer) done(false);
-    };
-    window.addEventListener("mobux:peer-cred-stored", onStored);
-    window.addEventListener("mobux:peer-cred-cancelled", onCancel);
-    window.dispatchEvent(
-      new CustomEvent("mobux:peer-auth-required", { detail: { peer } }),
-    );
-  });
-}
-
 async function refresh() {
   try {
-    // Wait for mesh-client.js to be loaded before fetching. Without this,
-    // the first call runs while window.MobuxMesh is still undefined (it is
-    // loaded asynchronously by HostPicker), so apiGet falls back to a plain
-    // same-origin fetch and lists the LOCAL host regardless of the saved
-    // peer — causing picker/list mismatch. Awaiting here guarantees apiGet
-    // always routes through the correct peer.
-    try {
-      await ensureMeshClient();
-    } catch (_) {
-      // Mesh script failed to load — proceed with local same-origin fetch.
-    }
     const data = await apiGet("/api/sessions");
     sessions.value = Array.isArray(data) ? data : data.sessions || [];
     error.value = null;
   } catch (e) {
-    // mesh-client clears the cred and throws meshKind=unauthorized on 401.
-    // Surface the in-app credential dialog instead of a text error so the
-    // browser's native auth prompt never appears.
-    if (handlePeerAuthError(e)) return;
     error.value = String(e.message || e);
   }
 }
@@ -99,29 +26,13 @@ export function HomePage() {
 
   useEffect(() => {
     refresh();
-    // Re-fetch sessions when the host picker switches peers.
-    window.addEventListener("mobux:peer-changed", refresh);
-    // Also expose as a global so the legacy host-picker.js onPeerChange can call it.
-    window.refreshSessions = refresh;
-    return () => {
-      window.removeEventListener("mobux:peer-changed", refresh);
-      if (window.refreshSessions === refresh) delete window.refreshSessions;
-    };
   }, []);
 
   const open = async (name) => {
-    const peer = currentPeer();
-    // Opening a peer session deep-links to /s/<peer>/<name>; the terminal then
-    // connects a relayed WS. With no stored creds that WS would 401 → silent
-    // close-loop. Prompt in-app first so navigation only happens with creds.
-    if (peer && !(await ensurePeerCred(peer))) return;
-    const href = peer
-      ? `/s/${encodeURIComponent(peer)}/${encodeURIComponent(name)}`
-      : `/s/${encodeURIComponent(name)}`;
-    // Hard-load so terminal.js and host-picker.js always get a fresh execution
-    // context. Client-side navigation re-uses the module map, leaving #terminal
-    // empty and triggering "already been declared" errors on the second open.
-    window.location.href = `/app#${href}`;
+    // Hard-load so terminal.js always gets a fresh execution context.
+    // Client-side navigation re-uses the module map, leaving #terminal empty
+    // and triggering "already been declared" errors on the second open.
+    window.location.href = `/app#/s/${encodeURIComponent(name)}`;
     window.location.reload();
   };
 
@@ -129,8 +40,6 @@ export function HomePage() {
     e.preventDefault();
     const name = (nameRef.current?.value || "").trim();
     if (!name) return;
-    const peer = currentPeer();
-    if (peer && !(await ensurePeerCred(peer))) return;
     try {
       await apiSend("/api/sessions", {
         method: "POST",
@@ -140,7 +49,6 @@ export function HomePage() {
       dialogRef.current?.close();
       await refresh();
     } catch (err) {
-      if (handlePeerAuthError(err)) return;
       alert(`Create failed: ${err.message}`);
     }
   };
@@ -153,7 +61,6 @@ export function HomePage() {
       });
       await refresh();
     } catch (err) {
-      if (handlePeerAuthError(err)) return;
       alert(`Kill failed: ${err.message}`);
     }
   };
@@ -168,7 +75,6 @@ export function HomePage() {
       });
       await refresh();
     } catch (err) {
-      if (handlePeerAuthError(err)) return;
       alert(`Rename failed: ${err.message}`);
     }
   };

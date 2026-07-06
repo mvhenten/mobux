@@ -4,7 +4,6 @@ import { HomePage } from "./pages/Home.jsx";
 import { TerminalPage } from "./pages/Terminal.jsx";
 import { SettingsPage } from "./pages/Settings.jsx";
 import { InstallPage } from "./pages/Install.jsx";
-import { HostPicker } from "./components/HostPicker.jsx";
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -17,9 +16,6 @@ export function App() {
     <Router hook={useHashLocation}>
       <Switch>
         {/* Terminal is a full-bleed island — no shell chrome around it. */}
-        <Route path="/s/:host/:name">
-          {(params) => <TerminalPage host={params.host} name={params.name} />}
-        </Route>
         <Route path="/s/:name">
           {(params) => <TerminalPage name={params.name} />}
         </Route>
@@ -53,9 +49,8 @@ export function App() {
 // from web/static/style.css, so colors/spacing/typography match exactly.
 //
 //   • home/install/etc: the old render_index header — a `mobux` wordmark
-//     (clicks home) + `⚙` gear. The only addition is the native <select> host
-//     picker between them (the user-preferred replacement for the old popover).
-//     No Home/Install text tabs — Install stays reachable via Settings.
+//     (clicks home) + `⚙` gear. No Home/Install text tabs — Install stays
+//     reachable via Settings.
 //   • /settings: the old settings_page header — a `‹` back link + "settings".
 function HomeHeader() {
   const [, navigate] = useLocation();
@@ -72,7 +67,6 @@ function HomeHeader() {
       >
         mobux
       </h1>
-      <HostPicker />
       <button
         class="header-icon header-icon-btn"
         type="button"
