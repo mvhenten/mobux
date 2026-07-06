@@ -634,9 +634,9 @@ impl Default for SttConfig {
             url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
             model: "Systran/faster-whisper-small".to_string(),
             api_key: None,
-            install_cmd: Some("bin/stt-install".to_string()),
-            start_cmd: Some("bin/stt-serve".to_string()),
-            stop_cmd: Some("bin/stt-stop".to_string()),
+            install_cmd: Some(crate::stt_scripts::INSTALL_SCRIPT.to_string()),
+            start_cmd: Some(crate::stt_scripts::SERVE_SCRIPT.to_string()),
+            stop_cmd: Some(crate::stt_scripts::STOP_SCRIPT.to_string()),
         }
     }
 }
@@ -1010,5 +1010,19 @@ mod tests {
             ("https://api.openai.com".to_string(), "443".to_string())
         );
         assert_eq!(split_url_host_port(""), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn default_stt_commands_are_self_contained() {
+        let db = fresh_db();
+        let cfg = db.stt_config().expect("default stt_config");
+        for cmd in [&cfg.install_cmd, &cfg.start_cmd, &cfg.stop_cmd] {
+            let cmd = cmd.as_deref().expect("default command present");
+            assert!(cmd.contains("podman"), "expected podman in: {cmd}");
+            assert!(
+                !cmd.contains("bin/stt-"),
+                "default command must not reference a bin/stt- path: {cmd}"
+            );
+        }
     }
 }
