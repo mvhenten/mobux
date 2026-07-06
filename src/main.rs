@@ -48,6 +48,7 @@ mod relay;
 mod shell_integration;
 mod ssl;
 mod stt_debug;
+mod stt_scripts;
 mod tmux;
 mod transcribe;
 mod update;
@@ -1955,7 +1956,7 @@ async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoRespo
 
         let cmd_str = match cfg {
             Ok(Ok(c)) => match c.install_cmd {
-                Some(s) => s,
+                Some(s) => stt_scripts::resolve(&s, stt_scripts::INSTALL_SCRIPT),
                 None => {
                     let mut guard = install_state.lock().await;
                     guard.phase = InstallPhase::Failed("no install_cmd configured".to_string());
@@ -2078,6 +2079,7 @@ async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppE
     let cmd_str = cfg
         .start_cmd
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no start_cmd configured")))?;
+    let cmd_str = stt_scripts::resolve(&cmd_str, stt_scripts::SERVE_SCRIPT);
 
     tokio::process::Command::new("sh")
         .arg("-c")
@@ -2103,6 +2105,7 @@ async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppEr
     let cmd_str = cfg
         .stop_cmd
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no stop_cmd configured")))?;
+    let cmd_str = stt_scripts::resolve(&cmd_str, stt_scripts::STOP_SCRIPT);
 
     tokio::process::Command::new("sh")
         .arg("-c")
