@@ -42,7 +42,7 @@ Technical operators — developers, SREs, ML and infra engineers — who keep lo
 
 - **Modernizing the UI** toward a component-based single-page app, for a faster and more maintainable frontend.
 - **Replacing the legacy terminal renderer** with a clean-room, permissively licensed engine (already switchable as an experimental option).
-- **Multi-host mesh** — reaching sessions across several of your machines from one app — is in active development.
+- **Multi-host support** — reaching sessions across several of your machines from one app — is in active development.
 
 ## Honest footing
 

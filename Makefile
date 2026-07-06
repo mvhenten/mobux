@@ -178,17 +178,13 @@ test-critical-path:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
 
-# Mesh relay flow: smoke instance is the relay node, the spec spins up a
-# second TLS instance (the peer) on its own port/data-dir/tmux socket and
-# drives it through the relay. Proves peer selection → relay → upstream-auth
-# → TOFU pin → pin-mismatch recovery end to end.
+# The cross-host peer relay was removed (phase 1 of #176 — mobux is moving to
+# a hub model instead). Kept as a no-op so CI's existing "make test-mesh" step
+# still resolves; drop this target and that CI step together once the
+# workflow change is approved.
 .PHONY: test-mesh
 test-mesh:
-	@$(MAKE) smoke-start
-	@trap '$(MAKE) smoke-stop' EXIT; \
-		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
-		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/mesh-relay.spec.cjs
+	@echo "test-mesh: peer relay removed, see #176 — nothing to test"
 
 # Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
 # against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,

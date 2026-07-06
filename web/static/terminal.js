@@ -8,17 +8,6 @@ import { navigateToUrl, openExternal } from "./external-link.js";
 
 const session = window.MOBUX_SESSION;
 
-// ── Pin this page to the session's host (issue #123) ─────────────────
-// The host the session lives on is canonical in the URL path (/s/<host>/<name>)
-// and the server injects it as window.MOBUX_PEER. Bind routing to that peer for
-// the whole lifetime of this page BEFORE the terminal core constructs its WS /
-// fetches, so the very first WS + history + panes — and every later reconnect,
-// which calls wsUrl() again — target the host the session actually lives on,
-// regardless of what the global host picker is set to. Empty (same-origin /
-// current node) → no override, behaviour unchanged.
-const pinnedHost = window.MOBUX_PEER || "";
-if (pinnedHost) window.MobuxMesh.usePeerForPage(pinnedHost);
-
 const termEl = document.getElementById("terminal");
 const readerEl = document.getElementById("reader");
 const overlay = document.getElementById("touchOverlay");
@@ -625,7 +614,7 @@ updateToggleLabel();
 // so we can switch without a reload.
 function selectWindow(windowIndex) {
   if (windowIndex == null || windowIndex === "") return;
-  window.MobuxMesh.apiFetch(
+  fetch(
     `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select`,
     { method: "POST" },
   )
@@ -663,30 +652,6 @@ if ("serviceWorker" in navigator) {
 // socket that boot then immediately replaces.
 let booted = false;
 (async () => {
-  // When pinned to a peer (deep-linked /s/<host>/<name>) whose creds aren't
-  // stored on this device yet, the relayed WS would 401 → close-loop and the
-  // panes/history fetches would .catch() silently, leaving a blank
-  // "reconnecting" terminal. Prompt for the host's creds first so the very
-  // first connect carries them; if the prompt is unavailable or declined,
-  // surface a visible note instead of wedging.
-  if (pinnedHost && !window.MobuxMesh.getPeerCred(pinnedHost)) {
-    const picker = window.MobuxHostPicker;
-    let signedIn = false;
-    if (picker && typeof picker.promptPeerCred === "function") {
-      try {
-        signedIn = await picker.promptPeerCred(pinnedHost);
-      } catch (_) {}
-    }
-    if (!signedIn) {
-      if (loadquote) {
-        const q = document.getElementById("quote");
-        const a = document.getElementById("qauthor");
-        if (q) q.textContent = `Sign in to ${pinnedHost} to open this session.`;
-        if (a) a.textContent = "";
-      }
-      return; // don't connect with no creds — avoids the silent close-loop
-    }
-  }
   await core.reloadHistory();
   core.connect();
   booted = true;
@@ -736,41 +701,6 @@ window.addEventListener("pageshow", autoReconnect);
 window.addEventListener("pagehide", () => {
   core.intentionalClose = true;
 });
-
-// ── Peer WS auth-failure → in-app re-prompt ─────────────────────────
-// When pinned to a peer, the relay accepts the browser WS first, then dials
-// the peer with the stored upstream_auth. A *stale/wrong* cred makes that
-// server-side dial 401, so the browser socket closes WITHOUT ever opening —
-// indistinguishable from a network blip, so the core would just back off and
-// retry the same bad cred forever (a silent close-loop, never the browser's
-// native dialog since a WS upgrade can't trigger it). To recover: if a peer
-// socket closes before it ever opened, treat it as an auth failure — clear the
-// cred, prompt in-app for fresh creds, then reconnect. A clean open clears the
-// flag so a later blip on a working session reconnects normally.
-if (pinnedHost) {
-  let everOpened = false;
-  let reprompting = false;
-  core.addEventListener("open", () => {
-    everOpened = true;
-  });
-  core.addEventListener("close", async () => {
-    if (everOpened || reprompting || core.intentionalClose) return;
-    reprompting = true;
-    const mesh = window.MobuxMesh;
-    const picker = window.MobuxHostPicker;
-    mesh.clearPeerCred(pinnedHost);
-    let signedIn = false;
-    if (picker && typeof picker.promptPeerCred === "function") {
-      try {
-        signedIn = await picker.promptPeerCred(pinnedHost, {
-          note: `Sign in to ${pinnedHost} to open this session.`,
-        });
-      } catch (_) {}
-    }
-    reprompting = false;
-    if (signedIn) core.connect();
-  });
-}
 
 // ── Soft keyboard (visualViewport) handler ──────────────────────────
 // Renderer-agnostic. On Android Chrome (the TWA target) the soft

@@ -17,9 +17,8 @@ import { createMicOverlay, faultMessage } from './mic-overlay.js';
 import { openExternal } from './external-link.js';
 
 // ── File attach (any file type) ─────────────────────────────────────
-// Owns a hidden <input type=file>, POSTs the picked file to /api/upload via
-// the mesh relay (the returned path is only valid on the terminal's host),
-// and drops the path into the terminal via send().
+// Owns a hidden <input type=file>, POSTs the picked file to /api/upload, and
+// drops the returned path into the terminal via send().
 //
 //   createAttachAction({ send, onError }) → { trigger() }
 //     onError(message)  optional — surface an upload failure in the UI.
@@ -33,9 +32,7 @@ export function createAttachAction({ send, onError } = {}) {
   async function uploadFile(file) {
     const form = new FormData();
     form.append('file', file);
-    // Upload to whichever host drives the terminal: the returned path is only
-    // meaningful on that host's filesystem, so it must go through the relay.
-    const res = await window.MobuxMesh.apiFetch('/api/upload', { method: 'POST', body: form });
+    const res = await fetch('/api/upload', { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
     // Send path directly to terminal, ready to use.
