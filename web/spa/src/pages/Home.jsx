@@ -93,10 +93,16 @@ export function HomePage() {
   };
 
   const open = async (name) => {
+    // The node segment pins the session to the node it was listed from —
+    // the URL is the whole address, so a later picker change (or another
+    // device) can never re-target it to the wrong tmux (#185).
+    const node = selectedNode.value
+      ? `${encodeURIComponent(selectedNode.value)}/`
+      : "";
     // Hard-load so terminal.js always gets a fresh execution context.
     // Client-side navigation re-uses the module map, leaving #terminal empty
     // and triggering "already been declared" errors on the second open.
-    window.location.href = `/app#/s/${encodeURIComponent(name)}`;
+    window.location.href = `/app#/s/${node}${encodeURIComponent(name)}`;
     window.location.reload();
   };
 

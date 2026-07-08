@@ -1,5 +1,4 @@
 import { useRef, useLayoutEffect } from "preact/hooks";
-import { getSelectedNode } from "../lib/nodes.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -43,7 +42,7 @@ function loadScript(src, { module = false } = {}) {
   });
 }
 
-export function TerminalIsland({ session }) {
+export function TerminalIsland({ node, session }) {
   const rootRef = useRef(null);
   const bootedRef = useRef(false);
   const resizeObsRef = useRef(null);
@@ -53,10 +52,12 @@ export function TerminalIsland({ session }) {
     bootedRef.current = true;
 
     // 1. Globals the engine reads at module-eval time. MOBUX_NODE routes the
-    //    PTY WebSocket and every tmux call through the hub's SSH proxy to the
-    //    node picked on Home; unset ⇒ local host.
+    //    PTY WebSocket and every tmux call through the hub's SSH proxy. It
+    //    comes from the route (`#/s/<node>/<name>`), never from the device's
+    //    selected-node preference — a stale selection must not re-target a
+    //    session URL (#185). No node segment ⇒ local host.
     window.MOBUX_SESSION = session;
-    window.MOBUX_NODE = getSelectedNode();
+    window.MOBUX_NODE = node || "";
     window.MOBUX_DEV = false;
 
     // 2. Resolve the renderer choice exactly like the Rust page's inline

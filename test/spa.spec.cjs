@@ -1482,14 +1482,48 @@ test("creating a session targets the selected node", async ({ page }) => {
   expect(posts[0]).toBe("devbox");
 });
 
-test("terminal PTY websocket and pane calls carry ?node= for the selected node", async ({
+// Issue #185: the session URL carries the node segment, so the terminal is
+// pinned to the node it was opened from — a later picker change or another
+// device can never re-target it.
+test("opening a session from a node navigates to #/s/<node>/<name>", async ({
+  page,
+}) => {
+  await mockNodes(page, {
+    nodes: [{ name: "devbox", target: "mvhenten@devbox", reachable: true }],
+  });
+  await page.addInitScript(() => localStorage.setItem("mobux:node", "devbox"));
+  await page.route(/\/api\/sessions(\?[^/]*)?$/, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const u = new URL(route.request().url());
+    if (u.searchParams.get("node") === "devbox") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { name: "remote-sess", windows: 1, attached: 0 },
+        ]),
+      });
+    }
+    return route.continue();
+  });
+
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await page
+    .locator('#sessionList .swipe-row[data-name="remote-sess"] .session-item')
+    .click();
+  await expect(page).toHaveURL(/#\/s\/devbox\/remote-sess$/, {
+    timeout: 8000,
+  });
+});
+
+test("terminal PTY websocket and pane calls carry ?node= from the URL's node segment", async ({
   page,
 }) => {
   // FakeSocket (same shape as the splash tests') so the assertion doesn't
   // depend on the backend accepting the ?node param: it records the URL and
-  // fires `open`, which triggers the engine's refreshPanes fetch.
+  // fires `open`, which triggers the engine's refreshPanes fetch. The node
+  // comes from the route alone — localStorage stays deliberately empty.
   await page.addInitScript(() => {
-    localStorage.setItem("mobux:node", "devbox");
     window.__wsUrls = [];
     class FakeSocket extends EventTarget {
       constructor(url) {
@@ -1522,7 +1556,7 @@ test("terminal PTY websocket and pane calls carry ?node= for the selected node",
     if (u.pathname.endsWith("/panes")) paneCalls.push(u.search);
   });
 
-  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+  await page.goto(`${APP}#/s/devbox/${encodeURIComponent(SEED)}`, {
     waitUntil: "networkidle",
   });
 

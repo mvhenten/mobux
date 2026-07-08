@@ -4,27 +4,33 @@
 // (test/fleet/hub.cjs) that reaches the node exactly like production —
 // its own ssh binary, its own ~/.ssh/config, keys it holds itself.
 //
-// The SPA picks the node the way a user does: the Home picker persists
-// `localStorage["mobux:node"]`, TerminalIsland pins window.MOBUX_NODE
-// from it, and every PTY/tmux call carries ?node=<name>. The spec seeds
-// that key instead of clicking through the picker — the picker UI has
-// its own coverage in test/spa.spec.cjs.
+// The session URL is the whole address (issue #185): `#/s/<node>/<name>`
+// attaches to that node's tmux, bare `#/s/<name>` to the hub's local one.
+// TerminalIsland pins window.MOBUX_NODE from the route — never from the
+// device's `localStorage["mobux:node"]` picker preference — so these specs
+// navigate straight to the node-qualified URL with no seeded device state,
+// exactly like a fresh device opening a shared link. The picker UI has its
+// own coverage in test/spa.spec.cjs.
 //
 // Run with: make test-fleet
 
 const { test, expect } = require("../fixtures.cjs");
+const { createTmuxRunner } = require("../lib/tmux.cjs");
 const { startNode } = require("./node.cjs");
 const { startHub, HUB_AUTH } = require("./hub.cjs");
 
 const SESSION = "fleet-e2e";
 
-let node, hub;
+let node, hub, hubTmux;
 
 test.use({ extraHTTPHeaders: { Authorization: HUB_AUTH } });
 
 test.beforeAll(async () => {
   node = await startNode({ name: "remote" });
   hub = await startHub({ nodes: [node] });
+  // The hub's own tmux server lives on its scoped test socket; envVar: null
+  // because this socket belongs to this hub instance, never the podman lane.
+  hubTmux = createTmuxRunner(hub.tmuxSocket, { envVar: null });
   // The session lives on the NODE's tmux server — the hub has no
   // session of this name, so any output we see must have crossed ssh.
   node.ssh(`tmux new-session -d -s ${SESSION} 'bash --norc --noprofile'`);
@@ -33,17 +39,15 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  try {
+    hubTmux?.("kill-server");
+  } catch (_) {}
   if (hub) await hub.stop();
   if (node) await node.stop();
 });
 
-async function bootRemoteTerminal(page) {
-  await page.addInitScript((name) => {
-    try {
-      localStorage.setItem("mobux:node", name);
-    } catch (_) {}
-  }, node.name);
-  await page.goto(`${hub.base}/app#/s/${SESSION}`, { waitUntil: "load" });
+async function bootTerminal(page, hash) {
+  await page.goto(`${hub.base}/app#${hash}`, { waitUntil: "load" });
   await page.waitForFunction(
     () => {
       const t = document.getElementById("terminal");
@@ -58,6 +62,10 @@ async function bootRemoteTerminal(page) {
     { timeout: 8000 },
   );
   await page.waitForTimeout(500);
+}
+
+async function bootRemoteTerminal(page) {
+  await bootTerminal(page, `/s/${node.name}/${SESSION}`);
 }
 
 test("terminal I/O round-trips through the ssh proxy", async ({ page }) => {
@@ -101,6 +109,94 @@ test("no extra auth challenge crossing to the node", async ({ page }) => {
     })
     .toContain(marker);
   expect(challenges, "unexpected 401s during fleet session").toEqual([]);
+});
+
+// Regression, issue #185: tmux ≥ 3.4 replaces control characters with `_`
+// when writing to a non-tty, so the old tab-separated `-F` list formats
+// came back underscore-joined from a newer node (the container runs
+// trixie's tmux 3.5a) and parsed to an EMPTY list — Home showed no remote
+// sessions at all. The emulated node's tmux is deliberately newer than the
+// hub host's, so this pins the printable-separator formats.
+test("session and pane listings cross ssh intact", async () => {
+  const res = await fetch(`${hub.base}/api/sessions?node=${node.name}`, {
+    headers: { Authorization: HUB_AUTH },
+  });
+  expect(res.status).toBe(200);
+  const sessions = await res.json();
+  const found = sessions.find((s) => s.name === SESSION);
+  expect(found, `sessions: ${JSON.stringify(sessions)}`).toBeTruthy();
+  expect(found.windows).toBeGreaterThan(0);
+
+  const pres = await fetch(
+    `${hub.base}/api/sessions/${SESSION}/panes?node=${node.name}`,
+    { headers: { Authorization: HUB_AUTH } },
+  );
+  expect(pres.status).toBe(200);
+  const panes = await pres.json();
+  expect(panes.length).toBeGreaterThan(0);
+  expect(panes[0].id).toMatch(/^@/);
+});
+
+// Regression, issue #185: the route must pin the node even when the
+// device's picker preference points elsewhere. A stale/foreign
+// `localStorage["mobux:node"]` used to silently re-target the attach —
+// here it names no configured node at all, so any fallback to it would
+// fail loudly instead of reaching the remote session.
+test("the URL's node segment wins over a stale device selection", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem("mobux:node", "decommissioned-node");
+    } catch (_) {}
+  });
+  await bootRemoteTerminal(page);
+  const marker = `MOBUX_FLEET_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect
+    .poll(() => node.tmux(["capture-pane", "-p", "-t", SESSION]), {
+      timeout: 10000,
+      intervals: [200, 400, 800],
+    })
+    .toContain(marker);
+});
+
+// The other half of the #185 contract: a bare `#/s/<name>` URL means the
+// hub's LOCAL tmux, regardless of which node the device last selected.
+// Before the fix this attach followed localStorage to the remote node and
+// tmux answered "can't find session".
+test("a bare session URL attaches to the hub's local tmux", async ({
+  page,
+}) => {
+  const local = "hub-local";
+  const res = await fetch(`${hub.base}/api/sessions`, {
+    method: "POST",
+    headers: {
+      Authorization: hub.authHeader,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: local }),
+  });
+  expect(res.ok).toBe(true);
+
+  await page.addInitScript((name) => {
+    try {
+      localStorage.setItem("mobux:node", name);
+    } catch (_) {}
+  }, node.name);
+  await bootTerminal(page, `/s/${local}`);
+  const marker = `MOBUX_FLEET_${Math.floor(Math.random() * 1e9)}`;
+  await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
+  await expect
+    .poll(() => hubTmux(`capture-pane -p -t ${local}`).toString(), {
+      timeout: 10000,
+      intervals: [200, 400, 800],
+    })
+    .toContain(marker);
+  // …and it never leaked to the node the device had selected.
+  expect(node.tmux(["list-sessions", "-F", "#{session_name}"])).not.toContain(
+    local,
+  );
 });
 
 test("resize reaches the remote PTY", async ({ page }) => {

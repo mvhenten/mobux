@@ -84,13 +84,21 @@ fn is_no_server_error(msg: &str) -> bool {
         || msg.contains("error connecting to")
 }
 
+// Field separators in `-F` formats must be PRINTABLE: tmux ≥ 3.4 replaces
+// control characters (tabs included) with `_` when printing to a non-tty,
+// which is every invocation here — and always the remote (`ssh`) one. A
+// tab-separated format therefore parses fine against an older local tmux
+// and comes back as one underscore-joined field from a newer node, silently
+// emptying the remote session list (#185). `:` is safe as separator: tmux
+// itself refuses it in session names, and the other fields are numeric; any
+// free-text field (window names) goes last, re-joined via `splitn`.
 pub async fn list_sessions(target: Option<&str>) -> Result<Vec<Session>> {
     let output = tmux_command(
         target,
         &[
             "list-sessions",
             "-F",
-            "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}",
+            "#{session_windows}:#{session_attached}:#{session_created}:#{session_name}",
         ],
     )
     .output()
@@ -109,15 +117,15 @@ pub async fn list_sessions(target: Option<&str>) -> Result<Vec<Session>> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut out = vec![];
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
+        let parts: Vec<&str> = line.splitn(4, ':').collect();
         if parts.len() != 4 {
             continue;
         }
         out.push(Session {
-            name: parts[0].to_string(),
-            windows: parts[1].parse().unwrap_or(0),
-            attached: parts[2].parse().unwrap_or(0),
-            created_unix: parts[3].parse().unwrap_or(0),
+            name: parts[3].to_string(),
+            windows: parts[0].parse().unwrap_or(0),
+            attached: parts[1].parse().unwrap_or(0),
+            created_unix: parts[2].parse().unwrap_or(0),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -378,7 +386,10 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
             "-t",
             session,
             "-F",
-            "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}",
+            // Printable separator, free-text window name LAST — see the
+            // separator note above list_sessions. `splitn` keeps any `:`
+            // inside the window name intact.
+            "#{window_id}:#{window_index}:#{window_active}:#{window_name}",
         ],
     )
     .output()
@@ -393,15 +404,15 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut out = vec![];
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
+        let parts: Vec<&str> = line.splitn(4, ':').collect();
         if parts.len() != 4 {
             continue;
         }
         out.push(Pane {
             id: parts[0].to_string(),
             index: parts[1].to_string(),
-            title: parts[2].to_string(),
-            active: parts[3] == "1",
+            title: parts[3].to_string(),
+            active: parts[2] == "1",
         });
     }
     Ok(out)
