@@ -15,7 +15,13 @@ export function App() {
   return (
     <Router hook={useHashLocation}>
       <Switch>
-        {/* Terminal is a full-bleed island — no shell chrome around it. */}
+        {/* Terminal is a full-bleed island — no shell chrome around it.
+            The URL is the whole address: /s/<node>/<name> attaches to that
+            node's tmux, /s/<name> to the local host — never to whatever
+            node the device last had selected (#185). */}
+        <Route path="/s/:node/:name">
+          {(params) => <TerminalPage node={params.node} name={params.name} />}
+        </Route>
         <Route path="/s/:name">
           {(params) => <TerminalPage name={params.name} />}
         </Route>

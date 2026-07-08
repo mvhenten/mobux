@@ -16,7 +16,7 @@
 //   hub.base; // http://127.0.0.1:<port>
 //   await hub.stop();
 
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
 const net = require("net");
 const os = require("os");
@@ -51,6 +51,26 @@ async function waitForHttp(base, timeoutMs) {
   }
 }
 
+// OpenSSH resolves "~/.ssh/config" from the passwd entry (pw_dir), NOT from
+// $HOME — so the hub's sandboxed HOME alone leaves its node aliases silently
+// unresolvable ("Could not resolve hostname <node>"). Give the hub a `ssh`
+// wrapper on PATH that pins -F to the sandbox's config; the backend spawns
+// plain `ssh <alias> ...` via PATH (src/nodes.rs, src/tmux.rs), so this is
+// transparent to it.
+function writeSshWrapper(dir, home) {
+  const realSsh = execFileSync("sh", ["-c", "command -v ssh"])
+    .toString()
+    .trim();
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    path.join(bin, "ssh"),
+    `#!/bin/sh\nexec ${realSsh} -F ${home}/.ssh/config "$@"\n`,
+    { mode: 0o755 },
+  );
+  return bin;
+}
+
 function writeSshConfig(home, nodes) {
   const sshDir = path.join(home, ".ssh");
   fs.mkdirSync(sshDir, { mode: 0o700 });
@@ -77,8 +97,10 @@ async function startHub({ nodes = [] } = {}) {
   const home = path.join(dir, "home");
   fs.mkdirSync(home);
   writeSshConfig(home, nodes);
+  const sshBin = writeSshWrapper(dir, home);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
+  const tmuxSocket = `mobux-fleet-hub-${port}`;
   const log = path.join(dir, "mobux.log");
   const out = fs.openSync(log, "a");
 
@@ -86,11 +108,12 @@ async function startHub({ nodes = [] } = {}) {
     stdio: ["ignore", out, out],
     env: {
       ...process.env,
+      PATH: `${sshBin}:${process.env.PATH}`,
       HOME: home,
       HISTFILE: "/dev/null",
       MOBUX_DATA_DIR: dir,
       MOBUX_TLS: "0",
-      MOBUX_TMUX_SOCKET: `mobux-fleet-hub-${port}`,
+      MOBUX_TMUX_SOCKET: tmuxSocket,
       MOBUX_UPDATE_DISABLE_RUN: "1",
       PORT: String(port),
       MOBUX_AUTH_USER: HUB_USER,
@@ -120,6 +143,7 @@ async function startHub({ nodes = [] } = {}) {
   return {
     base,
     port,
+    tmuxSocket,
     dir,
     log,
     user: HUB_USER,
