@@ -1222,6 +1222,91 @@ test("settings: build-info card shows version and matching hashes", async ({
   await expect(page.locator("#buildStaleRow")).toHaveCount(0);
 });
 
+// ── manual hard reload (#189) ─────────────────────────────────────────────
+//
+// A single-action reload control always within reach: the app-shell header
+// (Home + Settings) and, separately, the terminal ribbon. Both just call
+// `location.reload()` — the only clean boot of the terminal engine (#188).
+
+test("home and settings headers expose a reload button", async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const homeReload = page.locator(
+    'button.header-icon-btn[aria-label="Reload"]',
+  );
+  await expect(homeReload).toBeVisible();
+
+  await Promise.all([page.waitForEvent("load"), homeReload.click()]);
+  await expect(page.locator(".app-wordmark")).toBeVisible();
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const settingsReload = page.locator(
+    'button.header-icon-btn[aria-label="Reload"]',
+  );
+  await expect(settingsReload).toBeVisible();
+  await Promise.all([page.waitForEvent("load"), settingsReload.click()]);
+});
+
+test("terminal ribbon exposes a reload button", async ({ page }) => {
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+  await expect(page.locator("#reloadBtn")).toHaveCount(1);
+  await Promise.all([
+    page.waitForEvent("load"),
+    page.locator("#reloadBtn").click(),
+  ]);
+});
+
+// ── automatic reload after server update (#189) ───────────────────────────
+//
+// The SPA remembers the server's build_hash (`/api/build-info`) in
+// sessionStorage and hard-reloads once it observes a change. `window.__mobuxCheckBuildHash`
+// (set up by watchBuildHash in lib/reload.js) lets the test force a check
+// without waiting out the real poll interval.
+
+test("auto-reload: first visit records a baseline, a later change reloads once, then settles", async ({
+  page,
+}) => {
+  let hash = "hash-a";
+  await page.route("**/api/build-info", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "0.0.0-test", build_hash: hash }),
+    }),
+  );
+
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("mobux:buildHash")))
+    .toBe("hash-a");
+
+  // Same hash again — no reload.
+  let reloaded = false;
+  page.once("load", () => (reloaded = true));
+  await page.evaluate(() => window.__mobuxCheckBuildHash());
+  await page.waitForTimeout(200);
+  expect(reloaded).toBe(false);
+
+  // Server hash changes — the next check hard-reloads exactly once, and
+  // remembers the new hash so the reloaded page's own check settles instead
+  // of looping.
+  hash = "hash-b";
+  await Promise.all([
+    page.waitForEvent("load"),
+    page.evaluate(() => window.__mobuxCheckBuildHash()),
+  ]);
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("mobux:buildHash")))
+    .toBe("hash-b");
+
+  let reloadedAgain = false;
+  page.once("load", () => (reloadedAgain = true));
+  await page.evaluate(() => window.__mobuxCheckBuildHash());
+  await page.waitForTimeout(200);
+  expect(reloadedAgain).toBe(false);
+});
+
 // ── regression: second terminal session renders after navigating home → terminal → home → terminal
 //
 // Before the fix, terminal.js was an ES module already in the browser's module

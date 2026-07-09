@@ -73,6 +73,7 @@ function HomeHeader() {
       >
         mobux
       </h1>
+      <ReloadButton />
       <button
         class="header-icon header-icon-btn"
         type="button"
@@ -92,7 +93,27 @@ function SettingsHeader() {
         ‹
       </Link>
       <h1>settings</h1>
+      <ReloadButton />
     </header>
+  );
+}
+
+// Single-action hard reload (#189), always within reach: it lives in both
+// app-shell headers (Home + Settings) and, separately, in the terminal
+// ribbon (TerminalIsland.jsx) — between the three, every SPA route has one
+// tap to a full `location.reload()`, the only clean boot of the terminal
+// engine (see #188).
+function ReloadButton() {
+  return (
+    <button
+      class="header-icon header-icon-btn"
+      type="button"
+      aria-label="Reload"
+      title="Reload app"
+      onClick={() => location.reload()}
+    >
+      ⟳
+    </button>
   );
 }
 
