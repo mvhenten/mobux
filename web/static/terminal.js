@@ -296,6 +296,13 @@ function unmountReaderGestures() {
 // implementation reset an 800 ms timer per event, which never
 // settled when the attached session pumped continuous output (e.g.
 // a TUI like Claude Code), leaving the loading splash up forever.
+//
+// The mobile input bar (ribbon) shares this same trigger (#198): it must
+// stay out of the way while the loading/quote splash is up and only appear
+// once the splash itself is dismissed, instead of popping in at mount time
+// and sitting pinned at the bottom through the whole splash. Revealing it
+// here — right where the splash starts fading — keeps both on one
+// lifecycle instead of the ribbon running its own separate timer.
 let revealScheduled = false;
 function scheduleReveal() {
   if (revealScheduled) return;
@@ -304,6 +311,7 @@ function scheduleReveal() {
   setTimeout(() => {
     core.scrollToBottom();
     loadquote.style.opacity = "0";
+    if (isMobile) ensureInputBar().reveal();
     setTimeout(() => {
       if (loadquote.parentNode) loadquote.remove();
     }, 300);
@@ -338,13 +346,15 @@ function ensureInputBar() {
   return inputBar;
 }
 
-// If we already look like a touch device, mount eagerly AND reveal the bar
-// immediately so the mic button (and the full control-key ribbon) are
-// visible from the moment the terminal boots — no double-tap required.
-// `reveal()` shows the bar without stealing keyboard focus, which avoids
-// popping the soft keyboard on load.
+// If we already look like a touch device, mount eagerly so the mic button
+// (and the full control-key ribbon) exist and are wired from the start —
+// but don't reveal yet. Revealing happens in `scheduleReveal()` above, in
+// step with the loading/quote splash dismissal (#198), so the ribbon never
+// sits pinned at the bottom through the splash. `reveal()` shows the bar
+// without stealing keyboard focus, which avoids popping the soft keyboard
+// on load.
 if (isMobile) {
-  ensureInputBar().reveal();
+  ensureInputBar();
 }
 
 // Re-evaluate when the primary pointer flips to coarse (e.g. a 2-in-1

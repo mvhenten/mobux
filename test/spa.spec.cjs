@@ -254,10 +254,10 @@ test("terminal island fills the viewport on mount (correct PTY rows)", async ({
     const t = document.getElementById("terminal");
     const bar = document.getElementById("inputBar");
     const r = t.getBoundingClientRect();
-    // On mobile the input bar (mic/ribbon) is revealed eagerly on mount
-    // (see terminal.js's `ensureInputBar().reveal()`) and sits below the
-    // terminal as a flex sibling, so it legitimately claims its own height
-    // at the bottom of the viewport instead of the terminal.
+    // On mobile the input bar (mic/ribbon) reveals itself once the loading
+    // splash resolves (see terminal.js's `scheduleReveal()`, #198) and sits
+    // below the terminal as a flex sibling, so it legitimately claims its
+    // own height at the bottom of the viewport instead of the terminal.
     const barHeight =
       bar && !bar.classList.contains("hidden")
         ? bar.getBoundingClientRect().height
@@ -376,6 +376,47 @@ test("loading splash still clears via the fallback timer when a session emits no
 
   // Only the fallback timer (armed on "open") can clear the splash now.
   await expect.poll(() => loadquoteGone(page), { timeout: 4000 }).toBe(true);
+});
+
+// ── ribbon stays hidden through the splash, reveals with it (#198) ──────────
+//
+// Regression guard: PR #194 and #195 each added a button (reload,
+// bug-report) to the mobile ribbon, and after both landed the ribbon was
+// visible on the loading/quote splash screen instead of staying hidden
+// until the same reveal condition that dismisses the splash. Assert the
+// ribbon is not visible while #loadquote is up, and becomes visible in step
+// with the splash's own reveal — not before.
+function ribbonVisible(page) {
+  return page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    if (!bar) return false;
+    const r = bar.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  });
+}
+
+test("ribbon stays hidden through the loading splash and reveals with it", async ({
+  page,
+}) => {
+  await installFakeSocket(page, { emitDataAfterMs: 50 });
+
+  // domcontentloaded, not networkidle: the fake socket's reveal timers (data
+  // at 50ms, splash fade+removal ~550ms later) can race past a slow
+  // networkidle wait, so asserting "still hidden" right after goto would be
+  // flaky. domcontentloaded returns as soon as the scaffold is parsed, well
+  // before those timers fire, giving a stable read of the pre-reveal state.
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "domcontentloaded",
+  });
+
+  // Splash is up, ribbon (reload/bug-report included) must not be showing.
+  await expect(page.locator("#loadquote")).toHaveCount(1);
+  expect(await loadquoteGone(page)).toBe(false);
+  expect(await ribbonVisible(page)).toBe(false);
+
+  // Once the splash's own reveal condition fires, the ribbon comes with it.
+  await expect.poll(() => loadquoteGone(page), { timeout: 1000 }).toBe(true);
+  expect(await ribbonVisible(page)).toBe(true);
 });
 
 // ── control-key ribbon: horizontally scrollable by touch ────────────────────
@@ -574,10 +615,12 @@ test("telemetry overlay only renders with ?telemetry=1", async ({ page }) => {
 // #inputBar which started with class `hidden` (display:none), giving it a zero
 // bounding rect — effectively invisible with no discoverable way to activate it.
 //
-// The fix: terminal.js calls ensureInputBar().reveal() on mobile so the bar (and
-// the mic button) are visible the moment the terminal boots, without triggering
-// keyboard focus. This test FAILS on the broken state (bounding rect = 0) and
-// PASSES after the fix (bounding rect > 0, click triggers dictation overlay).
+// The fix: terminal.js mounts the bar eagerly on mobile and reveals it as
+// soon as the loading splash resolves (`scheduleReveal()`, #198), so the bar
+// (and the mic button) become visible without any double-tap, just in step
+// with the splash instead of sitting pinned underneath it. This test FAILS
+// on the broken state (bounding rect = 0) and PASSES after the fix (bounding
+// rect > 0, click triggers dictation overlay).
 test("mobile #micBtn is visible on mount and wired to the dictation flow", async ({
   page,
 }) => {
