@@ -1660,3 +1660,113 @@ test("install page renders QR codes for CA and APK", async ({ page }) => {
   await expect(page.locator('a[href="/install/mobux-ca.crt"]')).toBeVisible();
   await expect(page.locator('a[href="/install/mobux.apk"]')).toBeVisible();
 });
+
+// ── fail-hard error page + ribbon bug report (#190, #191) ───────────────────
+//
+// Every current call site already catches its own API errors and shows an
+// inline status (Home's session hint, the settings cards' flash rows) — that
+// is correct, expected-error handling, not the "swallowed error / dead
+// widget" pattern #190 targets. The fail-hard page (lib/fatalError.js) is a
+// safety net for whatever DOESN'T get caught: an uncaught `ApiError`-shaped
+// rejection, exactly what a future forgotten `.catch()` would produce. These
+// tests drive that mechanism directly, the same way a real omission would
+// trigger it, rather than fighting the app's already-tested recoverable
+// error paths.
+
+test("an uncaught ApiError-shaped rejection fails hard with a full-screen error page and a prefilled GitHub link", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await expect(page.locator("#sessionList .session-item").first()).toBeVisible({
+    timeout: 8000,
+  });
+
+  await page.evaluate(() => {
+    const err = new Error("GET /api/whatever -> 500");
+    err.name = "ApiError";
+    err.method = "GET";
+    err.url = "/api/whatever";
+    err.status = 500;
+    err.statusText = "Internal Server Error";
+    err.body = "boom: something exploded server-side";
+    Promise.reject(err);
+  });
+
+  const errorPage = page.locator(".fatal-error-page");
+  await expect(errorPage).toBeVisible({ timeout: 5000 });
+  await expect(errorPage.locator("h1")).toHaveText("Something broke");
+  await expect(page.locator(".fatal-error-summary")).toContainText(
+    "GET /api/whatever -> 500",
+  );
+  await expect(page.locator(".fatal-error-block").first()).toContainText(
+    "boom: something exploded server-side",
+  );
+
+  // Full takeover — the app underneath is gone, not just covered.
+  await expect(page.locator("#sessionList")).toHaveCount(0);
+
+  const reportLink = page.locator(".fatal-error-report-btn");
+  await expect(reportLink).toBeVisible();
+  await expect
+    .poll(() => reportLink.getAttribute("href"), { timeout: 5000 })
+    .not.toBe("#");
+  const href = await reportLink.getAttribute("href");
+  const url = new URL(href);
+  expect(url.origin + url.pathname).toBe(
+    "https://github.com/mvhenten/mobux/issues/new",
+  );
+  expect(url.searchParams.get("title")).toContain("GET /api/whatever -> 500");
+  const body = url.searchParams.get("body");
+  expect(body).toContain("## Diagnostics");
+  expect(body).toContain("boom: something exploded server-side");
+});
+
+test("ribbon bug-report button opens a prefilled GitHub issue with the diagnostics bundle", async ({
+  page,
+}) => {
+  const openedUrls = [];
+  await page.exposeFunction("__testWindowOpen", (url) => {
+    openedUrls.push(url);
+  });
+  await page.addInitScript(() => {
+    window.open = (url) => {
+      window.__testWindowOpen(url);
+      return null;
+    };
+  });
+
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("terminal");
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+  await page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    if (bar) bar.classList.remove("hidden");
+  });
+
+  // Sits right next to the settings gear in the ribbon.
+  await expect(page.locator("#reportBugBtn")).toBeVisible();
+  await page.locator("#reportBugBtn").click();
+
+  await expect
+    .poll(() => openedUrls.length, { timeout: 5000 })
+    .toBeGreaterThan(0);
+  const url = new URL(openedUrls[0]);
+  expect(url.origin + url.pathname).toBe(
+    "https://github.com/mvhenten/mobux/issues/new",
+  );
+  expect(url.searchParams.get("title")).toBe("Bug report");
+  const body = url.searchParams.get("body");
+  expect(body).toContain("## Diagnostics");
+  const diagMatch = body.match(/```json\n([\s\S]*?)\n```/);
+  expect(diagMatch).toBeTruthy();
+  const diagnostics = JSON.parse(diagMatch[1]);
+  expect(diagnostics.userAgent).toBeTruthy();
+  expect(diagnostics.route).toContain(SEED);
+});

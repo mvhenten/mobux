@@ -1,4 +1,6 @@
 import { useRef, useLayoutEffect } from "preact/hooks";
+import { collectDiagnostics } from "../lib/diagnostics.js";
+import { buildIssueUrl } from "../lib/githubIssue.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -26,6 +28,15 @@ import { useRef, useLayoutEffect } from "preact/hooks";
 // `CACHE_BUST` mirrors the Rust page's `?v=` query so a stale SW cache can't
 // hand back an old bundle; in dev it is just a constant.
 const CACHE_BUST = "spa";
+
+// Ribbon bug-report button (#191): grab the current diagnostics bundle and
+// open a prefilled GitHub issue in a new tab. Reuses the same bundle/URL
+// builder as the fail-hard error page (lib/diagnostics.js, lib/githubIssue.js).
+async function openBugReport() {
+  const diagnostics = await collectDiagnostics();
+  const url = buildIssueUrl({ title: "Bug report", diagnostics });
+  window.open(url, "_blank", "noopener,noreferrer");
+}
 
 // Append a classic <script> and resolve when it loads. Order matters (the
 // renderer global must exist before terminal-core constructs the backend), so
@@ -203,6 +214,14 @@ export function TerminalIsland({ node, session }) {
           </button>
           <button id="settingsBtn" title="Settings">
             ⚙
+          </button>
+          <button
+            id="reportBugBtn"
+            title="Report a bug"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={openBugReport}
+          >
+            🐛
           </button>
           <button data-key="\x7f">⌫</button>
           <button data-key="\r">⏎</button>
