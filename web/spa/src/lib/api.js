@@ -3,9 +3,32 @@
 // (attaching Basic auth server-side). In production the SPA is served by the
 // backend itself at /app, so these stay same-origin.
 
+import { ApiError } from "./apiError.js";
+
+// Best-effort response body for an ApiError — never throws.
+async function readBody(res) {
+  try {
+    return await res.text();
+  } catch (_) {
+    return "";
+  }
+}
+
 export async function apiGet(path) {
-  const res = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
+  let res;
+  try {
+    res = await fetch(path, { headers: { Accept: "application/json" } });
+  } catch (e) {
+    throw new ApiError("GET", path, null, e.message);
+  }
+  if (!res.ok)
+    throw new ApiError(
+      "GET",
+      path,
+      res.status,
+      res.statusText,
+      await readBody(res),
+    );
   return res.json();
 }
 
@@ -35,9 +58,21 @@ export async function apiSend(path, opts = {}) {
     ...opts,
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   };
-  const res = await fetch(path, merged);
+  const method = opts.method || "GET";
+  let res;
+  try {
+    res = await fetch(path, merged);
+  } catch (e) {
+    throw new ApiError(method, path, null, e.message);
+  }
   if (!res.ok)
-    throw new Error(`${opts.method || "GET"} ${path} -> ${res.status}`);
+    throw new ApiError(
+      method,
+      path,
+      res.status,
+      res.statusText,
+      await readBody(res),
+    );
   const text = await res.text();
   return text ? JSON.parse(text) : null;
 }
@@ -47,11 +82,23 @@ export async function apiSend(path, opts = {}) {
 // the page (mirrors update.js's `fetchPath`).
 
 export async function localGet(path) {
-  const res = await fetch(path, {
-    headers: { Accept: "application/json" },
-    credentials: "same-origin",
-  });
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
+  let res;
+  try {
+    res = await fetch(path, {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+    });
+  } catch (e) {
+    throw new ApiError("GET", path, null, e.message);
+  }
+  if (!res.ok)
+    throw new ApiError(
+      "GET",
+      path,
+      res.status,
+      res.statusText,
+      await readBody(res),
+    );
   return res.json();
 }
 

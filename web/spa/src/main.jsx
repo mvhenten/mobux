@@ -1,3 +1,8 @@
+// Ring buffer for window.onerror/unhandledrejection (#190, #191) — imported
+// first, before anything else, so nothing that boots after it goes
+// uncaptured. See lib/errorLog.js.
+import "./lib/errorLog.js";
+
 import { render } from "preact";
 import { App } from "./app.jsx";
 import { watchBuildHash } from "./lib/reload.js";
