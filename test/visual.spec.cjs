@@ -25,6 +25,27 @@
 // baselines in strict mode.
 //
 // Run via: `make test-visual`.
+//
+// ── Baseline provenance: v1/v2-sterk are CI-pinned, not dev-box renders ──
+//
+// `v1-steady-sterk-linux.png` and `v2-keyboard-up-sterk-linux.png` are the
+// two exceptions to "shot on a dev box": the sterk (Ace-based) renderer's
+// glyph anti-aliasing differs just enough between this dev box's Chromium
+// and GitHub's hosted runner (0.03 pixel-diff ratio, over the 0.02
+// threshold) that a dev-box render of those two fails CI. Every other
+// baseline in this directory matches CI exactly.
+//
+// These two are pinned to the PNG CI itself rendered, pulled from a failed
+// run's `visual-diff-*` artifact (the "Upload visual diff artefacts on
+// failure" CI step). `make test-visual-update` does not know this and will
+// happily overwrite them with a dev-box render — it prints a warning when
+// it does (see `warnIfOverwritingCiPinned` below). To re-pin correctly
+// after a deliberate change to V1/V2:
+//   1. `make test-visual-update` locally as usual, commit, push.
+//   2. If CI fails on v1/v2-sterk with a small pixel-diff ratio, download
+//      that run's `visual-diff-*` artifact and copy the matching
+//      `test-results/.../v*-actual.png` over the committed baseline.
+//   3. Push again.
 
 const { test, expect } = require("./fixtures.cjs");
 const { devices } = require("@playwright/test");
@@ -217,17 +238,41 @@ async function showInputBar(page) {
   });
 }
 
+// See the "Baseline provenance" note in the file header — these two are
+// pinned to a CI-rendered PNG, not a dev-box one. `--update-snapshots`
+// doesn't know that; warn loudly instead of silently re-breaking CI.
+const CI_PINNED_BASELINES = new Set([
+  "v1-steady-sterk-linux.png",
+  "v2-keyboard-up-sterk-linux.png",
+]);
+
+function warnIfOverwritingCiPinned(testInfo, snapshotName) {
+  if (testInfo.config.updateSnapshots === "none") return;
+  const fname = `${snapshotName.replace(/\.png$/, "")}-${testInfo.project.name}-linux.png`;
+  if (!CI_PINNED_BASELINES.has(fname)) return;
+  console.warn(
+    `\n⚠️  ${fname} is pinned from a CI-artifact render, not a dev-box one ` +
+      "(see the header comment in test/visual.spec.cjs). This run just " +
+      "overwrote it locally — before committing, re-pin it from a failed " +
+      "CI run's visual-diff-* artifact instead of keeping this render, or " +
+      "CI will fail again.\n",
+  );
+}
+
 // ── V1: steady terminal ────────────────────────────────────────────
-test("V1 — steady terminal renders fixed PTY output", async ({ page }) => {
+test("V1 — steady terminal renders fixed PTY output", async ({
+  page,
+}, testInfo) => {
   await bootTerminal(page);
   await seedSteadyTerminal(page);
+  warnIfOverwritingCiPinned(testInfo, "v1-steady.png");
   await expect(page).toHaveScreenshot("v1-steady.png", DIFF);
 });
 
 // ── V2: keyboard up ────────────────────────────────────────────────
 test("V2 — soft keyboard up: last row visible above input ribbon", async ({
   page,
-}) => {
+}, testInfo) => {
   await bootTerminal(page);
   await seedSteadyTerminal(page);
   await showInputBar(page);
@@ -268,6 +313,7 @@ test("V2 — soft keyboard up: last row visible above input ribbon", async ({
     "terminal must not overlap the input ribbon",
   ).toBeLessThanOrEqual(layout.barTop + 1);
 
+  warnIfOverwritingCiPinned(testInfo, "v2-keyboard-up.png");
   await expect(page).toHaveScreenshot("v2-keyboard-up.png", DIFF);
 });
 

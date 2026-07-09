@@ -229,6 +229,13 @@ test-visual:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/visual.spec.cjs
 
+# NOTE: v1-steady-sterk-linux.png and v2-keyboard-up-sterk-linux.png are
+# pinned from a CI-artifact render, not a dev-box one (dev-box Chromium
+# renders sterk's glyphs with just enough anti-aliasing drift to fail CI's
+# threshold) — see the "Baseline provenance" note in test/visual.spec.cjs.
+# This target overwrites them with a dev-box render like everything else
+# and prints a warning when it does; re-pin those two from a failed CI
+# run's visual-diff-* artifact before committing, don't keep this render.
 .PHONY: test-visual-update
 test-visual-update:
 	@$(MAKE) smoke-start
