@@ -112,7 +112,7 @@ export function ShellIntegrationCard() {
   };
 
   return (
-    <section class="settings-card" id="shell-integration">
+    <section class="settings-group" id="shell-integration">
       <h2>Shell integration</h2>
       <p class="settings-lede">
         The reader view classifies prompts and command output deterministically
@@ -143,7 +143,7 @@ export function ShellIntegrationCard() {
                 {d.label}
               </span>
             </div>
-            <div class="shell-card-actions">
+            <div class="settings-actions">
               <button
                 type="button"
                 disabled={isInstalled}

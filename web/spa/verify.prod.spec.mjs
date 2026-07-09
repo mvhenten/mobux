@@ -74,14 +74,15 @@ test('settings: every ported card renders and hits the right endpoints', async (
   await expect(page.locator('#listen-settings h2')).toHaveText('Listen');
   await expect(page.locator('#build-info h2')).toHaveText('Build');
 
-  // Confirm the cards consumed their endpoints.
+  // Confirm the cards consumed their endpoints. The frontend bundle hash is
+  // read off the loaded <script> tag, not fetched, so /static/build-info.json
+  // is no longer part of this contract (issue #192).
   for (const want of [
     'GET /api/update/status',
     'GET /api/settings/notifications',
     'GET /api/shell-integration/status',
     'GET /api/settings/stt',
     'GET /api/build-info',
-    'GET /static/build-info.json',
   ]) {
     expect(seen.has(want), `expected ${want}`).toBeTruthy();
   }
@@ -131,7 +132,7 @@ test('listen card renders controls and saves prefs to localStorage', async ({ pa
   }
 });
 
-test('build-info card shows version and hashes', async ({ page }) => {
+test('build-info card shows version, server hash, and frontend hash', async ({ page }) => {
   await page.goto(`${APP}#/settings`, { waitUntil: 'networkidle' });
   await expect(page.locator('#build-info h2')).toHaveText('Build');
 
@@ -141,13 +142,14 @@ test('build-info card shows version and hashes', async ({ page }) => {
   // Server hash resolves.
   await expect(page.locator('#buildServerHash')).not.toHaveText('…', { timeout: 6000 });
 
-  // FE hash resolves from /static/build-info.json.
-  await expect(page.locator('#buildFeHash')).not.toHaveText('—', { timeout: 6000 });
-
-  // The hashes should match (fresh build, server started with the same file).
-  const srv = await page.locator('#buildServerHash').textContent();
+  // FE hash is read off the loaded script tag's filename
+  // (assets/index-<hash>.js), not fetched — a production build always
+  // resolves to a real hash, never the dev-mode fallback. It is not compared
+  // against the server hash: they describe two different builds (the
+  // terminal-renderer bundles vs. this SPA bundle — see web/build.js).
   const fe = await page.locator('#buildFeHash').textContent();
-  expect(srv.trim()).toBe(fe.trim());
+  expect(fe.trim()).not.toBe('dev');
+  expect(fe.trim()).toMatch(/^[\w-]+$/);
 });
 
 test('install page renders QR codes for CA and APK', async ({ page }) => {

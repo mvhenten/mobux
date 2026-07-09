@@ -259,11 +259,11 @@ export function SttCard() {
   const running = !!sttStatus.value?.local_process_running;
 
   return (
-    <section class="settings-card" id="stt-provider">
+    <section class="settings-group" id="stt-provider">
       <h2>Speech to text</h2>
 
       <label class="settings-row">
-        <span>Provider</span>
+        <span class="settings-label">Provider</span>
         <select
           id="sttKind"
           class="settings-select"
@@ -279,8 +279,8 @@ export function SttCard() {
       {/* Host + Port: only the self-hosted Network provider needs an endpoint. */}
       {isNetwork.value && (
         <>
-          <label class="settings-row" id="sttHostRow">
-            <span>Host</span>
+          <label class="settings-row settings-row--field" id="sttHostRow">
+            <span class="settings-label">Host</span>
             <input
               type="text"
               id="sttHost"
@@ -291,8 +291,8 @@ export function SttCard() {
               onBlur={onHostBlur}
             />
           </label>
-          <label class="settings-row" id="sttPortRow">
-            <span>Port</span>
+          <label class="settings-row settings-row--field" id="sttPortRow">
+            <span class="settings-label">Port</span>
             <input
               type="number"
               id="sttPort"
@@ -310,9 +310,9 @@ export function SttCard() {
 
       {/* Model picker: hidden for local (auto-selected). */}
       {!isLocal.value && (
-        <div class="settings-row" id="sttModelRow">
-          <span>Model</span>
-          <div style="display:flex;gap:0.5rem;flex:1">
+        <div class="settings-row settings-row--field" id="sttModelRow">
+          <span class="settings-label">Model</span>
+          <div style="display:flex;gap:0.5rem;flex:1;min-width:0">
             <select
               id="sttModel"
               class="settings-input settings-select"
@@ -330,6 +330,7 @@ export function SttCard() {
             <button
               type="button"
               id="sttRefreshModels"
+              class="settings-btn"
               title="Refresh model list"
               style="flex-shrink:0"
               onClick={() => loadModels(effectiveModel())}
@@ -342,8 +343,8 @@ export function SttCard() {
 
       {/* Custom model free-text: only when "custom…" is picked (never local). */}
       {!isLocal.value && isCustomModel.value && (
-        <label class="settings-row" id="sttCustomModelRow">
-          <span>Custom model</span>
+        <label class="settings-row settings-row--field" id="sttCustomModelRow">
+          <span class="settings-label">Custom model</span>
           <input
             type="text"
             id="sttCustomModel"
@@ -358,8 +359,8 @@ export function SttCard() {
 
       {/* API key: OpenAI only. */}
       {isOpenai.value && (
-        <label class="settings-row" id="sttApiKeyRow">
-          <span>API key</span>
+        <label class="settings-row settings-row--field" id="sttApiKeyRow">
+          <span class="settings-label">API key</span>
           <input
             type="password"
             id="sttApiKey"

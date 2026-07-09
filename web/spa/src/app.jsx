@@ -34,7 +34,7 @@ export function App() {
               <Route path="/settings" component={SettingsPage} />
               <Route path="/install" component={InstallPage} />
               <Route>
-                <div class="settings-card">
+                <div class="settings-group">
                   <h2>Not found</h2>
                   <p>
                     No SPA route here yet. <Link href="/">Home</Link>
