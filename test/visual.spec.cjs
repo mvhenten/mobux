@@ -26,25 +26,42 @@
 //
 // Run via: `make test-visual`.
 //
-// ── Baseline provenance: v1/v2-sterk are CI-pinned, not dev-box renders ──
+// ── V1/V2-sterk: measured CI-to-CI rendering variance, not just dev-box drift ──
 //
-// `v1-steady-sterk-linux.png` and `v2-keyboard-up-sterk-linux.png` are the
-// two exceptions to "shot on a dev box": the sterk (Ace-based) renderer's
-// glyph anti-aliasing differs just enough between this dev box's Chromium
-// and GitHub's hosted runner (0.03 pixel-diff ratio, over the 0.02
-// threshold) that a dev-box render of those two fails CI. Every other
-// baseline in this directory matches CI exactly.
+// `v1-steady-sterk-linux.png` and `v2-keyboard-up-sterk-linux.png` are
+// pinned to a PNG GitHub's hosted runner itself rendered (pulled from a
+// failed run's `visual-diff-*` artifact, the "Upload visual diff
+// artefacts on failure" CI step) — the sterk (Ace-based) renderer's glyph
+// anti-aliasing differs enough from this dev box's Chromium that a
+// dev-box render of those two failed CI at a ~0.028-0.03 pixel-diff
+// ratio.
 //
-// These two are pinned to the PNG CI itself rendered, pulled from a failed
-// run's `visual-diff-*` artifact (the "Upload visual diff artefacts on
-// failure" CI step). `make test-visual-update` does not know this and will
-// happily overwrite them with a dev-box render — it prints a warning when
-// it does (see `warnIfOverwritingCiPinned` below). To re-pin correctly
-// after a deliberate change to V1/V2:
+// Pinning the baseline to CI's own render did not fully close the gap:
+// two later CI runs on an otherwise-unchanged commit (run 29028137084,
+// both the original attempt and a rerun) still diffed against that
+// *same* CI-pinned baseline —
+//   v1: 9395px/0.0272 then 9387px/0.0272 (of 412×839 = 345,668px)
+//   v2: 9956px/0.0288 then 9997px/0.0289
+// — meaning sterk's rendering output itself carries run-to-run variance
+// on GitHub's hosted runners, not just dev-box-vs-CI drift. No single
+// pinned PNG can be exactly right for every future run.
+//
+// Fix: V1 and V2 carry a per-test threshold on the sterk project only
+// (`STERK_EDGE_DIFF`, 0.035 — comfortably above the ~0.029 max observed
+// above, still tight enough to catch a real rendering regression) instead
+// of chasing a moving pin. xterm and every other sterk baseline
+// (V3/V5/V8/V9/V10) stay at the strict 0.02 default — they matched CI
+// exactly on both of the runs above.
+//
+// `make test-visual-update` still overwrites these two with a dev-box
+// render and warns when it does (see `warnIfOverwritingCiPinned` below).
+// The wider threshold makes that dev-box render likely to still pass
+// against a real CI run, but it hasn't been measured — prefer re-pinning
+// from a failed CI run's `visual-diff-*` artifact:
 //   1. `make test-visual-update` locally as usual, commit, push.
-//   2. If CI fails on v1/v2-sterk with a small pixel-diff ratio, download
-//      that run's `visual-diff-*` artifact and copy the matching
-//      `test-results/.../v*-actual.png` over the committed baseline.
+//   2. If CI still flags v1/v2-sterk, download that run's `visual-diff-*`
+//      artifact and copy the matching `test-results/.../v*-actual.png`
+//      over the committed baseline.
 //   3. Push again.
 
 const { test, expect } = require("./fixtures.cjs");
@@ -72,6 +89,18 @@ const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 // loose enough to absorb subpixel font hinting jitter that Chromium
 // sometimes produces on different host machines.
 const DIFF = { maxDiffPixelRatio: 0.02 };
+
+// V1/V2 on the sterk project only — see the "measured CI-to-CI rendering
+// variance" note in the file header for the observed numbers (max 0.0289
+// across two CI runs). 0.035 is comfortably above that, not a blanket
+// loosening: it applies to these two tests on sterk alone, everything
+// else (including V1/V2 on xterm) stays at the strict DIFF above.
+const STERK_EDGE_DIFF = { maxDiffPixelRatio: 0.035 };
+
+// Only V1 and V2 call this — every other test keeps using DIFF directly.
+function diffForV1V2(testInfo) {
+  return testInfo.project.name === "sterk" ? STERK_EDGE_DIFF : DIFF;
+}
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
@@ -247,7 +276,13 @@ const CI_PINNED_BASELINES = new Set([
 ]);
 
 function warnIfOverwritingCiPinned(testInfo, snapshotName) {
-  if (testInfo.config.updateSnapshots === "none") return;
+  // Playwright's default mode is "missing" (only writes snapshots that
+  // don't exist yet — never overwrites an existing mismatch), and CI's
+  // plain `make test-visual` never passes --update-snapshots at all. Only
+  // "all"/"changed" (what `--update-snapshots` maps to) actually
+  // overwrite an existing, differing baseline.
+  const mode = testInfo.config.updateSnapshots;
+  if (mode !== "all" && mode !== "changed") return;
   const fname = `${snapshotName.replace(/\.png$/, "")}-${testInfo.project.name}-linux.png`;
   if (!CI_PINNED_BASELINES.has(fname)) return;
   console.warn(
@@ -266,7 +301,7 @@ test("V1 — steady terminal renders fixed PTY output", async ({
   await bootTerminal(page);
   await seedSteadyTerminal(page);
   warnIfOverwritingCiPinned(testInfo, "v1-steady.png");
-  await expect(page).toHaveScreenshot("v1-steady.png", DIFF);
+  await expect(page).toHaveScreenshot("v1-steady.png", diffForV1V2(testInfo));
 });
 
 // ── V2: keyboard up ────────────────────────────────────────────────
@@ -314,7 +349,10 @@ test("V2 — soft keyboard up: last row visible above input ribbon", async ({
   ).toBeLessThanOrEqual(layout.barTop + 1);
 
   warnIfOverwritingCiPinned(testInfo, "v2-keyboard-up.png");
-  await expect(page).toHaveScreenshot("v2-keyboard-up.png", DIFF);
+  await expect(page).toHaveScreenshot(
+    "v2-keyboard-up.png",
+    diffForV1V2(testInfo),
+  );
 });
 
 // ── V3: keyboard cycle ─────────────────────────────────────────────
