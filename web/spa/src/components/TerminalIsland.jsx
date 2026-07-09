@@ -32,10 +32,25 @@ const CACHE_BUST = "spa";
 // Ribbon bug-report button (#191): grab the current diagnostics bundle and
 // open a prefilled GitHub issue in a new tab. Reuses the same bundle/URL
 // builder as the fail-hard error page (lib/diagnostics.js, lib/githubIssue.js).
+//
+// The tab MUST be opened synchronously inside the click gesture: awaiting
+// the diagnostics fetches first loses the user activation, and popup
+// blockers (Android Chrome — the primary target) silently kill the
+// window.open. So open about:blank while the gesture is live, then steer it
+// to the issue URL once the bundle resolves. `noopener` can't be passed as a
+// window feature here (it makes window.open return null, losing the handle),
+// so sever the opener by hand while the tab is still same-origin.
 async function openBugReport() {
+  const win = window.open("about:blank", "_blank");
+  if (win) win.opener = null;
   const diagnostics = await collectDiagnostics();
   const url = buildIssueUrl({ title: "Bug report", diagnostics });
-  window.open(url, "_blank", "noopener,noreferrer");
+  if (win) {
+    win.location = url;
+    return;
+  }
+  // Popup blocked anyway — fall back to navigating this tab.
+  window.location.href = url;
 }
 
 // Append a classic <script> and resolve when it loads. Order matters (the

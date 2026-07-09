@@ -1724,16 +1724,18 @@ test("an uncaught ApiError-shaped rejection fails hard with a full-screen error 
 test("ribbon bug-report button opens a prefilled GitHub issue with the diagnostics bundle", async ({
   page,
 }) => {
-  const openedUrls = [];
-  await page.exposeFunction("__testWindowOpen", (url) => {
-    openedUrls.push(url);
-  });
-  await page.addInitScript(() => {
-    window.open = (url) => {
-      window.__testWindowOpen(url);
-      return null;
-    };
-  });
+  // Real popup path — no window.open stub. The tab must be opened
+  // synchronously inside the click gesture (awaiting the diagnostics
+  // fetches first would lose the user activation, and popup blockers —
+  // Android Chrome, the primary target — silently kill the open), then be
+  // steered to the issue URL once the bundle resolves. Stub the GitHub
+  // response at the context level so the navigation never leaves the test
+  // host.
+  await page
+    .context()
+    .route("https://github.com/**", (route) =>
+      route.fulfill({ status: 200, contentType: "text/html", body: "ok" }),
+    );
 
   await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
     waitUntil: "networkidle",
@@ -1752,12 +1754,15 @@ test("ribbon bug-report button opens a prefilled GitHub issue with the diagnosti
 
   // Sits right next to the settings gear in the ribbon.
   await expect(page.locator("#reportBugBtn")).toBeVisible();
-  await page.locator("#reportBugBtn").click();
+  const [popup] = await Promise.all([
+    page.waitForEvent("popup", { timeout: 5000 }),
+    page.locator("#reportBugBtn").click(),
+  ]);
 
-  await expect
-    .poll(() => openedUrls.length, { timeout: 5000 })
-    .toBeGreaterThan(0);
-  const url = new URL(openedUrls[0]);
+  await popup.waitForURL(/github\.com\/mvhenten\/mobux\/issues\/new/, {
+    timeout: 8000,
+  });
+  const url = new URL(popup.url());
   expect(url.origin + url.pathname).toBe(
     "https://github.com/mvhenten/mobux/issues/new",
   );
