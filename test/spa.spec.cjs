@@ -409,7 +409,21 @@ test("ribbon stays hidden through the loading splash and reveals with it", async
     waitUntil: "domcontentloaded",
   });
 
-  // Splash is up, ribbon (reload/bug-report included) must not be showing.
+  // #inputBar is part of the static scaffold TerminalIsland renders before
+  // terminal.js even loads, so its mere presence proves nothing. Wait
+  // instead for the engine to actually attach (children under #terminal) —
+  // terminal.js's boot is synchronous up to and including the mobile
+  // eager-mount decision, so by the time the engine has attached, that
+  // decision has already run. Asserting "not visible" here catches the
+  // regression: on the broken code this observes the ribbon already
+  // revealed, not just "not yet created".
+  await page.waitForFunction(() => {
+    const t = document.getElementById("terminal");
+    return t && t.childElementCount > 0;
+  });
+
+  // Splash is still up at this point; ribbon (reload/bug-report included)
+  // must not be showing.
   await expect(page.locator("#loadquote")).toHaveCount(1);
   expect(await loadquoteGone(page)).toBe(false);
   expect(await ribbonVisible(page)).toBe(false);
