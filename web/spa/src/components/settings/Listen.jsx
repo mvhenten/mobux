@@ -101,16 +101,15 @@ export function ListenCard() {
   }
 
   return (
-    <section class="settings-card" id="listen-settings">
+    <section class="settings-group" id="listen-settings">
       <h2>Listen</h2>
       {available.value ? (
         <div id="listenCapable">
-          <div class="listen-range-group">
-            <label>Voice</label>
+          <label class="settings-row settings-row--field">
+            <span class="settings-label">Voice</span>
             <select
               id="listenVoice"
               class="settings-select"
-              style="flex: 1;"
               value={prefs.value.voice}
               onChange={setVoice}
             >
@@ -121,45 +120,46 @@ export function ListenCard() {
                 </option>
               ))}
             </select>
-          </div>
-          <div class="listen-range-group" style="margin-top: 12px;">
-            <label>Rate</label>
-            <input
-              type="range"
-              id="listenRate"
-              min={RATE_MIN}
-              max={RATE_MAX}
-              step="0.1"
-              value={prefs.value.rate}
-              onInput={setRate}
-            />
-            <span class="listen-value" id="listenRateValue">
-              {prefs.value.rate.toFixed(1)}
+          </label>
+          <label class="settings-row">
+            <span class="settings-label">Rate</span>
+            <span class="settings-row-control">
+              <input
+                type="range"
+                id="listenRate"
+                min={RATE_MIN}
+                max={RATE_MAX}
+                step="0.1"
+                value={prefs.value.rate}
+                onInput={setRate}
+              />
+              <span class="listen-value" id="listenRateValue">
+                {prefs.value.rate.toFixed(1)}
+              </span>
             </span>
-          </div>
-          <div class="listen-range-group" style="margin-top: 8px;">
-            <label>Pitch</label>
-            <input
-              type="range"
-              id="listenPitch"
-              min={PITCH_MIN}
-              max={PITCH_MAX}
-              step="0.1"
-              value={prefs.value.pitch}
-              onInput={setPitch}
-            />
-            <span class="listen-value" id="listenPitchValue">
-              {prefs.value.pitch.toFixed(1)}
+          </label>
+          <label class="settings-row">
+            <span class="settings-label">Pitch</span>
+            <span class="settings-row-control">
+              <input
+                type="range"
+                id="listenPitch"
+                min={PITCH_MIN}
+                max={PITCH_MAX}
+                step="0.1"
+                value={prefs.value.pitch}
+                onInput={setPitch}
+              />
+              <span class="listen-value" id="listenPitchValue">
+                {prefs.value.pitch.toFixed(1)}
+              </span>
             </span>
+          </label>
+          <div class="settings-actions">
+            <button type="button" id="listenTest" onClick={test}>
+              Test
+            </button>
           </div>
-          <button
-            type="button"
-            id="listenTest"
-            class="listen-test-btn"
-            onClick={test}
-          >
-            Test
-          </button>
         </div>
       ) : (
         <div id="listenUnavailable" class="listen-unavailable">

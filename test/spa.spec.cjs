@@ -1134,7 +1134,9 @@ test("settings: every ported card renders and consumes its endpoint", async ({
   await expect(page.locator("#listen-settings h2")).toHaveText("Listen");
   await expect(page.locator("#build-info h2")).toHaveText("Build");
 
-  // The cards consumed their endpoints.
+  // The cards consumed their endpoints. The frontend bundle hash is read
+  // straight off the loaded <script> tag (issue #192), not fetched — so
+  // /static/build-info.json is no longer part of this contract.
   for (const want of [
     "GET /api/update/status",
     "GET /api/settings/notifications",
@@ -1142,7 +1144,6 @@ test("settings: every ported card renders and consumes its endpoint", async ({
     "GET /api/settings/stt",
     "GET /api/settings/nodes",
     "GET /api/build-info",
-    "GET /static/build-info.json",
   ]) {
     expect(seen.has(want), `expected ${want}`).toBeTruthy();
   }
@@ -1197,8 +1198,13 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
 });
 
 // ── build-info card ─────────────────────────────────────────────────────────
+//
+// Server build_hash and the frontend bundle hash describe two different
+// builds (the terminal-renderer bundles vs. the SPA's own Vite output — see
+// web/build.js), so they are shown as two independent facts, not compared
+// for a "stale" match (issue #192).
 
-test("settings: build-info card shows version and matching hashes", async ({
+test("settings: build-info card shows version, server hash, and frontend hash", async ({
   page,
 }) => {
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
@@ -1209,17 +1215,18 @@ test("settings: build-info card shows version and matching hashes", async ({
   await expect(page.locator("#buildServerHash")).not.toHaveText("…", {
     timeout: 6000,
   });
-  await expect(page.locator("#buildFeHash")).not.toHaveText("—", {
-    timeout: 6000,
-  });
-  // Fresh build: server hash and FE hash agree. "unknown" means the binary
-  // lost its embedded build-info.json (#172) — never acceptable on a build
-  // that just served the matching FE bundle.
+
+  // "unknown" means the binary lost its embedded build-info.json (#172) —
+  // never acceptable on a fresh build.
   const srv = await page.locator("#buildServerHash").textContent();
-  const fe = await page.locator("#buildFeHash").textContent();
   expect(srv.trim()).not.toBe("unknown");
-  expect(srv.trim()).toBe(fe.trim());
-  await expect(page.locator("#buildStaleRow")).toHaveCount(0);
+
+  // The frontend hash is read off the loaded script tag's filename
+  // (assets/index-<hash>.js), not fetched — a production build always has
+  // one, so it must resolve to a real hash, never the dev-mode fallback.
+  const fe = await page.locator("#buildFeHash").textContent();
+  expect(fe.trim()).not.toBe("dev");
+  expect(fe.trim()).toMatch(/^[\w-]+$/);
 });
 
 // ── regression: second terminal session renders after navigating home → terminal → home → terminal

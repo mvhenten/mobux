@@ -109,7 +109,7 @@ export function UpdateCard() {
   const available = !!s.available;
 
   return (
-    <section class="settings-card" id="update">
+    <section class="settings-group" id="update">
       <h2>Software update</h2>
       <p class="settings-lede">
         mobux checks crates.io for newer published versions. Updating installs
@@ -143,7 +143,7 @@ export function UpdateCard() {
           {s.latest || "…"}
         </span>
       </div>
-      <div class="shell-card-actions">
+      <div class="settings-actions">
         <button
           id="updateCheckBtn"
           type="button"
