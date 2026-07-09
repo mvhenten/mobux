@@ -56,3 +56,18 @@ jobs:
         env:
           CI: true
           MOBUX_URL: http://localhost:8281
+      - name: Run visual tests (strict, no baseline update)
+        run: make test-visual
+        env:
+          CI: true
+          MOBUX_URL: http://localhost:8281
+      - name: Upload visual diff artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-diff-${{ github.run_id }}
+          path: |
+            test-results/**
+            test/visual.spec.cjs-snapshots/**
+          if-no-files-found: ignore
+          retention-days: 14
