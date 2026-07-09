@@ -59,7 +59,7 @@ export function NotificationsCard() {
   );
 
   return (
-    <section class="settings-card">
+    <section class="settings-group">
       <h2>Notifications</h2>
       <p class="settings-lede">
         Pick what fires a push to subscribed devices. Everything is detected by

@@ -45,8 +45,14 @@ pub fn build_attach_command(
             // -tt forces remote pty allocation. The remote shell doesn't
             // inherit our TERM env (ssh only forwards vars the server's
             // AcceptEnv allows, which defaults to none), so set it inline
-            // as part of the remote command instead.
-            cmd.args(["-tt", target, &format!("TERM=xterm-256color {tmux_setup}")]);
+            // as part of the remote command instead. `export` (not a plain
+            // `TERM=... cmd` prefix) so it covers every command in the
+            // `;`-chain, not just the first one.
+            cmd.args([
+                "-tt",
+                target,
+                &format!("export TERM=xterm-256color; {tmux_setup}"),
+            ]);
             cmd
         }
     }
@@ -144,7 +150,7 @@ mod tests {
         assert_eq!(argv[0], "ssh");
         assert_eq!(argv[1], "-tt");
         assert_eq!(argv[2], "mvhenten@gpu-box");
-        assert!(argv[3].starts_with("TERM=xterm-256color "));
+        assert!(argv[3].starts_with("export TERM=xterm-256color; "));
         assert!(argv[3].contains("tmux attach-session -t demo"));
     }
 }

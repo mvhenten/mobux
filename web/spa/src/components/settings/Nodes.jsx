@@ -97,7 +97,7 @@ export function NodesCard() {
   const list = nodes.value;
 
   return (
-    <section class="settings-card" id="nodes-settings">
+    <section class="settings-group" id="nodes-settings">
       <h2>Nodes</h2>
       <p class="settings-lede">
         Remote hosts this hub can open tmux sessions on over SSH. SSH keys are

@@ -1134,7 +1134,9 @@ test("settings: every ported card renders and consumes its endpoint", async ({
   await expect(page.locator("#listen-settings h2")).toHaveText("Listen");
   await expect(page.locator("#build-info h2")).toHaveText("Build");
 
-  // The cards consumed their endpoints.
+  // The cards consumed their endpoints. The frontend bundle hash is read
+  // straight off the loaded <script> tag (issue #192), not fetched — so
+  // /static/build-info.json is no longer part of this contract.
   for (const want of [
     "GET /api/update/status",
     "GET /api/settings/notifications",
@@ -1142,7 +1144,6 @@ test("settings: every ported card renders and consumes its endpoint", async ({
     "GET /api/settings/stt",
     "GET /api/settings/nodes",
     "GET /api/build-info",
-    "GET /static/build-info.json",
   ]) {
     expect(seen.has(want), `expected ${want}`).toBeTruthy();
   }
@@ -1197,8 +1198,13 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
 });
 
 // ── build-info card ─────────────────────────────────────────────────────────
+//
+// Server build_hash and the frontend bundle hash describe two different
+// builds (the terminal-renderer bundles vs. the SPA's own Vite output — see
+// web/build.js), so they are shown as two independent facts, not compared
+// for a "stale" match (issue #192).
 
-test("settings: build-info card shows version and matching hashes", async ({
+test("settings: build-info card shows version, server hash, and frontend hash", async ({
   page,
 }) => {
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
@@ -1209,17 +1215,103 @@ test("settings: build-info card shows version and matching hashes", async ({
   await expect(page.locator("#buildServerHash")).not.toHaveText("…", {
     timeout: 6000,
   });
-  await expect(page.locator("#buildFeHash")).not.toHaveText("—", {
-    timeout: 6000,
-  });
-  // Fresh build: server hash and FE hash agree. "unknown" means the binary
-  // lost its embedded build-info.json (#172) — never acceptable on a build
-  // that just served the matching FE bundle.
+
+  // "unknown" means the binary lost its embedded build-info.json (#172) —
+  // never acceptable on a fresh build.
   const srv = await page.locator("#buildServerHash").textContent();
-  const fe = await page.locator("#buildFeHash").textContent();
   expect(srv.trim()).not.toBe("unknown");
-  expect(srv.trim()).toBe(fe.trim());
-  await expect(page.locator("#buildStaleRow")).toHaveCount(0);
+
+  // The frontend hash is read off the loaded script tag's filename
+  // (assets/index-<hash>.js), not fetched — a production build always has
+  // one, so it must resolve to a real hash, never the dev-mode fallback.
+  const fe = await page.locator("#buildFeHash").textContent();
+  expect(fe.trim()).not.toBe("dev");
+  expect(fe.trim()).toMatch(/^[\w-]+$/);
+});
+
+// ── manual hard reload (#189) ─────────────────────────────────────────────
+//
+// A single-action reload control always within reach: the app-shell header
+// (Home + Settings) and, separately, the terminal ribbon. Both just call
+// `location.reload()` — the only clean boot of the terminal engine (#188).
+
+test("home and settings headers expose a reload button", async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const homeReload = page.locator(
+    'button.header-icon-btn[aria-label="Reload"]',
+  );
+  await expect(homeReload).toBeVisible();
+
+  await Promise.all([page.waitForEvent("load"), homeReload.click()]);
+  await expect(page.locator(".app-wordmark")).toBeVisible();
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const settingsReload = page.locator(
+    'button.header-icon-btn[aria-label="Reload"]',
+  );
+  await expect(settingsReload).toBeVisible();
+  await Promise.all([page.waitForEvent("load"), settingsReload.click()]);
+});
+
+test("terminal ribbon exposes a reload button", async ({ page }) => {
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+  await expect(page.locator("#reloadBtn")).toHaveCount(1);
+  await Promise.all([
+    page.waitForEvent("load"),
+    page.locator("#reloadBtn").click(),
+  ]);
+});
+
+// ── automatic reload after server update (#189) ───────────────────────────
+//
+// The SPA remembers the server's build_hash (`/api/build-info`) in
+// sessionStorage and hard-reloads once it observes a change. `window.__mobuxCheckBuildHash`
+// (set up by watchBuildHash in lib/reload.js) lets the test force a check
+// without waiting out the real poll interval.
+
+test("auto-reload: first visit records a baseline, a later change reloads once, then settles", async ({
+  page,
+}) => {
+  let hash = "hash-a";
+  await page.route("**/api/build-info", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ version: "0.0.0-test", build_hash: hash }),
+    }),
+  );
+
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("mobux:buildHash")))
+    .toBe("hash-a");
+
+  // Same hash again — no reload.
+  let reloaded = false;
+  page.once("load", () => (reloaded = true));
+  await page.evaluate(() => window.__mobuxCheckBuildHash());
+  await page.waitForTimeout(200);
+  expect(reloaded).toBe(false);
+
+  // Server hash changes — the next check hard-reloads exactly once, and
+  // remembers the new hash so the reloaded page's own check settles instead
+  // of looping.
+  hash = "hash-b";
+  await Promise.all([
+    page.waitForEvent("load"),
+    page.evaluate(() => window.__mobuxCheckBuildHash()),
+  ]);
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("mobux:buildHash")))
+    .toBe("hash-b");
+
+  let reloadedAgain = false;
+  page.once("load", () => (reloadedAgain = true));
+  await page.evaluate(() => window.__mobuxCheckBuildHash());
+  await page.waitForTimeout(200);
+  expect(reloadedAgain).toBe(false);
 });
 
 // ── regression: second terminal session renders after navigating home → terminal → home → terminal

@@ -230,6 +230,17 @@ export function TerminalIsland({ node, session }) {
           <button id="settingsBtn" title="Settings">
             ⚙
           </button>
+          {/* Single-action hard reload (#189) — no data-key, so it's ignored
+              by the engine's ribbon delegation (input-bar.js only intercepts
+              `button[data-key]`); the click is handled directly by Preact. */}
+          <button
+            id="reloadBtn"
+            type="button"
+            title="Reload app"
+            onClick={() => location.reload()}
+          >
+            🔄
+          </button>
           <button
             id="reportBugBtn"
             title="Report a bug"

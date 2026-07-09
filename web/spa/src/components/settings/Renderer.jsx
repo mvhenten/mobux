@@ -35,7 +35,7 @@ export function RendererCard() {
   };
 
   return (
-    <section class="settings-card" id="renderer-picker">
+    <section class="settings-group" id="renderer-picker">
       <h2>Terminal renderer</h2>
       <p class="settings-lede">
         The browser-side terminal emulator. <strong>xterm.js</strong> is the

@@ -104,60 +104,85 @@ body {
 }
 .install-hint-x:active { background: rgba(255,255,255,0.05); }
 
-/* ── Settings page ─────────────────────────────────────────────────── */
+/* ── Settings page ─────────────────────────────────────────────────────────
+   Native-mobile row list (issue #192): no card chrome, no left/right screen
+   padding, hairline separators running the full row width. `.spa-main`
+   (app.css) gives every other route a 1rem inset; settings breaks out of it
+   with a negative margin so rows can run edge-to-edge, then each row re-adds
+   its own 16px inset so text isn't glued to the glass.
+
+   Row anatomy: a leading control (checkbox) or none, a `.settings-label`
+   that grows to fill the row (title + optional `<small>` secondary line),
+   and a trailing control docked to the right by virtue of the label eating
+   the remaining flex space. `.settings-row--field` flips that for rows whose
+   control is the point (a text field, a wide select) rather than the label. */
 .settings-page {
-  padding: 16px;
-  max-width: 640px;
-  margin: 0 auto;
+  margin: -1rem -1rem 0;
+  padding-bottom: 24px;
 }
-.settings-card {
-  background: var(--card, #1a1d24);
+.settings-search-wrap {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-search {
+  display: block;
+  width: 100%;
+  background: var(--panel);
+  color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 14px;
 }
-.settings-card h2 {
-  margin: 0 0 8px;
-  font-size: 16px;
+.settings-search:focus { border-color: var(--accent); outline: none; }
+.settings-search::placeholder { color: var(--muted); }
+
+.settings-group { padding-top: 22px; }
+.settings-group:first-child { padding-top: 0; }
+.settings-group[hidden] { display: none; }
+.settings-group h2 {
+  margin: 0;
+  padding: 0 16px 2px;
+  font-size: 12px;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
 }
 .settings-lede {
   color: var(--muted);
   font-size: 13px;
-  margin: 0 0 16px;
+  margin: 0;
+  padding: 2px 16px 10px;
 }
-.settings-link-btn {
-  display: inline-block;
-  margin-top: 4px;
-  padding: 8px 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--accent);
-  text-decoration: none;
-  font-size: 14px;
-}
-.settings-link-btn:active { background: rgba(255,255,255,0.05); }
 .settings-row {
   display: flex;
   gap: 12px;
-  align-items: flex-start;
-  padding: 10px 0;
+  align-items: center;
+  padding: 14px 16px;
   border-top: 1px solid var(--border);
   cursor: pointer;
 }
-.settings-row:first-of-type { border-top: none; }
+.settings-row[hidden] { display: none; }
+/* Navigation rows are anchors — they wear the row look, not link chrome. */
+a.settings-row {
+  color: inherit;
+  text-decoration: none;
+}
+a.settings-row:active { background: rgba(255,255,255,0.05); }
 .settings-row input[type="checkbox"] {
   width: 22px;
   height: 22px;
-  accent-color: #6ea8ff;
-  margin-top: 2px;
+  accent-color: var(--accent);
   flex: 0 0 auto;
 }
 .settings-label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .settings-label small {
   color: var(--muted);
@@ -171,19 +196,91 @@ body {
   padding: 1px 4px;
   border-radius: 3px;
 }
-.settings-select {
-  margin-left: auto;
+/* Field rows (a short label, a control that needs the width): the label
+   stops growing and the control takes the remaining space instead. */
+.settings-row--field .settings-label {
   flex: 0 0 auto;
+  max-width: 40%;
+}
+.settings-row--field .settings-select,
+.settings-row--field .settings-input {
+  flex: 1 1 auto;
+}
+
+.settings-select,
+.settings-input {
+  flex: 0 0 auto;
+  margin-left: auto;
   background: rgba(255,255,255,0.06);
   color: inherit;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 10px;
   font: inherit;
-  min-width: 180px;
+  min-width: 0;
 }
+.settings-select { min-width: 160px; }
+.settings-row input[type="range"] {
+  width: 120px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.settings-row-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.settings-row-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.settings-btn {
+  flex-shrink: 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-btn:active:not(:disabled) { background: rgba(255,255,255,0.08); }
+.settings-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.settings-btn--danger { color: var(--danger); border-color: var(--danger); }
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--border);
+}
+.settings-actions button {
+  padding: 6px 12px;
+  font-size: 13px;
+  font: inherit;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: inherit;
+  cursor: pointer;
+}
+.settings-actions button:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+}
+.settings-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .settings-status {
-  margin-top: 12px;
+  padding: 0 16px 14px;
   font-size: 13px;
   color: var(--muted);
 }
@@ -191,12 +288,13 @@ body {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 .settings-value--new {
   color: var(--accent, #6ee7b7);
 }
 .settings-detail {
-  margin-top: 12px;
+  margin: 0 16px 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: rgba(0,0,0,0.2);
@@ -225,16 +323,13 @@ body {
   color: #d8dde6;
 }
 .settings-foot {
-  margin-top: 12px;
+  padding: 4px 16px 16px;
   font-size: 12px;
   color: var(--muted);
 }
 .shell-card {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: rgba(0,0,0,0.15);
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
 }
 .shell-card-head {
   display: flex;
@@ -259,29 +354,12 @@ body {
 .shell-state--off { color: var(--muted); }
 .shell-state--warn { color: #fbbf24; border-color: #553f17; background: rgba(251,191,36,0.08); }
 .shell-state--missing { color: var(--muted); font-style: italic; }
-.shell-card-actions {
-  display: flex;
-  gap: 8px;
-  margin: 10px 0;
-}
-.shell-card-actions button {
-  padding: 6px 12px;
-  font-size: 13px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: rgba(255,255,255,0.04);
-  color: inherit;
-  cursor: pointer;
-}
-.shell-card-actions button:hover:not(:disabled) {
-  background: rgba(255,255,255,0.08);
-}
-.shell-card-actions button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.shell-card .settings-actions {
+  padding: 10px 0 0;
+  border-top: none;
 }
 .shell-card .settings-detail {
-  margin-top: 0;
+  margin: 10px 0 0;
 }
 
 .session-list {
@@ -1086,52 +1164,16 @@ h1, h2, h3 { margin: 0; }
   line-height: 1.6;
 }
 
-.listen-range-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.listen-range-group label {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 14px;
-}
-
-.listen-range-group input[type="range"] {
-  flex: 1;
-  min-width: 120px;
-}
-
-.listen-range-group .listen-value {
-  min-width: 40px;
+.listen-value {
+  min-width: 32px;
   text-align: right;
   color: var(--muted);
   font-family: var(--mono);
   font-size: 12px;
 }
 
-.listen-test-btn {
-  margin-top: 8px;
-  padding: 8px 16px;
-  background: var(--accent);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: #fff;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.listen-test-btn:hover {
-  opacity: 0.9;
-}
-
 .listen-unavailable {
   color: var(--muted);
   font-size: 13px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.2);
+  padding: 4px 16px 14px;
 }

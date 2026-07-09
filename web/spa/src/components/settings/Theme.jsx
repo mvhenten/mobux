@@ -43,7 +43,7 @@ export function ThemeCard() {
   };
 
   return (
-    <section class="settings-card" id="theme-picker">
+    <section class="settings-group" id="theme-picker">
       <h2>Theme</h2>
       <p class="settings-lede">
         Sets the editor theme, terminal palette and reader palette together. All
