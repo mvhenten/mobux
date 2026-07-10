@@ -82,6 +82,43 @@ body.term-body #app {
   font-family: inherit;
 }
 
+/* ── Install hint banner ─────────────────────────────────────────────
+   Nudges a bare-browser-tab visitor toward the standalone PWA, whose
+   address bar is exactly the "wasted space on top" — installing runs the
+   app in display:standalone (manifest.json), removing it entirely. Sits
+   above .spa-main in the Shell, skipped on the terminal island (which has
+   no Shell) and on /install itself (see app.jsx). */
+.pwa-install-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.pwa-install-hint-link {
+  flex: 1;
+  color: var(--accent);
+  text-decoration: none;
+}
+.pwa-install-hint-link:hover,
+.pwa-install-hint-link:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+.pwa-install-hint-x {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+.pwa-install-hint-x:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 /* ── Node picker (Home) ──────────────────────────────────────────────
    Compact local/node switch above the session list. Rendered only when
    nodes are configured; palette stays on the muted theme vars. */

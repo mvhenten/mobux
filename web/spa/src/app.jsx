@@ -1,3 +1,4 @@
+import { useState } from "preact/hooks";
 import { Router, Route, Switch, Link, useLocation } from "wouter-preact";
 import { useHashLocation } from "wouter-preact/use-hash-location";
 import { HomePage } from "./pages/Home.jsx";
@@ -6,6 +7,7 @@ import { SettingsPage } from "./pages/Settings.jsx";
 import { InstallPage } from "./pages/Install.jsx";
 import { ErrorPage } from "./components/ErrorPage.jsx";
 import { fatalError } from "./lib/fatalError.js";
+import { shouldShowInstallHint, dismiss } from "./lib/installHint.js";
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -130,10 +132,46 @@ function ReloadButton() {
 function Shell({ children }) {
   const [location] = useLocation();
   const onSettings = location === "/settings";
+  const onInstall = location === "/install";
   return (
     <div class="spa-shell">
       {onSettings ? <SettingsHeader /> : <HomeHeader />}
+      {!onInstall && <InstallHint />}
       <main class="spa-main">{children}</main>
+    </div>
+  );
+}
+
+// Nudges a bare-browser-tab visitor toward the standalone PWA (no address
+// bar wasting screen). Skipped on /install itself and once the visitor
+// dismisses it (device-level, localStorage — see lib/installHint.js).
+function InstallHint() {
+  const [, navigate] = useLocation();
+  const [visible, setVisible] = useState(shouldShowInstallHint);
+  if (!visible) return null;
+  return (
+    <div class="pwa-install-hint">
+      <a
+        class="pwa-install-hint-link"
+        href="#"
+        onClick={(e) => {
+          e.preventDefault();
+          navigate("/install");
+        }}
+      >
+        Install mobux for fullscreen — no browser bar
+      </a>
+      <button
+        type="button"
+        class="pwa-install-hint-x"
+        aria-label="Dismiss"
+        onClick={() => {
+          dismiss();
+          setVisible(false);
+        }}
+      >
+        ✕
+      </button>
     </div>
   );
 }
