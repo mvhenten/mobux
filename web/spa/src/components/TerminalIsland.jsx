@@ -27,7 +27,7 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 //
 // `CACHE_BUST` mirrors the Rust page's `?v=` query so a stale SW cache can't
 // hand back an old bundle; in dev it is just a constant.
-const CACHE_BUST = "spa";
+const CACHE_BUST = "cp7";
 
 // Ribbon bug-report button (#191): grab the current diagnostics bundle and
 // open a prefilled GitHub issue in a new tab. Reuses the same bundle/URL
@@ -230,6 +230,14 @@ export function TerminalIsland({ node, session }) {
           <button id="settingsBtn" title="Settings">
             ⚙
           </button>
+          <button
+            id="streamModeBtn"
+            type="button"
+            title="Toggle live typing (stream keys to terminal)"
+            aria-pressed="false"
+          >
+            ⚡
+          </button>
           {/* Single-action hard reload (#189) — no data-key, so it's ignored
               by the engine's ribbon delegation (input-bar.js only intercepts
               `button[data-key]`); the click is handled directly by Preact. */}
@@ -275,15 +283,28 @@ export function TerminalIsland({ node, session }) {
           aria-live="polite"
         />
         <div class="input-row">
+          <button
+            id="ribbonToggleBtn"
+            type="button"
+            class="ribbon-toggle hidden"
+            title="Show control keys"
+            aria-expanded="false"
+          >
+            ⌃
+          </button>
           <input
             id="inputText"
-            type="text"
-            enterkeyhint="send"
+            class="input-composer"
+            type="search"
+            role="searchbox"
+            aria-label="Terminal input"
+            enterKeyHint="send"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck="false"
+            inputMode="search"
             placeholder="Type here…"
-            autocomplete="off"
-            autocorrect="on"
-            autocapitalize="off"
-            spellcheck={false}
           />
           <button id="inputSend" class="input-send" title="Send without Enter">
             ▶

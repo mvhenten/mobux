@@ -8,6 +8,7 @@
 // - Bar appears on tap, hides when keyboard dismisses.
 
 import { createAttachAction, createDictateAction } from './input-actions.js';
+import { getInputMode, setInputMode } from './input-mode.js';
 import telemetry from './telemetry.js';
 
 export function createInputBar(term, send) {
@@ -15,19 +16,57 @@ export function createInputBar(term, send) {
   const ribbon = document.getElementById('inputRibbon');
   const input = document.getElementById('inputText');
   const sendBtn = document.getElementById('inputSend');
+  const streamModeBtn = document.getElementById('streamModeBtn');
+  const ribbonToggleBtn = document.getElementById('ribbonToggleBtn');
   // Complete no-op shape: callers invoke .show()/.hide(), so a partial stub
   // would throw. Mirror the real public API below.
   if (!bar || !input) return { show() {}, hide() {}, destroy() {} };
 
+  input.setAttribute('spellcheck', 'false');
+  input.setAttribute('autocomplete', 'off');
+
+  let mode = getInputMode();
+  let streamPrev = '';
+  let composing = false;
+
+  function getComposerText() {
+    return input.value.replace(/\r?\n/g, '');
+  }
+
+  function setComposerText(text) {
+    input.value = text.replace(/\r?\n/g, '');
+  }
+
+  function insertComposerText(text) {
+    if (!text) return;
+    const flat = text.replace(/[\r\n]+/g, '');
+    const start = input.selectionStart ?? getComposerText().length;
+    const end = input.selectionEnd ?? start;
+    const val = getComposerText();
+    input.value = val.slice(0, start) + flat + val.slice(end);
+    const caret = start + flat.length;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
   // ── Disable xterm.js textarea on mobile ───────────────────────────
-  // We own input now. Prevent xterm's textarea from stealing focus.
+  // We own input now. Keep the renderer textarea inert so Chrome Android does
+  // not treat it as a second autofill target above Gboard.
   const textarea = term.textarea;
   if (textarea) {
     textarea.setAttribute('tabindex', '-1');
+    textarea.setAttribute('readonly', 'true');
+    textarea.setAttribute('autocomplete', 'off');
+    textarea.setAttribute('aria-hidden', 'true');
     textarea.style.pointerEvents = 'none';
     textarea.style.opacity = '0';
     textarea.style.position = 'fixed';
     textarea.style.top = '-9999px';
+  }
+
+  function focusComposer() {
+    if (textarea && document.activeElement === textarea) textarea.blur();
+    input.focus();
   }
 
   // ── Parse escape sequences from data-key attributes ───────────────
@@ -45,11 +84,13 @@ export function createInputBar(term, send) {
   // and reader-view recompute their bounds in the same task.
   function show() {
     bar.classList.remove('hidden');
+    updateCompact();
     resizeTerminal();
   }
 
   function hide() {
     bar.classList.add('hidden');
+    bar.classList.remove('compact', 'compact-expanded');
     // terminal.js owns body.style.height tracking (renderer-agnostic
     // visualViewport handler). It will clear the inline height the
     // next time the viewport grows back; we don't touch it here so a
@@ -78,7 +119,7 @@ export function createInputBar(term, send) {
     const seq = parseKey(btn.dataset.key);
     send(seq);
     // Keep focus on input so keyboard stays up
-    input.focus();
+    focusComposer();
   });
 
   // Prevent ribbon buttons from stealing focus, but allow scroll
@@ -88,35 +129,212 @@ export function createInputBar(term, send) {
   // Don't preventDefault touchstart — it kills ribbon scrolling.
   // Instead, prevent focus steal via mousedown only.
 
-  // ── Text input: two send modes ────────────────────────────────────
-  // Keyboard Enter: send text + \r (execute in shell)
-  // Green button: send text WITHOUT \r (inject into readline, still editable)
+  // ── Text input: buffered vs stream ────────────────────────────────
+  // Buffered (default upstream): hold text locally; Enter sends the line.
+  // Stream: each keystroke goes to the PTY so TUIs (/menus, tab complete) work.
   function sendAndExecute() {
-    const text = input.value;
+    const text = getComposerText();
     if (text) send(text);
     send('\r');
-    input.value = '';
+    setComposerText('');
+    streamPrev = '';
   }
 
   function sendWithoutEnter() {
-    const text = input.value;
+    const text = getComposerText();
     if (text) send(text);
-    input.value = '';
-    input.focus();
+    setComposerText('');
+    streamPrev = '';
+    focusComposer();
   }
+
+  function flushStreamDiff() {
+    const val = getComposerText();
+    if (val.length > streamPrev.length) {
+      send(val.slice(streamPrev.length));
+    } else if (val.length < streamPrev.length) {
+      for (let i = 0; i < streamPrev.length - val.length; i++) send('\x7f');
+    }
+    streamPrev = val;
+  }
+
+  function applyInputModeUi() {
+    const streaming = mode === 'stream';
+    if (streamModeBtn) {
+      streamModeBtn.classList.toggle('stream-active', streaming);
+      streamModeBtn.title = streaming
+        ? 'Live typing on — tap to buffer locally'
+        : 'Live typing off — tap to stream keys to terminal';
+      streamModeBtn.setAttribute('aria-pressed', streaming ? 'true' : 'false');
+    }
+    input.dataset.placeholder = streaming ? 'Live typing…' : 'Type here…';
+    input.placeholder = input.dataset.placeholder;
+    input.enterKeyHint = streaming ? 'enter' : 'send';
+    if (sendBtn) sendBtn.classList.toggle('hidden', streaming);
+  }
+
+  function setMode(next) {
+    if (next === mode) return;
+    if (next === 'stream') {
+      const text = getComposerText();
+      if (text) {
+        send(text);
+        streamPrev = text;
+      } else {
+        streamPrev = '';
+      }
+    } else {
+      setComposerText('');
+      streamPrev = '';
+    }
+    mode = next;
+    setInputMode(mode);
+    applyInputModeUi();
+  }
+
+  function toggleStreamMode() {
+    setMode(mode === 'stream' ? 'buffered' : 'stream');
+    focusComposer();
+  }
+
+  applyInputModeUi();
+
+  input.addEventListener('compositionstart', () => { composing = true; });
+  input.addEventListener('compositionend', () => {
+    composing = false;
+    if (mode === 'stream') flushStreamDiff();
+  });
+
+  input.addEventListener('paste', (e) => {
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    if (!/[\r\n]/.test(text)) return;
+    e.preventDefault();
+    insertComposerText(text);
+  });
+
+  input.addEventListener('input', () => {
+    if (mode !== 'stream' || composing) return;
+    flushStreamDiff();
+  });
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      sendAndExecute();
+      if (mode === 'stream') {
+        send('\r');
+        setComposerText('');
+        streamPrev = '';
+      } else {
+        sendAndExecute();
+      }
     }
   });
 
-  sendBtn.addEventListener('click', (e) => {
-    e.preventDefault();
-    sendWithoutEnter();
-    input.focus();
+  if (sendBtn) {
+    sendBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      sendWithoutEnter();
+      focusComposer();
+    });
+  }
+
+  if (streamModeBtn) {
+    streamModeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    streamModeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      toggleStreamMode();
+    });
+  }
+
+  // ── Compact keyboard: hide ribbon + overlay slim input ────────────
+  // The ribbon + text row consume ~90px above the OS keyboard. On mobile
+  // keep the ribbon collapsed by default (tap ⌃ to expand) and overlay the
+  // slim input row so the PTY keeps as many rows as possible.
+  const isMobileInput =
+    window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 620;
+  const COMPACT_KEYBOARD_KEY = 'mobux.input.compactKeyboard';
+  let layoutFullHeight = Math.max(window.innerHeight, window.visualViewport?.height ?? 0);
+
+  function compactKeyboardEnabled() {
+    try {
+      return localStorage.getItem(COMPACT_KEYBOARD_KEY) !== '0';
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function noteLayoutFullHeight() {
+    if (!document.activeElement || document.activeElement !== input) {
+      layoutFullHeight = Math.max(
+        layoutFullHeight,
+        window.innerHeight,
+        window.visualViewport?.height ?? 0,
+      );
+    }
+  }
+
+  function keyboardLikelyUp() {
+    if (document.activeElement === input) return true;
+    // resizes-content (Android): innerHeight shrinks with the keyboard, so
+    // vv.height ≈ innerHeight and a vv-vs-inner diff never fires.
+    const h = Math.min(window.innerHeight, window.visualViewport?.height ?? window.innerHeight);
+    return h < layoutFullHeight - 80;
+  }
+
+  function updateRibbonToggle() {
+    if (!ribbonToggleBtn) return;
+    const compact = bar.classList.contains('compact');
+    const expanded = bar.classList.contains('compact-expanded');
+    ribbonToggleBtn.classList.toggle('hidden', !compact);
+    ribbonToggleBtn.title = expanded ? 'Hide control keys' : 'Show control keys';
+    ribbonToggleBtn.textContent = expanded ? '⌄' : '⌃';
+    ribbonToggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
+
+  function updateCompact() {
+    if (!compactKeyboardEnabled() || bar.classList.contains('hidden')) {
+      bar.classList.remove('compact', 'compact-expanded');
+      updateRibbonToggle();
+      return;
+    }
+    if (!isMobileInput) {
+      bar.classList.remove('compact', 'compact-expanded');
+      updateRibbonToggle();
+      return;
+    }
+    const shouldCompact =
+      document.activeElement === input || keyboardLikelyUp();
+    bar.classList.toggle('compact', shouldCompact);
+    if (!shouldCompact) bar.classList.remove('compact-expanded');
+    if (!shouldCompact) noteLayoutFullHeight();
+    updateRibbonToggle();
+    resizeTerminal();
+  }
+
+  input.addEventListener('focus', () => {
+    requestAnimationFrame(updateCompact);
   });
+  input.addEventListener('blur', () => setTimeout(updateCompact, 120));
+
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    vv.addEventListener('resize', updateCompact);
+    vv.addEventListener('scroll', updateCompact);
+  }
+  window.addEventListener('resize', noteLayoutFullHeight);
+
+  if (ribbonToggleBtn) {
+    ribbonToggleBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    ribbonToggleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      bar.classList.toggle('compact-expanded');
+      updateRibbonToggle();
+      resizeTerminal();
+      focusComposer();
+    });
+  }
+
+  updateCompact();
 
   // ── Activate on touch/tap overlay ─────────────────────────────────
   // Double-tap on terminal area shows the input bar
@@ -125,7 +343,10 @@ export function createInputBar(term, send) {
   function activateInput() {
     show();
     // Small delay so the bar renders before focusing (avoids layout jump)
-    setTimeout(() => input.focus(), 50);
+    setTimeout(() => {
+      focusComposer();
+      updateCompact();
+    }, 50);
   }
 
   // ── Auto-hide bar when the keyboard dismisses ─────────────────────
@@ -140,6 +361,7 @@ export function createInputBar(term, send) {
     const vv = window.visualViewport;
     let lastHeight = vv.height;
     const onViewportChange = () => {
+      updateCompact();
       const h = vv.height;
       if (h > lastHeight + 50 && !bar.classList.contains('hidden')) {
         hide();
@@ -199,7 +421,7 @@ export function createInputBar(term, send) {
   const dictate = createDictateAction({
     send,
     button: micBtn,
-    onText: () => input.focus(),
+    onText: () => focusComposer(),
   });
   if (micBtn) {
     micBtn.addEventListener('mousedown', (e) => e.preventDefault());
@@ -228,6 +450,8 @@ export function createInputBar(term, send) {
 
   // ── Public API ────────────────────────────────────────────────────
   return {
+    getInputMode: () => mode,
+    setInputMode: setMode,
     _computeKeyboardOffset: computeKeyboardOffset,
     // reveal() — show the bar without focusing the text input.  Used for
     // the eager mobile mount so #micBtn is visible from the start without

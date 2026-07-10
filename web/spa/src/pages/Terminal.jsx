@@ -6,8 +6,19 @@ import { TerminalIsland } from "../components/TerminalIsland.jsx";
 // the lifetime of the route. The island itself never re-renders.
 export function TerminalPage({ node, name }) {
   useLayoutEffect(() => {
+    const html = document.documentElement;
+    const prevHtmlAc = html.getAttribute("autocomplete");
+    const prevBodyAc = document.body.getAttribute("autocomplete");
     document.body.classList.add("term-body");
-    return () => document.body.classList.remove("term-body");
+    html.setAttribute("autocomplete", "off");
+    document.body.setAttribute("autocomplete", "off");
+    return () => {
+      document.body.classList.remove("term-body");
+      if (prevHtmlAc === null) html.removeAttribute("autocomplete");
+      else html.setAttribute("autocomplete", prevHtmlAc);
+      if (prevBodyAc === null) document.body.removeAttribute("autocomplete");
+      else document.body.setAttribute("autocomplete", prevBodyAc);
+    };
   }, []);
 
   return <TerminalIsland node={node} session={name} />;
