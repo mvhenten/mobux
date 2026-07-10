@@ -297,12 +297,16 @@ function unmountReaderGestures() {
 // settled when the attached session pumped continuous output (e.g.
 // a TUI like Claude Code), leaving the loading splash up forever.
 //
-// The mobile input bar (ribbon) shares this same trigger (#198): it must
-// stay out of the way while the loading/quote splash is up and only appear
-// once the splash itself is dismissed, instead of popping in at mount time
-// and sitting pinned at the bottom through the whole splash. Revealing it
-// here — right where the splash starts fading — keeps both on one
-// lifecycle instead of the ribbon running its own separate timer.
+// The mobile input bar (ribbon) does NOT share this trigger (#201). #198
+// made splash dismissal reveal the ribbon too, but that left it popping up
+// the instant an attached session produced any output and then sitting
+// pinned at the bottom of an already-familiar session for the rest of the
+// read — the same "showed once, now permanently in the way" problem #198
+// was trying to avoid, just moved earlier. Splash dismissal is not an
+// input event; the ribbon stays hidden through it and only reveals on
+// actual engagement (tap-to-focus — see the `onDoubleTap` handlers below
+// and in reader-view's gesture wiring), same as it already hides on
+// keyboard dismissal (input-bar.js's visualViewport handler).
 let revealScheduled = false;
 function scheduleReveal() {
   if (revealScheduled) return;
@@ -311,7 +315,6 @@ function scheduleReveal() {
   setTimeout(() => {
     core.scrollToBottom();
     loadquote.style.opacity = "0";
-    if (isMobile) ensureInputBar().reveal();
     setTimeout(() => {
       if (loadquote.parentNode) loadquote.remove();
     }, 300);
@@ -348,11 +351,11 @@ function ensureInputBar() {
 
 // If we already look like a touch device, mount eagerly so the mic button
 // (and the full control-key ribbon) exist and are wired from the start —
-// but don't reveal yet. Revealing happens in `scheduleReveal()` above, in
-// step with the loading/quote splash dismissal (#198), so the ribbon never
-// sits pinned at the bottom through the splash. `reveal()` shows the bar
-// without stealing keyboard focus, which avoids popping the soft keyboard
-// on load.
+// but stay hidden. The bar only reveals on engagement: the `onDoubleTap`
+// handlers below (xterm overlay, reader-view) call `ensureInputBar().show()`,
+// which is the only path that unhides it (#201). Mounting without revealing
+// keeps `ensureInputBar()` idempotent and the mic button wired the moment a
+// tap asks for it, without popping the bar — or the soft keyboard — on load.
 if (isMobile) {
   ensureInputBar();
 }

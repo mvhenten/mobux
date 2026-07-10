@@ -254,10 +254,12 @@ test("terminal island fills the viewport on mount (correct PTY rows)", async ({
     const t = document.getElementById("terminal");
     const bar = document.getElementById("inputBar");
     const r = t.getBoundingClientRect();
-    // On mobile the input bar (mic/ribbon) reveals itself once the loading
-    // splash resolves (see terminal.js's `scheduleReveal()`, #198) and sits
-    // below the terminal as a flex sibling, so it legitimately claims its
-    // own height at the bottom of the viewport instead of the terminal.
+    // On mobile the input bar (mic/ribbon) is a flex sibling of #terminal
+    // that only reveals on tap-to-focus engagement (#201) — it stays
+    // hidden through this test, so barHeight is normally 0, but the check
+    // below covers either state: whenever it IS shown it legitimately
+    // claims its own height at the bottom of the viewport instead of the
+    // terminal.
     const barHeight =
       bar && !bar.classList.contains("hidden")
         ? bar.getBoundingClientRect().height
@@ -378,14 +380,17 @@ test("loading splash still clears via the fallback timer when a session emits no
   await expect.poll(() => loadquoteGone(page), { timeout: 4000 }).toBe(true);
 });
 
-// ── ribbon stays hidden through the splash, reveals with it (#198) ──────────
+// ── ribbon: hidden through splash + attach, reveals only on engagement (#201) ─
 //
-// Regression guard: PR #194 and #195 each added a button (reload,
-// bug-report) to the mobile ribbon, and after both landed the ribbon was
-// visible on the loading/quote splash screen instead of staying hidden
-// until the same reveal condition that dismisses the splash. Assert the
-// ribbon is not visible while #loadquote is up, and becomes visible in step
-// with the splash's own reveal — not before.
+// Follow-up to #198/#199. #198 made the ribbon share the splash's own
+// reveal trigger (`scheduleReveal()`), so in an attached session it popped
+// up the moment the first PTY output arrived and then sat pinned at the
+// bottom for the rest of the read — splash dismissal is not an input event.
+// The ribbon must instead stay hidden from load through attach and only
+// reveal on actual engagement (tap-to-focus — the same `onDoubleTap`
+// handler that already existed before #198), then hide again on keyboard
+// dismissal exactly as it already did (input-bar.js's visualViewport
+// handler, unchanged by this fix).
 function ribbonVisible(page) {
   return page.evaluate(() => {
     const bar = document.getElementById("inputBar");
@@ -395,7 +400,66 @@ function ribbonVisible(page) {
   });
 }
 
-test("ribbon stays hidden through the loading splash and reveals with it", async ({
+// Simulates the double-tap gesture terminal.js's `onDoubleTap` handler
+// responds to by revealing the input bar (`ensureInputBar().show()`).
+// touch.js's gesture recognizer is wired on #touchOverlay and is
+// renderer-agnostic — it sits above #terminal regardless of whether xterm
+// or sterk is the active engine underneath, so this exercises the same
+// "way in" on both renderer projects this spec runs under. Two real
+// touchstart/touchend pairs fired back-to-back land well inside touch.js's
+// TAP_MS/DTAP_MS windows, exactly like a physical double-tap.
+function doubleTapOverlay(page, x = 100, y = 100) {
+  return page.evaluate(
+    ({ x, y }) => {
+      const overlay = document.getElementById("touchOverlay");
+      const mkTouch = () =>
+        new Touch({ identifier: 0, target: overlay, clientX: x, clientY: y });
+      const fire = (type, touches) =>
+        overlay.dispatchEvent(
+          new TouchEvent(type, { bubbles: true, cancelable: true, touches }),
+        );
+      fire("touchstart", [mkTouch()]);
+      fire("touchend", []);
+      fire("touchstart", [mkTouch()]);
+      fire("touchend", []);
+    },
+    { x, y },
+  );
+}
+
+// Simulates the on-screen keyboard opening then dismissing by stubbing
+// `visualViewport.height` and dispatching the `resize` event input-bar.js's
+// auto-hide listener reacts to (shrink is a no-op for visibility; growing
+// back by more than 50px while the bar is shown is what triggers `hide()`).
+// Playwright can't drive a real soft keyboard headlessly, so this drives
+// the exact DOM event the production code listens for instead of a
+// same-effect-different-cause substitute like a bare `blur()` (input-bar.js
+// has no blur listener — only this visualViewport path calls `hide()`).
+// Mirrors the established stubbing pattern in critical-path.spec.cjs /
+// smoke.spec.cjs's own keyboard-visualViewport tests.
+async function simulateKeyboardOpenThenDismiss(page) {
+  await page.evaluate(() => {
+    const vv = window.visualViewport;
+    window.__origVVHeight = vv.height;
+    Object.defineProperty(vv, "height", {
+      configurable: true,
+      get: () =>
+        typeof window.__stubVVHeight === "number"
+          ? window.__stubVVHeight
+          : window.__origVVHeight,
+    });
+  });
+  await page.evaluate(() => {
+    window.__stubVVHeight = window.__origVVHeight - 300;
+    window.visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await page.evaluate(() => {
+    window.__stubVVHeight = window.__origVVHeight;
+    window.visualViewport.dispatchEvent(new Event("resize"));
+  });
+}
+
+test("ribbon stays hidden through the loading splash and after attach", async ({
   page,
 }) => {
   await installFakeSocket(page, { emitDataAfterMs: 50 });
@@ -415,7 +479,7 @@ test("ribbon stays hidden through the loading splash and reveals with it", async
   // terminal.js's boot is synchronous up to and including the mobile
   // eager-mount decision, so by the time the engine has attached, that
   // decision has already run. Asserting "not visible" here catches the
-  // regression: on the broken code this observes the ribbon already
+  // regression: on the broken (#198) code this observes the ribbon already
   // revealed, not just "not yet created".
   await page.waitForFunction(() => {
     const t = document.getElementById("terminal");
@@ -428,9 +492,40 @@ test("ribbon stays hidden through the loading splash and reveals with it", async
   expect(await loadquoteGone(page)).toBe(false);
   expect(await ribbonVisible(page)).toBe(false);
 
-  // Once the splash's own reveal condition fires, the ribbon comes with it.
+  // The splash's own reveal condition fires (first PTY data) — the ribbon
+  // must NOT come with it (#201: splash dismissal is not an input event).
   await expect.poll(() => loadquoteGone(page), { timeout: 1000 }).toBe(true);
-  expect(await ribbonVisible(page)).toBe(true);
+  expect(await ribbonVisible(page)).toBe(false);
+});
+
+test("ribbon reveals on tap-to-focus engagement and hides again on keyboard dismissal (#201)", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("terminal");
+      return t && t.childElementCount > 0;
+    },
+    { timeout: 15000 },
+  );
+  // Real session output has almost certainly already dismissed the splash
+  // by "networkidle"; make sure, so the assertion below is unambiguous
+  // about engagement (not splash-dismissal) being the cause of reveal.
+  await expect.poll(() => loadquoteGone(page), { timeout: 5000 }).toBe(true);
+  expect(await ribbonVisible(page)).toBe(false);
+
+  // Engage: double-tap the terminal, exactly like a phone user tapping to
+  // type. This is the "way in" that must exist while the bar starts hidden.
+  await doubleTapOverlay(page);
+  await expect.poll(() => ribbonVisible(page), { timeout: 1000 }).toBe(true);
+
+  // Dismiss: keyboard opens then closes — the bar must hide again, same as
+  // it already did before #198/#201 (input-bar.js's visualViewport handler).
+  await simulateKeyboardOpenThenDismiss(page);
+  await expect.poll(() => ribbonVisible(page), { timeout: 1000 }).toBe(false);
 });
 
 // ── control-key ribbon: horizontally scrollable by touch ────────────────────
@@ -448,10 +543,9 @@ test("control-key ribbon is horizontally scrollable (not wrapped/clipped)", asyn
   });
   await expect(page.locator("#inputRibbon")).toHaveCount(1);
 
-  // The mobile input bar is revealed automatically on boot (fix for the
-  // "mic button completely gone on mobile" regression). Guard against the
-  // bar still being hidden in the test environment by removing the class
-  // explicitly so the geometry checks below are always reliable.
+  // The mobile input bar only reveals on tap-to-focus engagement (#201),
+  // not on mount, so force it visible directly for these geometry checks —
+  // they're about ribbon scroll behavior, not the reveal lifecycle.
   await page.evaluate(() => {
     const bar = document.getElementById("inputBar");
     if (bar) bar.classList.remove("hidden");
@@ -622,20 +716,23 @@ test("telemetry overlay only renders with ?telemetry=1", async ({ page }) => {
   });
 });
 
-// ── mobile mic button: visible on mount + wired to dictation ────────────────
+// ── mobile mic button: hidden on mount, reachable via tap-to-focus (#201) ───
 //
 // Regression guard for the "mobile microphone button completely gone" bug
-// introduced in v0.6.0 (SPA cutover). Before the fix, #micBtn lived inside
-// #inputBar which started with class `hidden` (display:none), giving it a zero
-// bounding rect — effectively invisible with no discoverable way to activate it.
+// introduced in v0.6.0 (SPA cutover). Before that fix, #micBtn lived inside
+// #inputBar which started with class `hidden` (display:none) and stayed that
+// way forever — a zero bounding rect with no discoverable way to activate it.
 //
-// The fix: terminal.js mounts the bar eagerly on mobile and reveals it as
-// soon as the loading splash resolves (`scheduleReveal()`, #198), so the bar
-// (and the mic button) become visible without any double-tap, just in step
-// with the splash instead of sitting pinned underneath it. This test FAILS
-// on the broken state (bounding rect = 0) and PASSES after the fix (bounding
-// rect > 0, click triggers dictation overlay).
-test("mobile #micBtn is visible on mount and wired to the dictation flow", async ({
+// #198 fixed the "no way in" half by having the bar mount eagerly, but also
+// made it auto-reveal on splash dismissal, which #201 reverts: the bar mounts
+// eagerly (mic button exists and is wired) but starts hidden, same as splash
+// dismissal, attach, and everything up to the first tap. What must still hold
+// is the "discoverable way to activate it" half of the original fix — tap-to-
+// focus (double-tap the terminal) is that way in. This test FAILS if the bar
+// never reveals (the pre-#198 bug) or if it's already visible before any
+// engagement (the #201 regression), and PASSES when it's hidden until the
+// double-tap, then visible and wired.
+test("mobile #micBtn stays hidden until tap-to-focus, then reveals and wires the dictation flow", async ({
   page,
 }) => {
   await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
@@ -654,11 +751,24 @@ test("mobile #micBtn is visible on mount and wired to the dictation flow", async
   // Allow the post-mount resize + input-bar wiring to settle.
   await page.waitForTimeout(300);
 
-  // 1. #micBtn must exist in the DOM (rendered by TerminalIsland scaffold).
+  // 1. #micBtn must exist in the DOM (rendered by TerminalIsland scaffold,
+  //    wired by the eager mobile mount) ...
   await expect(page.locator("#micBtn")).toHaveCount(1);
 
-  // 2. #micBtn must be computed-visible — NOT inside a display:none container.
-  //    getBoundingClientRect() returns all-zeros for hidden elements.
+  // 2. ... but stay computed-hidden (inside #inputBar's display:none) until
+  //    engagement. getBoundingClientRect() returns all-zeros for hidden
+  //    elements.
+  const hiddenRect = await page.locator("#micBtn").evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { width: r.width, height: r.height };
+  });
+  expect(hiddenRect.width, "#micBtn must start hidden (width 0)").toBe(0);
+  expect(hiddenRect.height, "#micBtn must start hidden (height 0)").toBe(0);
+
+  // 3. Tap-to-focus is the discoverable way in: double-tap the terminal.
+  await doubleTapOverlay(page);
+  await expect.poll(() => ribbonVisible(page), { timeout: 1000 }).toBe(true);
+
   const rect = await page.locator("#micBtn").evaluate((el) => {
     const r = el.getBoundingClientRect();
     return { width: r.width, height: r.height };
@@ -671,7 +781,7 @@ test("mobile #micBtn is visible on mount and wired to the dictation flow", async
     "#micBtn height must be > 0 (not hidden)",
   ).toBeGreaterThan(0);
 
-  // 3. #micBtn must be wired to the dictation flow: clicking it must launch the
+  // 4. #micBtn must be wired to the dictation flow: clicking it must launch the
   //    mic overlay. In the test environment getUserMedia may be blocked/denied,
   //    but createDictateAction still surfaces a fault state via the overlay.
   await page.locator("#micBtn").click();
@@ -1315,6 +1425,13 @@ test("terminal ribbon exposes a reload button", async ({ page }) => {
     waitUntil: "networkidle",
   });
   await expect(page.locator("#reloadBtn")).toHaveCount(1);
+  // The ribbon only reveals on tap-to-focus engagement (#201), not on
+  // mount — force it visible so #reloadBtn is actionable. This test is
+  // about the button existing and working, not the reveal lifecycle.
+  await page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    if (bar) bar.classList.remove("hidden");
+  });
   await Promise.all([
     page.waitForEvent("load"),
     page.locator("#reloadBtn").click(),

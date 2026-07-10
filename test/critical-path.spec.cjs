@@ -418,12 +418,11 @@ test("row-height parity: PTY rows match what actually fits, including after the 
   const captured = seedErrorCapture(page);
   await bootTerminal(page);
 
-  // On mobile, terminal.js now reveals the input bar eagerly on mount (see
-  // input-bar.js's reveal()), so it's already visible by the time bootTerminal
-  // resolves. Force it back to the hidden state — still a real, reachable
-  // state (input-bar.js auto-hides on keyboard dismiss / Escape) — so this
-  // test can still exercise the hidden→visible transition the regression
-  // comment above describes.
+  // On mobile, terminal.js mounts the input bar eagerly but it stays
+  // hidden until tap-to-focus engagement (#201) — already the state
+  // bootTerminal leaves it in. Force it explicitly anyway so this
+  // assertion doesn't silently depend on that default, then exercise the
+  // hidden→visible transition the regression comment above describes.
   await page.evaluate(() => {
     const bar = document.getElementById("inputBar");
     bar.classList.add("hidden");
@@ -822,6 +821,16 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
   ).toContain("interactive-widget=resizes-content");
 
   await bootTerminal(page);
+
+  // This test is about the keyboard-up geometry, not the reveal
+  // lifecycle: the bar only reveals on tap-to-focus engagement (#201),
+  // not on mount, so reveal it directly here — the real flow this test
+  // simulates (soft keyboard up) never starts without the user tapping
+  // to focus first anyway.
+  await page.evaluate(() => {
+    const bar = document.getElementById("inputBar");
+    if (bar) bar.classList.remove("hidden");
+  });
 
   const marker = `MOBUX_167_${Math.floor(Math.random() * 1e9)}`;
   await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
