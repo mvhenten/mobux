@@ -1057,7 +1057,8 @@ h1, h2, h3 { margin: 0; }
   gap: 6px;
 }
 
-.input-row input {
+.input-row input,
+.input-row .input-composer {
   flex: 1;
   height: 36px;
   border: 1px solid #444;
@@ -1069,7 +1070,18 @@ h1, h2, h3 { margin: 0; }
   padding: 0 10px;
   outline: none;
 }
-.input-row input:focus {
+.input-row .input-composer {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.input-row .input-composer::-webkit-search-cancel-button,
+.input-row .input-composer::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+.input-row input:focus,
+.input-row .input-composer:focus {
   border-color: #6a9;
 }
 
@@ -1086,6 +1098,66 @@ h1, h2, h3 { margin: 0; }
 }
 .input-send:active {
   background: #3a7a4a;
+}
+.input-bar.compact:not(.compact-expanded) {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.35);
+}
+.input-bar.compact:not(.compact-expanded) .input-ribbon {
+  display: none;
+}
+.input-bar.compact.compact-expanded {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.35);
+}
+.input-bar.compact:not(.compact-expanded) .input-row {
+  padding: 2px 6px 4px;
+}
+.input-bar.compact:not(.compact-expanded) .input-row input,
+.input-bar.compact:not(.compact-expanded) .input-row .input-composer {
+  height: 34px;
+}
+
+.ribbon-toggle {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border: 1px solid #444;
+  border-radius: 6px;
+  background: #2a2d33;
+  color: #ccc;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.ribbon-toggle:active {
+  background: #444;
+  color: #fff;
+}
+.ribbon-toggle.hidden {
+  display: none;
+}
+
+.input-send.hidden {
+  display: none;
+}
+
+#streamModeBtn.stream-active {
+  background: #2a4a5a;
+  color: #9fd;
+  border-color: #5a9a8a;
 }
 
 /* ── /install page ────────────────────────────────────────────────── */

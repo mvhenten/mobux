@@ -134,6 +134,27 @@ async function visibleTerminalText(page) {
   });
 }
 
+async function focusComposer(page) {
+  await page.evaluate(() => {
+    document.getElementById("inputBar").classList.remove("hidden");
+    document.getElementById("inputText").focus();
+  });
+}
+
+async function ensureStreamMode(page) {
+  await page.evaluate(() => {
+    const btn = document.getElementById("streamModeBtn");
+    if (btn?.getAttribute("aria-pressed") !== "true") btn?.click();
+  });
+}
+
+async function ensureBufferedMode(page) {
+  await page.evaluate(() => {
+    const btn = document.getElementById("streamModeBtn");
+    if (btn?.getAttribute("aria-pressed") === "true") btn?.click();
+  });
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 test("boot: terminal page loads without JS errors or failed assets", async ({
@@ -1056,6 +1077,136 @@ test("tap-to-snap: a tap snaps to bottom, a swipe does not", async ({
     postTapViewportY,
     `TAP must snap to bottom: viewportY should be ${bottomViewportY}, got ${postTapViewportY}; screenshot: ${screenshotPath}`,
   ).toBe(bottomViewportY);
+
+  assertNoFailures(captured);
+});
+
+test("terminal composer: search input (Android autofill workaround)", async ({ page }) => {
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+  await focusComposer(page);
+
+  const composer = await page.evaluate(() => {
+    const el = document.getElementById("inputText");
+    return {
+      tag: el.tagName,
+      type: el.type,
+      contenteditable: el.getAttribute("contenteditable"),
+      role: el.getAttribute("role"),
+      ariaLabel: el.getAttribute("aria-label"),
+      spellcheck: el.getAttribute("spellcheck"),
+      autocorrect: el.getAttribute("autocorrect"),
+      autocapitalize: el.getAttribute("autocapitalize"),
+      inputmode: el.getAttribute("inputmode"),
+      autocomplete: el.getAttribute("autocomplete"),
+      placeholder: el.getAttribute("placeholder"),
+      htmlAutocomplete: document.documentElement.getAttribute("autocomplete"),
+      bodyAutocomplete: document.body.getAttribute("autocomplete"),
+    };
+  });
+  expect(composer.tag).toBe("INPUT");
+  expect(composer.type).toBe("search");
+  expect(composer.contenteditable).toBeNull();
+  expect(composer.role).toBe("searchbox");
+  expect(composer.ariaLabel).toBeTruthy();
+  expect(composer.spellcheck).toBe("false");
+  expect(composer.autocorrect).toBe("off");
+  expect(composer.autocapitalize).toBe("off");
+  expect(composer.inputmode).toBe("search");
+  expect(composer.autocomplete).toBe("off");
+  expect(composer.placeholder).toBeTruthy();
+  expect(composer.htmlAutocomplete).toBe("off");
+  expect(composer.bodyAutocomplete).toBe("off");
+
+  assertNoFailures(captured);
+});
+
+test("terminal composer: stream typing, Enter, Backspace, paste, IME", async ({
+  page,
+}) => {
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+  await focusComposer(page);
+  await ensureStreamMode(page);
+
+  const prefix = `MOBUX_CE_${Math.floor(Math.random() * 1e9)}`;
+  await page.locator("#inputText").click();
+  await page.keyboard.type(`${prefix}ab`, { delay: 15 });
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .toContain(`${prefix}ab`);
+
+  // Backspace removes one streamed character from the PTY.
+  await page.keyboard.press("Backspace");
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .toContain(`${prefix}a`);
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .not.toContain(`${prefix}ab`);
+
+  // Paste plain text (newlines stripped); stream diff sends the insert.
+  await page.evaluate(() => {
+    const el = document.getElementById("inputText");
+    el.focus();
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "XY\nZ");
+    el.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }),
+    );
+  });
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .toContain(`${prefix}aXYZ`);
+
+  // IME composition: no PTY traffic until compositionend.
+  const imeChar = "漢";
+  await page.evaluate((ch) => {
+    const el = document.getElementById("inputText");
+    el.focus();
+    el.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    el.value = (el.value || "") + ch;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }, imeChar);
+  const midCompose = await visibleTerminalText(page);
+  expect(midCompose).not.toContain(imeChar);
+  await page.evaluate((ch) => {
+    const el = document.getElementById("inputText");
+    el.dispatchEvent(
+      new CompositionEvent("compositionend", { bubbles: true, data: ch }),
+    );
+  }, imeChar);
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .toContain(imeChar);
+
+  // Enter sends CR and clears the composer without duplicating buffered text.
+  await page.keyboard.press("Enter");
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .toContain(`${prefix}aXYZ${imeChar}`);
+  const cleared = await page.evaluate(() => document.getElementById("inputText").value);
+  expect(cleared).toBe("");
+
+  assertNoFailures(captured);
+});
+
+test("terminal composer: buffered Enter sends line", async ({ page }) => {
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+  await focusComposer(page);
+  await ensureBufferedMode(page);
+
+  const marker = `MOBUX_BUF_${Math.floor(Math.random() * 1e9)}`;
+  await page.locator("#inputText").click();
+  await page.keyboard.type(marker, { delay: 10 });
+  const beforeEnter = await visibleTerminalText(page);
+  expect(beforeEnter).not.toContain(marker);
+
+  await page.keyboard.press("Enter");
+  await expect
+    .poll(() => visibleTerminalText(page), { timeout: 5000 })
+    .toContain(marker);
 
   assertNoFailures(captured);
 });
