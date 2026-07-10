@@ -217,6 +217,34 @@ test-spa:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/spa.spec.cjs
 
+# Visual e2e: Pixel 7 emulation, pixel-diff baselines. Strict mode (CI
+# default) compares against committed baselines and fails on drift. Use
+# `make test-visual-update` to regenerate baselines after a deliberate
+# visual change; commit the resulting PNGs in test/visual.spec.cjs-snapshots/.
+.PHONY: test-visual
+test-visual:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/visual.spec.cjs
+
+# NOTE: v1-steady-sterk-linux.png and v2-keyboard-up-sterk-linux.png are
+# pinned from a CI-artifact render, not a dev-box one, AND carry a wider
+# per-test pixel-diff threshold (0.035 vs the 0.02 default) — sterk's
+# glyph rendering measurably varies CI-run to CI-run, not just dev-box vs
+# CI. See the V1/V2-sterk note in test/visual.spec.cjs for the measured
+# numbers. This target overwrites the two PNGs with a dev-box render like
+# everything else and prints a warning when it does; prefer re-pinning
+# those two from a failed CI run's visual-diff-* artifact instead.
+.PHONY: test-visual-update
+test-visual-update:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/visual.spec.cjs --update-snapshots
+
 # Fleet e2e (issue #176 phase 4): emulated fleet of throwaway sshd+tmux
 # "nodes", each its own podman container (test/fleet/node.cjs,
 # Containerfile.fleet-node — see issue #183 for why a container and not

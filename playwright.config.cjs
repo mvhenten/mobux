@@ -31,6 +31,20 @@ module.exports = defineConfig({
   use: {
     ignoreHTTPSErrors: true,
   },
+  // Visual baselines live next to their spec by default
+  // (test/visual.spec.cjs-snapshots/). The default toHaveScreenshot
+  // threshold is per-test (see DIFF in visual.spec.cjs); this block
+  // sets the floor for any future visual test that forgets to pass
+  // options.
+  expect: {
+    toHaveScreenshot: {
+      maxDiffPixelRatio: 0.02,
+      // Animations would otherwise diff on every run.
+      animations: 'disabled',
+      // Disable caret blink for snapshots.
+      caret: 'hide',
+    },
+  },
   projects: [
     {
       name: 'xterm',
