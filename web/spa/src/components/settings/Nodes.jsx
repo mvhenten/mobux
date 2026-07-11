@@ -1,17 +1,25 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiPutJSON } from "../../lib/api.js";
+import { HostSuggestionSheet } from "../HostSuggestionSheet.jsx";
 
 // Nodes card — the inventory behind the Home node picker (#176 phase 3).
 // A node is {name, target}; the whole list is replaced on every change
 // (PUT /api/settings/nodes), mirroring the fixed API contract. SSH keys are
 // deliberately out of scope: the hub's key must already be authorized on the
 // node, and the card says so instead of growing key-management UI.
+//
+// Host suggestions (#193): the target field is read-only — tapping it opens
+// a full-screen picker (HostSuggestionSheet) whose own text field IS the
+// target value while open, so manual entry is never blocked by detection
+// finding nothing. Detection (GET /api/host-suggestions) runs fresh on
+// every open.
 
 const nodes = signal(null); // null = loading
 const status = signal(null); // { msg, ok }
 const name = signal("");
 const target = signal("");
+const pickerOpen = signal(false);
 
 function flash(msg, ok) {
   status.value = { msg, ok };
@@ -139,8 +147,9 @@ export function NodesCard() {
           class="settings-input"
           placeholder="user@host"
           autocomplete="off"
+          readOnly
           value={target.value}
-          onInput={(e) => (target.value = e.target.value)}
+          onClick={() => (pickerOpen.value = true)}
         />
         <button type="submit" id="nodeAddBtn">
           Add
@@ -156,6 +165,13 @@ export function NodesCard() {
           {status.value.msg}
         </div>
       )}
+
+      <HostSuggestionSheet
+        open={pickerOpen.value}
+        value={target.value}
+        onChange={(v) => (target.value = v)}
+        onClose={() => (pickerOpen.value = false)}
+      />
     </section>
   );
 }
