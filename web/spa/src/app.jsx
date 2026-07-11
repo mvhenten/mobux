@@ -111,8 +111,8 @@ function SettingsHeader() {
 // Single-action hard reload (#189), always within reach: it lives in both
 // app-shell headers (Home + Settings) and, separately, in the terminal
 // ribbon (TerminalIsland.jsx) — between the three, every SPA route has one
-// tap to a full `location.reload()`, the only clean boot of the terminal
-// engine (see #188).
+// tap to a full `location.reload()`, the recovery hatch that refetches the
+// bundle and reboots the whole app.
 function ReloadButton() {
   return (
     <button

@@ -4,29 +4,23 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
-// Wraps the EXISTING mobux terminal engine instead of reimplementing it. The
-// engine (`/static/terminal.js`) is a side-effecting ES module that, on load:
-//   * reads window.MOBUX_SESSION / MOBUX_DEV,
-//   * binds to a fixed set of DOM ids (#terminal, #reader, #loadquote, the
-//     #inputBar ribbon, the #cmdPickList overlay, …),
-//   * constructs TerminalCore (xterm or sterk), opens the PTY WebSocket, and
-//     wires every gesture / input-bar handler.
+// Hosts the mobux terminal engine (`/static/terminal.js`) as a real
+// component. The engine exports `createTerminal({ node, session, host,
+// renderer })` → `{ dispose() }`: config goes in as arguments (no window
+// globals), and dispose() tears down everything the engine attached —
+// WebSocket, renderer instance, window/document listeners, timers.
 //
-// So the island's job is purely a HOST:
-//   1. Render the exact DOM scaffold the engine expects (mirrors the markup in
-//      the Rust `render_terminal_page`).
-//   2. Set the window globals.
-//   3. Load the same script chain, in order, that the Rust page loads:
-//        renderer-picker → vendor bundle (xterm|sterk) → terminal.js (module).
-//        All served by the backend through the Vite proxy, so the REAL engine
-//        bundle runs unchanged.
+// The island's job:
+//   1. Render the DOM scaffold the engine binds to (#terminal, #reader,
+//      #loadquote, the #inputBar ribbon, the #cmdPickList overlay, …).
+//   2. Load the renderer's vendor bundle (once per document), then create
+//      the engine in an effect and dispose it on unmount. A route-param
+//      change is a clean dispose + create — no document reload (#188), and
+//      the new engine attaches to exactly the (node, session) in the URL
+//      (the #185 regression class).
 //
-// This runs ONCE in a layout effect. Preact never re-renders the inner DOM
-// (no children, the ref'd subtree is owned by the engine), so the terminal is
-// mounted exactly once for the lifetime of the route — the island contract.
-//
-// `CACHE_BUST` mirrors the Rust page's `?v=` query so a stale SW cache can't
-// hand back an old bundle; in dev it is just a constant.
+// `CACHE_BUST` mirrors the old Rust page's `?v=` query so a stale SW cache
+// can't hand back an old bundle; in dev it is just a constant.
 const CACHE_BUST = "spa";
 
 // Ribbon bug-report button (#191): grab the current diagnostics bundle and
@@ -53,68 +47,80 @@ async function openBugReport() {
   window.location.href = url;
 }
 
-// Append a classic <script> and resolve when it loads. Order matters (the
-// renderer global must exist before terminal-core constructs the backend), so
-// callers await each one.
-function loadScript(src, { module = false } = {}) {
-  return new Promise((resolve, reject) => {
-    const el = document.createElement("script");
-    el.src = src;
-    if (module) el.type = "module";
-    el.async = false; // preserve execution order
-    el.onload = () => resolve();
-    el.onerror = () => reject(new Error(`failed to load ${src}`));
-    document.body.appendChild(el);
-  });
+// Append a classic <script> and resolve when it loads. Deduped per document:
+// the vendor bundles pin window globals (window.Terminal / window.Sterk) and
+// chime.js self-boots, so each URL loads exactly once no matter how many
+// times the island mounts.
+const loadedScripts = new Map();
+function loadScript(src) {
+  if (!loadedScripts.has(src)) {
+    loadedScripts.set(
+      src,
+      new Promise((resolve, reject) => {
+        const el = document.createElement("script");
+        el.src = src;
+        el.async = false; // preserve execution order
+        el.onload = () => resolve();
+        el.onerror = () => {
+          loadedScripts.delete(src); // a later mount may retry
+          reject(new Error(`failed to load ${src}`));
+        };
+        document.body.appendChild(el);
+      }),
+    );
+  }
+  return loadedScripts.get(src);
+}
+
+function ensureStylesheet(href) {
+  if (document.querySelector(`link[rel="stylesheet"][href="${href}"]`)) return;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = href;
+  document.head.appendChild(link);
 }
 
 export function TerminalIsland({ node, session }) {
   const rootRef = useRef(null);
-  const bootedRef = useRef(false);
   const resizeObsRef = useRef(null);
 
   useLayoutEffect(() => {
-    if (bootedRef.current) return; // never boot twice
-    bootedRef.current = true;
+    // The engine attaches to exactly this (node, session) — both come from
+    // the route (`#/s/<node>/<name>`), never from the device's selected-node
+    // preference, so a stale selection can't re-target a session URL (#185).
+    // No node segment ⇒ local host.
+    let cancelled = false;
+    let engine = null;
 
-    // 1. Globals the engine reads at module-eval time. MOBUX_NODE routes the
-    //    PTY WebSocket and every tmux call through the hub's SSH proxy. It
-    //    comes from the route (`#/s/<node>/<name>`), never from the device's
-    //    selected-node preference — a stale selection must not re-target a
-    //    session URL (#185). No node segment ⇒ local host.
-    window.MOBUX_SESSION = session;
-    window.MOBUX_NODE = node || "";
-    window.MOBUX_DEV = false;
-
-    // 2. Resolve the renderer choice exactly like the Rust page's inline
-    //    boot script, then load the matching vendor bundle + css first.
+    // Resolve the renderer choice, then load the matching vendor bundle +
+    // css (once per document) before constructing the engine.
     let renderer = "xterm";
     try {
       const s = localStorage.getItem("mobux:renderer");
       if (s === "sterk" || s === "xterm") renderer = s;
     } catch (_) {}
-    window.__mobuxRenderer = renderer;
 
     const v = `?v=${CACHE_BUST}`;
     const bundle = renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js";
 
     if (renderer === "xterm") {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = `/static/vendor/xterm.css${v}`;
-      document.head.appendChild(link);
+      ensureStylesheet(`/static/vendor/xterm.css${v}`);
     }
 
-    // 3. Load the chain in order. Vendor bundle (sets window.Terminal /
-    //    window.Sterk) → the engine module. The engine boots itself on load.
     (async () => {
+      let createTerminal;
       try {
         await loadScript(`/static/vendor/${bundle}${v}`);
-        await loadScript(`/static/terminal.js${v}`, { module: true });
+        // The engine module is pure (a factory export, no side effects), so
+        // the browser's module-map caching is exactly right: first mount
+        // fetches it, every later mount reuses it and just calls the factory.
+        ({ createTerminal } = await import(
+          /* @vite-ignore */ `/static/terminal.js${v}`
+        ));
         // chime.js sets up the in-page bell that plays when the SW delivers a
         // push notification. It self-boots via IIFE (attaches to SW messages),
-        // so loading it once is enough. Guard against double-mount via the global
-        // it exposes (unlikely here since the island boots once, but be safe).
+        // so loading it once is enough; it also guards itself via the global
+        // it exposes.
         if (!window.__mobuxChime) {
           await loadScript(`/static/chime.js${v}`);
         }
@@ -124,18 +130,26 @@ export function TerminalIsland({ node, session }) {
         if (q) q.textContent = `Terminal failed to load: ${e.message}`;
         return;
       }
+      if (cancelled || !rootRef.current) return;
 
-      // Force a resize once the SPA layout has actually painted. terminal.js
+      engine = createTerminal({
+        node: node || "",
+        session,
+        host: rootRef.current,
+        renderer,
+      });
+
+      // Force a resize once the SPA layout has actually painted. The engine
       // sizes the PTY (cols/rows) from the host element's clientHeight, and it
-      // does its own resize at 0ms/100ms after load — but in the SPA the engine
-      // boots while Preact's island subtree is still settling its flex height,
-      // so that early measurement can read a too-short host and the backend
-      // computes far too few rows (the stranded-status-bar / dead-black bug).
-      // The engine already listens on window `resize` → core.resize(), so we
-      // reuse that machinery: re-fire a synthetic resize after a double-rAF
-      // (one full painted frame later) and again after the host's box settles,
-      // via a ResizeObserver, so the initial row count is correct without a
-      // rotate/keyboard nudge.
+      // does its own resize at 0ms/100ms after boot — but in the SPA the
+      // engine boots while Preact's island subtree is still settling its flex
+      // height, so that early measurement can read a too-short host and the
+      // backend computes far too few rows (the stranded-status-bar /
+      // dead-black bug). The engine already listens on window `resize` →
+      // core.resize(), so we reuse that machinery: re-fire a synthetic resize
+      // after a double-rAF (one full painted frame later) and again after the
+      // host's box settles, via a ResizeObserver, so the initial row count is
+      // correct without a rotate/keyboard nudge.
       const kick = () => window.dispatchEvent(new Event("resize"));
       requestAnimationFrame(() => requestAnimationFrame(kick));
 
@@ -155,13 +169,20 @@ export function TerminalIsland({ node, session }) {
     })();
 
     return () => {
+      cancelled = true;
       resizeObsRef.current?.disconnect();
       resizeObsRef.current = null;
+      engine?.dispose();
+      engine = null;
     };
-  }, []);
+    // A (node, session) change is a full dispose + create. TerminalPage also
+    // keys the island on the pair, so in practice Preact remounts the whole
+    // scaffold (fresh splash, fresh #terminal); these deps are the backstop.
+  }, [node, session]);
 
-  // Scaffold mirrors render_terminal_page() in src/main.rs. The engine binds to
-  // these ids; we render them once and hand the subtree to the engine.
+  // The engine binds to these ids (scoped to this subtree via the `host`
+  // factory argument); we render them once per mount and hand the subtree
+  // to the engine.
   return (
     <div ref={rootRef} class="term-body-spa">
       <div id="terminal" />

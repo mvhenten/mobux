@@ -6,7 +6,7 @@
 //
 // The session URL is the whole address (issue #185): `#/s/<node>/<name>`
 // attaches to that node's tmux, bare `#/s/<name>` to the hub's local one.
-// TerminalIsland pins window.MOBUX_NODE from the route — never from the
+// TerminalIsland passes the engine the node from the route — never from the
 // device's `localStorage["mobux:node"]` picker preference — so these specs
 // navigate straight to the node-qualified URL with no seeded device state,
 // exactly like a fresh device opening a shared link. The picker UI has its

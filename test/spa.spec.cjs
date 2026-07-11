@@ -313,20 +313,21 @@ function loadquoteGone(page) {
   });
 }
 
-function installFakeSocket(page, { emitDataAfterMs = null } = {}) {
-  return page.addInitScript((emitDataAfterMs) => {
+// The fake socket exposes `window.__fakeEmitData(str)` so the test decides
+// exactly when the first PTY byte arrives — timer-based emission raced the
+// page's own networkidle settling and flaked either way.
+function installFakeSocket(page) {
+  return page.addInitScript(() => {
     class FakeSocket extends EventTarget {
       constructor(url) {
         super();
         this.url = url;
         this.readyState = 0;
         this.binaryType = "blob";
+        window.__fakeEmitData = (str) => this.onmessage?.({ data: str });
         setTimeout(() => {
           this.readyState = 1;
           this.onopen?.(new Event("open"));
-          if (emitDataAfterMs != null) {
-            setTimeout(() => this.onmessage?.({ data: "$ " }), emitDataAfterMs);
-          }
         }, 10);
       }
       send() {}
@@ -340,24 +341,32 @@ function installFakeSocket(page, { emitDataAfterMs = null } = {}) {
     FakeSocket.CLOSING = 2;
     FakeSocket.CLOSED = 3;
     window.WebSocket = FakeSocket;
-  }, emitDataAfterMs);
+  });
 }
 
 test("loading splash reveals on first data (unchanged data-triggered path)", async ({
   page,
 }) => {
-  await installFakeSocket(page, { emitDataAfterMs: 50 });
+  await installFakeSocket(page);
 
   await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
     waitUntil: "networkidle",
   });
 
+  // No data has arrived yet (emission is test-controlled) and the no-output
+  // fallback (armed at 1.5s after open) is still far away — the splash must
+  // be up.
   await expect(page.locator("#loadquote")).toHaveCount(1);
   expect(await loadquoteGone(page)).toBe(false);
 
-  // Data arrives ~60ms after connect — reveals almost immediately, long
-  // before the no-output fallback (armed at 1.5s) could ever fire.
-  await expect.poll(() => loadquoteGone(page), { timeout: 1000 }).toBe(true);
+  // First byte arrives — the data path reveals within ~200ms (fade + removal
+  // complete by ~500ms), well before the fallback could ever fire. Steady
+  // 100ms probes: the default poll backoff (100/250/500/1000) skips clean
+  // over the fade window.
+  await page.evaluate(() => window.__fakeEmitData("$ "));
+  await expect
+    .poll(() => loadquoteGone(page), { timeout: 1500, intervals: [100] })
+    .toBe(true);
 });
 
 test("loading splash still clears via the fallback timer when a session emits no output on attach", async ({
@@ -462,13 +471,11 @@ async function simulateKeyboardOpenThenDismiss(page) {
 test("ribbon stays hidden through the loading splash and after attach", async ({
   page,
 }) => {
-  await installFakeSocket(page, { emitDataAfterMs: 50 });
+  await installFakeSocket(page);
 
-  // domcontentloaded, not networkidle: the fake socket's reveal timers (data
-  // at 50ms, splash fade+removal ~550ms later) can race past a slow
-  // networkidle wait, so asserting "still hidden" right after goto would be
-  // flaky. domcontentloaded returns as soon as the scaffold is parsed, well
-  // before those timers fire, giving a stable read of the pre-reveal state.
+  // domcontentloaded returns as soon as the scaffold is parsed, giving a
+  // stable read of the pre-reveal state (data emission is test-controlled,
+  // so nothing can reveal the splash before this test says so).
   await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
     waitUntil: "domcontentloaded",
   });
@@ -494,6 +501,7 @@ test("ribbon stays hidden through the loading splash and after attach", async ({
 
   // The splash's own reveal condition fires (first PTY data) — the ribbon
   // must NOT come with it (#201: splash dismissal is not an input event).
+  await page.evaluate(() => window.__fakeEmitData("$ "));
   await expect.poll(() => loadquoteGone(page), { timeout: 1000 }).toBe(true);
   expect(await ribbonVisible(page)).toBe(false);
 });
@@ -1488,18 +1496,57 @@ test("auto-reload: first visit records a baseline, a later change reloads once, 
   expect(reloadedAgain).toBe(false);
 });
 
-// ── regression: second terminal session renders after navigating home → terminal → home → terminal
+// ── terminal engine lifecycle (#188) ─────────────────────────────────────────
 //
-// Before the fix, terminal.js was an ES module already in the browser's module
-// map after the first open. Client-side navigate() to a second session route
-// never re-executed it, and #terminal stayed empty. The fix: open() hard-loads
-// (location.href + reload()) for every terminal route, so each open gets a
-// fresh module scope.
-test("second terminal open renders without engine boot error", async ({
+// The engine is a factory (`createTerminal({ node, session, host, renderer })`
+// → `{ dispose() }`), so terminal routes are plain SPA navigations: mounting
+// creates an engine, leaving disposes it, and a (node, session) change is
+// dispose + create — never a document reload. These tests are the acceptance
+// bar for that lifecycle; historically every same-document path into a second
+// terminal either rendered nothing (stale module scope) or attached to the
+// WRONG tmux (the #185/#188 "session not found" class, because the engine
+// kept the first target it ever booted with).
+
+// Wait until the engine on the current route is fully up: renderer DOM
+// mounted AND its PTY websocket open.
+async function waitForEngine(page) {
+  await page.waitForFunction(
+    () => {
+      const t = document.getElementById("terminal");
+      return (
+        t &&
+        t.childElementCount > 0 &&
+        window.__mobuxView?.test?.wsReady?.() === true
+      );
+    },
+    { timeout: 15000 },
+  );
+}
+
+// Exact-line occurrence count of `marker` in a tmux pane. The senders below
+// split the marker in the typed command (`echo TG''T_1`) so the command echo
+// can never match — only the command's OUTPUT contains the contiguous marker.
+function paneMarkerCount(session, marker) {
+  return tmux(`capture-pane -p -t ${session}`)
+    .toString()
+    .split("\n")
+    .filter((l) => l.trim() === marker).length;
+}
+
+// mount → unmount → mount in ONE document, via the exact taps a user makes
+// (session row → terminal → back → other session row). Asserts each mount
+// attaches its own live websocket, the unmounted engine's socket is closed
+// (disposed, not leaked), and input lands exactly once (no duplicated
+// handlers surviving from the previous mount).
+test("terminal engine survives mount → unmount → mount in one document", async ({
   page,
 }) => {
   const pageErrors = [];
   page.on("pageerror", (err) => pageErrors.push(err.message));
+  const sockets = [];
+  page.on("websocket", (ws) => {
+    if (ws.url().includes("/ws/")) sockets.push(ws);
+  });
 
   // A second dedicated session so the test can open two distinct terminals.
   const SEED2 = `spa-seed2-${process.pid}`;
@@ -1522,58 +1569,53 @@ test("second terminal open renders without engine boot error", async ({
       ),
     ).toBeVisible({ timeout: 8000 });
 
-    // Click first session row — hard-load navigates to the terminal route.
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle" }),
-      page
-        .locator(`#sessionList .swipe-row[data-name="${SEED}"] .session-item`)
-        .click(),
-    ]);
-    await page.waitForFunction(
-      () => {
-        const t = document.getElementById("terminal");
-        return t && t.childElementCount > 0;
-      },
-      { timeout: 15000 },
-    );
-    expect(
-      await page.evaluate(
-        () =>
-          document.getElementById("terminal").getBoundingClientRect().height,
-      ),
-    ).toBeGreaterThan(0);
+    // Open the first session — a plain SPA navigation, no document load.
+    await page
+      .locator(`#sessionList .swipe-row[data-name="${SEED}"] .session-item`)
+      .click();
+    await expect(page).toHaveURL(new RegExp(`#/s/${SEED}$`));
+    await waitForEngine(page);
+    expect(sockets.length).toBe(1);
+    expect(sockets[0].url()).toContain(`/ws/${SEED}`);
 
-    // Return to Home.
-    await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+    // Back to Home — the island unmounts, dispose() tears the engine down:
+    // its websocket closes and the test surface goes away with it.
+    await page.evaluate(() => {
+      location.hash = "#/";
+    });
     await expect(
       page.locator(
         `#sessionList .swipe-row[data-name="${SEED2}"] .session-item`,
       ),
     ).toBeVisible({ timeout: 8000 });
+    await page.waitForFunction(() => window.__mobuxView === undefined, {
+      timeout: 8000,
+    });
+    await expect
+      .poll(() => sockets[0].isClosed(), { timeout: 8000 })
+      .toBe(true);
 
-    // Click second session row — hard-load again; without the fix this was blank
-    // because terminal.js was already module-cached and would not re-execute.
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle" }),
-      page
-        .locator(`#sessionList .swipe-row[data-name="${SEED2}"] .session-item`)
-        .click(),
-    ]);
-    await page.waitForFunction(
-      () => {
-        const t = document.getElementById("terminal");
-        return t && t.childElementCount > 0;
-      },
-      { timeout: 15000 },
+    // Open the second session in the SAME document.
+    await page
+      .locator(`#sessionList .swipe-row[data-name="${SEED2}"] .session-item`)
+      .click();
+    await expect(page).toHaveURL(new RegExp(`#/s/${SEED2}$`));
+    await waitForEngine(page);
+    expect(sockets.length).toBe(2);
+    expect(sockets[1].url()).toContain(`/ws/${SEED2}`);
+
+    // Input lands exactly once — a duplicated handler from the first mount
+    // would run the command twice.
+    const MARK = `LIFE_${process.pid}`;
+    await page.evaluate(
+      (m) => window.__mobuxView.send(`echo ${m.slice(0, 4)}''${m.slice(4)}\r`),
+      MARK,
     );
-    expect(
-      await page.evaluate(
-        () =>
-          document.getElementById("terminal").getBoundingClientRect().height,
-      ),
-    ).toBeGreaterThan(0);
+    await expect
+      .poll(() => paneMarkerCount(SEED2, MARK), { timeout: 8000 })
+      .toBe(1);
 
-    // Core symptom of double-execution — must be absent.
+    // Core symptom of the old self-booting module — must be absent.
     const doubleDecl = pageErrors.filter((m) =>
       m.includes("already been declared"),
     );
@@ -1584,6 +1626,71 @@ test("second terminal open renders without engine boot error", async ({
   } finally {
     try {
       tmux(`kill-session -t ${SEED2}`);
+    } catch (_) {}
+  }
+});
+
+// Same-document navigation from one terminal route straight to another —
+// hand-editing the address bar, or browser back/forward between two terminal
+// routes. The engine must attach to the target in the NEW URL (the
+// #185/#188 regression class: the stale engine kept serving the FIRST
+// session/node, rendering another tmux's output — or its "session not
+// found" — under the new route). No reload is allowed to paper over it.
+test("navigating between two session routes re-attaches to the right target without a reload", async ({
+  page,
+}) => {
+  const sockets = [];
+  page.on("websocket", (ws) => {
+    if (ws.url().includes("/ws/")) sockets.push(ws);
+  });
+
+  const SEED3 = `spa-seed3-${process.pid}`;
+  try {
+    tmux(`kill-session -t ${SEED3}`);
+  } catch (_) {}
+  tmux(`new-session -d -s ${SEED3} ${SHELL_ENV} "bash --norc --noprofile"`);
+
+  try {
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await waitForEngine(page);
+    expect(sockets.length).toBe(1);
+    expect(sockets[0].url()).toContain(`/ws/${SEED}`);
+
+    // Prove the next navigation stays in THIS document.
+    await page.evaluate(() => {
+      window.__sameDocProbe = true;
+    });
+
+    await page.evaluate((name) => {
+      location.hash = `#/s/${encodeURIComponent(name)}`;
+    }, SEED3);
+    await waitForEngine(page);
+
+    // Same document (no reload) …
+    expect(await page.evaluate(() => window.__sameDocProbe)).toBe(true);
+    // … the old engine is gone (socket closed, not leaked) …
+    await expect
+      .poll(() => sockets[0].isClosed(), { timeout: 8000 })
+      .toBe(true);
+    // … and the new engine attached to the target in the URL.
+    expect(sockets.length).toBe(2);
+    expect(sockets[1].url()).toContain(`/ws/${SEED3}`);
+
+    // Keystrokes land in SEED3's tmux — and never in SEED's.
+    const MARK = `TGT_${process.pid}`;
+    await page.evaluate(
+      (m) => window.__mobuxView.send(`echo ${m.slice(0, 3)}''${m.slice(3)}\r`),
+      MARK,
+    );
+    await expect
+      .poll(() => paneMarkerCount(SEED3, MARK), { timeout: 8000 })
+      .toBe(1);
+    expect(paneMarkerCount(SEED, MARK)).toBe(0);
+  } finally {
+    try {
+      tmux(`kill-session -t ${SEED3}`);
     } catch (_) {}
   }
 });
@@ -1913,6 +2020,65 @@ test("settings: a failed nodes save is loud and keeps the old list", async ({
   const box = await status.boundingBox();
   expect(box.width).toBeGreaterThan(0);
   await expect(card.locator(".node-row")).toHaveCount(0);
+});
+
+// A failed GET must never collapse into an editable `[]` — that's
+// indistinguishable from a real "zero nodes configured" response, and
+// add/remove PUT the whole list back (a full-list replace). A stale empty
+// list from a transient load failure, followed by one "Add", would silently
+// wipe every previously-configured node on the server — this is the actual
+// mechanism that emptied the live node table out from under a running
+// remote session.
+test("settings: a failed nodes load disables editing instead of offering an empty, saveable list", async ({
+  page,
+}) => {
+  const puts = [];
+  await page.route(/\/api\/settings\/nodes$/, async (route) => {
+    if (route.request().method() === "PUT") {
+      puts.push(JSON.parse(route.request().postData()));
+      return route.fulfill({ status: 200, body: "" });
+    }
+    return route.fulfill({ status: 500, body: "boom" });
+  });
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator("#nodes-settings");
+  await expect(card).toBeVisible();
+
+  // No real list was ever confirmed — no rows, no "zero nodes" hint either
+  // (that hint means a confirmed empty list, not a failed one).
+  await expect(card.locator(".node-row")).toHaveCount(0);
+  await expect(card).toContainText("Could not load the node list");
+
+  // The add form is present but wholly inert until a load succeeds — every
+  // control disabled, so there is no way to compose and fire a save that
+  // would PUT this failure-derived (non-)list back as the truth.
+  await expect(card.locator("#nodeName")).toBeDisabled();
+  await expect(card.locator("#nodeTarget")).toBeDisabled();
+  await expect(card.locator("#nodeAddBtn")).toBeDisabled();
+
+  // Give any (incorrect) save a moment to fire, then assert it never did.
+  await page.waitForTimeout(300);
+  expect(puts.length).toBe(0);
+
+  // Recovering the GET and retrying loads the real list and re-enables editing.
+  await page.unroute(/\/api\/settings\/nodes$/);
+  await page.route(/\/api\/settings\/nodes$/, async (route) => {
+    if (route.request().method() === "PUT") {
+      puts.push(JSON.parse(route.request().postData()));
+      return route.fulfill({ status: 200, body: "" });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        nodes: [{ name: "sandbox", target: "mvhenten@sandbox" }],
+      }),
+    });
+  });
+  await card.locator("#nodesRetryBtn").click();
+  await expect(card.locator(".node-row")).toHaveCount(1);
+  await expect(card.locator("#nodeAddBtn")).toBeEnabled();
 });
 
 // ── install page: QR codes ──────────────────────────────────────────────────

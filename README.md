@@ -116,8 +116,7 @@ device. It is **off by default and inert in production** — gated behind the
 `MOBUX_DEV` env var, read once at startup.
 
 - **Enable it:** start mobux with `MOBUX_DEV=1` (the `mobux-dev.service`
-  unit sets this). When set, the server logs `dev mode: ON` and exposes the
-  flag to the page as `window.MOBUX_DEV = true`.
+  unit sets this). When set, the server logs `dev mode: ON`.
 - **Where logs land:** the frontend POSTs lines to `POST /api/telemetry`
   (same-origin, behind normal auth, body capped at 64KB). The server writes
   each line to **stderr / the journal** prefixed `[telemetry HH:MM:SS.mmm]`.

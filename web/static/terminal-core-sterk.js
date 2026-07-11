@@ -1,9 +1,9 @@
 // Sterk-backed TerminalCore — experimental renderer using @kattebak/sterk
 // (libterm + Ace VirtualRenderer under the hood).
 //
-// Loaded only when `window.__mobuxRenderer === 'sterk'`. The page-level
-// boot script in render_terminal_page() injects sterk.bundle.js before
-// terminal.js runs, which pins `window.Sterk = { createTerminal }`.
+// Constructed only when the engine's `renderer` option is 'sterk'. The host
+// (TerminalIsland) loads sterk.bundle.js before constructing the engine,
+// which pins `window.Sterk = { createTerminal }`.
 //
 // Exposes the same external surface as terminal-core-xterm.js so
 // terminal.js / reader-view.js / the test suite use a single contract.
@@ -17,18 +17,14 @@ const WINDOW_SWITCH_CMDS = new Set([
   "kill-window",
 ]);
 
-// Hub → node SSH proxying (#176): when the SPA picked a remote node it pins
-// window.MOBUX_NODE before the engine boots, and every PTY/tmux call carries
-// ?node=<name>. Absent ⇒ the local host, exactly the pre-node behavior.
-function nodeQuery() {
-  const node = window.MOBUX_NODE;
-  return node ? `?node=${encodeURIComponent(node)}` : "";
-}
-
 export class TerminalCoreSterk extends EventTarget {
-  constructor({ session, host }) {
+  // `node` (#176): the remote node this session lives on — every PTY/tmux
+  // call carries ?node=<name> so the hub proxies it over SSH. "" ⇒ the local
+  // host, exactly the pre-node behavior.
+  constructor({ session, node, host }) {
     super();
     this.session = session;
+    this.node = node || "";
     this.host = host;
     this.renderer = "sterk";
 
@@ -68,7 +64,7 @@ export class TerminalCoreSterk extends EventTarget {
     this.intentionalClose = false;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     this.ws = new WebSocket(
-      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${nodeQuery()}`,
+      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${this._nodeQuery()}`,
     );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
@@ -144,6 +140,31 @@ export class TerminalCoreSterk extends EventTarget {
   send(data) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(data);
+    }
+  }
+
+  _nodeQuery() {
+    return this.node ? `?node=${encodeURIComponent(this.node)}` : "";
+  }
+
+  // Full teardown for a same-document remount (terminal.js dispose()):
+  // no reconnect may survive, the socket closes, and the renderer
+  // releases its DOM + internal listeners.
+  dispose() {
+    this.intentionalClose = true;
+    if (this._reconnectTimer !== null) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    try {
+      this.ws?.close();
+    } catch (_) {}
+    this.ws = null;
+    try {
+      this.term.dispose();
+    } catch (_) {}
+    if (typeof window !== "undefined" && window.__sterk === this.term) {
+      delete window.__sterk;
     }
   }
 
@@ -247,7 +268,7 @@ export class TerminalCoreSterk extends EventTarget {
   async refreshPanes() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/panes${nodeQuery()}`,
+        `/api/sessions/${encodeURIComponent(this.session)}/panes${this._nodeQuery()}`,
       );
       if (!res.ok) return;
       this.panes = await res.json();
@@ -290,7 +311,7 @@ export class TerminalCoreSterk extends EventTarget {
   async runTmuxCmd(command) {
     try {
       await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/command${nodeQuery()}`,
+        `/api/sessions/${encodeURIComponent(this.session)}/command${this._nodeQuery()}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -311,7 +332,7 @@ export class TerminalCoreSterk extends EventTarget {
   async reloadHistory() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/history${nodeQuery()}`,
+        `/api/sessions/${encodeURIComponent(this.session)}/history${this._nodeQuery()}`,
       );
       if (!res.ok) return;
       const history = await res.text();
@@ -420,6 +441,12 @@ function makeSterkAdapter(host, sendCb) {
 
     write(data, cb) {
       sterk.write(data, cb);
+    },
+    dispose() {
+      writeParsedSubs.length = 0;
+      try {
+        sterk.dispose();
+      } catch (_) {}
     },
     resize(cols, rows) {
       sterk.resize(cols, rows);

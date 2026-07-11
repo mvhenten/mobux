@@ -136,6 +136,7 @@ export function createInputBar(term, send) {
   // handles bar UX: when the keyboard dismisses (viewport grows back
   // by > 50px), tuck the bar away too so the user gets terminal-full
   // space back.
+  let removeViewportListeners = null;
   if (window.visualViewport) {
     const vv = window.visualViewport;
     let lastHeight = vv.height;
@@ -148,6 +149,10 @@ export function createInputBar(term, send) {
     };
     vv.addEventListener('resize', onViewportChange);
     vv.addEventListener('scroll', onViewportChange);
+    removeViewportListeners = () => {
+      vv.removeEventListener('resize', onViewportChange);
+      vv.removeEventListener('scroll', onViewportChange);
+    };
   }
 
   // Also hide on Escape
@@ -233,7 +238,13 @@ export function createInputBar(term, send) {
     // engagement path — see terminal.js's `onDoubleTap` handlers, #201).
     show: activateInput,
     hide,
+    // Full teardown for a same-document engine remount: everything wired
+    // OUTSIDE the host subtree (visualViewport listeners, the attach
+    // action's hidden file input on document.body) must go — the subtree
+    // listeners die with the DOM.
     destroy() {
+      removeViewportListeners?.();
+      attach.destroy?.();
       if (textarea) {
         textarea.removeAttribute('tabindex');
         textarea.style.pointerEvents = '';

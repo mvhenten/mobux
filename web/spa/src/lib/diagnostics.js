@@ -19,17 +19,24 @@ export async function collectDiagnostics() {
     serverBuildHash: settledValue(buildInfo)?.build_hash ?? null,
     spaBundleHash: settledValue(feInfo)?.hash ?? null,
     route: location.hash || location.pathname,
-    node: nonEmpty(window.MOBUX_NODE),
-    session: nonEmpty(window.MOBUX_SESSION),
+    ...terminalTarget(),
     userAgent: navigator.userAgent,
     recentErrors: recentErrors(),
   };
 }
 
-function settledValue(settled) {
-  return settled.status === "fulfilled" ? settled.value : null;
+// The (node, session) a terminal route points at, derived from the hash —
+// the URL is the whole address (#185), so it's also the diagnostic truth.
+// Non-terminal routes report both as null.
+function terminalTarget() {
+  const m = /^#\/s\/(?:([^/]+)\/)?([^/]+)$/.exec(location.hash);
+  if (!m) return { node: null, session: null };
+  return {
+    node: m[1] ? decodeURIComponent(m[1]) : null,
+    session: decodeURIComponent(m[2]),
+  };
 }
 
-function nonEmpty(v) {
-  return v ? v : null;
+function settledValue(settled) {
+  return settled.status === "fulfilled" ? settled.value : null;
 }

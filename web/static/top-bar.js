@@ -136,6 +136,7 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
   return {
     destroy() {
       window.removeEventListener('mobux:viewchange', syncReaderBtn);
+      attach.destroy?.();
       bar.remove();
       window.dispatchEvent(new Event('resize'));
     },

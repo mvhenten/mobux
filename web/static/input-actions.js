@@ -20,7 +20,7 @@ import { openExternal } from './external-link.js';
 // Owns a hidden <input type=file>, POSTs the picked file to /api/upload, and
 // drops the returned path into the terminal via send().
 //
-//   createAttachAction({ send, onError }) → { trigger() }
+//   createAttachAction({ send, onError }) → { trigger(), destroy() }
 //     onError(message)  optional — surface an upload failure in the UI.
 export function createAttachAction({ send, onError } = {}) {
   const fileInput = document.createElement('input');
@@ -54,6 +54,10 @@ export function createAttachAction({ send, onError } = {}) {
 
   return {
     trigger() { fileInput.click(); },
+    // The hidden input lives on document.body, outside the caller's own
+    // subtree — a remounting host (input-bar/top-bar destroy) must remove
+    // it or every remount leaks one.
+    destroy() { fileInput.remove(); },
   };
 }
 
