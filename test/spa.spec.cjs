@@ -1588,6 +1588,75 @@ test("second terminal open renders without engine boot error", async ({
   }
 });
 
+// ── regression: same-document hash change between two terminal routes ──────
+//
+// Every SUPPORTED way into a terminal route hard-reloads (Home's open(), the
+// reload buttons, a fresh page/deep-link load). But nothing stopped a
+// same-document hash change straight from one session route to another —
+// hand-editing the address bar, or a browser back/forward step that lands on
+// a second already-hard-loaded terminal route without an intervening reload.
+// terminal.js is a side-effecting ES module cached by the browser after its
+// first evaluation (#188): without a reload, the engine keeps running the
+// FIRST session/node while the UI silently claims to show the second one —
+// the PTY (re)attaches wherever the stale window.MOBUX_NODE still points,
+// and whatever tmux finds (or doesn't) there renders as if it were the new
+// session's own output. This is the actual mechanism behind the
+// "session not found" regression: the fix is a reload guard in
+// TerminalIsland that detects a same-document session/node change and forces
+// a real reload instead of trying to reuse the stale engine.
+test("a same-document hash change to a different session forces a reload instead of reusing the stale engine", async ({
+  page,
+}) => {
+  const SEED3 = `spa-seed3-${process.pid}`;
+  try {
+    tmux(`kill-session -t ${SEED3}`);
+  } catch (_) {}
+  tmux(`new-session -d -s ${SEED3} ${SHELL_ENV} "bash --norc --noprofile"`);
+
+  try {
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    expect(await page.evaluate(() => window.__mobuxBootedSession)).toBe(
+      `/${SEED}`,
+    );
+
+    // Same-document hash edit to a DIFFERENT session — no reload triggered by
+    // the app itself, exactly like typing a new hash into the address bar.
+    await Promise.all([
+      page.waitForEvent("load", { timeout: 10000 }),
+      page.evaluate((name) => {
+        location.hash = `#/s/${encodeURIComponent(name)}`;
+      }, SEED3),
+    ]);
+
+    // The reload landed on the SECOND session's route and booted it fresh —
+    // not stuck on the first session's stale engine.
+    await expect(page).toHaveURL(new RegExp(`#/s/${SEED3}$`));
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    expect(await page.evaluate(() => window.__mobuxBootedSession)).toBe(
+      `/${SEED3}`,
+    );
+  } finally {
+    try {
+      tmux(`kill-session -t ${SEED3}`);
+    } catch (_) {}
+  }
+});
+
 // ── node picker + nodes settings (#176 phase 3) ─────────────────────────────
 //
 // The backend side (/api/nodes, GET/PUT /api/settings/nodes, ?node= on the
@@ -1913,6 +1982,65 @@ test("settings: a failed nodes save is loud and keeps the old list", async ({
   const box = await status.boundingBox();
   expect(box.width).toBeGreaterThan(0);
   await expect(card.locator(".node-row")).toHaveCount(0);
+});
+
+// A failed GET must never collapse into an editable `[]` — that's
+// indistinguishable from a real "zero nodes configured" response, and
+// add/remove PUT the whole list back (a full-list replace). A stale empty
+// list from a transient load failure, followed by one "Add", would silently
+// wipe every previously-configured node on the server — this is the actual
+// mechanism that emptied the live node table out from under a running
+// remote session.
+test("settings: a failed nodes load disables editing instead of offering an empty, saveable list", async ({
+  page,
+}) => {
+  const puts = [];
+  await page.route(/\/api\/settings\/nodes$/, async (route) => {
+    if (route.request().method() === "PUT") {
+      puts.push(JSON.parse(route.request().postData()));
+      return route.fulfill({ status: 200, body: "" });
+    }
+    return route.fulfill({ status: 500, body: "boom" });
+  });
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator("#nodes-settings");
+  await expect(card).toBeVisible();
+
+  // No real list was ever confirmed — no rows, no "zero nodes" hint either
+  // (that hint means a confirmed empty list, not a failed one).
+  await expect(card.locator(".node-row")).toHaveCount(0);
+  await expect(card).toContainText("Could not load the node list");
+
+  // The add form is present but wholly inert until a load succeeds — every
+  // control disabled, so there is no way to compose and fire a save that
+  // would PUT this failure-derived (non-)list back as the truth.
+  await expect(card.locator("#nodeName")).toBeDisabled();
+  await expect(card.locator("#nodeTarget")).toBeDisabled();
+  await expect(card.locator("#nodeAddBtn")).toBeDisabled();
+
+  // Give any (incorrect) save a moment to fire, then assert it never did.
+  await page.waitForTimeout(300);
+  expect(puts.length).toBe(0);
+
+  // Recovering the GET and retrying loads the real list and re-enables editing.
+  await page.unroute(/\/api\/settings\/nodes$/);
+  await page.route(/\/api\/settings\/nodes$/, async (route) => {
+    if (route.request().method() === "PUT") {
+      puts.push(JSON.parse(route.request().postData()));
+      return route.fulfill({ status: 200, body: "" });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        nodes: [{ name: "sandbox", target: "mvhenten@sandbox" }],
+      }),
+    });
+  });
+  await card.locator("#nodesRetryBtn").click();
+  await expect(card.locator(".node-row")).toHaveCount(1);
+  await expect(card.locator("#nodeAddBtn")).toBeEnabled();
 });
 
 // ── install page: QR codes ──────────────────────────────────────────────────

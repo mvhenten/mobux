@@ -1744,14 +1744,31 @@ async fn api_set_settings_nodes(
         }
     }
 
+    let new_count = req.nodes.len();
     tokio::task::spawn_blocking({
         let db = state.db.clone();
         let pairs = req.nodes.into_iter().map(|n| (n.name, n.target)).collect();
-        move || db.replace_nodes(pairs)
+        move || -> anyhow::Result<usize> {
+            let previous_count = db.list_nodes()?.len();
+            db.replace_nodes(pairs)?;
+            Ok(previous_count)
+        }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
+    .map_err(AppError::internal)
+    .map(|previous_count| {
+        // A full-list replace from N configured nodes down to zero is the
+        // shape of a client-side bug (a load failure mistaken for a real
+        // empty list, then saved — see web/spa/src/components/settings/
+        // Nodes.jsx) rather than a deliberate "remove every node" action, so
+        // it's loud in the log even though it's still honored as requested.
+        if previous_count > 0 && new_count == 0 {
+            eprintln!(
+                "warning: PUT /api/settings/nodes emptied the node list (was {previous_count}, now 0) — was this intentional?"
+            );
+        }
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

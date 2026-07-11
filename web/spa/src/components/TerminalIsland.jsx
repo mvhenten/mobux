@@ -21,9 +21,13 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 //        All served by the backend through the Vite proxy, so the REAL engine
 //        bundle runs unchanged.
 //
-// This runs ONCE in a layout effect. Preact never re-renders the inner DOM
-// (no children, the ref'd subtree is owned by the engine), so the terminal is
-// mounted exactly once for the lifetime of the route — the island contract.
+// The boot sequence below runs at most ONCE per (node, session) pair. Preact
+// never re-renders the inner DOM (no children, the ref'd subtree is owned by
+// the engine), so the terminal is mounted exactly once for the lifetime of a
+// given session route — the island contract. If this component instance (or
+// the document) ever sees a DIFFERENT (node, session) pair without an
+// intervening full reload, it forces one instead of trying to soft-reboot —
+// see the reload guard in the effect below.
 //
 // `CACHE_BUST` mirrors the Rust page's `?v=` query so a stale SW cache can't
 // hand back an old bundle; in dev it is just a constant.
@@ -70,12 +74,45 @@ function loadScript(src, { module = false } = {}) {
 
 export function TerminalIsland({ node, session }) {
   const rootRef = useRef(null);
-  const bootedRef = useRef(false);
+  const bootedRef = useRef(null); // null | the "<node>/<session>" key it booted for
   const resizeObsRef = useRef(null);
 
   useLayoutEffect(() => {
-    if (bootedRef.current) return; // never boot twice
-    bootedRef.current = true;
+    const bootKey = `${node || ""}/${session}`;
+
+    // terminal.js is a side-effecting ES module that captures
+    // window.MOBUX_SESSION/MOBUX_NODE and boots the PTY connection at its
+    // FIRST evaluation in this document (#188) — re-appending its <script>
+    // tag, or re-mounting this island, never re-runs that top-level code,
+    // because the browser's module map is keyed by URL and this URL never
+    // changes. Every entry path that's SUPPOSED to reach a session route
+    // (Home's open(), the reload buttons, a genuine fresh page load from a
+    // bookmark/deep link/PWA relaunch) already forces a real document
+    // reload before or instead of mounting here.
+    //
+    // A same-document hash change straight to a DIFFERENT session/node skips
+    // all of that: hand-editing the URL bar, or browser back/forward between
+    // two already-hard-loaded terminal routes, just makes wouter re-render
+    // this route (or this same component instance, since neither route
+    // carries a `key`) with new params — no reload in between. Left
+    // unchecked, the STALE engine keeps running the OLD session/node while
+    // the UI claims to show a new one: the PTY (re)attach runs wherever the
+    // stale window.MOBUX_NODE still points, tmux prints its own
+    // "can't find session" / "no sessions" for whatever it finds there
+    // instead, and that renders as if it were THIS session's output — the
+    // exact "session not found" regression this reload guard closes.
+    if (bootedRef.current === bootKey) return; // this instance already booted this exact session
+
+    if (
+      window.__mobuxBootedSession &&
+      window.__mobuxBootedSession !== bootKey
+    ) {
+      location.reload();
+      return;
+    }
+
+    bootedRef.current = bootKey;
+    window.__mobuxBootedSession = bootKey;
 
     // 1. Globals the engine reads at module-eval time. MOBUX_NODE routes the
     //    PTY WebSocket and every tmux call through the hub's SSH proxy. It
@@ -158,7 +195,11 @@ export function TerminalIsland({ node, session }) {
       resizeObsRef.current?.disconnect();
       resizeObsRef.current = null;
     };
-  }, []);
+    // Deps ARE [node, session], not []: this effect must re-run whenever
+    // wouter hands this instance new route params (see the reload guard
+    // above) — it does not mean the engine boots more than once; bootedRef
+    // still gates that.
+  }, [node, session]);
 
   // Scaffold mirrors render_terminal_page() in src/main.rs. The engine binds to
   // these ids; we render them once and hand the subtree to the engine.
