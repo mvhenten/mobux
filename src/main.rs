@@ -1346,38 +1346,73 @@ fn resolve_session_location(
     Some(first)
 }
 
+/// Wall-clock bound on a single `locate_session` probe. `tmux::tmux_command`'s
+/// `ConnectTimeout=3` bounds SSH's own connection/handshake setup, but not
+/// what happens once a session is established and the remote command is
+/// actually running — a node whose sshd accepts fine but whose shell startup
+/// or tmux then hangs (a wedged `$HOME`, a dead NFS mount) would otherwise
+/// block `tmux list-sessions` forever, and every `/s/{name}` request with it.
+/// This wraps each probe in its own hard timeout so worst-case page load
+/// stays bounded regardless of what's wrong on the far side; timing out
+/// counts as "not there", exactly like any other probe failure.
+const SESSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Race `fut` against `SESSION_PROBE_TIMEOUT`; a timeout collapses to `None`,
+/// same as the future's own error case — split out from
+/// `probe_sessions_or_absent` so the timeout behavior itself is testable with
+/// a synthetic future, no real tmux/ssh process involved.
+async fn with_probe_timeout<T, Fut>(fut: Fut) -> Option<T>
+where
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    tokio::time::timeout(SESSION_PROBE_TIMEOUT, fut)
+        .await
+        .ok()
+        .and_then(Result::ok)
+}
+
+async fn probe_sessions_or_absent(target: Option<&str>) -> Vec<tmux::Session> {
+    with_probe_timeout(tmux::list_sessions(target))
+        .await
+        .unwrap_or_default()
+}
+
 /// Probe local + every configured node concurrently for a session named
 /// `name` (mirrors `api_nodes_status`'s `join_all` reachability pattern). A
-/// probe that errors (unreachable node, no local tmux server yet) counts as
-/// "not there" rather than failing the whole lookup — worst case that lands
-/// the caller on Home instead of a specific tmux, never the wrong one.
-async fn locate_session(state: &AppState, name: &str) -> Option<SessionLocation> {
+/// probe that times out or errors (unreachable node, no local tmux server
+/// yet) counts as "not there" rather than failing the whole lookup — worst
+/// case that lands the caller on Home instead of a specific tmux, never the
+/// wrong one. A failure to even READ the node inventory is different — that's
+/// not "no nodes configured", so it propagates as a hard error instead of
+/// silently narrowing the search (which could turn a real ambiguity into a
+/// false unique match).
+async fn locate_session(state: &AppState, name: &str) -> Result<Option<SessionLocation>, AppError> {
     let db_nodes = tokio::task::spawn_blocking({
         let db = state.db.clone();
         move || db.list_nodes()
     })
     .await
-    .ok()?
-    .unwrap_or_default();
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
 
-    let local_probe = tmux::list_sessions(None);
+    let local_probe = probe_sessions_or_absent(None);
     let node_probes = db_nodes
         .iter()
-        .map(|n| tmux::list_sessions(Some(n.target.as_str())));
-    let (local_result, node_results) = tokio::join!(local_probe, future::join_all(node_probes));
+        .map(|n| probe_sessions_or_absent(Some(n.target.as_str())));
+    let (local_sessions, node_session_lists) =
+        tokio::join!(local_probe, future::join_all(node_probes));
 
-    let local_sessions = local_result.unwrap_or_default();
     let node_sessions: Vec<(String, Vec<tmux::Session>)> = db_nodes
         .into_iter()
-        .zip(node_results)
-        .map(|(n, r)| (n.name, r.unwrap_or_default()))
+        .zip(node_session_lists)
+        .map(|(n, sessions)| (n.name, sessions))
         .collect();
     let node_refs: Vec<(&str, &[tmux::Session])> = node_sessions
         .iter()
         .map(|(name, sessions)| (name.as_str(), sessions.as_slice()))
         .collect();
 
-    resolve_session_location(name, &local_sessions, &node_refs)
+    Ok(resolve_session_location(name, &local_sessions, &node_refs))
 }
 
 /// A bare session-name link, either a push-notification click (`push.rs`
@@ -1395,7 +1430,7 @@ async fn terminal_page(
     validate_session_name(&state, &name)?;
     // Name is already validated to [a-zA-Z0-9_-], so no percent-encoding
     // is needed in any of these hash routes.
-    let location = match locate_session(&state, &name).await {
+    let location = match locate_session(&state, &name).await? {
         Some(SessionLocation::Local) => format!("/app#/s/{name}"),
         Some(SessionLocation::Node(node)) => format!("/app#/s/{node}/{name}"),
         // Not found anywhere, or found in more than one place — never guess;
@@ -2804,6 +2839,53 @@ mod tests {
             resolve_session_location("mobux", &local, &nodes),
             Some(SessionLocation::Local)
         );
+    }
+
+    // Regression for the "wedged node" hang: `ConnectTimeout=3` bounds SSH's
+    // own connection/handshake setup, but NOT what happens once a remote
+    // command is actually running — a node whose sshd accepts fine but whose
+    // shell startup or tmux then hangs (a wedged `$HOME`, a dead NFS mount)
+    // would otherwise block `tmux list-sessions` — and every `/s/{name}`
+    // request with it — indefinitely. Exercised against a synthetic
+    // never-resolving future (via `with_probe_timeout`, the seam
+    // `probe_sessions_or_absent` is built on) rather than a real hung
+    // ssh/tmux process, which isn't reliably reproducible in a unit test.
+    #[tokio::test]
+    async fn probe_timeout_cuts_off_a_future_that_never_resolves() {
+        let start = std::time::Instant::now();
+        let result: Option<()> = with_probe_timeout(async {
+            tokio::time::sleep(SESSION_PROBE_TIMEOUT * 10).await;
+            Ok(())
+        })
+        .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, None, "a hung future must count as absent");
+        assert!(
+            elapsed < SESSION_PROBE_TIMEOUT + std::time::Duration::from_millis(500),
+            "must not wait past its own timeout: took {elapsed:?}",
+        );
+    }
+
+    // A DB read failure is NOT "no nodes configured" — degrading to that
+    // (via an `unwrap_or_default()`-style swallow) would silently narrow an
+    // ambiguous local+node session down to a false unique-local match,
+    // exactly the bug this route exists to prevent. It must propagate as a
+    // hard error instead.
+    #[tokio::test]
+    async fn terminal_page_errors_when_the_node_inventory_cannot_be_read() {
+        let (state, dir) = test_state(false);
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("mobux.db"))
+                .expect("raw open of the same sqlite file");
+            conn.execute("DROP TABLE nodes", [])
+                .expect("drop nodes table to force list_nodes() to fail");
+        }
+        let result = terminal_page(State(state), Path("whatever".to_string())).await;
+        match result {
+            Err(e) => assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR),
+            Ok(_) => panic!("expected an error when the node inventory can't be read"),
+        }
     }
 
     // The dev flag is exposed via /api/build-info for any other dev-only
