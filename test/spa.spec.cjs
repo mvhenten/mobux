@@ -27,7 +27,7 @@ const AUTH =
     ? "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64")
     : null;
 
-const { createTmuxRunner } = require("./lib/tmux.cjs");
+const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
 
 // Dedicated tmux server/session, identical convention to smoke.spec.cjs, so
 // SPA session ops drive the smoke instance's tmux without colliding with the
@@ -1508,8 +1508,11 @@ test("auto-reload: first visit records a baseline, a later change reloads once, 
 // kept the first target it ever booted with).
 
 // Wait until the engine on the current route is fully up: renderer DOM
-// mounted AND its PTY websocket open.
-async function waitForEngine(page) {
+// mounted, its PTY websocket open, AND tmux reporting the attach client —
+// the socket opens ~50-80ms before the server's attach subprocess registers
+// with tmux, and input sent into that window is lost (see
+// waitForClientAttached in lib/tmux.cjs).
+async function waitForEngine(page, session) {
   await page.waitForFunction(
     () => {
       const t = document.getElementById("terminal");
@@ -1521,6 +1524,7 @@ async function waitForEngine(page) {
     },
     { timeout: 15000 },
   );
+  await waitForClientAttached(tmux, session);
 }
 
 // Exact-line occurrence count of `marker` in a tmux pane. The senders below
@@ -1574,7 +1578,7 @@ test("terminal engine survives mount → unmount → mount in one document", asy
       .locator(`#sessionList .swipe-row[data-name="${SEED}"] .session-item`)
       .click();
     await expect(page).toHaveURL(new RegExp(`#/s/${SEED}$`));
-    await waitForEngine(page);
+    await waitForEngine(page, SEED);
     expect(sockets.length).toBe(1);
     expect(sockets[0].url()).toContain(`/ws/${SEED}`);
 
@@ -1600,7 +1604,7 @@ test("terminal engine survives mount → unmount → mount in one document", asy
       .locator(`#sessionList .swipe-row[data-name="${SEED2}"] .session-item`)
       .click();
     await expect(page).toHaveURL(new RegExp(`#/s/${SEED2}$`));
-    await waitForEngine(page);
+    await waitForEngine(page, SEED2);
     expect(sockets.length).toBe(2);
     expect(sockets[1].url()).toContain(`/ws/${SEED2}`);
 
@@ -1654,7 +1658,7 @@ test("navigating between two session routes re-attaches to the right target with
     await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
       waitUntil: "networkidle",
     });
-    await waitForEngine(page);
+    await waitForEngine(page, SEED);
     expect(sockets.length).toBe(1);
     expect(sockets[0].url()).toContain(`/ws/${SEED}`);
 
@@ -1666,7 +1670,7 @@ test("navigating between two session routes re-attaches to the right target with
     await page.evaluate((name) => {
       location.hash = `#/s/${encodeURIComponent(name)}`;
     }, SEED3);
-    await waitForEngine(page);
+    await waitForEngine(page, SEED3);
 
     // Same document (no reload) …
     expect(await page.evaluate(() => window.__sameDocProbe)).toBe(true);

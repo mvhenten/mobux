@@ -10,7 +10,7 @@ const AUTH =
     : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-smoke";
 
-const { createTmuxRunner } = require("./lib/tmux.cjs");
+const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
 
 // Runs against a dedicated tmux server (`tmux -L mobux-test`) so tests
 // never touch the host's default tmux server — see test/lib/tmux.cjs for
@@ -972,6 +972,13 @@ test("OSC 133 works out of the box for mobux-created sessions (no installer)", a
       { timeout: 5000 },
     );
 
+    // wsReady means the browser's socket is open — the server's attach
+    // subprocess is still registering with tmux at that point, and a
+    // prompt redraw fired before the client is attached emits its OSC 133
+    // to nobody (events aren't replayed on attach). Gate on tmux's own
+    // attach state before triggering the redraw.
+    await waitForClientAttached(tmux, OOTB_SESSION);
+
     // Precondition: nothing has emitted OSC 133 yet.
     const before = await page.evaluate(() =>
       window.__mobuxView.test.oscDetected(),
@@ -1059,6 +1066,13 @@ test("OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm", async ({
       execSync("sleep 0.1");
     }
     expect(allowPassthroughOn).toBe(true);
+
+    // The allow-passthrough poll above is a no-op gate when a previous
+    // attach already set the option (it's a server-global that persists),
+    // so it does NOT prove THIS page's client is attached yet. A DCS
+    // passthrough emitted while tmux still has zero attached clients is
+    // dropped, not replayed — gate on the attach itself.
+    await waitForClientAttached(tmux, PT_SESSION);
 
     // Precondition: oscDetected is false on a fresh page (no OSC 133
     // has flowed yet).
