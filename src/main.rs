@@ -42,6 +42,7 @@ use serde_json::json;
 struct StaticAssets;
 
 mod db;
+mod host_suggestions;
 mod nodes;
 mod push;
 mod shell_integration;
@@ -234,6 +235,7 @@ async fn main() -> Result<()> {
             get(api_get_settings_nodes).put(api_set_settings_nodes),
         )
         .route("/api/nodes", get(api_nodes_status))
+        .route("/api/host-suggestions", get(api_host_suggestions))
         .route(
             "/api/telemetry",
             post(api_telemetry).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
@@ -1813,6 +1815,29 @@ async fn api_nodes_status(
         })
         .collect();
     Ok(Json(NodesStatusJson { nodes: out }))
+}
+
+#[derive(serde::Serialize)]
+struct HostSuggestionsJson {
+    hosts: Vec<host_suggestions::HostSuggestion>,
+}
+
+/// GET /api/host-suggestions — best-effort host candidates for the "add
+/// remote node" host field (issue #193). Each provider (ssh-config,
+/// tailscale, avahi/mDNS) is independently optional: a missing tool, a
+/// parse failure, or a timeout contributes nothing, never an error. The two
+/// subprocess-backed providers run concurrently and are individually
+/// time-boxed, so the endpoint's total latency is bounded by the slower of
+/// the two (~2s), not their sum.
+async fn api_host_suggestions() -> Json<HostSuggestionsJson> {
+    let ssh = host_suggestions::ssh_config_hosts();
+    let (tailscale, mdns) = tokio::join!(
+        host_suggestions::tailscale_hosts(std::time::Duration::from_millis(1500)),
+        host_suggestions::avahi_hosts(std::time::Duration::from_millis(2000)),
+    );
+    Json(HostSuggestionsJson {
+        hosts: host_suggestions::merge([ssh, tailscale, mdns]),
+    })
 }
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────

@@ -1952,6 +1952,28 @@ test("terminal PTY websocket and pane calls carry ?node= from the URL's node seg
   expect(paneCalls[0]).toContain("node=devbox");
 });
 
+// The target field is read-only (tapping it opens the host suggestion
+// sheet — see below), so filling it in a test means: open the sheet, type
+// into its own field, then confirm with Done.
+async function fillNodeTarget(card, page, value) {
+  await card.locator("#nodeTarget").click();
+  const sheet = page.locator('[data-testid="host-picker-sheet"]');
+  await expect(sheet).toBeVisible();
+  await sheet.locator(".picker-input").fill(value);
+  await sheet.locator(".picker-done").click();
+  await expect(sheet).toHaveCount(0);
+}
+
+function mockHostSuggestions(page, fixture = { hosts: [] }) {
+  return page.route(/\/api\/host-suggestions$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fixture),
+    }),
+  );
+}
+
 test("settings: nodes card lists, adds, and removes nodes via PUT /api/settings/nodes", async ({
   page,
 }) => {
@@ -1968,6 +1990,7 @@ test("settings: nodes card lists, adds, and removes nodes via PUT /api/settings/
       body: JSON.stringify(stored),
     });
   });
+  await mockHostSuggestions(page);
 
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
@@ -1984,7 +2007,7 @@ test("settings: nodes card lists, adds, and removes nodes via PUT /api/settings/
 
   // ADD replaces the whole list with the new entry appended.
   await card.locator("#nodeName").fill("lab");
-  await card.locator("#nodeTarget").fill("ubuntu@lab");
+  await fillNodeTarget(card, page, "ubuntu@lab");
   await card.locator("#nodeAddBtn").click();
   await expect(card.locator(".node-row")).toHaveCount(2);
   expect(puts[0].nodes).toEqual([
@@ -2011,11 +2034,12 @@ test("settings: a failed nodes save is loud and keeps the old list", async ({
       body: JSON.stringify({ nodes: [] }),
     });
   });
+  await mockHostSuggestions(page);
 
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
   await card.locator("#nodeName").fill("lab");
-  await card.locator("#nodeTarget").fill("ubuntu@lab");
+  await fillNodeTarget(card, page, "ubuntu@lab");
   await card.locator("#nodeAddBtn").click();
 
   const status = page.locator("#nodesStatus");
@@ -2044,6 +2068,9 @@ test("settings: a failed nodes load disables editing instead of offering an empt
     }
     return route.fulfill({ status: 500, body: "boom" });
   });
+  await mockHostSuggestions(page, {
+    hosts: [{ name: "should-not-appear", source: "ssh" }],
+  });
 
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
@@ -2060,6 +2087,13 @@ test("settings: a failed nodes load disables editing instead of offering an empt
   await expect(card.locator("#nodeName")).toBeDisabled();
   await expect(card.locator("#nodeTarget")).toBeDisabled();
   await expect(card.locator("#nodeAddBtn")).toBeDisabled();
+
+  // The picker must not open either — a disabled field can't stage a value
+  // for a save that would PUT this failure-derived (non-)list back.
+  await card.locator("#nodeTarget").click({ force: true });
+  await expect(page.locator('[data-testid="host-picker-sheet"]')).toHaveCount(
+    0,
+  );
 
   // Give any (incorrect) save a moment to fire, then assert it never did.
   await page.waitForTimeout(300);
@@ -2083,6 +2117,83 @@ test("settings: a failed nodes load disables editing instead of offering an empt
   await card.locator("#nodesRetryBtn").click();
   await expect(card.locator(".node-row")).toHaveCount(1);
   await expect(card.locator("#nodeAddBtn")).toBeEnabled();
+});
+
+// ── host suggestion picker (#193) ────────────────────────────────────────
+//
+// GET /api/host-suggestions lands with the backend PR; these tests mock it
+// at the page level so the picker's UI contract is pinned regardless of
+// merge order, same convention as mockNodes above.
+
+test("host suggestion sheet: renders detected hosts with source + online, tap fills the field and closes", async ({
+  page,
+}) => {
+  await mockHostSuggestions(page, {
+    hosts: [
+      { name: "devbox", source: "ssh" },
+      { name: "gpu-box", source: "tailscale", online: true },
+      { name: "labbox.local", source: "mdns" },
+    ],
+  });
+  await page.route(/\/api\/settings\/nodes$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ nodes: [] }),
+    }),
+  );
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator("#nodes-settings");
+  await expect(card.locator("#nodeTarget")).toBeEnabled();
+  await card.locator("#nodeTarget").click();
+
+  const sheet = page.locator('[data-testid="host-picker-sheet"]');
+  await expect(sheet).toBeVisible();
+  await expect(sheet.locator(".picker-row")).toHaveCount(3);
+
+  const tsRow = sheet.locator(".picker-row").nth(1);
+  await expect(tsRow).toContainText("gpu-box");
+  await expect(tsRow.locator(".picker-badge")).toContainText("tailscale");
+  await expect(tsRow.locator(".picker-online-dot")).toHaveClass(/online/);
+
+  // ssh/mdns rows carry no online info at all — no dot rendered.
+  await expect(
+    sheet.locator(".picker-row").first().locator(".picker-online-dot"),
+  ).toHaveCount(0);
+
+  await tsRow.click();
+  await expect(sheet).toHaveCount(0);
+  await expect(card.locator("#nodeTarget")).toHaveValue("gpu-box");
+});
+
+test("host suggestion sheet: no detections still allows manual typing", async ({
+  page,
+}) => {
+  await mockHostSuggestions(page, { hosts: [] });
+  await page.route(/\/api\/settings\/nodes$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ nodes: [] }),
+    }),
+  );
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator("#nodes-settings");
+  await card.locator("#nodeTarget").click();
+
+  const sheet = page.locator('[data-testid="host-picker-sheet"]');
+  await expect(sheet).toBeVisible();
+  await expect(sheet.locator(".picker-row")).toHaveCount(0);
+  await expect(sheet.locator(".picker-hint")).toContainText(
+    "No hosts detected",
+  );
+
+  await sheet.locator(".picker-input").fill("manual@host");
+  await sheet.locator(".picker-done").click();
+  await expect(sheet).toHaveCount(0);
+  await expect(card.locator("#nodeTarget")).toHaveValue("manual@host");
 });
 
 // ── install page: QR codes ──────────────────────────────────────────────────

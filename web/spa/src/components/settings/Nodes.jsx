@@ -1,18 +1,29 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiPutJSON } from "../../lib/api.js";
+import { HostSuggestionSheet } from "../HostSuggestionSheet.jsx";
 
 // Nodes card — the inventory behind the Home node picker (#176 phase 3).
 // A node is {name, target}; the whole list is replaced on every change
 // (PUT /api/settings/nodes), mirroring the fixed API contract. SSH keys are
 // deliberately out of scope: the hub's key must already be authorized on the
 // node, and the card says so instead of growing key-management UI.
+//
+// Host suggestions (#193): the target field is read-only — tapping it opens
+// a full-screen picker (HostSuggestionSheet) whose own text field IS the
+// target value while open, so manual entry is never blocked by detection
+// finding nothing. It only opens once the list has loaded (`editable`
+// below): the same "don't let the field do anything until a real list is
+// confirmed" rule that disables the rest of the add form, so a pre-load tap
+// can never stage a value for a save that PUTs the whole (unconfirmed)
+// list back.
 
 const nodes = signal(null); // null = loading OR load failed — never editable
 const loadFailed = signal(false); // true = the initial GET didn't confirm a real list
 const status = signal(null); // { msg, ok }
 const name = signal("");
 const target = signal("");
+const pickerOpen = signal(false);
 
 function flash(msg, ok) {
   status.value = { msg, ok };
@@ -103,6 +114,7 @@ export function NodesCard() {
     // stale data. Force back to "loading, not yet editable" on every mount.
     nodes.value = null;
     loadFailed.value = false;
+    pickerOpen.value = false;
     load();
   }, []);
 
@@ -189,14 +201,22 @@ export function NodesCard() {
           class="settings-input"
           placeholder="user@host"
           autocomplete="off"
+          readOnly
           disabled={!editable}
           value={target.value}
-          onInput={(e) => (target.value = e.target.value)}
+          onClick={() => editable && (pickerOpen.value = true)}
         />
         <button type="submit" id="nodeAddBtn" disabled={!editable}>
           Add
         </button>
       </form>
+
+      <HostSuggestionSheet
+        open={pickerOpen.value}
+        value={target.value}
+        onChange={(v) => (target.value = v)}
+        onClose={() => (pickerOpen.value = false)}
+      />
 
       {status.value && (
         <div
