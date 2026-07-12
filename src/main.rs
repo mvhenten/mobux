@@ -1745,14 +1745,129 @@ async fn resolve_node_target(
     })
 }
 
+/// The terminal WS query: the shared `?node=<name>` (see `resolve_node_target`)
+/// plus `&build=<hash>` — the SPA's own loaded-bundle hash, set by the engine
+/// (TerminalIsland). It rides along so a stale tab still running old code
+/// identifies itself in the attach log even though it fetches a fresh
+/// `/static/build-info.json`; the hash is baked into the loaded bundle's
+/// filename, so it describes the code actually running in that tab.
+#[derive(Deserialize)]
+struct TerminalWsQuery {
+    node: Option<String>,
+    build: Option<String>,
+}
+
+/// Cap on how much of the client-supplied `build` param lands in a log line.
+/// `build` is an arbitrary query string with no server-side format check (it's
+/// diagnostic only), so without a cap a malicious/broken client can emit an
+/// unbounded line into the journal. The real values are short content hashes
+/// (8-20 chars), so this is generous headroom, not a real limit in practice.
+const MAX_LOGGED_BUILD_LEN: usize = 64;
+
+/// Truncate `s` to at most `max_chars` *characters* (not bytes), so the cut
+/// always lands on a UTF-8 char boundary.
+fn truncate_for_log(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
+    }
+}
+
+/// Formats one `[ws attach]` journal line — split from `log_ws_attach` as a
+/// pure function so the escaping/truncation behavior is unit-testable
+/// without constructing an `AppState`.
+///
+/// `node` and `build` are client-controlled query params — logged with
+/// `{:?}` (like `session`/`user_agent`) so a value containing `\n` or `"`
+/// can't forge fake-looking lines in the journal instead of just describing
+/// itself. `build` is additionally length-capped (see `MAX_LOGGED_BUILD_LEN`)
+/// since, unlike `session` (already bounded by `session_name_re`), nothing
+/// else constrains its size.
+fn format_ws_attach_line(
+    outcome: &str,
+    session: &str,
+    node: Option<&str>,
+    target: &str,
+    build: Option<&str>,
+    server_build: &str,
+    user_agent: &str,
+) -> String {
+    let build = build.map(|b| truncate_for_log(b, MAX_LOGGED_BUILD_LEN));
+    format!(
+        "[ws attach] {outcome} session={session:?} node={node:?} target={target} build={build:?} server_build={server_build} ua={user_agent:?}"
+    )
+}
+
+/// Every PTY attach and every rejected upgrade logs one line to the journal —
+/// the only ground truth for "which host did this tab actually attach to?".
+/// A session error rendered inside the terminal (`can't find session: X`)
+/// means the attach hit the wrong tmux because `node` arrived absent or wrong;
+/// this line makes that visible instead of silent. Loud like the "PUT emptied
+/// the node list" warning: mobux is a single-operator tool, so per-attach
+/// journal lines are affordable and worth it.
+fn log_ws_attach(
+    state: &AppState,
+    outcome: &str,
+    session: &str,
+    node: Option<&str>,
+    target: &str,
+    build: Option<&str>,
+    user_agent: &str,
+) {
+    eprintln!(
+        "{}",
+        format_ws_attach_line(
+            outcome,
+            session,
+            node,
+            target,
+            build,
+            &state.build_hash,
+            user_agent,
+        )
+    );
+}
+
 async fn terminal_ws(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(q): Query<NodeQuery>,
+    Query(q): Query<TerminalWsQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    validate_session_name(&state, &name)?;
-    let ssh_target = resolve_node_target(&state, q.node.as_deref()).await?;
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<none>")
+        .to_string();
+    let node = q.node.as_deref();
+    let build = q.build.as_deref();
+
+    if let Err(err) = validate_session_name(&state, &name) {
+        let outcome = format!("REJECTED[{}: {}]", err.status.as_u16(), err.message);
+        log_ws_attach(&state, &outcome, &name, node, "-", build, &user_agent);
+        return Err(err);
+    }
+
+    let ssh_target = match resolve_node_target(&state, node).await {
+        Ok(target) => target,
+        Err(err) => {
+            let outcome = format!("REJECTED[{}: {}]", err.status.as_u16(), err.message);
+            log_ws_attach(&state, &outcome, &name, node, "-", build, &user_agent);
+            return Err(err);
+        }
+    };
+
+    log_ws_attach(
+        &state,
+        "ok",
+        &name,
+        node,
+        ssh_target.as_deref().unwrap_or("local"),
+        build,
+        &user_agent,
+    );
+
     Ok(ws.on_upgrade(move |socket| async move {
         if let Err(err) = handle_ws(socket, name, ssh_target).await {
             eprintln!("ws error: {err:#}");
@@ -2604,6 +2719,74 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ws attach log line: client-controlled fields are escaped/bounded ────
+    //
+    // `node` and `build` come straight off the query string, so a value
+    // containing `\n` or `"` must not be able to inject fake-looking journal
+    // lines — `{:?}` escaping (matching session/user_agent) turns it back
+    // into a single, clearly-quoted line. `build` also has no format
+    // constraint (unlike session, bounded by session_name_re), so it's
+    // length-capped separately.
+    #[test]
+    fn ws_attach_log_line_escapes_newlines_in_node_and_build() {
+        let line = format_ws_attach_line(
+            "ok",
+            "mysession",
+            Some("devbox\n[ws attach] ok session=\"forged\""),
+            "local",
+            Some("abcd\nEVIL"),
+            "serverhash",
+            "curl/8.0",
+        );
+        // Exactly one line — nothing after the escaped node/build value
+        // reintroduces a real newline into the journal.
+        assert_eq!(line.lines().count(), 1);
+        assert!(line.contains(r#"node=Some("devbox\n[ws attach]"#));
+        assert!(line.contains(r#"build=Some("abcd\nEVIL")"#));
+    }
+
+    #[test]
+    fn ws_attach_log_line_absent_node_and_build_render_none() {
+        let line = format_ws_attach_line(
+            "ok",
+            "mysession",
+            None,
+            "local",
+            None,
+            "serverhash",
+            "curl/8.0",
+        );
+        assert!(line.contains("node=None"));
+        assert!(line.contains("build=None"));
+    }
+
+    #[test]
+    fn ws_attach_log_line_truncates_oversized_build() {
+        let huge = "x".repeat(10_000);
+        let line = format_ws_attach_line(
+            "ok",
+            "mysession",
+            None,
+            "local",
+            Some(&huge),
+            "serverhash",
+            "curl/8.0",
+        );
+        assert!(
+            line.len() < 500,
+            "an oversized build param must not produce an unbounded log line: {} bytes",
+            line.len()
+        );
+    }
+
+    #[test]
+    fn truncate_for_log_cuts_on_char_boundary() {
+        // Each "é" is 2 UTF-8 bytes; a byte-index cut here would panic or
+        // split a codepoint. Truncating to 3 *characters* must land cleanly.
+        let s = "éééé";
+        assert_eq!(truncate_for_log(s, 3), "ééé");
+    }
 
     // ── UI preferences validation (write) vs normalization (read) ───────────
     //

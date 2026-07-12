@@ -110,6 +110,9 @@ const RENDERER_OPTIONS = {
 //             engine binds all its DOM inside this subtree.
 //   renderer  'xterm' (default) | 'sterk'; the matching vendor bundle must
 //             already be loaded (window.Terminal / window.Sterk).
+//   build     the SPA's own loaded-bundle hash — ridden through to the WS URL
+//             (&build=<hash>) purely so a stale tab identifies itself in the
+//             server attach log. Never affects routing.
 //
 // The engine used to be a self-booting module: it read window.MOBUX_* at
 // eval time, so a second (node, session) in the same document silently kept
@@ -118,7 +121,13 @@ const RENDERER_OPTIONS = {
 // attaches (WebSocket, renderer instance, window/document/visualViewport
 // listeners, timers, observers) is registered for teardown, so dispose() +
 // createTerminal() is a real remount.
-export function createTerminal({ node = "", session, host, renderer } = {}) {
+export function createTerminal({
+  node = "",
+  session,
+  host,
+  renderer,
+  build = "",
+} = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
 
   const nodeQuery = () => (node ? `?node=${encodeURIComponent(node)}` : "");
@@ -194,6 +203,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
     node,
     host: termEl,
     renderer: rendererImpl,
+    build,
   });
 
   // Apply the stored theme to all three layers. The renderer applied its boot

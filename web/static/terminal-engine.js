@@ -46,10 +46,14 @@ export class TerminalEngine extends EventTarget {
   // `node` (#176): the remote node this session lives on — every PTY/tmux
   // call carries ?node=<name> so the hub proxies it over SSH. "" ⇒ the local
   // host, exactly the pre-node behavior.
-  constructor({ session, node, host, renderer }) {
+  constructor({ session, node, host, renderer, build }) {
     super();
     this.session = session;
     this.node = node || "";
+    // `build` (#213 observability): the SPA's own loaded-bundle hash, ridden
+    // through to the WS URL as `&build=<hash>` so a stale tab identifies itself
+    // in the server's attach log. Purely diagnostic — never affects routing.
+    this.build = build || "";
     this.host = host;
     this.renderer = renderer;
 
@@ -94,6 +98,17 @@ export class TerminalEngine extends EventTarget {
     return this.node ? `?node=${encodeURIComponent(this.node)}` : "";
   }
 
+  // The WS URL carries `node` (routing) plus `build` (diagnostic only). The
+  // /api/sessions calls keep `_nodeQuery()` — `build` is meaningful only for
+  // the attach log, so it rides only the WS.
+  _wsQuery() {
+    const params = new URLSearchParams();
+    if (this.node) params.set("node", this.node);
+    if (this.build) params.set("build", this.build);
+    const qs = params.toString();
+    return qs ? `?${qs}` : "";
+  }
+
   // ── WebSocket lifecycle ───────────────────────────────────────────
   connect() {
     // A fresh connect attempt supersedes any pending backoff retry.
@@ -104,7 +119,7 @@ export class TerminalEngine extends EventTarget {
     this.intentionalClose = false;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     this.ws = new WebSocket(
-      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${this._nodeQuery()}`,
+      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${this._wsQuery()}`,
     );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
