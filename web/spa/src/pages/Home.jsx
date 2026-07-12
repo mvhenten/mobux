@@ -2,7 +2,12 @@ import { useEffect, useRef } from "preact/hooks";
 import { useLocation } from "wouter-preact";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
-import { getSelectedNode, setSelectedNode, withNode } from "../lib/nodes.js";
+import {
+  getSelectedNode,
+  setSelectedNode,
+  withNode,
+  rememberSessionNode,
+} from "../lib/nodes.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
 // (render_index + index.js): list tmux sessions with window/attached counts,
@@ -100,6 +105,10 @@ export function HomePage() {
     // device) can never re-target it to the wrong tmux (#185). Plain SPA
     // navigation: the terminal engine is a component with a real
     // mount/dispose lifecycle (#188), so no document reload is needed.
+    // Remember which node this session was opened on, so a later re-entry by
+    // name alone (notification deep-link, saved link, restored tab) recovers
+    // the node instead of silently attaching to the local host.
+    rememberSessionNode(name, selectedNode.value);
     const node = selectedNode.value
       ? `${encodeURIComponent(selectedNode.value)}/`
       : "";
