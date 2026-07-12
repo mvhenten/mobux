@@ -1,4 +1,4 @@
-// prefs.js — client access to the server-held UI preferences (issue #211).
+// prefs.js — client access to the server-held UI preferences (#211).
 //
 // mobux is single-user (one basic-auth user, one sqlite db at the hub), so
 // preferences are global, not per-device. The server owns them; every client

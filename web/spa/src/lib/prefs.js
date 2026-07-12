@@ -1,4 +1,4 @@
-// SPA accessor for the server-held UI preferences (issue #211).
+// SPA accessor for the server-held UI preferences (#211).
 //
 // The real implementation is the engine module /static/prefs.js, loaded and
 // hydrated once in main.jsx before the app renders. It publishes itself on

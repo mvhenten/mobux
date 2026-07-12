@@ -98,7 +98,7 @@ test("app route serves the SPA shell and Home lists sessions", async ({
   await expect(page.locator("#fabNew")).toBeVisible();
 });
 
-// ── server-synced UI preferences (issue #211) ───────────────────────────────
+// ── server-synced UI preferences (#211) ───────────────────────────────
 
 const PREF_DEFAULTS = {
   renderer: "xterm",

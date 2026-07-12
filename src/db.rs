@@ -90,7 +90,7 @@ impl Default for NotificationPrefs {
 
 /// Global UI preferences. Single row, id=1, in `ui_preferences`. These were
 /// formerly per-device localStorage keys; mobux is single-user, so they now
-/// live on the server as one shared, authoritative row (issue #211).
+/// live on the server as one shared, authoritative row (#211).
 #[derive(Debug, Clone)]
 pub struct UiPreferences {
     /// Terminal renderer: `xterm` (default) or `sterk`.
@@ -167,7 +167,7 @@ impl Db {
                 program_exit_nonzero INTEGER NOT NULL
             );
 
-            -- UI preferences (issue #211): single global row of client
+            -- UI preferences (#211): single global row of client
             -- display/behaviour prefs. mobux is single-user, so there is no
             -- per-user or per-device modelling — one row, the server is
             -- authoritative, every client reads it at boot.

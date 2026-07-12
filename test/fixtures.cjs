@@ -2,7 +2,7 @@
 // each spec runs under BOTH the xterm-default and the sterk-experimental
 // renderers without inline boilerplate in every test file.
 //
-// The renderer is a server-held preference now (issue #211), not a per-device
+// The renderer is a server-held preference now (#211), not a per-device
 // localStorage key, so the seed is a PUT to /api/settings/preferences against
 // the instance under test. It writes a clean default blob with the project's
 // renderer, giving every test a known preferences baseline (the old

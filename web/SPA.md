@@ -261,7 +261,7 @@ Ported in phase 2 (one component per card, in `components/settings/`):
   `GET /api/shell-integration/status`, `POST .../install|uninstall` with a
   `{shell}` body; OSC-133 snippets shown verbatim.
 
-## Preferences (server-synced, issue #211)
+## Preferences (server-synced, #211)
 
 UI preferences are global server state, not per-device storage. mobux is
 single-user (one basic-auth user, one sqlite row), so there is no per-user or

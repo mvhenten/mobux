@@ -23,7 +23,7 @@ import(
   /* @vite-ignore */ new URL("/static/telemetry.js", location.origin).href
 ).catch((e) => console.warn("telemetry.js load failed", e));
 
-// Server-held UI preferences (issue #211). Load the shared engine module and
+// Server-held UI preferences (#211). Load the shared engine module and
 // fetch the whole blob before first render, so the terminal island reads the
 // renderer/theme/etc. the server holds — not per-device localStorage, which is
 // gone. hydrate() never rejects (it falls back to defaults if the server is

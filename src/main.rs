@@ -2536,7 +2536,7 @@ mod tests {
         }
     }
 
-    // Guard (issue #211): preferences live on the server, not per-device
+    // Guard (#211): preferences live on the server, not per-device
     // storage. The legacy localStorage keys that used to hold prefs must never
     // reappear as a client-side source of truth in the web sources. Scans both
     // the engine (web/static) and the SPA (web/spa/src) for the old keys —
