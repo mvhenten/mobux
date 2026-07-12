@@ -31,18 +31,28 @@ const CACHE_BUST = "spa";
 // open a prefilled GitHub issue in a new tab. Reuses the same bundle/URL
 // builder as the fail-hard error page (lib/diagnostics.js, lib/githubIssue.js).
 //
-// The tab MUST be opened synchronously inside the click gesture: awaiting
-// the diagnostics fetches first loses the user activation, and popup
-// blockers (Android Chrome — the primary target) silently kill the
-// window.open. So open about:blank while the gesture is live, then steer it
-// to the issue URL once the bundle resolves. `noopener` can't be passed as a
-// window feature here (it makes window.open return null, losing the handle),
-// so sever the opener by hand while the tab is still same-origin.
+// On desktop the tab MUST be opened synchronously inside the click gesture:
+// awaiting the diagnostics fetches first loses the user activation, and popup
+// blockers (Android Chrome) silently kill the window.open. So open about:blank
+// while the gesture is live, then steer it to the issue URL once the bundle
+// resolves. `noopener` can't be passed as a window feature here (it makes
+// window.open return null, losing the handle), so sever the opener by hand
+// while the tab is still same-origin.
+//
+// In the TWA that placeholder tab would open inside the app shell. There the
+// intent:// escape (window.__mobuxOpenExternal, set by the engine) leaves the
+// shell and needs no window handle, so skip the popup entirely.
 async function openBugReport() {
-  const win = window.open("about:blank", "_blank");
+  const isTWA = document.referrer.startsWith("android-app://");
+  const win = isTWA ? null : window.open("about:blank", "_blank");
   if (win) win.opener = null;
   const diagnostics = await collectDiagnostics();
   const url = buildIssueUrl({ title: "Bug report", diagnostics });
+  const openExternal = window.__mobuxOpenExternal;
+  if (isTWA && typeof openExternal === "function") {
+    openExternal(url);
+    return;
+  }
   if (win) {
     win.location = url;
     return;
