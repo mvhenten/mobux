@@ -4,8 +4,8 @@
 // `window.Terminal` and `window.WebLinksAddon`), owns the WebSocket,
 // OSC 133 handling, tmux pane tracking, etc.
 //
-// Loaded only when `window.__mobuxRenderer === 'xterm'` (the default).
-// Exposes the same external surface as terminal-core-sterk.js so
+// Constructed only when the engine's `renderer` option is 'xterm' (the
+// default). Exposes the same external surface as terminal-core-sterk.js so
 // consumers (terminal.js, reader-view.js, tests) use a single contract.
 
 const WINDOW_SWITCH_CMDS = new Set([
@@ -15,18 +15,14 @@ const WINDOW_SWITCH_CMDS = new Set([
   "kill-window",
 ]);
 
-// Hub → node SSH proxying (#176): when the SPA picked a remote node it pins
-// window.MOBUX_NODE before the engine boots, and every PTY/tmux call carries
-// ?node=<name>. Absent ⇒ the local host, exactly the pre-node behavior.
-function nodeQuery() {
-  const node = window.MOBUX_NODE;
-  return node ? `?node=${encodeURIComponent(node)}` : "";
-}
-
 export class TerminalCoreXterm extends EventTarget {
-  constructor({ session, host }) {
+  // `node` (#176): the remote node this session lives on — every PTY/tmux
+  // call carries ?node=<name> so the hub proxies it over SSH. "" ⇒ the local
+  // host, exactly the pre-node behavior.
+  constructor({ session, node, host }) {
     super();
     this.session = session;
+    this.node = node || "";
     this.host = host;
     this.renderer = "xterm";
 
@@ -123,6 +119,10 @@ export class TerminalCoreXterm extends EventTarget {
     }
   }
 
+  _nodeQuery() {
+    return this.node ? `?node=${encodeURIComponent(this.node)}` : "";
+  }
+
   // ── WebSocket lifecycle ───────────────────────────────────────────
   connect() {
     // A fresh connect attempt supersedes any pending backoff retry.
@@ -133,7 +133,7 @@ export class TerminalCoreXterm extends EventTarget {
     this.intentionalClose = false;
     const proto = location.protocol === "https:" ? "wss" : "ws";
     this.ws = new WebSocket(
-      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${nodeQuery()}`,
+      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${this._nodeQuery()}`,
     );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
@@ -210,6 +210,27 @@ export class TerminalCoreXterm extends EventTarget {
     }
   }
 
+  // Full teardown for a same-document remount (terminal.js dispose()):
+  // no reconnect may survive, the socket closes, and the renderer
+  // releases its DOM + internal listeners.
+  dispose() {
+    this.intentionalClose = true;
+    if (this._reconnectTimer !== null) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    try {
+      this.ws?.close();
+    } catch (_) {}
+    this.ws = null;
+    try {
+      this.term.dispose();
+    } catch (_) {}
+    if (typeof window !== "undefined" && window.__xterm === this.term) {
+      delete window.__xterm;
+    }
+  }
+
   // ── Resize ────────────────────────────────────────────────────────
   resize() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -278,7 +299,7 @@ export class TerminalCoreXterm extends EventTarget {
   async refreshPanes() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/panes${nodeQuery()}`,
+        `/api/sessions/${encodeURIComponent(this.session)}/panes${this._nodeQuery()}`,
       );
       if (!res.ok) return;
       this.panes = await res.json();
@@ -325,7 +346,7 @@ export class TerminalCoreXterm extends EventTarget {
   async runTmuxCmd(command) {
     try {
       await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/command${nodeQuery()}`,
+        `/api/sessions/${encodeURIComponent(this.session)}/command${this._nodeQuery()}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -347,7 +368,7 @@ export class TerminalCoreXterm extends EventTarget {
   async reloadHistory() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/history${nodeQuery()}`,
+        `/api/sessions/${encodeURIComponent(this.session)}/history${this._nodeQuery()}`,
       );
       if (!res.ok) return;
       const history = await res.text();

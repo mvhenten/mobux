@@ -73,9 +73,37 @@ function createTmuxRunner(
   };
 }
 
+// Wait until tmux reports a client attached to `session`. The browser's
+// "websocket open" fires while the server's attach subprocess (bash -> tmux
+// attach-session) is still starting, ~50-80ms before tmux registers the
+// client. Anything sent into the pane during that window that produces
+// one-shot output events (OSC 133 passthrough, prompt redraw markers) goes
+// to zero attached clients and is lost forever -- tmux replays pane CONTENT
+// on attach, never events. Tests that send keys right after the socket
+// opens must gate on this server-side truth, not on the socket state.
+async function waitForClientAttached(tmux, session, { timeoutMs = 8000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let out = "";
+    try {
+      out = tmux(`list-clients -t ${session} -F x`).toString().trim();
+    } catch (_) {
+      // Session may not be registered yet -- keep polling until deadline.
+    }
+    if (out) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `tmux reported no client attached to '${session}' within ${timeoutMs}ms`,
+      );
+    }
+    await new Promise((res) => setTimeout(res, 50));
+  }
+}
+
 module.exports = {
   createTmuxRunner,
   sanitizedEnv,
   assertIsolated,
   buildInvocation,
+  waitForClientAttached,
 };

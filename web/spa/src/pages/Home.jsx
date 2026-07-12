@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "preact/hooks";
+import { useLocation } from "wouter-preact";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
 import { getSelectedNode, setSelectedNode, withNode } from "../lib/nodes.js";
@@ -76,6 +77,7 @@ async function loadNodes() {
 export function HomePage() {
   const dialogRef = useRef(null);
   const nameRef = useRef(null);
+  const [, navigate] = useLocation();
 
   useEffect(() => {
     // Nodes first: a stale persisted selection must be reset before the
@@ -92,18 +94,16 @@ export function HomePage() {
     refresh();
   };
 
-  const open = async (name) => {
+  const open = (name) => {
     // The node segment pins the session to the node it was listed from —
     // the URL is the whole address, so a later picker change (or another
-    // device) can never re-target it to the wrong tmux (#185).
+    // device) can never re-target it to the wrong tmux (#185). Plain SPA
+    // navigation: the terminal engine is a component with a real
+    // mount/dispose lifecycle (#188), so no document reload is needed.
     const node = selectedNode.value
       ? `${encodeURIComponent(selectedNode.value)}/`
       : "";
-    // Hard-load so terminal.js always gets a fresh execution context.
-    // Client-side navigation re-uses the module map, leaving #terminal empty
-    // and triggering "already been declared" errors on the second open.
-    window.location.href = `/app#/s/${node}${encodeURIComponent(name)}`;
-    window.location.reload();
+    navigate(`/s/${node}${encodeURIComponent(name)}`);
   };
 
   const create = async (e) => {

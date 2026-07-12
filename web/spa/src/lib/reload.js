@@ -1,7 +1,7 @@
 import { localGet } from "./api.js";
 
-// Automatic hard-reload on server update (issue #189, see #188 for why a
-// full reload is the only clean boot of the terminal engine). Watches the
+// Automatic hard-reload on server update (issue #189) — a reload is how a
+// running tab picks up freshly-served bundles. Watches the
 // server's `build_hash` (`/api/build-info`) and forces `location.reload()`
 // once it observes a change — covers both a self-update (#130) and a plain
 // service restart, so a tab can never keep running against a stale server.

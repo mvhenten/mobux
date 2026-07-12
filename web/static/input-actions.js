@@ -20,7 +20,7 @@ import { openExternal } from './external-link.js';
 // Owns a hidden <input type=file>, POSTs the picked file to /api/upload, and
 // drops the returned path into the terminal via send().
 //
-//   createAttachAction({ send, onError }) → { trigger() }
+//   createAttachAction({ send, onError }) → { trigger(), destroy() }
 //     onError(message)  optional — surface an upload failure in the UI.
 export function createAttachAction({ send, onError } = {}) {
   const fileInput = document.createElement('input');
@@ -54,6 +54,10 @@ export function createAttachAction({ send, onError } = {}) {
 
   return {
     trigger() { fileInput.click(); },
+    // The hidden input lives on document.body, outside the caller's own
+    // subtree — a remounting host (input-bar/top-bar destroy) must remove
+    // it or every remount leaks one.
+    destroy() { fileInput.remove(); },
   };
 }
 
@@ -89,6 +93,12 @@ export function createDictateAction({ send, button, onText } = {}) {
     pendingRate: 0,
     pendingDurationMs: 0,
   };
+  // Flips true in destroy() (a same-document engine remount mid-recording).
+  // Guards the async completion points below so a transcription that
+  // resolves after teardown can't resurrect the overlay or send stale text
+  // through `send` (itself a safe no-op once the engine's socket is gone,
+  // but the overlay DOM must not come back after its host was torn down).
+  let destroyed = false;
 
   function micLabel(text) {
     if (button) button.textContent = text;
@@ -467,6 +477,7 @@ export function createDictateAction({ send, button, onText } = {}) {
   async function captureStop() {
     if (!stopCapture()) return;
     const text = await transcribePending();
+    if (destroyed) return; // torn down mid-transcription — nothing left to show
     if (text === null) return; // fault already shown, audio preserved
     micOverlay.showReview(text);
     // Note: mic.busy stays true until submit/cancel/retry resolves
@@ -477,6 +488,7 @@ export function createDictateAction({ send, button, onText } = {}) {
   async function captureStopAndSubmit() {
     if (!stopCapture()) return;
     const text = await transcribePending();
+    if (destroyed) return; // torn down mid-transcription — nothing left to show
     if (text === null) return; // fault already shown, audio preserved
     if (!text) {
       micOverlay.showReview(text);
@@ -493,6 +505,7 @@ export function createDictateAction({ send, button, onText } = {}) {
   async function retryPendingTranscription() {
     if (mic.pendingChunks === null) return;
     const text = await transcribePending();
+    if (destroyed) return; // torn down mid-transcription — nothing left to show
     if (text === null) return; // fault already shown, audio preserved
     micOverlay.showReview(text);
   }
@@ -545,5 +558,21 @@ export function createDictateAction({ send, button, onText } = {}) {
       else startRecording();
     },
     isRecording() { return mic.recording; },
+    // Full teardown for a same-document engine remount (e.g. a route change
+    // mid-recording): release the mic stream, remove the overlay, and mark
+    // any in-flight transcription's eventual resolution a no-op (see the
+    // `destroyed` guards above) instead of leaving the mic hot and the
+    // overlay showing after the host it was mounted into is gone.
+    destroy() {
+      destroyed = true;
+      stopTracks();
+      mic.recording = false;
+      mic.busy = false;
+      mic.paused = false;
+      mic.chunks = [];
+      mic.pendingChunks = null;
+      button?.classList.remove('mic-recording');
+      micOverlay.dismiss();
+    },
   };
 }
