@@ -35,8 +35,8 @@ import(
 
 // Server-held UI preferences (#211). Load the shared engine module and
 // fetch the whole blob before first render, so the terminal island reads the
-// renderer/theme/etc. the server holds — not per-device localStorage, which is
-// gone. hydrate() never rejects (it falls back to defaults if the server is
+// renderer/theme/etc. the server holds — mobux keeps no per-device client
+// storage. hydrate() never rejects (it falls back to defaults if the server is
 // unreachable), so a brief blocking fetch here can't wedge boot.
 async function boot() {
   try {

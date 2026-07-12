@@ -22,6 +22,7 @@ export const DEFAULTS = Object.freeze({
   listen_voice: "",
   listen_rate: 1.0,
   listen_pitch: 1.0,
+  selected_node: "",
 });
 
 let state = { ...DEFAULTS };

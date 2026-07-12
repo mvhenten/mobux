@@ -7,10 +7,10 @@
 // The session URL is the whole address (issue #185): `#/s/<node>/<name>`
 // attaches to that node's tmux, bare `#/s/<name>` to the hub's local one.
 // TerminalIsland passes the engine the node from the route — never from the
-// device's `localStorage["mobux:node"]` picker preference — so these specs
-// navigate straight to the node-qualified URL with no seeded device state,
-// exactly like a fresh device opening a shared link. The picker UI has its
-// own coverage in test/spa.spec.cjs.
+// server-held selected-node preference — so these specs navigate straight to
+// the node-qualified URL with no seeded selection, exactly like a fresh device
+// opening a shared link. The picker UI has its own coverage in
+// test/spa.spec.cjs.
 //
 // Run with: make test-fleet
 
@@ -45,6 +45,33 @@ test.afterAll(async () => {
   if (hub) await hub.stop();
   if (node) await node.stop();
 });
+
+// The #185 specs below seed the hub's server-held selected-node preference —
+// reset it after every test so that state never leaks into the next one (the
+// autouse reset in fixtures.cjs only targets MOBUX_URL, never this fleet hub).
+test.afterEach(async () => {
+  await seedHubSelectedNode("");
+});
+
+// Seed the hub's server-held selected-node preference (no client storage).
+// Used by the #185 regression specs to prove the URL's node segment wins over
+// a stale/foreign selection.
+async function seedHubSelectedNode(name) {
+  const cur = await (
+    await fetch(`${hub.base}/api/settings/preferences`, {
+      headers: { Authorization: hub.authHeader },
+    })
+  ).json();
+  const res = await fetch(`${hub.base}/api/settings/preferences`, {
+    method: "PUT",
+    headers: {
+      Authorization: hub.authHeader,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ...cur, selected_node: name }),
+  });
+  expect(res.ok).toBe(true);
+}
 
 async function bootTerminal(page, hash) {
   await page.goto(`${hub.base}/app#${hash}`, { waitUntil: "load" });
@@ -137,19 +164,15 @@ test("session and pane listings cross ssh intact", async () => {
   expect(panes[0].id).toMatch(/^@/);
 });
 
-// Regression, issue #185: the route must pin the node even when the
-// device's picker preference points elsewhere. A stale/foreign
-// `localStorage["mobux:node"]` used to silently re-target the attach —
-// here it names no configured node at all, so any fallback to it would
-// fail loudly instead of reaching the remote session.
+// Regression, issue #185: the route must pin the node even when the stored
+// selected-node preference points elsewhere. A stale/foreign `selected_node`
+// used to silently re-target the attach — here it names no configured node at
+// all, so any fallback to it would fail loudly instead of reaching the remote
+// session.
 test("the URL's node segment wins over a stale device selection", async ({
   page,
 }) => {
-  await page.addInitScript(() => {
-    try {
-      localStorage.setItem("mobux:node", "decommissioned-node");
-    } catch (_) {}
-  });
+  await seedHubSelectedNode("decommissioned-node");
   await bootRemoteTerminal(page);
   const marker = `MOBUX_FLEET_${Math.floor(Math.random() * 1e9)}`;
   await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);
@@ -162,9 +185,9 @@ test("the URL's node segment wins over a stale device selection", async ({
 });
 
 // The other half of the #185 contract: a bare `#/s/<name>` URL means the
-// hub's LOCAL tmux, regardless of which node the device last selected.
-// Before the fix this attach followed localStorage to the remote node and
-// tmux answered "can't find session".
+// hub's LOCAL tmux, regardless of which node was last selected. Before the fix
+// this attach followed the stored selection to the remote node and tmux
+// answered "can't find session".
 test("a bare session URL attaches to the hub's local tmux", async ({
   page,
 }) => {
@@ -179,11 +202,7 @@ test("a bare session URL attaches to the hub's local tmux", async ({
   });
   expect(res.ok).toBe(true);
 
-  await page.addInitScript((name) => {
-    try {
-      localStorage.setItem("mobux:node", name);
-    } catch (_) {}
-  }, node.name);
+  await seedHubSelectedNode(node.name);
   await bootTerminal(page, `/s/${local}`);
   const marker = `MOBUX_FLEET_${Math.floor(Math.random() * 1e9)}`;
   await page.evaluate((m) => window.__mobuxView.send(`echo ${m}\r`), marker);

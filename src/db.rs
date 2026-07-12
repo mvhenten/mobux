@@ -107,6 +107,10 @@ pub struct UiPreferences {
     pub listen_rate: f64,
     /// Listen speech pitch, clamped 0.5–2.0.
     pub listen_pitch: f64,
+    /// Selected fleet node for the Home session list (empty = local host).
+    /// Stored verbatim; a since-removed node is reconciled to local by the
+    /// client.
+    pub selected_node: String,
 }
 
 impl Default for UiPreferences {
@@ -119,6 +123,7 @@ impl Default for UiPreferences {
             listen_voice: String::new(),
             listen_rate: 1.0,
             listen_pitch: 1.0,
+            selected_node: String::new(),
         }
     }
 }
@@ -179,7 +184,8 @@ impl Db {
                 osc133_hint_dismissed INTEGER NOT NULL,
                 listen_voice TEXT NOT NULL,
                 listen_rate REAL NOT NULL,
-                listen_pitch REAL NOT NULL
+                listen_pitch REAL NOT NULL,
+                selected_node TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS stt_config (
@@ -227,6 +233,12 @@ impl Db {
         // duplicate column errors only through IF NOT EXISTS on indexes,
         // not columns, so we catch the error and treat it as a no-op.
         let _ = conn.execute_batch("ALTER TABLE stt_config ADD COLUMN stop_cmd TEXT;");
+
+        // Additive migration: the selected Home node moved from per-device
+        // localStorage into this global row. Older DBs predate the column.
+        let _ = conn.execute_batch(
+            "ALTER TABLE ui_preferences ADD COLUMN selected_node TEXT NOT NULL DEFAULT '';",
+        );
 
         // Migration: drop tables from the removed peer-relay feature
         // (mesh enumeration + TOFU cert pinning). DROP TABLE IF EXISTS is
@@ -434,46 +446,30 @@ impl Db {
     /// Read the single UI-preferences row, seeding defaults on first access.
     pub fn ui_preferences(&self) -> Result<UiPreferences> {
         let conn = self.lock_conn()?;
-        let row: Option<(String, String, String, i64, String, f64, f64)> = conn
+        let row: Option<UiPreferences> = conn
             .query_row(
                 "SELECT renderer, theme, default_view, osc133_hint_dismissed,
-                        listen_voice, listen_rate, listen_pitch
+                        listen_voice, listen_rate, listen_pitch, selected_node
                  FROM ui_preferences WHERE id = 1",
                 [],
                 |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
+                    Ok(UiPreferences {
+                        renderer: row.get(0)?,
+                        theme: row.get(1)?,
+                        default_view: row.get(2)?,
+                        osc133_hint_dismissed: row.get::<_, i64>(3)? != 0,
+                        listen_voice: row.get(4)?,
+                        listen_rate: row.get(5)?,
+                        listen_pitch: row.get(6)?,
+                        selected_node: row.get(7)?,
+                    })
                 },
             )
             .optional()
             .context("reading ui_preferences")?;
 
-        if let Some((
-            renderer,
-            theme,
-            default_view,
-            osc133_hint_dismissed,
-            listen_voice,
-            listen_rate,
-            listen_pitch,
-        )) = row
-        {
-            return Ok(UiPreferences {
-                renderer,
-                theme,
-                default_view,
-                osc133_hint_dismissed: osc133_hint_dismissed != 0,
-                listen_voice,
-                listen_rate,
-                listen_pitch,
-            });
+        if let Some(prefs) = row {
+            return Ok(prefs);
         }
 
         let defaults = UiPreferences::default();
@@ -493,8 +489,8 @@ impl Db {
         conn.execute(
             "INSERT INTO ui_preferences
                  (id, renderer, theme, default_view, osc133_hint_dismissed,
-                  listen_voice, listen_rate, listen_pitch)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                  listen_voice, listen_rate, listen_pitch, selected_node)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                  renderer = excluded.renderer,
                  theme = excluded.theme,
@@ -502,7 +498,8 @@ impl Db {
                  osc133_hint_dismissed = excluded.osc133_hint_dismissed,
                  listen_voice = excluded.listen_voice,
                  listen_rate = excluded.listen_rate,
-                 listen_pitch = excluded.listen_pitch",
+                 listen_pitch = excluded.listen_pitch,
+                 selected_node = excluded.selected_node",
             params![
                 prefs.renderer,
                 prefs.theme,
@@ -511,6 +508,7 @@ impl Db {
                 prefs.listen_voice,
                 prefs.listen_rate,
                 prefs.listen_pitch,
+                prefs.selected_node,
             ],
         )?;
         Ok(())
@@ -1023,6 +1021,7 @@ mod tests {
         assert_eq!(defaults.listen_voice, "");
         assert_eq!(defaults.listen_rate, 1.0);
         assert_eq!(defaults.listen_pitch, 1.0);
+        assert_eq!(defaults.selected_node, "");
 
         db.set_ui_preferences(UiPreferences {
             renderer: "sterk".to_string(),
@@ -1032,6 +1031,7 @@ mod tests {
             listen_voice: "Daniel".to_string(),
             listen_rate: 1.4,
             listen_pitch: 0.8,
+            selected_node: "gpu-box".to_string(),
         })
         .expect("write");
 
@@ -1043,6 +1043,7 @@ mod tests {
         assert_eq!(got.listen_voice, "Daniel");
         assert_eq!(got.listen_rate, 1.4);
         assert_eq!(got.listen_pitch, 0.8);
+        assert_eq!(got.selected_node, "gpu-box");
     }
 
     #[test]

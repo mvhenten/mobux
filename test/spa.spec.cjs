@@ -108,6 +108,7 @@ const PREF_DEFAULTS = {
   listen_voice: "",
   listen_rate: 1.0,
   listen_pitch: 1.0,
+  selected_node: "",
 };
 
 async function putPrefs(page, prefs) {
@@ -115,6 +116,22 @@ async function putPrefs(page, prefs) {
     data: prefs,
   });
   if (!res.ok()) throw new Error(`PUT preferences: ${res.status()}`);
+}
+
+// The selected Home node is a server-held preference now (no client storage),
+// so seed and read it through /api/settings/preferences, not localStorage.
+async function seedSelectedNode(page, name) {
+  const cur = await (
+    await page.request.get(`${BASE}/api/settings/preferences`)
+  ).json();
+  await putPrefs(page, { ...cur, selected_node: name });
+}
+
+async function readSelectedNode(page) {
+  const p = await (
+    await page.request.get(`${BASE}/api/settings/preferences`)
+  ).json();
+  return p.selected_node;
 }
 
 test("preferences API round-trips the whole blob", async ({ page }) => {
@@ -986,8 +1003,8 @@ test("POST /api/telemetry is live without MOBUX_DEV", async ({ page }) => {
 // ── telemetry overlay stays on-demand ───────────────────────────────────────
 //
 // Data collection (the POSTs above) is always on, but the on-screen overlay
-// is still opt-in: only `?telemetry=1` (or the persisted localStorage
-// toggle) renders it. A plain page load must not show it.
+// is still opt-in: only `?telemetry=1` (or the in-memory runtime toggle)
+// renders it. A plain page load must not show it.
 test("telemetry overlay only renders with ?telemetry=1", async ({ page }) => {
   await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
   await expect(page.locator("#mobux-telemetry-overlay")).toHaveCount(0);
@@ -1722,10 +1739,12 @@ test("terminal ribbon exposes a reload button", async ({ page }) => {
 
 // ── automatic reload after server update (#189) ───────────────────────────
 //
-// The SPA remembers the server's build_hash (`/api/build-info`) in
-// sessionStorage and hard-reloads once it observes a change. `window.__mobuxCheckBuildHash`
-// (set up by watchBuildHash in lib/reload.js) lets the test force a check
-// without waiting out the real poll interval.
+// The SPA remembers the server's build_hash (`/api/build-info`) in an
+// in-memory baseline (no client-side storage) and hard-reloads once it
+// observes a change. `window.__mobuxCheckBuildHash` (set up by watchBuildHash
+// in lib/reload.js) lets the test force a check without waiting out the real
+// poll interval. The baseline is not observable directly, so the test asserts
+// on the reload behaviour alone.
 
 test("auto-reload: first visit records a baseline, a later change reloads once, then settles", async ({
   page,
@@ -1740,29 +1759,30 @@ test("auto-reload: first visit records a baseline, a later change reloads once, 
   );
 
   await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
-  await expect
-    .poll(() => page.evaluate(() => sessionStorage.getItem("mobux:buildHash")))
-    .toBe("hash-a");
+  await page.waitForFunction(
+    () => typeof window.__mobuxCheckBuildHash === "function",
+  );
 
-  // Same hash again — no reload.
+  // First visit is never "stale": the baseline is recorded, so a check
+  // against the same hash does not reload.
   let reloaded = false;
   page.once("load", () => (reloaded = true));
   await page.evaluate(() => window.__mobuxCheckBuildHash());
   await page.waitForTimeout(200);
   expect(reloaded).toBe(false);
 
-  // Server hash changes — the next check hard-reloads exactly once, and
-  // remembers the new hash so the reloaded page's own check settles instead
-  // of looping.
+  // Server hash changes — the next check hard-reloads exactly once.
   hash = "hash-b";
   await Promise.all([
     page.waitForEvent("load"),
     page.evaluate(() => window.__mobuxCheckBuildHash()),
   ]);
-  await expect
-    .poll(() => page.evaluate(() => sessionStorage.getItem("mobux:buildHash")))
-    .toBe("hash-b");
 
+  // The reloaded page keeps no baseline across the reload; it re-records the
+  // now-current hash on boot and settles, so a further check does not loop.
+  await page.waitForFunction(
+    () => typeof window.__mobuxCheckBuildHash === "function",
+  );
   let reloadedAgain = false;
   page.once("load", () => (reloadedAgain = true));
   await page.evaluate(() => window.__mobuxCheckBuildHash());
@@ -2065,10 +2085,11 @@ test("node picker: renders nodes, marks unreachable, threads ?node, persists sel
   ).toBeVisible({ timeout: 8000 });
   expect(sessionQueries).toContain("devbox");
 
-  // Device-level persistence: localStorage, survives a reload.
-  expect(await page.evaluate(() => localStorage.getItem("mobux:node"))).toBe(
-    "devbox",
-  );
+  // Server-held persistence: written to the preferences blob (the PUT is
+  // async, so poll), survives a reload, shared across devices.
+  await expect
+    .poll(() => readSelectedNode(page), { timeout: 4000 })
+    .toBe("devbox");
   await page.reload({ waitUntil: "networkidle" });
   await expect(
     page.locator('#nodePicker .node-chip[data-node="devbox"]'),
@@ -2093,16 +2114,14 @@ test("node picker: renders nodes, marks unreachable, threads ?node, persists sel
   await expect(
     page.locator(`#sessionList .swipe-row[data-name="${SEED}"]`),
   ).toBeVisible({ timeout: 8000 });
-  expect(await page.evaluate(() => localStorage.getItem("mobux:node"))).toBe(
-    null,
-  );
+  await expect.poll(() => readSelectedNode(page), { timeout: 4000 }).toBe("");
 });
 
 test("creating a session targets the selected node", async ({ page }) => {
   await mockNodes(page, {
     nodes: [{ name: "devbox", target: "mvhenten@devbox", reachable: true }],
   });
-  await page.addInitScript(() => localStorage.setItem("mobux:node", "devbox"));
+  await seedSelectedNode(page, "devbox");
   const posts = [];
   await page.route(/\/api\/sessions(\?[^/]*)?$/, async (route) => {
     const u = new URL(route.request().url());
@@ -2142,7 +2161,7 @@ test("opening a session from a node navigates to #/s/<node>/<name>", async ({
   await mockNodes(page, {
     nodes: [{ name: "devbox", target: "mvhenten@devbox", reachable: true }],
   });
-  await page.addInitScript(() => localStorage.setItem("mobux:node", "devbox"));
+  await seedSelectedNode(page, "devbox");
   await page.route(/\/api\/sessions(\?[^/]*)?$/, async (route) => {
     if (route.request().method() !== "GET") return route.continue();
     const u = new URL(route.request().url());
@@ -2173,7 +2192,7 @@ test("terminal PTY websocket and pane calls carry ?node= from the URL's node seg
   // FakeSocket (same shape as the splash tests') so the assertion doesn't
   // depend on the backend accepting the ?node param: it records the URL and
   // fires `open`, which triggers the engine's refreshPanes fetch. The node
-  // comes from the route alone — localStorage stays deliberately empty.
+  // comes from the route alone — no selected-node preference is seeded.
   await page.addInitScript(() => {
     window.__wsUrls = [];
     class FakeSocket extends EventTarget {

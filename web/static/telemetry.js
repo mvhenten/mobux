@@ -12,9 +12,10 @@
 //   telemetry.log('ws-open', { session });        // structured
 //   telemetry.log('resize', `${cols}x${rows}`);   // or a plain string
 //
-// Overlay: off by default, on when `?telemetry=1` is in the URL or
-// localStorage['mobux:telemetry'] === '1'. `telemetry.overlay(true|false)`
-// toggles it at runtime (and persists the choice).
+// Overlay: off by default, on when `?telemetry=1` is in the URL.
+// `telemetry.overlay(true|false)` toggles it at runtime. The runtime toggle is
+// in-memory only (mobux keeps no client-side storage), so it resets on reload;
+// use the URL param for a choice that survives a reload.
 
 // Per-page session id so lines from one page load are correlatable in the
 // journal. Short random token; not security-sensitive.
@@ -29,11 +30,12 @@ const SESSION_ID = (() => {
   return Math.random().toString(36).slice(2, 10);
 })();
 
-const OVERLAY_KEY = 'mobux:telemetry';
-
 let overlayEl = null;
+// Runtime overlay state, in-memory for this page load only.
+let overlayOn = false;
 
 function overlayEnabled() {
+  if (overlayOn) return true;
   try {
     if (new URLSearchParams(window.location.search).get('telemetry') === '1') {
       return true;
@@ -41,11 +43,7 @@ function overlayEnabled() {
   } catch (_) {
     /* ignore */
   }
-  try {
-    return localStorage.getItem(OVERLAY_KEY) === '1';
-  } catch (_) {
-    return false;
-  }
+  return false;
 }
 
 function ensureOverlay() {
@@ -127,14 +125,10 @@ function log(event, data) {
   }
 }
 
-// Runtime overlay toggle. Persists the choice; pass nothing to flip.
+// Runtime overlay toggle (in-memory for this page load); pass nothing to flip.
 function overlay(on) {
   const next = on === undefined ? !overlayEnabled() : !!on;
-  try {
-    localStorage.setItem(OVERLAY_KEY, next ? '1' : '0');
-  } catch (_) {
-    /* ignore */
-  }
+  overlayOn = next;
   if (next) {
     ensureOverlay();
   } else if (overlayEl) {

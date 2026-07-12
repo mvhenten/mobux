@@ -682,15 +682,10 @@ test("reader view live-updates on new output", async ({ page }) => {
 });
 
 test("long-press menu toggles reader view", async ({ page }) => {
-  // Start clean: drop any per-window view override in localStorage. The
-  // renderer and default-view baseline are server-held and already reset to
-  // this project's renderer by the fixture, so clearing localStorage no longer
-  // wipes the backend choice.
-  await page.addInitScript(() => {
-    try {
-      localStorage.clear();
-    } catch (_) {}
-  });
+  // The per-window view override is in-memory and resets on every load, and
+  // the renderer/default-view baseline is server-held and already reset to
+  // this project's renderer by the fixture — so a fresh page load is a clean
+  // start with no client storage to clear.
   await page.goto(`${BASE}/app#/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
     timeout: 5000,
@@ -1644,20 +1639,12 @@ test.skip("reader status bar stays filled after a tmux window switch", async ({
     .toMatchObject({ filled: true });
 });
 
-test("view preference persists per window", async ({ page }) => {
+test("view swap persists as the server default view across reload", async ({
+  page,
+}) => {
   const session = SESSION;
-  const panes = await (
-    await page.request.get(`${BASE}/api/sessions/${session}/panes`)
-  ).json();
-  const activeId = panes.find((p) => p.active).id;
 
   await page.goto(`${BASE}/app#/s/${session}`);
-  await page.evaluate(() => {
-    try {
-      localStorage.clear();
-    } catch (_) {}
-  });
-  await page.reload();
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
     timeout: 5000,
   });
@@ -1667,17 +1654,11 @@ test("view preference persists per window", async ({ page }) => {
   );
   await page.waitForTimeout(500);
 
-  // Flip to reader via the API
+  // Flip to reader via the API. The per-window override is in-memory only
+  // (resets on reload, no client storage); what survives is the server-held
+  // default_view, which the swap writes.
   await page.evaluate(() => window.__mobuxView.swap("reader"));
   await page.waitForTimeout(150);
-
-  // Per-window override stays in localStorage (device-transient, keyed on the
-  // volatile tmux window id). The default view is now a server preference.
-  const perWindow = await page.evaluate(
-    ({ session, id }) => localStorage.getItem(`mobux.view.${session}.${id}`),
-    { session, id: activeId },
-  );
-  expect(perWindow).toBe("reader");
   await expect
     .poll(
       async () =>
@@ -1690,7 +1671,8 @@ test("view preference persists per window", async ({ page }) => {
     )
     .toBe("reader");
 
-  // Reload — should land in reader for this window
+  // Reload — with no client storage, the view comes from the server default,
+  // which is now reader.
   await page.reload();
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
     timeout: 5000,

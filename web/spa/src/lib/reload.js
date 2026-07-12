@@ -6,15 +6,17 @@ import { localGet } from "./api.js";
 // once it observes a change — covers both a self-update (#130) and a plain
 // service restart, so a tab can never keep running against a stale server.
 //
-// sessionStorage remembers the last hash THIS TAB observed:
+// An in-memory module variable remembers the last hash this tab observed —
+// no client-side storage, so it resets on every load, which is exactly right:
 //   - nothing remembered yet → record the current hash, don't reload (a
-//     first visit is never "stale", it just has no baseline).
+//     first load is never "stale", it just has no baseline).
 //   - remembered === current → no-op.
-//   - remembered !== current → record the new hash, THEN reload. Writing
-//     first is what stops a reload loop: the reloaded tab's next check sees
-//     remembered === current and settles.
-const STORAGE_KEY = "mobux:buildHash";
+//   - remembered !== current → record the new hash, THEN reload. Recording
+//     first can't loop: the reloaded tab starts fresh with no baseline, re-
+//     records the now-current hash, and settles.
 const POLL_MS = 60000;
+
+let seen = null;
 
 async function checkBuildHash() {
   let hash;
@@ -27,20 +29,12 @@ async function checkBuildHash() {
   // not evidence of staleness (mirrors BuildInfoCard's `stale` computation).
   if (!hash || hash === "unknown") return;
 
-  let seen;
-  try {
-    seen = sessionStorage.getItem(STORAGE_KEY);
-  } catch (_) {
-    return; // sessionStorage unavailable (private mode) — skip the feature
-  }
-
   if (seen === hash) return;
 
-  try {
-    sessionStorage.setItem(STORAGE_KEY, hash);
-  } catch (_) {}
+  const hadBaseline = seen !== null;
+  seen = hash;
 
-  if (seen !== null) location.reload();
+  if (hadBaseline) location.reload();
 }
 
 export function watchBuildHash() {

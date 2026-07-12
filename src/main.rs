@@ -1288,6 +1288,8 @@ struct UiPrefsJson {
     listen_voice: String,
     listen_rate: f64,
     listen_pitch: f64,
+    #[serde(default)]
+    selected_node: String,
 }
 
 impl From<db::UiPreferences> for UiPrefsJson {
@@ -1317,6 +1319,7 @@ impl From<db::UiPreferences> for UiPrefsJson {
             listen_voice: p.listen_voice,
             listen_rate: p.listen_rate.clamp(0.5, 2.0),
             listen_pitch: p.listen_pitch.clamp(0.5, 2.0),
+            selected_node: p.selected_node,
         }
     }
 }
@@ -1348,6 +1351,7 @@ impl UiPrefsJson {
             listen_voice: self.listen_voice,
             listen_rate: self.listen_rate.clamp(0.5, 2.0),
             listen_pitch: self.listen_pitch.clamp(0.5, 2.0),
+            selected_node: self.selected_node,
         })
     }
 }
@@ -2804,6 +2808,7 @@ mod tests {
             listen_voice: String::new(),
             listen_rate: 1.0,
             listen_pitch: 1.0,
+            selected_node: String::new(),
         };
         let err = bad.validate().expect_err("bogus renderer must be rejected");
         assert!(
@@ -2822,6 +2827,7 @@ mod tests {
             listen_voice: String::new(),
             listen_rate: 1.0,
             listen_pitch: 1.0,
+            selected_node: String::new(),
         };
         let err = bad
             .validate()
@@ -2842,6 +2848,7 @@ mod tests {
             listen_voice: "Daniel".to_string(),
             listen_rate: 99.0,  // out of range: clamped, not rejected
             listen_pitch: -5.0, // out of range: clamped, not rejected
+            selected_node: "gpu-box".to_string(),
         }
         .validate()
         .expect("valid enums must be accepted");
@@ -2849,6 +2856,7 @@ mod tests {
         assert_eq!(ok.default_view, "reader");
         assert_eq!(ok.listen_rate, 2.0);
         assert_eq!(ok.listen_pitch, 0.5);
+        assert_eq!(ok.selected_node, "gpu-box");
     }
 
     #[test]
@@ -2864,6 +2872,7 @@ mod tests {
             listen_voice: String::new(),
             listen_rate: 500.0,
             listen_pitch: -500.0,
+            selected_node: String::new(),
         };
         let json: UiPrefsJson = corrupt.into();
         assert_eq!(json.renderer, "xterm");
@@ -2944,48 +2953,27 @@ mod tests {
         }
     }
 
-    // Guard (#211): preferences live on the server, not per-device
-    // storage. The legacy localStorage keys that used to hold prefs must never
-    // reappear as a client-side source of truth in the web sources. Scans both
-    // the engine (web/static) and the SPA (web/spa/src) for the old keys —
-    // finding one means a preference silently regressed to per-device state.
+    // Guard: mobux keeps ZERO client-side persistent storage. No frontend
+    // source may read or write `localStorage` or `sessionStorage`. Durable
+    // state lives on the server (/api/settings/preferences); everything else is
+    // plain in-memory module state for the tab's lifetime. Device-resident
+    // state drifts out of sync with code changes in ways that are impossible to
+    // reproduce across devices, so the ban is total.
     //
-    // Two patterns are checked per file:
-    //   1. A forbidden key literal appears directly on a line alongside
-    //      `localStorage` (`localStorage.getItem("mobux:theme")`).
-    //   2. A hoisted const/let/var holds a forbidden key literal, and that
-    //      identifier is later passed into `localStorage.*Item(...)`
-    //      (`const K = "mobux:theme"; localStorage.getItem(K)`). Matched via
-    //      a declaration → identifier → usage chain rather than a plain
-    //      whole-file substring pair, so a coincidental same-string
-    //      CustomEvent name (terminal.js dispatches a `"mobux:theme"` event,
-    //      unrelated to storage) doesn't false-positive.
+    // A blanket substring scan over first-party web sources, comments included:
+    // even a mention has to be reworded, which keeps the ban obvious in the
+    // source. Third-party vendor bundles (web/static/vendor) and the generated
+    // SPA build output (web/static/spa) are not our source and are skipped;
+    // nothing else is allowlisted.
     #[test]
-    fn no_preference_keys_read_from_local_storage() {
+    fn no_client_storage_in_web_sources() {
         use std::fs;
-        // Keys that were per-device localStorage prefs and are now server-synced.
-        // `mobux.view.default` is the global default view; the per-window
-        // `mobux.view.<session>.<id>` override key is deliberately NOT here — it
-        // stays device-transient (see the PR classification table).
-        const FORBIDDEN: &[&str] = &[
-            "mobux:renderer",
-            "mobux:theme",
-            "mobux.listen.prefs",
-            "mobux.osc133.dismissed",
-            "mobux.view.default",
-        ];
+        const FORBIDDEN: &[&str] = &["localStorage", "sessionStorage"];
 
-        let decl_re =
-            Regex::new(r#"(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*['"]([^'"]+)['"]"#)
-                .unwrap();
-
-        let roots = [
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static"),
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/spa/src"),
-        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web");
 
         let mut offenders: Vec<String> = Vec::new();
-        let mut stack: Vec<std::path::PathBuf> = roots.to_vec();
+        let mut stack: Vec<std::path::PathBuf> = vec![root];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
@@ -2993,50 +2981,32 @@ mod tests {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if path.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    // Skip dependencies, committed third-party bundles, and the
+                    // generated SPA build output — none of it is our source.
+                    // web/spa (the SPA source tree) is still scanned; only the
+                    // build output at web/static/spa is dropped.
+                    if name == "node_modules"
+                        || path.ends_with("static/vendor")
+                        || path.ends_with("static/spa")
+                    {
                         continue;
                     }
                     stack.push(path);
                     continue;
                 }
                 let ext = path.extension().and_then(|e| e.to_str());
-                if !matches!(ext, Some("js") | Some("jsx")) {
+                if !matches!(ext, Some("js") | Some("jsx") | Some("mjs") | Some("cjs")) {
                     continue;
                 }
                 let Ok(src) = fs::read_to_string(&path) else {
                     continue;
                 };
-
-                // Pattern 1: direct literal alongside localStorage on one line.
                 for line in src.lines() {
-                    if !line.contains("localStorage") {
-                        continue;
-                    }
-                    for key in FORBIDDEN {
-                        if line.contains(key) {
+                    for token in FORBIDDEN {
+                        if line.contains(token) {
                             offenders.push(format!("{}: {}", path.display(), line.trim()));
                         }
-                    }
-                }
-
-                // Pattern 2: hoisted const/let/var holding a forbidden literal,
-                // later passed by identifier into localStorage.*Item(...).
-                for cap in decl_re.captures_iter(&src) {
-                    let ident = &cap[1];
-                    let value = &cap[2];
-                    if !FORBIDDEN.contains(&value) {
-                        continue;
-                    }
-                    let usage_re = Regex::new(&format!(
-                        r"localStorage\.(?:get|set|remove)Item\(\s*{}\b",
-                        regex::escape(ident)
-                    ))
-                    .unwrap();
-                    if usage_re.is_match(&src) {
-                        offenders.push(format!(
-                            "{}: `{ident}` holds forbidden key {value:?} and is passed to localStorage",
-                            path.display()
-                        ));
                     }
                 }
             }
@@ -3044,8 +3014,9 @@ mod tests {
 
         assert!(
             offenders.is_empty(),
-            "preference keys must not be read/written via localStorage (they are \
-             server-synced via /api/settings/preferences):\n{}",
+            "web sources must not use localStorage/sessionStorage — mobux keeps \
+             no client-side persistent storage (durable state is server-synced \
+             via /api/settings/preferences, the rest is in-memory):\n{}",
             offenders.join("\n")
         );
     }
