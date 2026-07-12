@@ -146,6 +146,11 @@ export function createSterkRenderer(host, options = {}) {
     for (const cb of linkSubs.slice()) cb(uri);
   };
   const URL_RE = /https?:\/\/[^\s)"'>]+/g;
+  // Trailing punctuation is not part of the URL. xterm's WebLinks addon forbids
+  // a URL ending in punctuation (its final character class excludes `.,:!?` and
+  // brackets); strip the same trailing set so the boundary matches the addon —
+  // `see https://x/foo.` links `foo`, not `foo.`.
+  const TRAILING_PUNCT_RE = /[.,;:!?)\]}]+$/;
   if (sterk.registerLinkProvider) {
     const sub = sterk.registerLinkProvider({
       provideLinks(bufferLineNumber, deliver) {
@@ -156,15 +161,17 @@ export function createSterkRenderer(host, options = {}) {
         URL_RE.lastIndex = 0;
         let m;
         while ((m = URL_RE.exec(text)) !== null) {
+          const uri = m[0].replace(TRAILING_PUNCT_RE, "");
+          if (!uri) continue;
           const startX = m.index + 1; // 1-based start column
-          const endX = m.index + m[0].length; // 1-based half-open end column
+          const endX = m.index + uri.length; // 1-based inclusive last column
           links.push({
             range: {
               start: { x: startX, y: bufferLineNumber },
               end: { x: endX, y: bufferLineNumber },
             },
-            text: m[0],
-            activate: (_event, uri) => emitLink(uri),
+            text: uri,
+            activate: (_event, activatedUri) => emitLink(activatedUri),
           });
         }
         deliver(links.length ? links : undefined);
@@ -177,8 +184,13 @@ export function createSterkRenderer(host, options = {}) {
   // mobux's standing policy: no alternate screen (tmux alt has no scrollback)
   // and no mouse-protocol reporting (touch gestures are the input model). We
   // own sterk, so we suppress the DEC private modes at the parser instead of
-  // patching internals: a CSI `?<mode>h`/`?<mode>l` whose modes are all
-  // blocked is consumed, so sterk never switches buffers or starts tracking.
+  // patching internals. A CSI `?<mode>h`/`?<mode>l` may pack several modes;
+  // sterk's built-in handler applies the whole group all-or-nothing, so a
+  // sequence that mixes a blocked mode with an allowed one (e.g.
+  // `\x1b[?1049;25h`) would still switch the alt buffer if it fell through.
+  // Consume any sequence carrying a blocked mode and re-emit only the allowed
+  // modes so those still take effect; the re-emitted sequence carries no
+  // blocked mode, so it falls through normally (no recursion).
   const blockedModes = new Set([
     // mouse tracking + encodings — kept off on both renderers.
     9, 1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016,
@@ -191,8 +203,15 @@ export function createSterkRenderer(host, options = {}) {
     for (const final of ["h", "l"]) {
       const sub = sterk.parser.registerCsiHandler(
         { prefix: "?", final },
-        (params) =>
-          params.length > 0 && params.every((p) => blockedModes.has(scalar(p))),
+        (params) => {
+          const modes = params.map(scalar);
+          if (!modes.some((m) => blockedModes.has(m))) return false;
+          const allowed = modes.filter((m) => !blockedModes.has(m));
+          if (allowed.length > 0) {
+            sterk.write(`\x1b[?${allowed.join(";")}${final}`);
+          }
+          return true;
+        },
       );
       if (sub && typeof sub.dispose === "function") rendererCleanups.push(sub);
     }

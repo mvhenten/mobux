@@ -243,6 +243,51 @@ test("R9/R16: reports the normal (non-alternate) screen", async ({ page }) => {
   );
 });
 
+// R16 (mixed DEC private modes) — a CSI `?…h` that packs a blocked mode with
+// an allowed one must suppress the blocked mode AND still apply the allowed
+// one. Both adapters enforce the "no alt screen / no mouse" policy; neither may
+// leak the alt buffer when a benign mode rides along, and neither may drop the
+// benign mode. (xterm blocks via its alt/mouse stubs; sterk consumes the
+// blocked mode at the parser and re-emits the allowed remainder.)
+test("R16: mixed DEC private modes suppress the blocked mode, keep the allowed one", async ({
+  page,
+}) => {
+  await boot(page);
+  // Close the WS so tmux can't re-assert modes or clobber the injected content.
+  await page.evaluate(() => window.__mobuxView.test.inject(""));
+
+  // Alt-screen (1049) packed with cursor-visibility (25): the alt buffer must
+  // not activate even though 25 is allowed through.
+  await page.evaluate(() =>
+    window.__mobuxView.test.writeData("\x1b[?1049;25h"),
+  );
+  expect(await page.evaluate(() => window.__mobuxView.test.isAlternate())).toBe(
+    false,
+  );
+
+  // Mouse tracking (1002) packed with save-cursor (1048): the allowed 1048 must
+  // still take effect. Save the cursor after a marker, move away, restore, then
+  // print — the trailing char lands back at the saved column iff 1048 applied.
+  await page.evaluate(() =>
+    window.__mobuxView.test.writeData(
+      "\x1b[2J\x1b[HR16SAVE\x1b[?1002;1048h\r\nR16OTHR\x1b[?1048lZ",
+    ),
+  );
+  const restored = await page.evaluate(() => {
+    const len = window.__mobuxView.test.bufferLength();
+    for (let y = 0; y < len; y++) {
+      const t = window.__mobuxView.test.lineText(y);
+      if (t && t.includes("R16SAVEZ")) return true;
+    }
+    return false;
+  });
+  expect(restored).toBe(true);
+  // Still no alt screen after the second sequence.
+  expect(await page.evaluate(() => window.__mobuxView.test.isAlternate())).toBe(
+    false,
+  );
+});
+
 // R10 — the engine registers an OSC 133 handler through the renderer; an OSC
 // 133 marker in the stream is detected and recorded.
 test("R10: OSC 133 markers are detected via registerOscHandler", async ({
@@ -420,6 +465,84 @@ test("R13: URL activation is reported through onLink", async ({ page }) => {
   await page.mouse.move(point.x, point.y);
   await page.mouse.move(point.x, point.y);
   await page.mouse.click(point.x, point.y);
+  expect(await linkPromise).toBe(URL);
+});
+
+// R13 (boundary) — the detected link excludes trailing punctuation, matching
+// xterm's WebLinks addon (its regex forbids a URL ending in punctuation). A URL
+// abutting a sentence-ending period links without the period on BOTH adapters.
+test("R13: trailing punctuation is not part of the link", async ({ page }) => {
+  await boot(page);
+  const URL = "https://example.com/r13-boundary";
+
+  await page.evaluate(() => {
+    const o = document.getElementById("touchOverlay");
+    if (o) o.style.pointerEvents = "none";
+    const q = document.getElementById("loadquote");
+    if (q) q.remove();
+  });
+
+  // The URL is followed immediately by a period. The detected link must stop
+  // before it. `\x1b[K` erases any residual tail so it can't extend the match.
+  await page.evaluate(
+    (u) => window.__mobuxView.test.inject(`see ${u}.\x1b[K\n`),
+    URL,
+  );
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  await page.waitForFunction(
+    (u) => {
+      const len = window.__mobuxView.test.bufferLength();
+      for (let y = 0; y < len; y++) {
+        const t = window.__mobuxView.test.lineText(y);
+        if (t && t.includes(`${u}.`)) return true;
+      }
+      return false;
+    },
+    URL,
+    { timeout: 10000 },
+  );
+
+  // Click the centre of the URL body (excluding the trailing period).
+  const point = await page.evaluate((u) => {
+    const len = window.__mobuxView.test.bufferLength();
+    const vy = window.__mobuxView.test.viewportY();
+    const rows = window.__mobuxView.test.rows();
+    const cell = window.__mobuxView.test.cellMetrics();
+    const rect = document.getElementById("terminal").getBoundingClientRect();
+    for (let y = vy; y < Math.min(len, vy + rows); y++) {
+      const t = window.__mobuxView.test.lineText(y);
+      const idx = t ? t.indexOf(u) : -1;
+      if (idx >= 0) {
+        const col = idx + Math.floor(u.length / 2);
+        return {
+          x: rect.left + (col + 0.5) * cell.width,
+          y: rect.top + (y - vy + 0.5) * cell.height,
+        };
+      }
+    }
+    return null;
+  }, URL);
+  expect(point).not.toBeNull();
+
+  const linkPromise = page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        let done = false;
+        const settle = (v) => {
+          if (!done) {
+            done = true;
+            resolve(v);
+          }
+        };
+        window.__mobuxView.test.awaitLink().then((uri) => settle(uri));
+        setTimeout(() => settle(null), 6000);
+      }),
+  );
+  await page.waitForTimeout(100);
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.click(point.x, point.y);
+  // No trailing period — the reported URI is the bare URL on both adapters.
   expect(await linkPromise).toBe(URL);
 });
 
