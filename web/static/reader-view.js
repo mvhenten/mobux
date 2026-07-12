@@ -122,10 +122,10 @@ export class ReaderView {
     this._maxScroll = 0;
     this._atBottom = true;
 
-    // onWriteParsed is the single source of truth for "buffer
-    // changed". xterm fires it after every write — history reload,
+    // onBufferChanged (R8) is the single source of truth for "buffer
+    // changed". Both renderers fire it after every write — history reload,
     // WS data, and synthetic test injects all flow through here.
-    this._writeSub = this.core.term.onWriteParsed(this._onWriteParsed);
+    this._writeSub = this.core.onBufferChanged(this._onWriteParsed);
 
     if (typeof ResizeObserver !== 'undefined') {
       this._resizeObserver = new ResizeObserver(() => this._handleResize());
@@ -232,7 +232,7 @@ export class ReaderView {
   _render() {
     if (!this._inner) return;
     const buffer = this.core.getActiveBuffer();
-    const cols = this.core.term.cols;
+    const cols = this.core.cols;
 
     const wasAtBottom = this._atBottom;
 

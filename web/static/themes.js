@@ -145,55 +145,14 @@ export function applyReaderVars(theme) {
   reader.style.color = theme.foreground || theme.palette[7] || '#c5c8c6';
 }
 
-// Push the bundle's palette onto the active terminal renderer.
-// - sterk: writes into `__sterk.options.theme.palette` in place.
-// - xterm: rebuilds `__xterm.options.theme` with the 16 ANSI slots
-//   mapped onto xterm.js's named-color keys.
-// Returns true if applied.
-export function applyTerminalColors(theme) {
-  // Sterk first (palette is just an array slot)
-  const sterk = window.__sterk;
-  if (sterk && sterk.options && sterk.options.theme && Array.isArray(sterk.options.theme.palette)) {
-    sterk.options.theme.palette = theme.palette.slice(0, 16);
-    sterk.options.theme.background = theme.background || theme.palette[0];
-    sterk.options.theme.foreground = theme.foreground || theme.palette[7] || '#c5c8c6';
-    return true;
-  }
-
-  // Xterm.js uses named keys for the ANSI palette (no `palette` array).
-  // The 16 ANSI slots map to: black/red/green/yellow/blue/magenta/cyan/white
-  // plus the brightX variants. xterm reads `theme.background`/`theme.foreground`
-  // from the same options object.
-  const xterm = window.__xterm;
-  if (xterm && xterm.options) {
-    const p = theme.palette;
-    xterm.options.theme = {
-      background: theme.background || p[0],
-      foreground: theme.foreground || p[7] || '#c5c8c6',
-      black: p[0],   red: p[1],     green: p[2],   yellow: p[3],
-      blue:  p[4],   magenta: p[5], cyan:  p[6],   white: p[7],
-      brightBlack: p[8],  brightRed: p[9],     brightGreen: p[10], brightYellow: p[11],
-      brightBlue:  p[12], brightMagenta: p[13], brightCyan: p[14], brightWhite: p[15],
-    };
-    return true;
-  }
-  return false;
-}
-
-// Apply the Ace editor theme (background, default fg, gutter) live.
-// `editor` is the Ace Editor instance accessed via sterk's renderer.
-export function applyEditorTheme(theme, editor) {
-  if (!editor || typeof editor.setTheme !== 'function') return false;
-  editor.setTheme(theme.aceTheme);
-  return true;
-}
-
-// Apply all three layers. Editor is optional (the settings page has no
-// terminal mounted; the terminal page passes its editor in).
-export function applyTheme(id, { editor } = {}) {
+// Apply the theme across every layer. themes.js owns the reader-mode CSS
+// variables (pure DOM on #reader); the terminal palette and the editor theme
+// go through the renderer interface via `engine.setTheme(theme)` (R11/D5), so
+// themes.js never branches on the live renderer. `engine` is optional — the
+// settings page has no terminal mounted and only updates the reader vars.
+export function applyTheme(id, { engine } = {}) {
   const theme = getTheme(id);
   applyReaderVars(theme);
-  applyTerminalColors(theme);
-  if (editor) applyEditorTheme(theme, editor);
+  if (engine && typeof engine.setTheme === 'function') engine.setTheme(theme);
   return theme;
 }

@@ -217,6 +217,18 @@ test-spa:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/spa.spec.cjs
 
+# Renderer conformance (issue #207, D10): one spec exercises the explicit
+# renderer interface (R1–R11, R15–R16) against BOTH adapters via the
+# xterm/sterk Playwright projects. A renderer is conformant when this suite is
+# green on its project. Same isolated smoke instance as the rest of the suite.
+.PHONY: test-conformance
+test-conformance:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/conformance.spec.cjs
+
 # Fleet e2e (issue #176 phase 4): emulated fleet of throwaway sshd+tmux
 # "nodes", each its own podman container (test/fleet/node.cjs,
 # Containerfile.fleet-node — see issue #183 for why a container and not

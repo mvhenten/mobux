@@ -10,7 +10,7 @@
 import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
 
-export function createInputBar(term, send) {
+export function createInputBar(engine, send) {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
   const input = document.getElementById('inputText');
@@ -19,16 +19,11 @@ export function createInputBar(term, send) {
   // would throw. Mirror the real public API below.
   if (!bar || !input) return { show() {}, hide() {}, destroy() {} };
 
-  // ── Disable xterm.js textarea on mobile ───────────────────────────
-  // We own input now. Prevent xterm's textarea from stealing focus.
-  const textarea = term.textarea;
-  if (textarea) {
-    textarea.setAttribute('tabindex', '-1');
-    textarea.style.pointerEvents = 'none';
-    textarea.style.opacity = '0';
-    textarea.style.position = 'fixed';
-    textarea.style.top = '-9999px';
-  }
+  // ── Disable the renderer's native input on mobile ─────────────────
+  // We own input now. Tell the renderer to release its native input surface
+  // so it can't steal focus / pop the soft keyboard (R15). The engine routes
+  // this to the live adapter — the input bar never touches renderer internals.
+  engine.setNativeInputEnabled(false);
 
   // ── Parse escape sequences from data-key attributes ───────────────
   function parseKey(raw) {
@@ -41,7 +36,7 @@ export function createInputBar(term, send) {
   // ── Show/hide bar ─────────────────────────────────────────────────
   // The bar is now a flex item (see style.css), so `.hidden` toggles
   // `display: none`. Showing/hiding the bar resizes the flex children
-  // (#terminal / #reader); fire a synchronous resize so terminal-core
+  // (#terminal / #reader); fire a synchronous resize so the engine
   // and reader-view recompute their bounds in the same task.
   function show() {
     bar.classList.remove('hidden');
@@ -64,8 +59,8 @@ export function createInputBar(term, send) {
   }
 
   function resizeTerminal() {
-    // Notify synchronously so layout-dependent consumers (terminal-core
-    // resize, reader-view re-pin) read the freshly-shrunk host height
+    // Notify synchronously so layout-dependent consumers (engine resize,
+    // reader-view re-pin) read the freshly-shrunk host height
     // in the same task — no visible jump on the next frame.
     window.dispatchEvent(new Event('resize'));
   }
@@ -247,10 +242,7 @@ export function createInputBar(term, send) {
       removeViewportListeners?.();
       attach.destroy?.();
       dictate.destroy?.();
-      if (textarea) {
-        textarea.removeAttribute('tabindex');
-        textarea.style.pointerEvents = '';
-      }
+      engine.setNativeInputEnabled(true);
     }
   };
 }

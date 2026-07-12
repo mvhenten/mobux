@@ -1,4 +1,6 @@
-import { TerminalCore } from "./terminal-core.js";
+import { TerminalEngine } from "./terminal-engine.js";
+import { createXtermRenderer } from "./renderer-xterm.js";
+import { createSterkRenderer } from "./renderer-sterk.js";
 import { ReaderView } from "./reader-view.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createInputBar } from "./input-bar.js";
@@ -80,6 +82,17 @@ const quotes = [
   ],
 ];
 
+// Renderer construction options shared by both adapters. The typography
+// matches the reader's (style.css `.rb-line`); `altScreen: false` is mobux's
+// standing "no alternate screen" policy (tmux alt screen has no scrollback).
+const RENDERER_OPTIONS = {
+  fontFamily:
+    "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
+  fontSize: 13,
+  scrollback: 10000,
+  altScreen: false,
+};
+
 // ── Terminal engine factory ─────────────────────────────────────────
 //
 // createTerminal({ node, session, host, renderer }) → { core, dispose() }
@@ -160,20 +173,31 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   // mouse stay `false` and skip the on-screen input bar.
   const isMobile =
     window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 620;
-  const core = new TerminalCore({ session, node, host: termEl, renderer });
+  // The engine is renderer-agnostic; it drives whichever adapter the host
+  // selected (the vendor bundle is already loaded). All renderer-specific
+  // code lives inside the two adapter factories.
+  const rendererImpl =
+    renderer === "sterk"
+      ? createSterkRenderer(termEl, RENDERER_OPTIONS)
+      : createXtermRenderer(termEl, RENDERER_OPTIONS);
+  const core = new TerminalEngine({
+    session,
+    node,
+    host: termEl,
+    renderer: rendererImpl,
+  });
 
-  // Apply the stored theme to all three layers. terminal-core.js already
-  // picked the matching palette + Ace theme at construction; this call
-  // pushes the --ansi-* vars onto #reader for tokenized reader output.
-  // Only the sterk backend has an Ace editor under the hood; xterm has none.
-  const getEditor = () => core.term?._sterk?.renderer?.getEditor?.();
-  applyTheme(getStoredThemeId(), { editor: getEditor() });
+  // Apply the stored theme to all three layers. The renderer applied its boot
+  // palette at construction; this call pushes the --ansi-* vars onto #reader
+  // for tokenized reader output and (re)applies the palette through the
+  // renderer interface — no reach-through into renderer internals.
+  applyTheme(getStoredThemeId(), { engine: core });
 
   // Live swap when the settings picker changes the theme in this document.
   // The picker dispatches `mobux:theme`; prefs.js dispatches `mobux:prefschange`
   // for every preference write, so honour a theme change from either.
   function onThemeChange() {
-    applyTheme(getStoredThemeId(), { editor: getEditor() });
+    applyTheme(getStoredThemeId(), { engine: core });
   }
   on(window, "mobux:theme", onThemeChange);
   on(window, "mobux:prefschange", (e) => {
@@ -391,7 +415,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   let inputBar = null;
   function ensureInputBar() {
     if (!inputBar) {
-      inputBar = createInputBar(core.term, (d) => core.send(d));
+      inputBar = createInputBar(core, (d) => core.send(d));
     }
     return inputBar;
   }
@@ -585,9 +609,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
         try {
           core.ws?.close();
         } catch (_) {}
-        return new Promise((resolve) =>
-          core.term.write("\x1b[?1049l" + str.replace(/\n/g, "\r\n"), resolve),
-        );
+        return core.write("\x1b[?1049l" + str.replace(/\n/g, "\r\n"));
       },
       injectLines: (n, prefix = "inject") => {
         core.intentionalClose = true;
@@ -596,7 +618,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
         } catch (_) {}
         let s = "\x1b[?1049l";
         for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
-        return new Promise((resolve) => core.term.write(s, resolve));
+        return core.write(s);
       },
       // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit)
       // prefix. Use this in tests that care about sticky-to-bottom
@@ -609,7 +631,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
         } catch (_) {}
         let s = "";
         for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
-        return new Promise((resolve) => core.term.write(s, resolve));
+        return core.write(s);
       },
       // Returns a Promise that resolves after the reader's next _render()
       // call has committed updated scroll geometry (maxScroll, scrollY).
@@ -618,26 +640,16 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
       // a non-serialisable payload.
       readerAwaitRender: () => reader.awaitNextRender(),
       bufferLength: () => core.getActiveBuffer().length,
-      isAlternate: () => {
-        // sterk: compare alternate vs active buffer references
-        if (core.term?._sterk?.buffer) {
-          return (
-            core.term._sterk.buffer.alternate === core.term._sterk.buffer.active
-          );
-        }
-        // xterm: the BufferNamespace exposes `active.type` ('normal' | 'alternate')
-        const t = core.term?.buffer?.active?.type;
-        return t === "alternate";
-      },
+      isAlternate: () => core.isAlternateScreenActive(),
       readerAtBottom: () => reader._atBottom,
       readerForceScrollTop: () => {
         reader._atBottom = false;
         reader._scrollY = 0;
         reader._applyTransform?.();
       },
-      terminalRows: () => core.term.rows,
-      cols: () => core.term.cols,
-      rows: () => core.term.rows,
+      terminalRows: () => core.rows,
+      cols: () => core.cols,
+      rows: () => core.rows,
       viewportY: () => core.getActiveBuffer().viewportY,
       scrollToBottom: () => core.scrollToBottom(),
       wsReady: () => core.ws?.readyState === WebSocket.OPEN,
@@ -669,6 +681,43 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
         document
           .querySelector(".reader-statusbar")
           ?.classList.contains("reader-statusbar--filled") ?? false,
+
+      // ── Renderer-interface conformance hooks ──────────────────────
+      // Renderer-agnostic probes the conformance suite (test/conformance
+      // .spec.cjs) drives against BOTH adapters through the engine. They go
+      // through the engine's interface passthroughs — never a renderer global.
+      writeData: (str) => core.write(str),
+      awaitBufferChange: () =>
+        new Promise((resolve) => {
+          const sub = core.onBufferChanged(() => {
+            sub.dispose();
+            resolve();
+          });
+        }),
+      measure: () => core.measure(),
+      cellMetrics: () => core.cellSize(),
+      scrollLines: (n) => core.scrollLines(n),
+      getFontSize: () => core.getFontSize(),
+      setFontSize: (px) => core.setFontSize(px),
+      focus: () => core.focus(),
+      setNativeInputEnabled: (enabled) => core.setNativeInputEnabled(enabled),
+      lineText: (y) => {
+        const line = core.getActiveBuffer().getLine(y);
+        return line ? line.translateToString(true) : null;
+      },
+      cellInfo: (y, x) => {
+        const line = core.getActiveBuffer().getLine(y);
+        if (!line) return null;
+        const cell = line.getCell(x);
+        return {
+          chars: cell.getChars(),
+          code: cell.getCode(),
+          bold: cell.isBold(),
+          fgDefault: cell.isFgDefault(),
+          bgDefault: cell.isBgDefault(),
+        };
+      },
+      oscMarkerCount: () => core.oscMarkers.size,
     },
   };
   window.__mobuxView = viewApi;
