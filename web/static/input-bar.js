@@ -37,7 +37,7 @@ export function createInputBar(engine, send) {
   // The bar is now a flex item (see style.css), so `.hidden` toggles
   // `display: none`. Showing/hiding the bar resizes the flex children
   // (#terminal / #reader); fire a synchronous resize so the engine
-  // and reader-view recompute their bounds in the same task.
+  // and reader recompute their bounds in the same task.
   function show() {
     bar.classList.remove('hidden');
     resizeTerminal();
@@ -60,7 +60,7 @@ export function createInputBar(engine, send) {
 
   function resizeTerminal() {
     // Notify synchronously so layout-dependent consumers (engine resize,
-    // reader-view re-pin) read the freshly-shrunk host height
+    // reader re-pin) read the freshly-shrunk host height
     // in the same task — no visible jump on the next frame.
     window.dispatchEvent(new Event('resize'));
   }
