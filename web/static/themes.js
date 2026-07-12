@@ -3,18 +3,20 @@
 //   2. a 16-colour ANSI palette for sterk (sterk.options.theme.palette[0..15])
 //   3. a matching reader-mode --ansi-* CSS variable set on #reader.
 //
-// Storage key: localStorage['mobux:theme']. Default: tomorrow-night-soft.
+// The selected theme id is a server-held preference (prefs.js `theme`),
+// global across devices. Default: tomorrow-night-soft.
 //
 // Apply on page load and on user selection. The picker lives in the
-// settings page; selection broadcasts via the 'storage' event so an
-// open terminal tab swaps live without a page reload.
+// settings page; selection broadcasts via the same-doc 'mobux:theme' event
+// so an open terminal tab swaps live without a page reload.
 //
 // All palettes are deliberately muted/low-contrast — a phone screen at
 // night doesn't tolerate saturated bgs (see PR #57). The luminance
 // contrast pick in aceterm/aceterm.js works against any palette by
 // design (#60), so we don't need per-theme threshold tuning.
 
-const STORAGE_KEY = 'mobux:theme';
+import * as prefs from './prefs.js';
+
 const DEFAULT_THEME = 'tomorrow-night-soft';
 
 // Ordered for the dropdown — first entry is the default.
@@ -116,16 +118,14 @@ export const THEMES = [
 const BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
 
 export function getStoredThemeId() {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY);
-    if (v && BY_ID[v]) return v;
-  } catch (_) {}
+  const v = prefs.get('theme');
+  if (v && BY_ID[v]) return v;
   return DEFAULT_THEME;
 }
 
 export function setStoredThemeId(id) {
   if (!BY_ID[id]) return;
-  try { localStorage.setItem(STORAGE_KEY, id); } catch (_) {}
+  prefs.set('theme', id);
 }
 
 export function getTheme(id) {

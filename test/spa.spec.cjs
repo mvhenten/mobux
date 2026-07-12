@@ -98,6 +98,88 @@ test("app route serves the SPA shell and Home lists sessions", async ({
   await expect(page.locator("#fabNew")).toBeVisible();
 });
 
+// ── server-synced UI preferences (issue #211) ───────────────────────────────
+
+const PREF_DEFAULTS = {
+  renderer: "xterm",
+  theme: "tomorrow-night-soft",
+  default_view: "xterm",
+  osc133_hint_dismissed: false,
+  listen_voice: "",
+  listen_rate: 1.0,
+  listen_pitch: 1.0,
+};
+
+async function putPrefs(page, prefs) {
+  const res = await page.request.put(`${BASE}/api/settings/preferences`, {
+    data: prefs,
+  });
+  if (!res.ok()) throw new Error(`PUT preferences: ${res.status()}`);
+}
+
+test("preferences API round-trips the whole blob", async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+
+  // A fresh row seeds to defaults; renderer/theme are always present strings.
+  const initial = await page.evaluate(async () =>
+    (await fetch("/api/settings/preferences")).json(),
+  );
+  expect(typeof initial.renderer).toBe("string");
+  expect(typeof initial.theme).toBe("string");
+
+  const put = {
+    renderer: "sterk",
+    theme: "nord",
+    default_view: "reader",
+    osc133_hint_dismissed: true,
+    listen_voice: "Daniel",
+    listen_rate: 1.4,
+    listen_pitch: 0.8,
+  };
+  try {
+    const status = await page.evaluate(async (body) => {
+      const r = await fetch("/api/settings/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return r.status;
+    }, put);
+    expect(status).toBe(204);
+
+    const got = await page.evaluate(async () =>
+      (await fetch("/api/settings/preferences")).json(),
+    );
+    expect(got).toMatchObject(put);
+  } finally {
+    await putPrefs(page, PREF_DEFAULTS);
+  }
+});
+
+test("terminal island reads the server renderer preference", async ({
+  page,
+}) => {
+  // Set the renderer to sterk on the server, then load a terminal fresh: the
+  // island must load the sterk vendor bundle, proving it booted from the
+  // server preference — there is no per-device localStorage renderer anymore.
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await putPrefs(page, { ...PREF_DEFAULTS, renderer: "sterk" });
+  try {
+    // about:blank first, so navigating to the terminal route is a full document
+    // load (not a hash-only change) and main.jsx re-runs — re-hydrating prefs
+    // before the island boots.
+    await page.goto("about:blank");
+    const sterkBundle = page.waitForRequest(
+      /\/static\/vendor\/sterk\.bundle\.js/,
+      { timeout: 20000 },
+    );
+    await page.goto(`${APP}#/s/${SEED}`, { waitUntil: "domcontentloaded" });
+    await sterkBundle;
+  } finally {
+    await putPrefs(page, PREF_DEFAULTS);
+  }
+});
+
 // ── session lifecycle: create → rename → kill, all via the SPA UI ───────────
 
 // Reveal a row's hidden swipe action (rename/kill sit behind .session-item).

@@ -1,13 +1,12 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 
-// Theme picker. Ports settings-theme.js. The theme catalogue + apply logic
-// lives in the backend ES module /static/themes.js (single source of truth,
-// also used by the terminal engine), so we dynamically import it at runtime
-// rather than re-declare the palettes here. On change: persist to localStorage
-// via the module, apply live, and broadcast the same-doc 'mobux:theme' event so
-// an open terminal tab swaps without reload (cross-tab is covered by the
-// 'storage' event the module's setter triggers).
+// Theme picker. The theme catalogue + apply logic lives in the backend ES
+// module /static/themes.js (single source of truth, also used by the terminal
+// engine), so we dynamically import it at runtime rather than re-declare the
+// palettes here. On change: persist via the module (which writes the
+// server-held `theme` preference), apply live, and broadcast the same-doc
+// 'mobux:theme' event so an open terminal tab swaps without reload.
 
 const themes = signal([]); // [{ id, label }]
 const current = signal("");
@@ -53,9 +52,7 @@ export function ThemeCard() {
       <label class="settings-row">
         <span class="settings-label">
           <strong>Colour theme</strong>
-          <small>
-            Stored locally as <code>mobux:theme</code>. Per-device.
-          </small>
+          <small>Synced to this mobux server.</small>
         </span>
         <select
           class="settings-select"

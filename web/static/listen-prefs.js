@@ -1,16 +1,17 @@
-// Pure preference loader/saver for the Web Speech API listen feature.
+// Preference loader/saver for the Web Speech API listen feature.
 //
-// Kept side-effect-free: importing this module is safe on any page,
-// including session pages that have no listen DOM. `listen-settings.js`
-// re-exports + handles all settings-page interactions (voice list,
-// voiceschanged listener, slider labels, etc.).
+// The voice/rate/pitch settings are server-held preferences (prefs.js
+// `listen_voice` / `listen_rate` / `listen_pitch`), global across devices.
+// This module is the {voice, rate, pitch} adapter over prefs.js: importing it
+// is safe on any page, including session pages that have no listen DOM.
 //
 // Schema: { voice: string, rate: number, pitch: number }
-// Rate/pitch are clamped to the same range the settings sliders expose
-// (0.5–2.0). Out-of-range or non-numeric values fall back to defaults
-// rather than propagating bad data to SpeechSynthesisUtterance.
+// Rate/pitch are clamped to the settings-slider range (0.5–2.0); out-of-range
+// or non-numeric values fall back to defaults rather than propagating bad data
+// to SpeechSynthesisUtterance.
 
-const STORAGE_KEY = 'mobux.listen.prefs';
+import * as prefs from './prefs.js';
+
 const DEFAULT_PREFS = Object.freeze({ voice: '', rate: 1.0, pitch: 1.0 });
 
 const RATE_MIN = 0.5;
@@ -25,29 +26,18 @@ function clamp(n, lo, hi, fallback) {
 }
 
 function loadPrefs() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_PREFS };
-    const parsed = JSON.parse(raw);
-    return {
-      voice: typeof parsed.voice === 'string' ? parsed.voice : DEFAULT_PREFS.voice,
-      rate: clamp(parsed.rate, RATE_MIN, RATE_MAX, DEFAULT_PREFS.rate),
-      pitch: clamp(parsed.pitch, PITCH_MIN, PITCH_MAX, DEFAULT_PREFS.pitch),
-    };
-  } catch (_) {
-    return { ...DEFAULT_PREFS };
-  }
+  const voice = prefs.get('listen_voice');
+  return {
+    voice: typeof voice === 'string' ? voice : DEFAULT_PREFS.voice,
+    rate: clamp(prefs.get('listen_rate'), RATE_MIN, RATE_MAX, DEFAULT_PREFS.rate),
+    pitch: clamp(prefs.get('listen_pitch'), PITCH_MIN, PITCH_MAX, DEFAULT_PREFS.pitch),
+  };
 }
 
-function savePrefs(prefs) {
-  try {
-    const sanitised = {
-      voice: typeof prefs.voice === 'string' ? prefs.voice : DEFAULT_PREFS.voice,
-      rate: clamp(prefs.rate, RATE_MIN, RATE_MAX, DEFAULT_PREFS.rate),
-      pitch: clamp(prefs.pitch, PITCH_MIN, PITCH_MAX, DEFAULT_PREFS.pitch),
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitised));
-  } catch (_) {}
+function savePrefs(p) {
+  prefs.set('listen_voice', typeof p.voice === 'string' ? p.voice : DEFAULT_PREFS.voice);
+  prefs.set('listen_rate', clamp(p.rate, RATE_MIN, RATE_MAX, DEFAULT_PREFS.rate));
+  prefs.set('listen_pitch', clamp(p.pitch, PITCH_MIN, PITCH_MAX, DEFAULT_PREFS.pitch));
 }
 
 export { loadPrefs, savePrefs, DEFAULT_PREFS };

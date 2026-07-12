@@ -1,6 +1,7 @@
 import { useRef, useLayoutEffect } from "preact/hooks";
 import { collectDiagnostics } from "../lib/diagnostics.js";
 import { buildIssueUrl } from "../lib/githubIssue.js";
+import { getPref } from "../lib/prefs.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -95,13 +96,10 @@ export function TerminalIsland({ node, session }) {
     let cancelled = false;
     let engine = null;
 
-    // Resolve the renderer choice, then load the matching vendor bundle +
-    // css (once per document) before constructing the engine.
-    let renderer = "xterm";
-    try {
-      const s = localStorage.getItem("mobux:renderer");
-      if (s === "sterk" || s === "xterm") renderer = s;
-    } catch (_) {}
+    // Resolve the renderer choice from the server-held preference (hydrated at
+    // boot by main.jsx), then load the matching vendor bundle + css (once per
+    // document) before constructing the engine.
+    const renderer = getPref("renderer") === "sterk" ? "sterk" : "xterm";
 
     const v = `?v=${CACHE_BUST}`;
     const bundle = renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js";

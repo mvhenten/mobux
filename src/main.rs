@@ -263,6 +263,10 @@ async fn main() -> Result<()> {
             get(api_get_notification_prefs).put(api_set_notification_prefs),
         )
         .route(
+            "/api/settings/preferences",
+            get(api_get_ui_preferences).put(api_set_ui_preferences),
+        )
+        .route(
             "/api/settings/stt",
             get(api_get_stt_config).put(api_set_stt_config),
         )
@@ -1272,6 +1276,81 @@ async fn api_set_notification_prefs(
         .db
         .set_notification_prefs(req.into())
         .map_err(|e| AppError::internal(anyhow::anyhow!("writing prefs: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Serialize, Deserialize)]
+struct UiPrefsJson {
+    renderer: String,
+    theme: String,
+    default_view: String,
+    osc133_hint_dismissed: bool,
+    listen_voice: String,
+    listen_rate: f64,
+    listen_pitch: f64,
+}
+
+impl From<db::UiPreferences> for UiPrefsJson {
+    fn from(p: db::UiPreferences) -> Self {
+        Self {
+            renderer: p.renderer,
+            theme: p.theme,
+            default_view: p.default_view,
+            osc133_hint_dismissed: p.osc133_hint_dismissed,
+            listen_voice: p.listen_voice,
+            listen_rate: p.listen_rate,
+            listen_pitch: p.listen_pitch,
+        }
+    }
+}
+
+impl From<UiPrefsJson> for db::UiPreferences {
+    fn from(j: UiPrefsJson) -> Self {
+        // Normalise the two enum-shaped fields and clamp the numeric ranges so
+        // a malformed client can't poison the stored blob. Free-text fields
+        // (theme id, voice name) are stored verbatim.
+        let renderer = if j.renderer == "sterk" {
+            "sterk"
+        } else {
+            "xterm"
+        }
+        .to_string();
+        let default_view = if j.default_view == "reader" {
+            "reader"
+        } else {
+            "xterm"
+        }
+        .to_string();
+        Self {
+            renderer,
+            theme: j.theme,
+            default_view,
+            osc133_hint_dismissed: j.osc133_hint_dismissed,
+            listen_voice: j.listen_voice,
+            listen_rate: j.listen_rate.clamp(0.5, 2.0),
+            listen_pitch: j.listen_pitch.clamp(0.5, 2.0),
+        }
+    }
+}
+
+async fn api_get_ui_preferences(
+    State(state): State<AppState>,
+) -> Result<Json<UiPrefsJson>, AppError> {
+    let prefs = state
+        .db
+        .ui_preferences()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("reading ui preferences: {e}")))?;
+    Ok(Json(prefs.into()))
+}
+
+async fn api_set_ui_preferences(
+    State(state): State<AppState>,
+    Json(req): Json<UiPrefsJson>,
+) -> Result<StatusCode, AppError> {
+    state
+        .db
+        .set_ui_preferences(req.into())
+        .map_err(|e| AppError::internal(anyhow::anyhow!("writing ui preferences: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2455,6 +2534,74 @@ mod tests {
                  denied at the OS layer"
             );
         }
+    }
+
+    // Guard (issue #211): preferences live on the server, not per-device
+    // storage. The legacy localStorage keys that used to hold prefs must never
+    // reappear as a client-side source of truth in the web sources. Scans both
+    // the engine (web/static) and the SPA (web/spa/src) for the old keys —
+    // finding one means a preference silently regressed to per-device state.
+    #[test]
+    fn no_preference_keys_read_from_local_storage() {
+        use std::fs;
+        // Keys that were per-device localStorage prefs and are now server-synced.
+        // `mobux.view.default` is the global default view; the per-window
+        // `mobux.view.<session>.<id>` override key is deliberately NOT here — it
+        // stays device-transient (see the PR classification table).
+        const FORBIDDEN: &[&str] = &[
+            "mobux:renderer",
+            "mobux:theme",
+            "mobux.listen.prefs",
+            "mobux.osc133.dismissed",
+            "mobux.view.default",
+        ];
+
+        let roots = [
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/spa/src"),
+        ];
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack: Vec<std::path::PathBuf> = roots.to_vec();
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                let ext = path.extension().and_then(|e| e.to_str());
+                if !matches!(ext, Some("js") | Some("jsx")) {
+                    continue;
+                }
+                let Ok(src) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                for line in src.lines() {
+                    if !line.contains("localStorage") {
+                        continue;
+                    }
+                    for key in FORBIDDEN {
+                        if line.contains(key) {
+                            offenders.push(format!("{}: {}", path.display(), line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "preference keys must not be read/written via localStorage (they are \
+             server-synced via /api/settings/preferences):\n{}",
+            offenders.join("\n")
+        );
     }
 
     #[test]

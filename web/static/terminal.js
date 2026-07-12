@@ -5,6 +5,7 @@ import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
 import { navigateToUrl, openExternal } from "./external-link.js";
+import * as prefs from "./prefs.js";
 
 // ── Loading screen quotes ───────────────────────────────────────────
 const quotes = [
@@ -168,16 +169,16 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   const getEditor = () => core.term?._sterk?.renderer?.getEditor?.();
   applyTheme(getStoredThemeId(), { editor: getEditor() });
 
-  // Live swap when the settings page (or another tab) changes the theme.
-  // `storage` only fires in OTHER documents — same-doc swaps go through
-  // `mobux:theme` (dispatched by the picker).
+  // Live swap when the settings picker changes the theme in this document.
+  // The picker dispatches `mobux:theme`; prefs.js dispatches `mobux:prefschange`
+  // for every preference write, so honour a theme change from either.
   function onThemeChange() {
     applyTheme(getStoredThemeId(), { editor: getEditor() });
   }
-  on(window, "storage", (e) => {
-    if (e.key === "mobux:theme") onThemeChange();
-  });
   on(window, "mobux:theme", onThemeChange);
+  on(window, "mobux:prefschange", (e) => {
+    if (e.detail?.key === "theme") onThemeChange();
+  });
 
   // Enable overlay for touch devices
   if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
@@ -428,7 +429,11 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   const reader = new ReaderView({ host: readerEl, core, overlay });
   let currentView = "xterm";
 
-  const VIEW_DEFAULT_KEY = "mobux.view.default";
+  // The default view is a server-held preference (prefs.js `default_view`).
+  // The per-window override — which view a specific tmux window was last left
+  // in — stays device-transient in localStorage: it's keyed on the volatile
+  // tmux window id, pruned when the window dies, and is mid-session tab state,
+  // not a durable preference.
   const viewPrefKey = (windowId) => `mobux.view.${session}.${windowId}`;
 
   function activeWindowId() {
@@ -437,11 +442,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   }
 
   function storedDefaultView() {
-    try {
-      return localStorage.getItem(VIEW_DEFAULT_KEY) || "xterm";
-    } catch (_) {
-      return "xterm";
-    }
+    return prefs.get("default_view") === "reader" ? "reader" : "xterm";
   }
 
   function storedViewFor(windowId) {
@@ -489,8 +490,8 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
     }
     currentView = mode;
     if (persist) {
+      prefs.set("default_view", mode);
       try {
-        localStorage.setItem(VIEW_DEFAULT_KEY, mode);
         const wid = activeWindowId();
         if (wid) localStorage.setItem(viewPrefKey(wid), mode);
       } catch (_) {}
