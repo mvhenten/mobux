@@ -23,6 +23,16 @@ import(
   /* @vite-ignore */ new URL("/static/telemetry.js", location.origin).href
 ).catch((e) => console.warn("telemetry.js load failed", e));
 
+// External-link escape (#…): route any anchor to a non-mobux origin out of
+// the app shell (system browser in the TWA) instead of navigating inside it.
+// Loads the same backend module the classic terminal engine uses — one
+// shared open-path, one delegated click handler for the whole SPA.
+import(
+  /* @vite-ignore */ new URL("/static/external-link.js", location.origin).href
+)
+  .then((m) => m.installExternalLinkHandler())
+  .catch((e) => console.warn("external-link.js load failed", e));
+
 // Server-held UI preferences (#211). Load the shared engine module and
 // fetch the whole blob before first render, so the terminal island reads the
 // renderer/theme/etc. the server holds — not per-device localStorage, which is

@@ -6,7 +6,12 @@ import { createGestureRecognizer } from "./touch.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
-import { navigateToUrl, openExternal } from "./external-link.js";
+import {
+  navigateToUrl,
+  openExternal,
+  isExternalUrl,
+  installExternalLinkHandler,
+} from "./external-link.js";
 import * as prefs from "./prefs.js";
 
 // ── Loading screen quotes ───────────────────────────────────────────
@@ -166,6 +171,10 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   // intent:// rationale. Expose for tests (mirrors `window.__mobuxView` etc.).
   window.__mobuxNavigateToUrl = navigateToUrl;
   window.__mobuxOpenExternal = openExternal;
+  window.__mobuxIsExternalUrl = isExternalUrl;
+  // Route any anchor to another origin (reader hints, future rendered
+  // links) out of the app shell. Idempotent with the SPA's own install.
+  installExternalLinkHandler();
 
   // ── Core ────────────────────────────────────────────────────────────
   // `coarse` pointer = touch primary (phones + tablets). Width fallback

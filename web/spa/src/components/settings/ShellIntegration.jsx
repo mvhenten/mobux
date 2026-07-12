@@ -120,7 +120,7 @@ export function ShellIntegrationCard() {
         <a
           href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md"
           target="_blank"
-          rel="noopener"
+          rel="noopener noreferrer"
         >
           OSC 133
         </a>{" "}

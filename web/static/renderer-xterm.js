@@ -12,6 +12,8 @@
 // The xterm bundle (xterm.bundle.js) pins `window.Terminal` and
 // `window.WebLinksAddon` before the engine is constructed.
 
+import { openExternal } from "./external-link.js";
+
 export function createXtermRenderer(host, options = {}) {
   const Xterm = window.Terminal;
   const WebLinksAddon =
@@ -38,7 +40,9 @@ export function createXtermRenderer(host, options = {}) {
   });
   term.open(host);
   if (WebLinksAddon) {
-    term.loadAddon(new WebLinksAddon());
+    // Route clicked links out of the app shell (system browser in the TWA)
+    // instead of xterm's default in-window window.open.
+    term.loadAddon(new WebLinksAddon((_event, uri) => openExternal(uri)));
   }
 
   // Lock mouse protocol to NONE — prevents xterm.js from capturing

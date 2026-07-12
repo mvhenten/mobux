@@ -33,6 +33,8 @@
 // the connection/scroll/pane/tmux/history methods, and the interface
 // passthroughs above.
 
+import { openExternal } from "./external-link.js";
+
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
   "prev-window",

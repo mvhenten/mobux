@@ -495,6 +495,132 @@ test("external links: anchor-click in regular browser, intent:// in TWA", async 
   expect(twaResult.anchorClicked).toBe(false);
 });
 
+test("external links: isExternalUrl distinguishes shell-internal from off-origin", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(
+    () => typeof window.__mobuxIsExternalUrl === "function",
+    { timeout: 5000 },
+  );
+
+  const result = await page.evaluate(() => {
+    const isExternal = window.__mobuxIsExternalUrl;
+    return {
+      absoluteOther: isExternal("https://example.com/x"),
+      sameOrigin: isExternal(`${window.location.origin}/settings`),
+      relativePath: isExternal("/settings#shell-integration"),
+      hash: isExternal("#/s/foo"),
+      mailto: isExternal("mailto:x@example.com"),
+      protocolRelative: isExternal("//example.com/x"),
+    };
+  });
+
+  expect(result.absoluteOther).toBe(true);
+  expect(result.sameOrigin).toBe(false);
+  expect(result.relativePath).toBe(false);
+  expect(result.hash).toBe(false);
+  // Non-http(s) schemes are left to the platform, not treated as external.
+  expect(result.mailto).toBe(false);
+  // Protocol-relative URLs inherit the page's scheme and still resolve to a
+  // different origin — must be caught too.
+  expect(result.protocolRelative).toBe(true);
+});
+
+test("external links: delegated handler escapes off-origin anchors, leaves in-app anchors alone", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  // The delegated click handler is installed at SPA boot (main.jsx) and again
+  // by the engine — both no-op after the first via the window guard.
+  await page.waitForFunction(
+    () => window.__mobuxExternalLinkHandlerInstalled === true,
+    { timeout: 5000 },
+  );
+
+  const result = await page.evaluate(() => {
+    // Simulate the TWA so the escape path is the observable intent:// route.
+    Object.defineProperty(document, "referrer", {
+      configurable: true,
+      get: () => "android-app://io.github.mvhenten.mobux",
+    });
+    const origNavigate = window.__mobuxNavigateToUrl;
+
+    // Fires a real click at a freshly created anchor and reports what the
+    // delegated handler (registered earlier, same node/phase) decided.
+    // `observe` is a *second* capture-phase listener on the same document
+    // node, so per spec it runs strictly after the real handler (same
+    // node+phase => registration order) — it reads e.defaultPrevented
+    // exactly as the real handler left it before applying its own
+    // preventDefault() as a safety net (only to stop this headless page
+    // from actually navigating away). Asserting only navigatedToUrl would
+    // pass even if that safety net were the sole thing stopping navigation,
+    // so the handler's own verdict is captured separately.
+    function fireClick(href, { download, ...eventInit } = {}) {
+      let navigatedToUrl = null;
+      window.__mobuxNavigateToUrl = (url) => {
+        navigatedToUrl = url;
+      };
+      const a = document.createElement("a");
+      a.href = href;
+      a.textContent = "link";
+      if (download) a.setAttribute("download", "");
+      document.body.appendChild(a);
+
+      let defaultPrevented = null;
+      const observe = (e) => {
+        defaultPrevented = e.defaultPrevented;
+        e.preventDefault();
+      };
+      document.addEventListener("click", observe, true);
+      const ev = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        ...eventInit,
+      });
+      a.dispatchEvent(ev);
+      document.removeEventListener("click", observe, true);
+      a.remove();
+      return { navigatedToUrl, defaultPrevented };
+    }
+
+    const external = fireClick("https://example.com/delegated");
+    const internal = fireClick(`${window.location.origin}/settings`);
+    const modifiedClick = fireClick("https://example.com/modified", {
+      metaKey: true,
+    });
+    const downloadAnchor = fireClick("https://example.com/file.bin", {
+      download: true,
+    });
+
+    window.__mobuxNavigateToUrl = origNavigate;
+    Object.defineProperty(document, "referrer", {
+      configurable: true,
+      get: () => "",
+    });
+    return { external, internal, modifiedClick, downloadAnchor };
+  });
+
+  // The handler itself must call preventDefault for an external anchor —
+  // not just produce a navigatedToUrl side effect.
+  expect(result.external.defaultPrevented).toBe(true);
+  expect(result.external.navigatedToUrl).toContain("intent://");
+  expect(result.external.navigatedToUrl).toContain("example.com/delegated");
+
+  // In-app navigation must not be pushed out of the shell.
+  expect(result.internal.defaultPrevented).toBe(false);
+  expect(result.internal.navigatedToUrl).toBeNull();
+
+  // A modifier-click (open in new tab/window) and a download anchor must
+  // reach the browser's own default behavior untouched — the handler must
+  // not intercept either.
+  expect(result.modifiedClick.defaultPrevented).toBe(false);
+  expect(result.modifiedClick.navigatedToUrl).toBeNull();
+  expect(result.downloadAnchor.defaultPrevented).toBe(false);
+  expect(result.downloadAnchor.navigatedToUrl).toBeNull();
+});
+
 test("reader view renders buffer text", async ({ page }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
 
