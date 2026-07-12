@@ -23,9 +23,13 @@
 //   R9  isAlternateScreenActive(): boolean
 //   R10 registerOscHandler(id, cb): Disposable
 //   R11 setTheme(theme); setFontSize(px); getFontSize()
+//   R12 getSelection(); hasSelection(); clearSelection(); selectAll();
+//       onSelectionChange(cb): Disposable    native-DOM selection (#137)
+//   R13 onLink(cb): Disposable               URL activations; UI opens them
+//   R14 onBell(cb): Disposable               terminal BEL; UI decides
 //   R15 focus(); setNativeInputEnabled(bool)
 //   R16 constructed with { altScreen: false }; the renderer suppresses
-//       alternate-screen switching itself
+//       alternate-screen switching (and mouse-protocol reporting) itself
 //       clear()                              (engine housekeeping)
 //
 // The engine exposes the same surface consumers (terminal.js, reader-view.js)
@@ -289,6 +293,29 @@ export class TerminalEngine extends EventTarget {
   }
   setTheme(theme) {
     this.renderer.setTheme(theme);
+  }
+
+  // ── Selection / links / bell (R12–R14) ────────────────────────────
+  getSelection() {
+    return this.renderer.getSelection();
+  }
+  hasSelection() {
+    return this.renderer.hasSelection();
+  }
+  clearSelection() {
+    this.renderer.clearSelection();
+  }
+  selectAll() {
+    this.renderer.selectAll();
+  }
+  onSelectionChange(cb) {
+    return this.renderer.onSelectionChange(cb);
+  }
+  onLink(cb) {
+    return this.renderer.onLink(cb);
+  }
+  onBell(cb) {
+    return this.renderer.onBell(cb);
   }
 
   setFontSize(px) {

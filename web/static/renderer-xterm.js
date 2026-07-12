@@ -12,8 +12,6 @@
 // The xterm bundle (xterm.bundle.js) pins `window.Terminal` and
 // `window.WebLinksAddon` before the engine is constructed.
 
-import { openExternal } from "./external-link.js";
-
 export function createXtermRenderer(host, options = {}) {
   const Xterm = window.Terminal;
   const WebLinksAddon =
@@ -23,6 +21,13 @@ export function createXtermRenderer(host, options = {}) {
       "xterm bundle not loaded — check vendor/xterm.bundle.js script tag",
     );
   }
+
+  // R13 — link activations detected by the WebLinks addon fan out here; the UI
+  // decides how to open them (mobux routes them out of the app shell).
+  const linkSubs = [];
+  const emitLink = (uri) => {
+    for (const cb of linkSubs.slice()) cb(uri);
+  };
 
   const term = new Xterm({
     cursorBlink: true,
@@ -40,9 +45,9 @@ export function createXtermRenderer(host, options = {}) {
   });
   term.open(host);
   if (WebLinksAddon) {
-    // Route clicked links out of the app shell (system browser in the TWA)
-    // instead of xterm's default in-window window.open.
-    term.loadAddon(new WebLinksAddon((_event, uri) => openExternal(uri)));
+    // Report activations through onLink instead of opening here — the UI owns
+    // the open decision (R13).
+    term.loadAddon(new WebLinksAddon((_event, uri) => emitLink(uri)));
   }
 
   // Lock mouse protocol to NONE — prevents xterm.js from capturing
@@ -90,6 +95,7 @@ export function createXtermRenderer(host, options = {}) {
   return {
     // R1 — teardown: xterm releases its DOM + internal listeners.
     dispose() {
+      linkSubs.length = 0;
       try {
         term.dispose();
       } catch (_) {}
@@ -182,6 +188,39 @@ export function createXtermRenderer(host, options = {}) {
     },
     getFontSize() {
       return term.options.fontSize;
+    },
+
+    // R12 — selection, via xterm's selection API.
+    getSelection() {
+      return term.getSelection();
+    },
+    hasSelection() {
+      return term.hasSelection();
+    },
+    clearSelection() {
+      term.clearSelection();
+    },
+    selectAll() {
+      term.selectAll();
+    },
+    onSelectionChange(cb) {
+      return term.onSelectionChange(cb);
+    },
+
+    // R13 — links. Subscribe to activations reported by the WebLinks addon.
+    onLink(cb) {
+      linkSubs.push(cb);
+      return {
+        dispose() {
+          const i = linkSubs.indexOf(cb);
+          if (i >= 0) linkSubs.splice(i, 1);
+        },
+      };
+    },
+
+    // R14 — bell. The UI decides what to do (mobux's chime).
+    onBell(cb) {
+      return term.onBell(cb);
     },
 
     // R15 — input surface ownership.

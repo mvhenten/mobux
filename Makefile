@@ -218,9 +218,9 @@ test-spa:
 		npx playwright test test/spa.spec.cjs
 
 # Renderer conformance (issue #207, D10): one spec exercises the explicit
-# renderer interface (R1–R11, R15–R16) against BOTH adapters via the
-# xterm/sterk Playwright projects. A renderer is conformant when this suite is
-# green on its project. Same isolated smoke instance as the rest of the suite.
+# renderer interface (R1–R16) against BOTH adapters via the xterm/sterk
+# Playwright projects. A renderer is conformant when this suite is green on its
+# project. Same isolated smoke instance as the rest of the suite.
 .PHONY: test-conformance
 test-conformance:
 	@$(MAKE) smoke-start

@@ -7,11 +7,11 @@
 // (`window.__mobuxView.test.*`), never a renderer global, so the assertions
 // are renderer-agnostic: the same code must pass on xterm and on sterk.
 //
-// Scope note (stages 1–2): R12–R14 (selection, links, bell) are stage 3 and
-// are not asserted here. Where sterk carries a known upstream gap, the shared
-// contract is asserted at the level both renderers satisfy today (see the R9 /
-// R16 and R2 comments); the stronger sterk guarantees land with the upstream
-// sterk release (stage 3). See the PR description.
+// Scope note: R1–R16 are asserted here, both adapters. R12–R14 (selection,
+// links, bell) landed in stage 3 with sterk pinned to a published release, so
+// the sterk-side gaps the earlier stages worked around (public alt-screen
+// state, native selection, a link module, a bell event) are now real API and
+// held to the same contract as xterm. See the PR description.
 
 const { test, expect } = require("./fixtures.cjs");
 const { execSync } = require("child_process");
@@ -291,4 +291,155 @@ test("R15: focus and setNativeInputEnabled are callable", async ({ page }) => {
     return true;
   });
   expect(ok).toBe(true);
+});
+
+// R12 — selection: selectAll produces a readable, non-empty selection that
+// fires onSelectionChange; clearSelection empties it. Sterk implements it with
+// native DOM selection, xterm with its selection API — same contract.
+test("R12: selectAll, getSelection, onSelectionChange, clearSelection", async ({
+  page,
+}) => {
+  await boot(page);
+  await page.evaluate(() =>
+    window.__mobuxView.test.inject("R12_SELECTION_MARKER\n"),
+  );
+  await page.waitForFunction(() => window.__mobuxView.test.bufferLength() > 0, {
+    timeout: 8000,
+  });
+
+  // Subscribe BEFORE selecting so the change event can't be missed.
+  const changePromise = page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        let done = false;
+        const settle = (v) => {
+          if (!done) {
+            done = true;
+            resolve(v);
+          }
+        };
+        window.__mobuxView.test.awaitSelectionChange().then(() => settle(true));
+        setTimeout(() => settle(false), 5000);
+      }),
+  );
+  await page.waitForTimeout(50);
+  await page.evaluate(() => window.__mobuxView.test.selectAll());
+  expect(await changePromise).toBe(true);
+
+  expect(
+    await page.evaluate(() => window.__mobuxView.test.hasSelection()),
+  ).toBe(true);
+  const selected = await page.evaluate(() =>
+    window.__mobuxView.test.getSelection(),
+  );
+  expect(selected).toContain("R12_SELECTION_MARKER");
+
+  await page.evaluate(() => window.__mobuxView.test.clearSelection());
+  expect(
+    await page.evaluate(() => window.__mobuxView.test.hasSelection()),
+  ).toBe(false);
+});
+
+// R13 — links: a URL in the buffer, when activated, is reported through
+// onLink. Both adapters detect the URL themselves (xterm: WebLinks addon;
+// sterk: its link module) and fan the activation out to the UI.
+test("R13: URL activation is reported through onLink", async ({ page }) => {
+  await boot(page);
+  const URL = "https://example.com/r13-conformance";
+
+  // The coarse-pointer touch overlay and the loading splash both sit above the
+  // terminal and would eat the click; drop them so the renderer's own link
+  // layer sees the mouse (the desktop path). inject() closes the WS, so the
+  // splash's first-data dismissal never fires on its own. The mobile
+  // tap-to-open affordance is separate.
+  await page.evaluate(() => {
+    const o = document.getElementById("touchOverlay");
+    if (o) o.style.pointerEvents = "none";
+    const q = document.getElementById("loadquote");
+    if (q) q.remove();
+  });
+
+  // `\x1b[K` erases to end of line after the URL so a residual char left on the
+  // row by earlier output can't extend the detected link (the URL regex is
+  // greedy up to the next whitespace).
+  await page.evaluate(
+    (u) => window.__mobuxView.test.inject(`open ${u}\x1b[K\n`),
+    URL,
+  );
+  await page.evaluate(() => window.__mobuxView.test.scrollToBottom());
+  await page.waitForFunction(
+    (u) => {
+      const len = window.__mobuxView.test.bufferLength();
+      for (let y = 0; y < len; y++) {
+        const t = window.__mobuxView.test.lineText(y);
+        if (t && t.includes(u)) return true;
+      }
+      return false;
+    },
+    URL,
+    { timeout: 10000 },
+  );
+
+  // Centre of the URL text, in viewport pixels.
+  const point = await page.evaluate((u) => {
+    const len = window.__mobuxView.test.bufferLength();
+    const vy = window.__mobuxView.test.viewportY();
+    const rows = window.__mobuxView.test.rows();
+    const cell = window.__mobuxView.test.cellMetrics();
+    const rect = document.getElementById("terminal").getBoundingClientRect();
+    for (let y = vy; y < Math.min(len, vy + rows); y++) {
+      const t = window.__mobuxView.test.lineText(y);
+      const idx = t ? t.indexOf(u) : -1;
+      if (idx >= 0) {
+        const col = idx + Math.floor(u.length / 2);
+        return {
+          x: rect.left + (col + 0.5) * cell.width,
+          y: rect.top + (y - vy + 0.5) * cell.height,
+        };
+      }
+    }
+    return null;
+  }, URL);
+  expect(point).not.toBeNull();
+
+  const linkPromise = page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        let done = false;
+        const settle = (v) => {
+          if (!done) {
+            done = true;
+            resolve(v);
+          }
+        };
+        window.__mobuxView.test.awaitLink().then((uri) => settle(uri));
+        setTimeout(() => settle(null), 6000);
+      }),
+  );
+  await page.waitForTimeout(100);
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.click(point.x, point.y);
+  expect(await linkPromise).toBe(URL);
+});
+
+// R14 — bell: a terminal BEL (0x07) is reported through onBell.
+test("R14: terminal BEL is reported through onBell", async ({ page }) => {
+  await boot(page);
+  const observed = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        let done = false;
+        const settle = (v) => {
+          if (!done) {
+            done = true;
+            resolve(v);
+          }
+        };
+        window.__mobuxView.test.awaitBell().then(() => settle(true));
+        setTimeout(() => settle(false), 5000);
+        window.__mobuxView.test.writeData("\x07");
+      }),
+  );
+  expect(observed).toBe(true);
 });
