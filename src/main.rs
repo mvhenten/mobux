@@ -1311,14 +1311,98 @@ async fn settings_page() -> impl IntoResponse {
     )
 }
 
+/// Where a bare session name (no node segment) is currently found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionLocation {
+    Local,
+    Node(String),
+}
+
+/// Pure decision, no I/O: given what's currently at each location, is `name`
+/// findable at exactly one? A same-named session can exist locally AND on a
+/// node, or on two different nodes — that's ambiguous, not a tie-break, so it
+/// (like a zero-location miss) returns `None`. Kept separate from
+/// `locate_session` (the tmux/ssh-probing wrapper) so the decision itself is
+/// unit-testable without any process spawning.
+fn resolve_session_location(
+    name: &str,
+    local: &[tmux::Session],
+    nodes: &[(&str, &[tmux::Session])],
+) -> Option<SessionLocation> {
+    let mut found = Vec::new();
+    if local.iter().any(|s| s.name == name) {
+        found.push(SessionLocation::Local);
+    }
+    for (node_name, sessions) in nodes {
+        if sessions.iter().any(|s| s.name == name) {
+            found.push(SessionLocation::Node((*node_name).to_string()));
+        }
+    }
+    let mut it = found.into_iter();
+    let first = it.next()?;
+    if it.next().is_some() {
+        return None; // ambiguous
+    }
+    Some(first)
+}
+
+/// Probe local + every configured node concurrently for a session named
+/// `name` (mirrors `api_nodes_status`'s `join_all` reachability pattern). A
+/// probe that errors (unreachable node, no local tmux server yet) counts as
+/// "not there" rather than failing the whole lookup — worst case that lands
+/// the caller on Home instead of a specific tmux, never the wrong one.
+async fn locate_session(state: &AppState, name: &str) -> Option<SessionLocation> {
+    let db_nodes = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || db.list_nodes()
+    })
+    .await
+    .ok()?
+    .unwrap_or_default();
+
+    let local_probe = tmux::list_sessions(None);
+    let node_probes = db_nodes
+        .iter()
+        .map(|n| tmux::list_sessions(Some(n.target.as_str())));
+    let (local_result, node_results) = tokio::join!(local_probe, future::join_all(node_probes));
+
+    let local_sessions = local_result.unwrap_or_default();
+    let node_sessions: Vec<(String, Vec<tmux::Session>)> = db_nodes
+        .into_iter()
+        .zip(node_results)
+        .map(|(n, r)| (n.name, r.unwrap_or_default()))
+        .collect();
+    let node_refs: Vec<(&str, &[tmux::Session])> = node_sessions
+        .iter()
+        .map(|(name, sessions)| (name.as_str(), sessions.as_slice()))
+        .collect();
+
+    resolve_session_location(name, &local_sessions, &node_refs)
+}
+
+/// A bare session-name link, either a push-notification click (`push.rs`
+/// builds `/s/{session}` — always the hub's own local tmux, since the
+/// `alert-bell` hook only ever runs there, see `push::session_url`) or a
+/// hand-typed / bookmarked one, which carries no such guarantee. A same-named
+/// session can exist on a node too, so this resolves rather than assuming
+/// local (issue #210: the previous behavior — always redirecting to the
+/// hub-local hash route regardless of where the session actually lived —
+/// silently attached the wrong tmux whenever the two disagreed).
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     validate_session_name(&state, &name)?;
-    // 307 to the SPA hash route. Name is already validated to [a-zA-Z0-9_-] so
-    // no percent-encoding needed.
-    let location = format!("/app#/s/{name}");
+    // Name is already validated to [a-zA-Z0-9_-], so no percent-encoding
+    // is needed in any of these hash routes.
+    let location = match locate_session(&state, &name).await {
+        Some(SessionLocation::Local) => format!("/app#/s/{name}"),
+        Some(SessionLocation::Node(node)) => format!("/app#/s/{node}/{name}"),
+        // Not found anywhere, or found in more than one place — never guess;
+        // land on Home so the user picks explicitly instead of silently
+        // attaching to the wrong tmux.
+        None => "/app#/".to_string(),
+    };
     Ok((
         axum::http::StatusCode::TEMPORARY_REDIRECT,
         [
@@ -2642,6 +2726,84 @@ mod tests {
         for m in &models {
             assert!(!m.is_empty(), "model id must not be empty");
         }
+    }
+
+    // ── bare session-name resolution (issue #210) ────────────────────────────
+    //
+    // `resolve_session_location` is the pure decision behind `terminal_page`'s
+    // `/s/{name}` redirect: given what's currently at each location, is `name`
+    // findable at exactly one? Exercised directly with synthetic session
+    // lists — no tmux process, no ssh — so every combination is deterministic
+    // and fast. The I/O wrapper (`locate_session`, real tmux/ssh probing) is
+    // covered by the fleet e2e (test/fleet/hub-proxy.spec.cjs), the only place
+    // that can stand up a real second tmux server.
+
+    fn session(name: &str) -> tmux::Session {
+        tmux::Session {
+            name: name.to_string(),
+            windows: 1,
+            attached: 0,
+            created_unix: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_session_location_unique_local_match() {
+        let local = [session("mobux")];
+        assert_eq!(
+            resolve_session_location("mobux", &local, &[]),
+            Some(SessionLocation::Local)
+        );
+    }
+
+    #[test]
+    fn resolve_session_location_unique_node_match() {
+        let local = [session("other")];
+        let devbox = [session("mobux")];
+        let nodes: [(&str, &[tmux::Session]); 1] = [("devbox", &devbox)];
+        assert_eq!(
+            resolve_session_location("mobux", &local, &nodes),
+            Some(SessionLocation::Node("devbox".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_session_location_no_match_anywhere() {
+        let local = [session("other")];
+        let devbox = [session("also-other")];
+        let nodes: [(&str, &[tmux::Session]); 1] = [("devbox", &devbox)];
+        assert_eq!(resolve_session_location("mobux", &local, &nodes), None);
+    }
+
+    #[test]
+    fn resolve_session_location_ambiguous_local_and_node_is_not_a_tiebreak() {
+        // Same name local AND on a node — must not default to local.
+        let local = [session("mobux")];
+        let devbox = [session("mobux")];
+        let nodes: [(&str, &[tmux::Session]); 1] = [("devbox", &devbox)];
+        assert_eq!(resolve_session_location("mobux", &local, &nodes), None);
+    }
+
+    #[test]
+    fn resolve_session_location_ambiguous_across_two_nodes() {
+        let local: [tmux::Session; 0] = [];
+        let alpha = [session("mobux")];
+        let beta = [session("mobux")];
+        let nodes: [(&str, &[tmux::Session]); 2] = [("alpha", &alpha), ("beta", &beta)];
+        assert_eq!(resolve_session_location("mobux", &local, &nodes), None);
+    }
+
+    #[test]
+    fn resolve_session_location_ignores_other_names_on_other_locations() {
+        // A node having ITS OWN unrelated session named differently must not
+        // affect resolving a distinct name that's only local.
+        let local = [session("mobux")];
+        let devbox = [session("unrelated")];
+        let nodes: [(&str, &[tmux::Session]); 1] = [("devbox", &devbox)];
+        assert_eq!(
+            resolve_session_location("mobux", &local, &nodes),
+            Some(SessionLocation::Local)
+        );
     }
 
     // The dev flag is exposed via /api/build-info for any other dev-only

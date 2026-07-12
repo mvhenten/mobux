@@ -48,6 +48,18 @@ use crate::db::{Db, Subscription, VapidKeys};
 
 /// Build the deep-link URL for a session notification, embedding
 /// `?w={window}` so a click can land on the originating tmux window.
+///
+/// Deliberately node-less: `session` always names a session on the HUB'S OWN
+/// local tmux. The only caller is `fire_bell`, driven exclusively by the
+/// `alert-bell` hook (`tmux::install_bell_hook`), which is installed once, at
+/// startup, on the hub's local tmux server only — nodes are plain SSH targets
+/// (see `nodes.rs`/`tmux.rs`), not separate mobux processes, so they have no
+/// hook to install and can never be the source of a bell. There is no node to
+/// know here, so producing a bare `/s/{session}` is already correct, not a
+/// gap (contrast with the `/s/{name}` server route in `main.rs`, which is
+/// also reachable by a hand-typed/bookmarked link and — unlike this
+/// hook-driven one — cannot assume local; see `terminal_page` /
+/// `resolve_session_location` there, issue #210).
 fn session_url(session: &str, window: Option<&str>) -> String {
     match window {
         Some(w) if !w.is_empty() => format!("/s/{session}?w={w}"),

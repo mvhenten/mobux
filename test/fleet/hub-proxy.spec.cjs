@@ -199,6 +199,60 @@ test("a bare session URL attaches to the hub's local tmux", async ({
   );
 });
 
+// ── bare session-name redirect resolves to the RIGHT tmux (issue #210) ─────
+//
+// A push notification (push.rs::session_url) and the legacy `/s/{name}`
+// route it deep-links to both carry the session name ALONE, with no node
+// segment. Before this fix, the server unconditionally redirected to the
+// hub-LOCAL hash route regardless of where the session actually lived, so a
+// notification for a node-only session silently attached to the wrong (or
+// nonexistent) local tmux instead. These hit the real `/s/{name}` redirect
+// (the raw legacy route, not `/app#/s/...`) against a real second tmux
+// server — the only harness that can prove a wrong resolution as the WRONG
+// server's tmux, not just a wrong-looking URL.
+
+test("a bare session-name link resolves to the node that actually owns it", async () => {
+  const solo = "fleet-e2e-node-only";
+  node.ssh(`tmux new-session -d -s ${solo}`);
+  try {
+    const res = await fetch(`${hub.base}/s/${solo}`, {
+      headers: { Authorization: HUB_AUTH },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe(`/app#/s/${node.name}/${solo}`);
+  } finally {
+    node.ssh(`tmux kill-session -t ${solo} || true`);
+  }
+});
+
+test("a bare session-name link ambiguous between local and a node lands on Home, never a guess", async () => {
+  const dupe = "fleet-e2e-dupe";
+  node.ssh(`tmux new-session -d -s ${dupe}`);
+  hubTmux(`new-session -d -s ${dupe}`);
+  try {
+    const res = await fetch(`${hub.base}/s/${dupe}`, {
+      headers: { Authorization: HUB_AUTH },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(307);
+    // Same name lives in two places — never guess which one the user meant.
+    expect(res.headers.get("location")).toBe("/app#/");
+  } finally {
+    node.ssh(`tmux kill-session -t ${dupe} || true`);
+    hubTmux(`kill-session -t ${dupe}`);
+  }
+});
+
+test("a bare session-name link with no match anywhere lands on Home", async () => {
+  const res = await fetch(`${hub.base}/s/fleet-e2e-does-not-exist`, {
+    headers: { Authorization: HUB_AUTH },
+    redirect: "manual",
+  });
+  expect(res.status).toBe(307);
+  expect(res.headers.get("location")).toBe("/app#/");
+});
+
 test("resize reaches the remote PTY", async ({ page }) => {
   await bootRemoteTerminal(page);
   const dims = () =>

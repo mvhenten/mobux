@@ -220,130 +220,28 @@ test("terminal island mounts and the PTY websocket connects", async ({
   );
 });
 
-// ── node-drop on re-entry: a session's node rides only in the hash URL, so a
-// re-entry by name alone (a push-notification deep-link — push.rs builds a
-// node-less `/s/<name>`; the `/s/<name>` server redirect; a saved/restored
-// link) drops it and the engine silently attaches to the LOCAL host instead of
-// the node ("can't find session"). The observed bad ws URL is `/ws/<name>` with
-// no `?node=`. These pin the fix: the node a session was opened on is
-// remembered and recovered on a node-less re-entry. ────────────────────────
-
-const NODE_MOCK = {
-  nodes: [{ name: "devbox", target: "mvhenten@devbox", reachable: true }],
-};
-
-test("terminal: a node-less re-entry recovers the session's node (no silent local attach)", async ({
-  page,
-}) => {
-  await page.route(/\/api\/nodes$/, (r) =>
-    r.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(NODE_MOCK),
-    }),
-  );
-
-  // The device remembers it last opened this session on 'devbox' (what Home's
-  // open() records — asserted separately below).
-  await page.goto(`${APP}#/`, { waitUntil: "load" });
-  await page.evaluate((s) => {
-    localStorage.setItem(
-      "mobux:sessionNodes",
-      JSON.stringify({ [s]: "devbox" }),
-    );
-  }, SEED);
-
-  // Node-less re-entry — the notification / saved-link shape.
-  const wsUrl = new Promise((resolve) => {
-    page.on("websocket", (ws) => {
-      if (ws.url().includes(`/ws/${encodeURIComponent(SEED)}`))
-        resolve(ws.url());
-    });
-  });
-  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
-    waitUntil: "load",
-  });
-
-  // Recovered: the route is rewritten to the node-qualified form and the ws
-  // carries ?node=devbox rather than attaching locally.
-  await expect
-    .poll(() => page.url(), { timeout: 5000 })
-    .toContain(`#/s/devbox/${SEED}`);
-  const url = await Promise.race([
-    wsUrl,
-    new Promise((_, rej) =>
-      setTimeout(() => rej(new Error("ws timeout")), 15000),
-    ),
-  ]);
-  expect(url).toContain("node=devbox");
-});
-
-test("terminal: a node-less re-entry with no memory stays local (no wrong-node attach)", async ({
-  page,
-}) => {
-  await page.route(/\/api\/nodes$/, (r) =>
-    r.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(NODE_MOCK),
-    }),
-  );
-
-  const wsUrl = new Promise((resolve) => {
-    page.on("websocket", (ws) => {
-      if (ws.url().includes(`/ws/${encodeURIComponent(SEED)}`))
-        resolve(ws.url());
-    });
-  });
-  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
-    waitUntil: "load",
-  });
-
-  const url = await Promise.race([
-    wsUrl,
-    new Promise((_, rej) =>
-      setTimeout(() => rej(new Error("ws timeout")), 15000),
-    ),
-  ]);
-  // Nothing remembered ⇒ a node-less URL is a genuine local attach; the route
-  // is not rewritten and the ws carries no node.
-  expect(url).not.toContain("node=");
-  expect(page.url()).toContain(`#/s/${SEED}`);
-  expect(page.url()).not.toContain("devbox");
-});
-
-test("home: opening a node session records the node for later recovery", async ({
-  page,
-}) => {
-  await page.route(/\/api\/nodes$/, (r) =>
-    r.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(NODE_MOCK),
-    }),
-  );
-  await page.route(/\/api\/sessions(\?|$)/, (r) => {
-    if (r.request().method() !== "GET")
-      return r.fulfill({ status: 200, body: "{}" });
-    return r.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ sessions: [{ name: SEED, windows: 1 }] }),
-    });
-  });
-
-  await page.goto(`${APP}#/`, { waitUntil: "load" });
-  await page.locator('.node-chip[data-node="devbox"]').click();
-  await page.locator(".session-item").first().click();
-
-  await expect
-    .poll(() => page.url(), { timeout: 5000 })
-    .toContain(`#/s/devbox/${SEED}`);
-  const mem = await page.evaluate(() =>
-    localStorage.getItem("mobux:sessionNodes"),
-  );
-  expect(JSON.parse(mem)[SEED]).toBe("devbox");
-});
+// ── node-drop on re-entry (issue #210) ──────────────────────────────────────
+//
+// A session's node rides only in the hash URL (`#/s/<node>/<name>`), so a
+// re-entry by bare session name — a push-notification deep-link, the legacy
+// `/s/<name>` server redirect, a hand-typed/bookmarked link — must not
+// silently attach to the LOCAL host when the session actually lives on a
+// node. That's fixed at the URL-production layer, server-side, where the
+// knowledge actually lives: `push.rs::session_url` documents why its
+// session is always hub-local (the alert-bell hook only ever runs there),
+// and the `/s/{name}` route (`terminal_page` in src/main.rs) resolves an
+// ambiguous/hand-typed name against the real session inventory before
+// redirecting into the SPA. See:
+//   - src/main.rs `resolve_session_location_*` unit tests (pure decision
+//     logic: unique local, unique node, ambiguous, no match)
+//   - test/fleet/hub-proxy.spec.cjs (real ssh + real second tmux server —
+//     the only harness that can prove a notification-shaped URL actually
+//     lands on the right tmux, not just the right *route*)
+// A client-side "remember what node I last used" cache can't deliver this
+// guarantee (a notification opened on a second device, or a fresh browser
+// with no local storage, would still attach locally), so there is
+// deliberately no client-side mechanism here — the SPA renders whatever
+// (node, name) pair the URL already names.
 
 // ── terminal island: fills the viewport on mount (no too-short PTY) ─────────
 //

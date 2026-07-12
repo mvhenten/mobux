@@ -1,7 +1,7 @@
 import { Router, Route, Switch, Link, useLocation } from "wouter-preact";
 import { useHashLocation } from "wouter-preact/use-hash-location";
 import { HomePage } from "./pages/Home.jsx";
-import { TerminalPage, NodeLessTerminalRoute } from "./pages/Terminal.jsx";
+import { TerminalPage } from "./pages/Terminal.jsx";
 import { SettingsPage } from "./pages/Settings.jsx";
 import { InstallPage } from "./pages/Install.jsx";
 import { ErrorPage } from "./components/ErrorPage.jsx";
@@ -33,7 +33,7 @@ export function App() {
           {(params) => <TerminalPage node={params.node} name={params.name} />}
         </Route>
         <Route path="/s/:name">
-          {(params) => <NodeLessTerminalRoute name={params.name} />}
+          {(params) => <TerminalPage name={params.name} />}
         </Route>
 
         {/* Everything else shares the shell. */}
