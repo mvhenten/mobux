@@ -16,6 +16,12 @@
 //! The three providers run concurrently (see `api_host_suggestions` in
 //! main.rs) so the endpoint's total latency is bounded by the slowest
 //! one, not their sum.
+//!
+//! Both subprocess-backed providers set `kill_on_drop(true)`: `tokio::time::
+//! timeout` firing drops the `output()` future without waiting on the
+//! child, and without `kill_on_drop` tokio leaves it running — a
+//! never-answering `tailscaled`/`avahi-daemon` would otherwise leak one
+//! child process per picker open instead of being reaped at the timeout.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -55,6 +61,9 @@ pub fn ssh_config_hosts() -> Vec<HostSuggestion> {
 /// A `Host` line can list several space-separated aliases; each is
 /// suggested independently. Patterns (`*`, `?`) and negations (`!foo`)
 /// describe a matching *rule*, not an addressable host, so they're skipped.
+/// `Include` directives are not followed — aliases living in an included
+/// file (e.g. `~/.ssh/config.d/*`) are not suggested. Best-effort only;
+/// not worth the added complexity here.
 fn parse_ssh_config_hosts(contents: &str) -> Vec<HostSuggestion> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -116,6 +125,7 @@ pub async fn tailscale_hosts(timeout: Duration) -> Vec<HostSuggestion> {
         timeout,
         tokio::process::Command::new("tailscale")
             .args(["status", "--json"])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -163,6 +173,7 @@ pub async fn avahi_hosts(timeout: Duration) -> Vec<HostSuggestion> {
         timeout,
         tokio::process::Command::new("avahi-browse")
             .args(["-rpt", "_workstation._tcp"])
+            .kill_on_drop(true)
             .output(),
     )
     .await
