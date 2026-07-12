@@ -41,6 +41,10 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  // `url` is exactly the deep link the server chose when it sent the push
+  // (push.rs::session_url) — the SW does no URL construction of its own, so
+  // there's no separate node-correctness question here: whatever
+  // push.rs/terminal_page decided is what opens (issue #210).
   const url = event.notification.data?.url || '/';
   // Match an open client by session pathname (the `?w=N` query holds
   // the originating tmux window). On a hit, focus the existing tab and
