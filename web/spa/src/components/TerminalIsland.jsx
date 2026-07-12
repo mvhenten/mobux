@@ -2,6 +2,7 @@ import { useRef, useLayoutEffect } from "preact/hooks";
 import { collectDiagnostics } from "../lib/diagnostics.js";
 import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
+import { readLoadedBundleHash } from "../lib/bundleHash.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -148,6 +149,9 @@ export function TerminalIsland({ node, session }) {
         session,
         host: rootRef.current,
         renderer,
+        // Diagnostic only: rides to the WS URL as &build=<hash> so a stale tab
+        // identifies itself in the server's attach log (never affects routing).
+        build: readLoadedBundleHash() || "",
       });
 
       // Force a resize once the SPA layout has actually painted. The engine

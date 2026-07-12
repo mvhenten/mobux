@@ -1,6 +1,7 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { localGet } from "../../lib/api.js";
+import { readLoadedBundleHash } from "../../lib/bundleHash.js";
 
 // Build-info card. Shows the backend version, the server's build_hash
 // (/api/build-info — unchanged, server-side), and the SPA's own bundle hash.
@@ -10,19 +11,11 @@ import { localGet } from "../../lib/api.js";
 // web/build.js), so it never matched this bundle and comparing them as
 // "server vs loaded" was comparing two unrelated builds. Instead this reads
 // the content hash Vite already baked into the currently-loaded script's
-// filename (`assets/index-<hash>.js`) straight off the DOM — the one hash
-// that's actually guaranteed to describe the code running in this tab, no
-// extra request needed.
+// filename (`assets/index-<hash>.js`) straight off the DOM (readLoadedBundleHash)
+// — the one hash that's actually guaranteed to describe the code running in
+// this tab, no extra request needed.
 
 const info = signal(null); // { version, build_hash }
-
-function readLoadedBundleHash() {
-  const script = document.querySelector(
-    'script[type="module"][src*="/assets/index-"]',
-  );
-  const match = script?.src.match(/index-([\w-]+)\.js/);
-  return match ? match[1] : null;
-}
 
 export function BuildInfoCard() {
   useEffect(() => {

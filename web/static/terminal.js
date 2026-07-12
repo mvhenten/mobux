@@ -97,6 +97,9 @@ const quotes = [
 //             engine binds all its DOM inside this subtree.
 //   renderer  'xterm' (default) | 'sterk'; the matching vendor bundle must
 //             already be loaded (window.Terminal / window.Sterk).
+//   build     the SPA's own loaded-bundle hash — ridden through to the WS URL
+//             (&build=<hash>) purely so a stale tab identifies itself in the
+//             server attach log. Never affects routing.
 //
 // The engine used to be a self-booting module: it read window.MOBUX_* at
 // eval time, so a second (node, session) in the same document silently kept
@@ -105,7 +108,13 @@ const quotes = [
 // attaches (WebSocket, renderer instance, window/document/visualViewport
 // listeners, timers, observers) is registered for teardown, so dispose() +
 // createTerminal() is a real remount.
-export function createTerminal({ node = "", session, host, renderer } = {}) {
+export function createTerminal({
+  node = "",
+  session,
+  host,
+  renderer,
+  build = "",
+} = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
 
   const nodeQuery = () => (node ? `?node=${encodeURIComponent(node)}` : "");
@@ -169,7 +178,13 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   // mouse stay `false` and skip the on-screen input bar.
   const isMobile =
     window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 620;
-  const core = new TerminalCore({ session, node, host: termEl, renderer });
+  const core = new TerminalCore({
+    session,
+    node,
+    host: termEl,
+    renderer,
+    build,
+  });
 
   // Apply the stored theme to all three layers. terminal-core.js already
   // picked the matching palette + Ace theme at construction; this call

@@ -420,6 +420,12 @@ test("terminal island mounts and the PTY websocket connects", async ({
   ]);
   expect(wsUrl).toContain(`/ws/${encodeURIComponent(SEED)}`);
 
+  // Observability (#213): the attach carries the SPA's own loaded-bundle hash
+  // as `&build=<hash>` so a stale tab identifies itself in the server's attach
+  // log. The value is Vite's `assets/index-<hash>.js` filename hash, so it's
+  // present in any real built SPA.
+  expect(wsUrl).toMatch(/[?&]build=[\w-]+/);
+
   // Engine actually rendered into the host (xterm/sterk attaches a child).
   await page.waitForFunction(
     () => {
@@ -428,6 +434,41 @@ test("terminal island mounts and the PTY websocket connects", async ({
     },
     { timeout: 15000 },
   );
+});
+
+// ── ws URL carries the node segment (node-drop guard, #185/#210) ────────────
+//
+// The node rides only in the hash URL (`#/s/<node>/<name>`) and must reach the
+// server on the PTY WebSocket as `?node=<node>` — a dropped node silently
+// attaches the wrong tmux (the "can't find session" bug class). The node here
+// isn't configured on the smoke instance, so the server rejects the upgrade;
+// that's fine — this asserts the URL the client BUILDS, captured before the
+// server's verdict, alongside the `build=` observability param.
+test("node-qualified route threads ?node= and &build= onto the PTY ws", async ({
+  page,
+}) => {
+  const NODE = "nodeprobe";
+  const wsSeen = new Promise((resolve) => {
+    page.on("websocket", (ws) => {
+      if (ws.url().includes(`/ws/${encodeURIComponent(SEED)}`))
+        resolve(ws.url());
+    });
+  });
+
+  await page.goto(`${APP}#/s/${NODE}/${encodeURIComponent(SEED)}`, {
+    waitUntil: "networkidle",
+  });
+
+  const wsUrl = await Promise.race([
+    wsSeen,
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error("ws timeout")), 15000),
+    ),
+  ]);
+
+  expect(wsUrl).toContain(`/ws/${encodeURIComponent(SEED)}`);
+  expect(wsUrl).toContain(`node=${NODE}`);
+  expect(wsUrl).toMatch(/[?&]build=[\w-]+/);
 });
 
 // ── node-drop on re-entry (issue #210) ──────────────────────────────────────

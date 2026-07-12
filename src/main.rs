@@ -1745,14 +1745,82 @@ async fn resolve_node_target(
     })
 }
 
+/// The terminal WS query: the shared `?node=<name>` (see `resolve_node_target`)
+/// plus `&build=<hash>` — the SPA's own loaded-bundle hash, set by the engine
+/// (TerminalIsland). It rides along so a stale tab still running old code
+/// identifies itself in the attach log even though it fetches a fresh
+/// `/static/build-info.json`; the hash is baked into the loaded bundle's
+/// filename, so it describes the code actually running in that tab.
+#[derive(Deserialize)]
+struct TerminalWsQuery {
+    node: Option<String>,
+    build: Option<String>,
+}
+
+/// Every PTY attach and every rejected upgrade logs one line to the journal —
+/// the only ground truth for "which host did this tab actually attach to?".
+/// A session error rendered inside the terminal (`can't find session: X`)
+/// means the attach hit the wrong tmux because `node` arrived absent or wrong;
+/// this line makes that visible instead of silent. Loud like the "PUT emptied
+/// the node list" warning: mobux is a single-operator tool, so per-attach
+/// journal lines are affordable and worth it.
+fn log_ws_attach(
+    state: &AppState,
+    outcome: &str,
+    session: &str,
+    node: Option<&str>,
+    target: &str,
+    build: Option<&str>,
+    user_agent: &str,
+) {
+    eprintln!(
+        "[ws attach] {outcome} session={session:?} node={} target={target} build={} server_build={} ua={user_agent:?}",
+        node.unwrap_or("<none>"),
+        build.unwrap_or("<none>"),
+        state.build_hash,
+    );
+}
+
 async fn terminal_ws(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(q): Query<NodeQuery>,
+    Query(q): Query<TerminalWsQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    validate_session_name(&state, &name)?;
-    let ssh_target = resolve_node_target(&state, q.node.as_deref()).await?;
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<none>")
+        .to_string();
+    let node = q.node.as_deref();
+    let build = q.build.as_deref();
+
+    if let Err(err) = validate_session_name(&state, &name) {
+        let outcome = format!("REJECTED[{}: {}]", err.status.as_u16(), err.message);
+        log_ws_attach(&state, &outcome, &name, node, "-", build, &user_agent);
+        return Err(err);
+    }
+
+    let ssh_target = match resolve_node_target(&state, node).await {
+        Ok(target) => target,
+        Err(err) => {
+            let outcome = format!("REJECTED[{}: {}]", err.status.as_u16(), err.message);
+            log_ws_attach(&state, &outcome, &name, node, "-", build, &user_agent);
+            return Err(err);
+        }
+    };
+
+    log_ws_attach(
+        &state,
+        "ok",
+        &name,
+        node,
+        ssh_target.as_deref().unwrap_or("local"),
+        build,
+        &user_agent,
+    );
+
     Ok(ws.on_upgrade(move |socket| async move {
         if let Err(err) = handle_ws(socket, name, ssh_target).await {
             eprintln!("ws error: {err:#}");
