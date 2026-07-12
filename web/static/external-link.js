@@ -81,8 +81,13 @@ export function installExternalLinkHandler(target) {
   (target || document).addEventListener(
     'click',
     (e) => {
-      // Let the browser handle modified clicks (new tab/window, download)
-      // and anything a more specific handler already claimed.
+      // Modified clicks (new tab/window) and downloads keep the browser's
+      // own default behavior. `e.defaultPrevented` here can only reflect a
+      // listener that already ran earlier in the *capture* phase (e.g. on
+      // `window`, or another document-level capture listener registered
+      // before this one) — a listener on the anchor itself fires later
+      // (deeper in capture, or during bubble), so this isn't a general
+      // "handled elsewhere" guard.
       if (
         e.defaultPrevented ||
         e.button !== 0 ||
