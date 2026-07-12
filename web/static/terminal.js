@@ -455,10 +455,10 @@ export function createTerminal({
 
   // The default view is a server-held preference (prefs.js `default_view`).
   // The per-window override — which view a specific tmux window was last left
-  // in — stays device-transient in localStorage: it's keyed on the volatile
-  // tmux window id, pruned when the window dies, and is mid-session tab state,
-  // not a durable preference.
-  const viewPrefKey = (windowId) => `mobux.view.${session}.${windowId}`;
+  // in — is mid-session tab state, not a durable preference: it lives in an
+  // in-memory map keyed on the volatile tmux window id, scoped to this engine
+  // instance, and is pruned when the window dies. Losing it on reload is fine.
+  const windowViews = new Map();
 
   function activeWindowId() {
     const p = core.panes[core.activeIndex];
@@ -471,11 +471,7 @@ export function createTerminal({
 
   function storedViewFor(windowId) {
     if (!windowId) return null;
-    try {
-      return localStorage.getItem(viewPrefKey(windowId));
-    } catch (_) {
-      return null;
-    }
+    return windowViews.get(windowId) || null;
   }
 
   function updateToggleLabel() {
@@ -515,10 +511,8 @@ export function createTerminal({
     currentView = mode;
     if (persist) {
       prefs.set("default_view", mode);
-      try {
-        const wid = activeWindowId();
-        if (wid) localStorage.setItem(viewPrefKey(wid), mode);
-      } catch (_) {}
+      const wid = activeWindowId();
+      if (wid) windowViews.set(wid, mode);
     }
     updateToggleLabel();
     window.dispatchEvent(new CustomEvent("mobux:viewchange", { detail: mode }));
@@ -582,15 +576,9 @@ export function createTerminal({
 
   function pruneViewPrefs() {
     const live = new Set(core.panes.map((p) => p.id).filter(Boolean));
-    const prefix = `mobux.view.${session}.`;
-    try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const k = localStorage.key(i);
-        if (k?.startsWith(prefix) && !live.has(k.slice(prefix.length))) {
-          localStorage.removeItem(k);
-        }
-      }
-    } catch (_) {}
+    for (const wid of windowViews.keys()) {
+      if (!live.has(wid)) windowViews.delete(wid);
+    }
   }
 
   const viewApi = {

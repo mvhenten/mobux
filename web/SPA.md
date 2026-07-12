@@ -267,7 +267,7 @@ UI preferences are global server state, not per-device storage. mobux is
 single-user (one basic-auth user, one sqlite row), so there is no per-user or
 per-device modelling. `GET|PUT /api/settings/preferences` returns/replaces the
 whole blob: `renderer`, `theme`, `default_view`, `osc133_hint_dismissed`,
-`listen_voice`, `listen_rate`, `listen_pitch`.
+`listen_voice`, `listen_rate`, `listen_pitch`, `selected_node`.
 
 `/static/prefs.js` is the one client module both the SPA and the terminal engine
 share. `main.jsx` loads it and `await`s `hydrate()` (the whole blob, once)
@@ -275,10 +275,14 @@ before first render, so the terminal island reads `renderer`/`theme`/etc.
 synchronously at boot. Every change PUTs the whole blob. No local caching: a
 server that's unreachable at boot falls back to defaults for that load.
 
-Genuinely device-local state stays in the browser: the per-window reader/xterm
-override (`mobux.view.<session>.<id>`, keyed on the volatile tmux window id),
-the selected node (`mobux:node`), the telemetry overlay toggle
-(`mobux:telemetry`), and the per-tab reload baseline (`sessionStorage`).
+mobux keeps no client-side persistent storage — no `localStorage`, no
+`sessionStorage`. Durable state is server-synced (the preferences blob above);
+everything else is plain in-memory module state for the tab's lifetime and is
+expected to reset on reload: the per-window reader/xterm override (keyed on the
+volatile tmux window id), the telemetry overlay toggle, and the reload
+baseline the server-update watcher compares against. A source-scan test
+(`no_client_storage_in_web_sources` in `src/main.rs`) fails the build on any
+`localStorage`/`sessionStorage` occurrence in the web sources.
 
 ## Remaining work
 

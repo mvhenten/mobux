@@ -10,8 +10,8 @@
 //    web/static/vendor/sterk.bundle.js.
 //
 // Both bundles are emitted unconditionally; the page-level boot script
-// decides which one to load at runtime based on the user's
-// `mobux:renderer` localStorage choice. Safe to re-run.
+// decides which one to load at runtime based on the server-held `renderer`
+// preference. Safe to re-run.
 
 const { execSync } = require('child_process');
 const fs = require('fs');

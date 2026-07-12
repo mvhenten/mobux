@@ -1,23 +1,17 @@
-// Selected-node preference for the hub → node SSH proxy (#176 phase 3).
-// Device-level by design: localStorage on this single origin. "" means the
-// local host — exactly today's behavior, and the only state when no nodes
-// are configured.
+import { getPref, setPref } from "./prefs.js";
 
-const KEY = "mobux:node";
+// Selected-node preference for the hub → node SSH proxy (#176 phase 3).
+// Server-held (`selected_node` in the preferences blob), global across
+// devices — last writer wins, which is fine for a single-user tool. "" means
+// the local host, the only state when no nodes are configured.
 
 export function getSelectedNode() {
-  try {
-    return localStorage.getItem(KEY) || "";
-  } catch (_) {
-    return "";
-  }
+  const v = getPref("selected_node");
+  return typeof v === "string" ? v : "";
 }
 
 export function setSelectedNode(name) {
-  try {
-    if (name) localStorage.setItem(KEY, name);
-    else localStorage.removeItem(KEY);
-  } catch (_) {}
+  setPref("selected_node", name || "");
 }
 
 // Append ?node=<name> to an API path; no node ⇒ path untouched (local host).

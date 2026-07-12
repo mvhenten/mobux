@@ -17,7 +17,11 @@ const sessions = signal(null);
 const error = signal(null);
 const nodes = signal(null); // null until /api/nodes answers
 const nodeError = signal(null);
-const selectedNode = signal(getSelectedNode());
+// Seeded to local, not getSelectedNode() — this module evaluates as part of
+// the static import chain, before main.jsx's boot() has awaited prefs
+// hydration. The mount effect reads the server value once the app has rendered
+// (which only happens after hydrate() resolved).
+const selectedNode = signal("");
 
 async function refresh() {
   try {
@@ -80,8 +84,10 @@ export function HomePage() {
   const [, navigate] = useLocation();
 
   useEffect(() => {
-    // Nodes first: a stale persisted selection must be reset before the
+    // Read the server-held selection now that prefs are hydrated. Nodes
+    // first: a stale selection (a since-removed node) must be reset before the
     // session list is fetched with it.
+    selectedNode.value = getSelectedNode();
     loadNodes().then(refresh);
   }, []);
 
