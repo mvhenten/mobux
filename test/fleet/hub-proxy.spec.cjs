@@ -46,6 +46,13 @@ test.afterAll(async () => {
   if (node) await node.stop();
 });
 
+// The #185 specs below seed the hub's server-held selected-node preference —
+// reset it after every test so that state never leaks into the next one (the
+// autouse reset in fixtures.cjs only targets MOBUX_URL, never this fleet hub).
+test.afterEach(async () => {
+  await seedHubSelectedNode("");
+});
+
 // Seed the hub's server-held selected-node preference (no client storage).
 // Used by the #185 regression specs to prove the URL's node segment wins over
 // a stale/foreign selection.
