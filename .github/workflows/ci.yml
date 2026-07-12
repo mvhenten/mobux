@@ -56,3 +56,8 @@ jobs:
         env:
           CI: true
           MOBUX_URL: http://localhost:8281
+      - name: Run renderer conformance tests
+        run: make test-conformance
+        env:
+          CI: true
+          MOBUX_URL: http://localhost:8281

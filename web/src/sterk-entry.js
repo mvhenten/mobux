@@ -2,7 +2,7 @@
 //
 // Bundles @kattebak/sterk (which includes ace-builds as a dependency) into
 // a single IIFE for the static site. Pins the constructor to `window.Sterk`
-// so terminal-core.js (loaded as an ES module) can import it.
+// so renderer-sterk.js (loaded as an ES module) can import it.
 //
 // Sterk's API:
 // - `createTerminal(options)` → Terminal instance
@@ -32,5 +32,5 @@ import 'ace-builds/src-noconflict/theme-solarized_light';
 import 'ace-builds/src-noconflict/theme-gruvbox_light_hard';
 import 'ace-builds/src-noconflict/theme-github_light_default';
 
-// Pin to window so terminal-core.js can reach it from the classic script
+// Pin to window so renderer-sterk.js can reach it from the classic script
 window.Sterk = { createTerminal };

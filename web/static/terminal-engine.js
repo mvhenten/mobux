@@ -1,12 +1,37 @@
-// Xterm-backed TerminalCore — stable default renderer.
+// The mobux terminal engine — one implementation, two renderers.
 //
-// Wraps @xterm/xterm (loaded via xterm.bundle.js, which pins
-// `window.Terminal` and `window.WebLinksAddon`), owns the WebSocket,
-// OSC 133 handling, tmux pane tracking, etc.
+// The engine owns everything that is renderer-independent: the PTY
+// WebSocket lifecycle, reconnect backoff, tmux pane tracking, tmux
+// commands, history reload, and OSC 133 marker bookkeeping. It drives a
+// renderer through the explicit interface below and never reaches into a
+// renderer's internals. The two adapters (renderer-xterm.js,
+// renderer-sterk.js) are the only code that knows which renderer is live.
 //
-// Constructed only when the engine's `renderer` option is 'xterm' (the
-// default). Exposes the same external surface as terminal-core-sterk.js so
-// consumers (terminal.js, reader-view.js, tests) use a single contract.
+// ── Renderer interface (the only crossing) ──────────────────────────────
+// An adapter is a plain object exposing:
+//
+//   R1  dispose()
+//   R2  write(data): Promise<void>            resolves once the buffer reflects data
+//   R3  resize(cols, rows)
+//       measure(): {cols, rows, cellWidth, cellHeight}   authoritative fit
+//       cellSize(): {width, height}
+//   R4  cols, rows                            current grid
+//   R5  onInput(cb): Disposable               keystrokes / IME bound for the PTY
+//   R6  scrollLines(n), scrollToBottom()
+//   R7  buffer.active.{length,cursorX,cursorY,baseY,viewportY,getLine}
+//   R8  onBufferChanged(cb): Disposable       fires after a write is parsed
+//   R9  isAlternateScreenActive(): boolean
+//   R10 registerOscHandler(id, cb): Disposable
+//   R11 setTheme(theme); setFontSize(px); getFontSize()
+//   R15 focus(); setNativeInputEnabled(bool)
+//   R16 constructed with { altScreen: false }; the renderer suppresses
+//       alternate-screen switching itself
+//       clear()                              (engine housekeeping)
+//
+// The engine exposes the same surface consumers (terminal.js, reader-view.js)
+// use: EventTarget events (open, close, data, panes, history, osc-detected),
+// the connection/scroll/pane/tmux/history methods, and the interface
+// passthroughs above.
 
 import { openExternal } from "./external-link.js";
 
@@ -17,11 +42,11 @@ const WINDOW_SWITCH_CMDS = new Set([
   "kill-window",
 ]);
 
-export class TerminalCoreXterm extends EventTarget {
+export class TerminalEngine extends EventTarget {
   // `node` (#176): the remote node this session lives on — every PTY/tmux
   // call carries ?node=<name> so the hub proxies it over SSH. "" ⇒ the local
   // host, exactly the pre-node behavior.
-  constructor({ session, node, host, build }) {
+  constructor({ session, node, host, renderer, build }) {
     super();
     this.session = session;
     this.node = node || "";
@@ -30,72 +55,17 @@ export class TerminalCoreXterm extends EventTarget {
     // in the server's attach log. Purely diagnostic — never affects routing.
     this.build = build || "";
     this.host = host;
-    this.renderer = "xterm";
-
-    const Xterm = window.Terminal;
-    const WebLinksAddon =
-      window.WebLinksAddon && window.WebLinksAddon.WebLinksAddon;
-    if (!Xterm) {
-      throw new Error(
-        "xterm bundle not loaded — check vendor/xterm.bundle.js script tag",
-      );
-    }
-
-    this.term = new Xterm({
-      cursorBlink: true,
-      // Match the reader's typography (style.css `.rb-line`): same
-      // mono stack, same 13px font, line-height bumped from xterm's
-      // default 1.0 to 1.25 for a bit of breathing room.
-      fontFamily:
-        "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
-      fontSize: 13,
-      lineHeight: 1.25,
-      fontWeight: 300,
-      convertEol: false,
-      scrollback: 10000,
-      theme: { background: "#0f1115" },
-    });
-    this.term.open(host);
-    if (WebLinksAddon) {
-      // Route clicked links out of the app shell (system browser in the
-      // TWA) instead of xterm's default in-window window.open.
-      this.term.loadAddon(
-        new WebLinksAddon((_event, uri) => openExternal(uri)),
-      );
-    }
-
-    // Lock mouse protocol to NONE — prevents xterm.js from capturing
-    // touch/mouse when tmux sends \x1b[?1000h
-    try {
-      Object.defineProperty(
-        this.term._core.coreMouseService,
-        "activeProtocol",
-        {
-          set() {},
-          get() {
-            return "NONE";
-          },
-          configurable: true,
-        },
-      );
-    } catch (_) {}
-
-    // Block alternate screen buffer — tmux alt screen has no scrollback
-    try {
-      const buffers = this.term._core._bufferService.buffers;
-      buffers.activateAltBuffer = () => {};
-      buffers.activateNormalBuffer = () => {};
-    } catch (_) {}
+    this.renderer = renderer;
 
     this.ws = null;
     this.panes = [];
     this.activeIndex = 0;
 
-    // Auto-reconnect state. `intentionalClose` guards the onclose
-    // backoff so we don't reconnect after a deliberate teardown (page
-    // unload, a `reconnect()` that closes a stale socket, or the test
-    // `inject` helper closing the WS on purpose). Backoff caps the
-    // retry interval so a server that's down doesn't get hammered.
+    // Auto-reconnect state. `intentionalClose` guards the onclose backoff so
+    // we don't reconnect after a deliberate teardown (page unload, a
+    // reconnect() that closes a stale socket, or the test `inject` helper
+    // closing the WS on purpose). Backoff caps the retry interval so a server
+    // that's down doesn't get hammered.
     this.intentionalClose = false;
     this._reconnectTimer = null;
     this._reconnectDelay = 0;
@@ -105,28 +75,23 @@ export class TerminalCoreXterm extends EventTarget {
     // OSC 133 (FinalTerm / shell-integration) markers.
     this.oscMarkers = new Map();
     this.oscDetected = false;
-    if (this.term.parser && this.term.parser.registerOscHandler) {
-      this.term.parser.registerOscHandler(133, (data) => {
-        const kind = (data || "").charAt(0);
-        if (kind !== "A" && kind !== "B" && kind !== "C" && kind !== "D")
-          return false;
-        const buf = this.term.buffer.active;
-        const absY = buf.baseY + buf.cursorY;
-        this.oscMarkers.set(absY, kind);
-        if (!this.oscDetected) {
-          this.oscDetected = true;
-          this.dispatchEvent(new Event("osc-detected"));
-        }
+
+    this._oscSub = this.renderer.registerOscHandler(133, (data) => {
+      const kind = (data || "").charAt(0);
+      if (kind !== "A" && kind !== "B" && kind !== "C" && kind !== "D") {
         return false;
-      });
-    }
+      }
+      const buf = this.getActiveBuffer();
+      const absY = (buf.baseY || 0) + (buf.cursorY || 0);
+      this.oscMarkers.set(absY, kind);
+      if (!this.oscDetected) {
+        this.oscDetected = true;
+        this.dispatchEvent(new Event("osc-detected"));
+      }
+      return false; // allow other handlers
+    });
 
-    this.term.onData((d) => this.send(d));
-
-    // Debug peephole for tests / themes.js.
-    if (typeof window !== "undefined") {
-      window.__xterm = this.term;
-    }
+    this._inputSub = this.renderer.onInput((d) => this.send(d));
   }
 
   _nodeQuery() {
@@ -167,15 +132,15 @@ export class TerminalCoreXterm extends EventTarget {
     this.ws.onmessage = async (ev) => {
       let bytes;
       if (typeof ev.data === "string") {
-        this.term.write(ev.data);
+        this.renderer.write(ev.data);
         bytes = ev.data;
       } else if (ev.data instanceof ArrayBuffer) {
         const u8 = new Uint8Array(ev.data);
-        this.term.write(u8);
+        this.renderer.write(u8);
         bytes = u8;
       } else if (ev.data instanceof Blob) {
         const u8 = new Uint8Array(await ev.data.arrayBuffer());
-        this.term.write(u8);
+        this.renderer.write(u8);
         bytes = u8;
       }
       this.dispatchEvent(new CustomEvent("data", { detail: bytes }));
@@ -189,8 +154,8 @@ export class TerminalCoreXterm extends EventTarget {
 
   // Schedule an auto-reconnect after an unexpected close, using capped
   // exponential backoff. No-ops on an intentional close so a deliberate
-  // teardown (page unload, reconnect()'s own close, test injection)
-  // doesn't trigger a reconnect loop.
+  // teardown (page unload, reconnect()'s own close, test injection) doesn't
+  // trigger a reconnect loop.
   _scheduleReconnect() {
     if (this.intentionalClose) return;
     if (this._reconnectTimer !== null) return;
@@ -204,16 +169,17 @@ export class TerminalCoreXterm extends EventTarget {
   }
 
   reconnect() {
-    // Idempotent: a socket that's already OPEN or still CONNECTING needs
-    // no action. The CONNECTING guard also avoids a double-socket race
-    // when an early `pageshow`/`visibilitychange` fires before boot's
-    // own connect() has finished handshaking.
+    // Idempotent: a socket that's already OPEN or still CONNECTING needs no
+    // action. The CONNECTING guard also avoids a double-socket race when an
+    // early pageshow/visibilitychange fires before boot's own connect() has
+    // finished handshaking.
     if (
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN ||
         this.ws.readyState === WebSocket.CONNECTING)
-    )
+    ) {
       return;
+    }
     if (this.ws) {
       // Tear down the stale socket without arming the backoff — connect()
       // below opens a fresh one immediately.
@@ -231,9 +197,9 @@ export class TerminalCoreXterm extends EventTarget {
     }
   }
 
-  // Full teardown for a same-document remount (terminal.js dispose()):
-  // no reconnect may survive, the socket closes, and the renderer
-  // releases its DOM + internal listeners.
+  // Full teardown for a same-document remount (terminal.js dispose()): no
+  // reconnect may survive, the socket closes, and the renderer releases its
+  // DOM + internal listeners.
   dispose() {
     this.intentionalClose = true;
     if (this._reconnectTimer !== null) {
@@ -245,75 +211,94 @@ export class TerminalCoreXterm extends EventTarget {
     } catch (_) {}
     this.ws = null;
     try {
-      this.term.dispose();
+      this._oscSub?.dispose();
     } catch (_) {}
-    if (typeof window !== "undefined" && window.__xterm === this.term) {
-      delete window.__xterm;
-    }
+    try {
+      this._inputSub?.dispose();
+    } catch (_) {}
+    try {
+      this.renderer.dispose();
+    } catch (_) {}
   }
 
   // ── Resize ────────────────────────────────────────────────────────
   resize() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const cell = this.cellSize();
-    // Drive rows from the host's actual painted height, not from
-    // `window.innerHeight`. On Android Chrome the layout viewport stays
-    // at full screen when the soft keyboard opens, but the body is
-    // shrunk to `visualViewport.height` by terminal.js's
-    // visualViewport handler — so `#terminal` (a flex child) shrinks
-    // too. Reading clientHeight here is what makes the row count
-    // follow the keyboard. Falls back to window.innerHeight pre-flex
-    // (initial paint where clientHeight may briefly be 0).
-    const hostW = this.host.clientWidth || window.innerWidth;
-    const hostH = this.host.clientHeight || window.innerHeight;
-    // #terminal has horizontal padding (style.css). Subtract it so
-    // xterm doesn't overrun the inner content box and shave a column
-    // off the right edge.
-    const pad = this._horizontalPadding();
-    const cols = Math.max(20, Math.floor((hostW - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
-    this.term.resize(cols, rows);
+    const { cols, rows } = this.renderer.measure();
+    this.renderer.resize(cols, rows);
     this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
-  _horizontalPadding() {
-    try {
-      const cs = getComputedStyle(this.host);
-      return (
-        (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
-      );
-    } catch (_) {
-      return 0;
-    }
+  _forceRedraw() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const { cols, rows } = this.renderer.measure();
+    this.ws.send(
+      JSON.stringify({ type: "resize", cols, rows: Math.max(2, rows - 1) }),
+    );
+    setTimeout(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.renderer.resize(cols, rows);
+      this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+    }, 50);
+  }
+
+  measure() {
+    return this.renderer.measure();
   }
 
   cellSize() {
-    const dims = this.term._core?._renderService?.dimensions?.css?.cell;
-    return { width: dims?.width || 9, height: dims?.height || 18 };
+    return this.renderer.cellSize();
   }
 
   // ── Buffer / scroll passthroughs ──────────────────────────────────
   getActiveBuffer() {
-    return this.term.buffer.active;
+    return this.renderer.buffer.active;
   }
   scrollLines(n) {
-    this.term.scrollLines(n);
+    this.renderer.scrollLines(n);
   }
   scrollToBottom() {
-    this.term.scrollToBottom();
+    this.renderer.scrollToBottom();
   }
   clear() {
-    this.term.clear();
+    this.renderer.clear();
+  }
+
+  get cols() {
+    return this.renderer.cols;
+  }
+  get rows() {
+    return this.renderer.rows;
+  }
+
+  // ── Renderer interface passthroughs ───────────────────────────────
+  write(data) {
+    return this.renderer.write(data);
+  }
+  onBufferChanged(cb) {
+    return this.renderer.onBufferChanged(cb);
+  }
+  isAlternateScreenActive() {
+    return this.renderer.isAlternateScreenActive();
+  }
+  focus() {
+    this.renderer.focus();
+  }
+  setNativeInputEnabled(enabled) {
+    this.renderer.setNativeInputEnabled(enabled);
+  }
+  setTheme(theme) {
+    this.renderer.setTheme(theme);
   }
 
   setFontSize(px) {
-    if (px !== this.term.options.fontSize) {
-      this.term.options.fontSize = px;
+    if (px !== this.renderer.getFontSize()) {
+      this.renderer.setFontSize(px);
       this.resize();
     }
   }
   getFontSize() {
-    return this.term.options.fontSize;
+    return this.renderer.getFontSize();
   }
 
   // ── Panes (= tmux windows) ────────────────────────────────────────
@@ -346,24 +331,6 @@ export class TerminalCoreXterm extends EventTarget {
     }, 300);
   }
 
-  _forceRedraw() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const cell = this.cellSize();
-    const hostW = this.host.clientWidth || window.innerWidth;
-    const hostH = this.host.clientHeight || window.innerHeight;
-    const pad = this._horizontalPadding();
-    const cols = Math.max(20, Math.floor((hostW - pad) / cell.width) - 1);
-    const rows = Math.max(10, Math.floor(hostH / cell.height) - 1);
-    this.ws.send(
-      JSON.stringify({ type: "resize", cols, rows: Math.max(2, rows - 1) }),
-    );
-    setTimeout(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      this.term.resize(cols, rows);
-      this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
-    }, 50);
-  }
-
   async runTmuxCmd(command) {
     try {
       await fetch(
@@ -394,7 +361,7 @@ export class TerminalCoreXterm extends EventTarget {
       if (!res.ok) return;
       const history = await res.text();
       if (history.trim()) {
-        this.term.write(history.replace(/\n/g, "\r\n"));
+        this.renderer.write(history.replace(/\n/g, "\r\n"));
         this.scrollToBottom();
         this.dispatchEvent(new CustomEvent("history", { detail: history }));
       }
