@@ -19,8 +19,11 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 //      the new engine attaches to exactly the (node, session) in the URL
 //      (the #185 regression class).
 //
-// `CACHE_BUST` mirrors the old Rust page's `?v=` query so a stale SW cache
-// can't hand back an old bundle; in dev it is just a constant.
+// `CACHE_BUST` mirrors the old Rust page's `?v=` query-param convention on
+// <script>/<link> tags, but it's a fixed string — it does no cache-busting
+// of its own. What actually guarantees a stale cache never hands back an
+// old bundle is `serve_static` in src/main.rs serving every /static/* asset
+// `no-store, must-revalidate`; the query param is vestigial and harmless.
 const CACHE_BUST = "spa";
 
 // Ribbon bug-report button (#191): grab the current diagnostics bundle and

@@ -134,9 +134,14 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
   window.dispatchEvent(new Event('resize'));
 
   return {
+    // Full teardown for a same-document engine remount: an active
+    // dictation's mic stream + full-viewport overlay live outside `bar`
+    // (mic-overlay.js mounts its own root on document.body), so `bar.remove()`
+    // alone would leave both behind.
     destroy() {
       window.removeEventListener('mobux:viewchange', syncReaderBtn);
       attach.destroy?.();
+      dictate.destroy?.();
       bar.remove();
       window.dispatchEvent(new Event('resize'));
     },

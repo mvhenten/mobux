@@ -95,6 +95,14 @@ export function NodesCard() {
   };
 
   useEffect(() => {
+    // `nodes`/`loadFailed` are module-level signals, so they persist across
+    // mounts — this page can unmount/remount via SPA navigation (Home <->
+    // Settings). Without resetting here, a remount would show the PREVIOUS
+    // mount's confirmed list as already editable before a fresh GET for
+    // THIS mount has confirmed anything, letting an Add/Remove fire against
+    // stale data. Force back to "loading, not yet editable" on every mount.
+    nodes.value = null;
+    loadFailed.value = false;
     load();
   }, []);
 

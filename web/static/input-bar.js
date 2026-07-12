@@ -240,11 +240,13 @@ export function createInputBar(term, send) {
     hide,
     // Full teardown for a same-document engine remount: everything wired
     // OUTSIDE the host subtree (visualViewport listeners, the attach
-    // action's hidden file input on document.body) must go — the subtree
-    // listeners die with the DOM.
+    // action's hidden file input on document.body, an active dictation's
+    // mic stream + full-viewport overlay) must go — the subtree listeners
+    // die with the DOM, but none of those live in the subtree.
     destroy() {
       removeViewportListeners?.();
       attach.destroy?.();
+      dictate.destroy?.();
       if (textarea) {
         textarea.removeAttribute('tabindex');
         textarea.style.pointerEvents = '';
