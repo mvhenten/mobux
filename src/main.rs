@@ -1582,7 +1582,7 @@ async fn serve_sw(State(state): State<AppState>) -> impl axum::response::IntoRes
 // `immutable` for a year, and the only cache-busting was the `?v=<cache_bust>`
 // query param the HTML appends to `<script src>`/`<link href>` tags. But ES
 // module `import` statements use bare specifiers with no `?v=`, so every
-// import-only module (input-bar.js, reader-view.js, …) was frozen in the
+// import-only module (input-bar.js, reader.js, …) was frozen in the
 // browser cache forever and never picked up new deploys.
 //
 // Fix: `no-store`, same as the HTML pages and sw.js — nothing is ever cached,

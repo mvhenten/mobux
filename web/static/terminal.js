@@ -1,7 +1,6 @@
 import { TerminalEngine } from "./terminal-engine.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
-import { ReaderView } from "./reader-view.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
@@ -12,7 +11,6 @@ import {
   isExternalUrl,
   installExternalLinkHandler,
 } from "./external-link.js";
-import * as prefs from "./prefs.js";
 
 // ── Loading screen quotes ───────────────────────────────────────────
 const quotes = [
@@ -100,19 +98,27 @@ const RENDERER_OPTIONS = {
 
 // ── Terminal engine factory ─────────────────────────────────────────
 //
-// createTerminal({ node, session, host, renderer }) → { core, dispose() }
+// createTerminal({ node, session, host, renderer }) →
+//   { core, document, dispose(), openCommandMenu(), refreshViewToggle(),
+//     showInputBar(), twoPullMove(), twoPullEnd(), test }
 //
-//   session   tmux session name to attach to.
-//   node      remote node name (#176) — every PTY/tmux call carries
-//             ?node=<name> so the hub proxies it over SSH. "" ⇒ local.
-//   host      element containing the terminal scaffold (#terminal, #reader,
-//             #touchOverlay, #loadquote, #cmdPickList, #inputBar, …). The
-//             engine binds all its DOM inside this subtree.
-//   renderer  'xterm' (default) | 'sterk'; the matching vendor bundle must
-//             already be loaded (window.Terminal / window.Sterk).
-//   build     the SPA's own loaded-bundle hash — ridden through to the WS URL
-//             (&build=<hash>) purely so a stale tab identifies itself in the
-//             server attach log. Never affects routing.
+//   session    tmux session name to attach to.
+//   node       remote node name (#176) — every PTY/tmux call carries
+//              ?node=<name> so the hub proxies it over SSH. "" ⇒ local.
+//   host       element containing the terminal scaffold (#terminal,
+//              #touchOverlay, #loadquote, #cmdPickList, #inputBar, …). The
+//              engine binds all its DOM inside this subtree.
+//   renderer   'xterm' (default) | 'sterk'; the matching vendor bundle must
+//              already be loaded (window.Terminal / window.Sterk).
+//   build      the SPA's own loaded-bundle hash — ridden through to the WS URL
+//              (&build=<hash>) purely so a stale tab identifies itself in the
+//              server attach log. Never affects routing.
+//   viewToggle optional opaque hooks the owner supplies to wire the reader
+//              toggle affordances (ribbon + desktop top bar): `{ toggle(),
+//              isReader() }`. The engine renders and reflects the buttons but
+//              has no knowledge of what a "reader" is — view state lives in the
+//              owner (the SPA's TerminalIsland, issue #206 D3). Absent ⇒ no
+//              reader toggle is shown and the engine runs standalone.
 //
 // The engine used to be a self-booting module: it read window.MOBUX_* at
 // eval time, so a second (node, session) in the same document silently kept
@@ -127,13 +133,13 @@ export function createTerminal({
   host,
   renderer,
   build = "",
+  viewToggle = null,
 } = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
 
   const nodeQuery = () => (node ? `?node=${encodeURIComponent(node)}` : "");
 
   const termEl = $("terminal");
-  const readerEl = $("reader");
   const overlay = $("touchOverlay");
   const loadquote = $("loadquote");
   const paneIndicator = $("paneIndicator");
@@ -254,8 +260,6 @@ export function createTerminal({
   on(core, "panes", () => {
     if (disposed) return;
     updatePaneUI();
-    pruneViewPrefs();
-    applyStoredViewForActiveWindow();
   });
 
   // ── Command pick list ───────────────────────────────────────────────
@@ -290,6 +294,19 @@ export function createTerminal({
     if (lines !== 0) core.scrollLines(lines);
   }
 
+  // Two-finger pull-to-reload feedback. Shared with the reader: the SPA hands
+  // these to the reader's own recognizer, so the thresholds and the indicator
+  // strings live in exactly one place.
+  function twoPullMove(pull, vh) {
+    if (pull > vh * 0.08) paneIndicator.textContent = "↻ Release to reload";
+    else if (pull > vh * 0.03)
+      paneIndicator.textContent = "↓ Pull to reload...";
+  }
+  function twoPullEnd(pull, vh) {
+    if (pull > vh * 0.08) location.reload(true);
+    else updatePaneUI();
+  }
+
   const gestures = createGestureRecognizer(overlay, {
     onScroll: scrollByPixels,
     onReconnect: () => core.reconnect(),
@@ -300,16 +317,8 @@ export function createTerminal({
       core.setFontSize(newSize);
     },
 
-    onTwoPullMove(pull, vh) {
-      if (pull > vh * 0.08) paneIndicator.textContent = "↻ Release to reload";
-      else if (pull > vh * 0.03)
-        paneIndicator.textContent = "↓ Pull to reload...";
-    },
-
-    onTwoPullEnd(pull, vh) {
-      if (pull > vh * 0.08) location.reload(true);
-      else updatePaneUI();
-    },
+    onTwoPullMove: twoPullMove,
+    onTwoPullEnd: twoPullEnd,
 
     onTap(x, y) {
       // Detect URLs in terminal text at tap position and open them.
@@ -349,51 +358,6 @@ export function createTerminal({
     onSwipeUp: showCmdList,
   });
 
-  // ReaderView uses fully synthetic scroll: native overflow scrolling
-  // on mobile WebViews has been unreliable (engaged-only-after-fresh-touch
-  // on iOS, locked-state on Android with large scrollbacks). We feed the
-  // gesture recogniser's onScroll/fling output straight into reader's
-  // translateY transform.
-  let readerGestures = null;
-  function mountReaderGestures() {
-    if (readerGestures) return;
-    readerGestures = createGestureRecognizer(
-      readerEl,
-      {
-        onReconnect: () => core.reconnect(),
-        onLongPress: showCmdList,
-        onSwipeUp: showCmdList,
-        onHSwipe: (dir) => core.switchWindow(dir),
-        onTap: () => {},
-        // Double-tap in reader mode is for typing, but the reader has no
-        // cursor / no live editing affordance — opening the keyboard
-        // there is confusing. Drop back to xterm first, then show the
-        // input bar so the keystrokes have somewhere to land.
-        onDoubleTap: () => {
-          swapView("xterm");
-          ensureInputBar().show();
-        },
-        onScroll: (dy) => reader.scrollBy(dy),
-        onTwoPullMove(pull, vh) {
-          if (pull > vh * 0.08)
-            paneIndicator.textContent = "↻ Release to reload";
-          else if (pull > vh * 0.03)
-            paneIndicator.textContent = "↓ Pull to reload...";
-        },
-        onTwoPullEnd(pull, vh) {
-          if (pull > vh * 0.08) location.reload(true);
-          else updatePaneUI();
-        },
-      },
-      { passiveScroll: false },
-    );
-  }
-  function unmountReaderGestures() {
-    if (!readerGestures) return;
-    readerGestures.destroy();
-    readerGestures = null;
-  }
-
   // ── Reveal on first output ──────────────────────────────────────────
   // Fire on the first `data` event, not on settle. The previous
   // implementation reset an 800 ms timer per event, which never
@@ -408,7 +372,7 @@ export function createTerminal({
   // was trying to avoid, just moved earlier. Splash dismissal is not an
   // input event; the ribbon stays hidden through it and only reveals on
   // actual engagement (tap-to-focus — see the `onDoubleTap` handlers below
-  // and in reader-view's gesture wiring), same as it already hides on
+  // and in the reader's gesture wiring), same as it already hides on
   // keyboard dismissal (input-bar.js's visualViewport handler).
   let revealScheduled = false;
   function scheduleReveal() {
@@ -455,7 +419,8 @@ export function createTerminal({
   // If we already look like a touch device, mount eagerly so the mic button
   // (and the full control-key ribbon) exist and are wired from the start —
   // but stay hidden. The bar only reveals on engagement: the `onDoubleTap`
-  // handlers below (xterm overlay, reader-view) call `ensureInputBar().show()`,
+  // handlers below (xterm overlay; the reader via showInputBar) call
+  // `ensureInputBar().show()`,
   // which is the only path that unhides it (#201). Mounting without revealing
   // keeps `ensureInputBar()` idempotent and the mic button wired the moment a
   // tap asks for it, without popping the bar — or the soft keyboard — on load.
@@ -481,87 +446,40 @@ export function createTerminal({
     /* matchMedia unsupported: lazy creation on tap still covers us */
   }
 
-  // ── View swap (xterm <-> reader) ────────────────────────────────────
-  const reader = new ReaderView({ host: readerEl, core, overlay });
-  let currentView = "xterm";
-
-  // The default view is a server-held preference (prefs.js `default_view`).
-  // The per-window override — which view a specific tmux window was last left
-  // in — is mid-session tab state, not a durable preference: it lives in an
-  // in-memory map keyed on the volatile tmux window id, scoped to this engine
-  // instance, and is pruned when the window dies. Losing it on reload is fine.
-  const windowViews = new Map();
-
-  function activeWindowId() {
-    const p = core.panes[core.activeIndex];
-    return p?.id || null;
-  }
-
-  function storedDefaultView() {
-    return prefs.get("default_view") === "reader" ? "reader" : "xterm";
-  }
-
-  function storedViewFor(windowId) {
-    if (!windowId) return null;
-    return windowViews.get(windowId) || null;
-  }
-
-  function updateToggleLabel() {
+  // ── Reader toggle affordances ───────────────────────────────────────
+  // View state (which view is showing, mount/unmount, per-window persistence)
+  // lives in the owner (the SPA's TerminalIsland, issue #206 D3). The engine
+  // only renders the toggle buttons and reflects their label; `viewToggle` is
+  // opaque — the engine has no knowledge of a reader. Absent ⇒ no toggle.
+  function refreshViewToggle() {
+    const isReader = !!viewToggle?.isReader?.();
     const btn = $("viewToggleBtn");
-    if (!btn) return;
-    if (currentView === "reader") {
-      btn.textContent = "▣";
-      btn.title = "Switch to terminal view";
-    } else {
-      btn.textContent = "📖";
-      btn.title = "Switch to reader view";
-    }
-  }
-
-  function applyView(mode, { persist = true } = {}) {
-    if (mode !== "xterm" && mode !== "reader") return;
-    if (mode === currentView) {
-      updateToggleLabel();
-      return;
-    }
-    if (mode === "reader") {
-      termEl.classList.add("hidden");
-      // Reader has its own gesture recogniser on #reader. Disable the
-      // xterm overlay so it doesn't sit on top and eat every touch.
-      overlay.style.pointerEvents = "none";
-      reader.mount();
-      mountReaderGestures();
-    } else {
-      unmountReaderGestures();
-      reader.unmount();
-      termEl.classList.remove("hidden");
-      if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
-        overlay.style.pointerEvents = "auto";
+    if (btn) {
+      if (!viewToggle) {
+        btn.hidden = true;
+      } else {
+        btn.hidden = false;
+        btn.textContent = isReader ? "▣" : "📖";
+        btn.title = isReader
+          ? "Switch to terminal view"
+          : "Switch to reader view";
       }
-      later(() => core.resize(), 0);
     }
-    currentView = mode;
-    if (persist) {
-      prefs.set("default_view", mode);
-      const wid = activeWindowId();
-      if (wid) windowViews.set(wid, mode);
-    }
-    updateToggleLabel();
-    window.dispatchEvent(new CustomEvent("mobux:viewchange", { detail: mode }));
-  }
-
-  function swapView(mode) {
-    applyView(mode, { persist: true });
+    topBar?.sync?.();
   }
 
   // Ribbon view-toggle button (mobile input bar).
   const viewToggleBtn = $("viewToggleBtn");
   if (viewToggleBtn) {
-    on(viewToggleBtn, "mousedown", (e) => e.preventDefault());
-    on(viewToggleBtn, "click", (e) => {
-      e.preventDefault();
-      swapView(currentView === "xterm" ? "reader" : "xterm");
-    });
+    if (viewToggle) {
+      on(viewToggleBtn, "mousedown", (e) => e.preventDefault());
+      on(viewToggleBtn, "click", (e) => {
+        e.preventDefault();
+        viewToggle.toggle();
+      });
+    } else {
+      viewToggleBtn.hidden = true;
+    }
   }
 
   // ── Desktop top bar ─────────────────────────────────────────────────
@@ -575,9 +493,8 @@ export function createTerminal({
     if (topBar || isMobile) return;
     topBar = createTopBar({
       send: (d) => core.send(d),
-      toggleReader: () =>
-        swapView(currentView === "xterm" ? "reader" : "xterm"),
-      isReader: () => currentView === "reader",
+      toggleReader: viewToggle ? () => viewToggle.toggle() : null,
+      isReader: () => !!viewToggle?.isReader?.(),
     });
   }
   if (!isMobile) ensureTopBar();
@@ -599,184 +516,134 @@ export function createTerminal({
     /* matchMedia unsupported: static gate still covers us */
   }
 
-  function applyStoredViewForActiveWindow() {
-    const wid = activeWindowId();
-    const stored = storedViewFor(wid);
-    const mode = stored || storedDefaultView();
-    applyView(mode, { persist: false });
-  }
+  // ── Command menu control (exposed for the reader's gestures) ─────────
+  // The reader runs in its own component; when its long-press / swipe-up
+  // gesture wants the tmux menu, the owner routes it here through the handle
+  // so there is one command-menu implementation, not a duplicate in the
+  // reader.
+  const openCommandMenu = showCmdList;
 
-  function pruneViewPrefs() {
-    const live = new Set(core.panes.map((p) => p.id).filter(Boolean));
-    for (const wid of windowViews.keys()) {
-      if (!live.has(wid)) windowViews.delete(wid);
-    }
-  }
-
-  const viewApi = {
-    swap: swapView,
-    get current() {
-      return currentView;
+  // Engine test surface. Renderer-agnostic probes the conformance suite drives
+  // against BOTH adapters, plus the inject helpers the reader/view tests use.
+  // The owner (SPA) assembles `window.__mobuxView` from this and the reader
+  // handle; the engine no longer self-wires a global (issue #206 D3).
+  const testApi = {
+    // Test injections close the WS first so tmux can't race/clobber the
+    // injected content (e.g. by re-asserting alt-screen mode). Mark the close
+    // intentional so auto-reconnect doesn't reopen the WS.
+    inject: (str) => {
+      core.intentionalClose = true;
+      try {
+        core.ws?.close();
+      } catch (_) {}
+      return core.write("\x1b[?1049l" + str.replace(/\n/g, "\r\n"));
     },
-    send: (d) => core.send(d),
-    test: {
-      // Test injections close the WS first so tmux can't race/clobber
-      // the injected content (e.g. by re-asserting alt-screen mode).
-      inject: (str) => {
-        // Mark the close intentional so auto-reconnect doesn't reopen the
-        // WS and let tmux clobber the injected content.
-        core.intentionalClose = true;
-        try {
-          core.ws?.close();
-        } catch (_) {}
-        return core.write("\x1b[?1049l" + str.replace(/\n/g, "\r\n"));
-      },
-      injectLines: (n, prefix = "inject") => {
-        core.intentionalClose = true;
-        try {
-          core.ws?.close();
-        } catch (_) {}
-        let s = "\x1b[?1049l";
-        for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
-        return core.write(s);
-      },
-      // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit)
-      // prefix. Use this in tests that care about sticky-to-bottom
-      // behaviour after incremental content growth: the alt-screen exit
-      // sequence causes sterk to reset the buffer, which races with the
-      // test's scroll-geometry probe.
-      injectLinesPlain: (n, prefix = "inject") => {
-        try {
-          core.ws?.close();
-        } catch (_) {}
-        let s = "";
-        for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
-        return core.write(s);
-      },
-      // Returns a Promise that resolves after the reader's next _render()
-      // call has committed updated scroll geometry (maxScroll, scrollY).
-      // Safe to call from page.evaluate() — Playwright serialises the
-      // resolved value via structured-clone, so callers should not await
-      // a non-serialisable payload.
-      readerAwaitRender: () => reader.awaitNextRender(),
-      bufferLength: () => core.getActiveBuffer().length,
-      isAlternate: () => core.isAlternateScreenActive(),
-      readerAtBottom: () => reader._atBottom,
-      readerForceScrollTop: () => {
-        reader._atBottom = false;
-        reader._scrollY = 0;
-        reader._applyTransform?.();
-      },
-      terminalRows: () => core.rows,
-      cols: () => core.cols,
-      rows: () => core.rows,
-      viewportY: () => core.getActiveBuffer().viewportY,
-      scrollToBottom: () => core.scrollToBottom(),
-      wsReady: () => core.ws?.readyState === WebSocket.OPEN,
-      // Simulate an *unexpected* server-side drop: close the socket
-      // WITHOUT marking the close intentional, so the core's onclose
-      // backoff fires exactly as it would for a real network/server blip.
-      // Used by the auto-reconnect test.
-      forceDrop: () => {
-        core.intentionalClose = false;
-        try {
-          core.ws?.close();
-        } catch (_) {}
-      },
-      oscDetected: () => !!core.oscDetected,
-      readerScrollY: () => reader.scrollY,
-      readerMaxScroll: () => reader.maxScroll,
-      readerInnerHeight: () => reader.innerHeight,
-      readerScrollBy: (dy) => reader.scrollBy(dy),
-      readerStickToBottom: () => reader.stickToBottom(),
-      // Force a synchronous re-render. Used by tests that need to assert
-      // post-render invariants (e.g. that rb-speaking re-applies after
-      // _inner.replaceChildren wipes the icon DOM) without racing the
-      // 50ms render throttle.
-      readerForceRender: () => reader._render(),
-      switchWindow: (dir) => core.switchWindow(dir),
-      statusBarOffsetHeight: () =>
-        document.querySelector(".reader-statusbar")?.offsetHeight ?? 0,
-      statusBarFilled: () =>
-        document
-          .querySelector(".reader-statusbar")
-          ?.classList.contains("reader-statusbar--filled") ?? false,
-
-      // ── Renderer-interface conformance hooks ──────────────────────
-      // Renderer-agnostic probes the conformance suite (test/conformance
-      // .spec.cjs) drives against BOTH adapters through the engine. They go
-      // through the engine's interface passthroughs — never a renderer global.
-      writeData: (str) => core.write(str),
-      awaitBufferChange: () =>
-        new Promise((resolve) => {
-          const sub = core.onBufferChanged(() => {
-            sub.dispose();
-            resolve();
-          });
-        }),
-      // ── Selection / links / bell probes (R12–R14) ─────────────────
-      getSelection: () => core.getSelection(),
-      hasSelection: () => core.hasSelection(),
-      clearSelection: () => core.clearSelection(),
-      selectAll: () => core.selectAll(),
-      awaitSelectionChange: () =>
-        new Promise((resolve) => {
-          const sub = core.onSelectionChange(() => {
-            sub.dispose();
-            resolve();
-          });
-        }),
-      awaitLink: () =>
-        new Promise((resolve) => {
-          const sub = core.onLink((uri) => {
-            sub.dispose();
-            resolve(uri);
-          });
-        }),
-      awaitBell: () =>
-        new Promise((resolve) => {
-          const sub = core.onBell(() => {
-            sub.dispose();
-            resolve();
-          });
-        }),
-      measure: () => core.measure(),
-      cellMetrics: () => core.cellSize(),
-      scrollLines: (n) => core.scrollLines(n),
-      getFontSize: () => core.getFontSize(),
-      setFontSize: (px) => core.setFontSize(px),
-      focus: () => core.focus(),
-      setNativeInputEnabled: (enabled) => core.setNativeInputEnabled(enabled),
-      lineText: (y) => {
-        const line = core.getActiveBuffer().getLine(y);
-        return line ? line.translateToString(true) : null;
-      },
-      cellInfo: (y, x) => {
-        const line = core.getActiveBuffer().getLine(y);
-        if (!line) return null;
-        const cell = line.getCell(x);
-        return {
-          chars: cell.getChars(),
-          code: cell.getCode(),
-          bold: cell.isBold(),
-          fgDefault: cell.isFgDefault(),
-          bgDefault: cell.isBgDefault(),
-        };
-      },
-      oscMarkerCount: () => core.oscMarkers.size,
+    injectLines: (n, prefix = "inject") => {
+      core.intentionalClose = true;
+      try {
+        core.ws?.close();
+      } catch (_) {}
+      let s = "\x1b[?1049l";
+      for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
+      return core.write(s);
     },
+    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit) prefix.
+    // Use this in tests that care about sticky-to-bottom behaviour after
+    // incremental content growth: the alt-screen exit sequence causes sterk to
+    // reset the buffer, which races with the test's scroll-geometry probe.
+    injectLinesPlain: (n, prefix = "inject") => {
+      try {
+        core.ws?.close();
+      } catch (_) {}
+      let s = "";
+      for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
+      return core.write(s);
+    },
+    bufferLength: () => core.getActiveBuffer().length,
+    isAlternate: () => core.isAlternateScreenActive(),
+    terminalRows: () => core.rows,
+    cols: () => core.cols,
+    rows: () => core.rows,
+    viewportY: () => core.getActiveBuffer().viewportY,
+    scrollToBottom: () => core.scrollToBottom(),
+    wsReady: () => core.ws?.readyState === WebSocket.OPEN,
+    // Simulate an *unexpected* server-side drop: close the socket WITHOUT
+    // marking the close intentional, so the core's onclose backoff fires
+    // exactly as it would for a real network/server blip.
+    forceDrop: () => {
+      core.intentionalClose = false;
+      try {
+        core.ws?.close();
+      } catch (_) {}
+    },
+    oscDetected: () => !!core.oscDetected,
+    switchWindow: (dir) => core.switchWindow(dir),
+
+    // ── Renderer-interface conformance hooks ──────────────────────
+    // Renderer-agnostic probes the conformance suite (test/conformance
+    // .spec.cjs) drives against BOTH adapters through the engine. They go
+    // through the engine's interface passthroughs — never a renderer global.
+    writeData: (str) => core.write(str),
+    awaitBufferChange: () =>
+      new Promise((resolve) => {
+        const sub = core.onBufferChanged(() => {
+          sub.dispose();
+          resolve();
+        });
+      }),
+    // ── Selection / links / bell probes (R12–R14) ─────────────────
+    getSelection: () => core.getSelection(),
+    hasSelection: () => core.hasSelection(),
+    clearSelection: () => core.clearSelection(),
+    selectAll: () => core.selectAll(),
+    awaitSelectionChange: () =>
+      new Promise((resolve) => {
+        const sub = core.onSelectionChange(() => {
+          sub.dispose();
+          resolve();
+        });
+      }),
+    awaitLink: () =>
+      new Promise((resolve) => {
+        const sub = core.onLink((uri) => {
+          sub.dispose();
+          resolve(uri);
+        });
+      }),
+    awaitBell: () =>
+      new Promise((resolve) => {
+        const sub = core.onBell(() => {
+          sub.dispose();
+          resolve();
+        });
+      }),
+    measure: () => core.measure(),
+    cellMetrics: () => core.cellSize(),
+    scrollLines: (n) => core.scrollLines(n),
+    getFontSize: () => core.getFontSize(),
+    setFontSize: (px) => core.setFontSize(px),
+    focus: () => core.focus(),
+    setNativeInputEnabled: (enabled) => core.setNativeInputEnabled(enabled),
+    lineText: (y) => {
+      const line = core.getActiveBuffer().getLine(y);
+      return line ? line.translateToString(true) : null;
+    },
+    cellInfo: (y, x) => {
+      const line = core.getActiveBuffer().getLine(y);
+      if (!line) return null;
+      const cell = line.getCell(x);
+      return {
+        chars: cell.getChars(),
+        code: cell.getCode(),
+        bold: cell.isBold(),
+        fgDefault: cell.isFgDefault(),
+        bgDefault: cell.isBgDefault(),
+      };
+    },
+    oscMarkerCount: () => core.oscMarkers.size,
   };
-  window.__mobuxView = viewApi;
 
-  // Apply stored default at boot so the user lands in their preferred
-  // view even before the first /panes refresh resolves. Per-window
-  // override (if any) is applied later in the panes listener.
-  const bootDefault = storedDefaultView();
-  if (bootDefault === "reader") {
-    later(() => applyView("reader", { persist: false }), 0);
-  }
-
-  updateToggleLabel();
+  refreshViewToggle();
 
   // ── Notification deep-link ─────────────────────────────────────────
   // A push notification's URL embeds ?w={window_index} for the tmux
@@ -966,8 +833,6 @@ export function createTerminal({
     disposed = true;
     // No backoff reconnect out of the teardown's own ws.close().
     core.intentionalClose = true;
-    unmountReaderGestures();
-    reader.unmount();
     gestures.destroy();
     if (topBar) {
       topBar.destroy();
@@ -985,8 +850,21 @@ export function createTerminal({
     core.dispose();
     // The keyboard tracker may have pinned an inline body height.
     document.body.style.height = "";
-    if (window.__mobuxView === viewApi) delete window.__mobuxView;
   }
 
-  return { core, dispose };
+  return {
+    core,
+    document: core.document,
+    dispose,
+    openCommandMenu,
+    refreshViewToggle,
+    // Reveal the on-screen input bar (the reader's double-tap-to-type path
+    // routes here so the keyboard has somewhere to land).
+    showInputBar: () => ensureInputBar().show(),
+    // Two-finger pull-to-reload handlers, shared with the reader's recognizer
+    // so the thresholds, strings, and pane-indicator restore live once.
+    twoPullMove,
+    twoPullEnd,
+    test: testApi,
+  };
 }

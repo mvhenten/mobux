@@ -32,12 +32,15 @@
 //       alternate-screen switching (and mouse-protocol reporting) itself
 //       clear()                              (engine housekeeping)
 //
-// The engine exposes the same surface consumers (terminal.js, reader-view.js)
-// use: EventTarget events (open, close, data, panes, history, osc-detected),
-// the connection/scroll/pane/tmux/history methods, and the interface
-// passthroughs above.
+// The engine exposes the surface its consumers use: EventTarget events (open,
+// close, data, panes, history, osc-detected), the connection/scroll/pane/tmux/
+// history methods, the interface passthroughs above, and a read-only `document`
+// contract (see terminal-document.js) the reader consumes. terminal.js drives
+// the engine; the reader (reader.js) is a sibling the SPA mounts — the engine
+// has no knowledge of it.
 
 import { openExternal } from "./external-link.js";
+import { createTerminalDocument } from "./terminal-document.js";
 
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
@@ -96,6 +99,12 @@ export class TerminalEngine extends EventTarget {
     });
 
     this._inputSub = this.renderer.onInput((d) => this.send(d));
+
+    // The read-only document contract (issue #206, D2). The reader consumes
+    // this instead of reaching into the buffer, `cols`, the OSC marker map,
+    // `onBufferChanged`, and the last-row-is-status convention. The engine has
+    // no knowledge of the reader; it only publishes the document.
+    this.document = createTerminalDocument(this);
   }
 
   _nodeQuery() {

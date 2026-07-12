@@ -3,6 +3,7 @@ import { collectDiagnostics } from "../lib/diagnostics.js";
 import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
 import { readLoadedBundleHash } from "../lib/bundleHash.js";
+import { createViewController } from "../lib/viewController.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -106,6 +107,7 @@ export function TerminalIsland({ node, session }) {
     // No node segment ⇒ local host.
     let cancelled = false;
     let engine = null;
+    let viewCtl = null;
 
     // Resolve the renderer choice from the server-held preference (hydrated at
     // boot by main.jsx), then load the matching vendor bundle + css (once per
@@ -121,13 +123,17 @@ export function TerminalIsland({ node, session }) {
 
     (async () => {
       let createTerminal;
+      let createReader;
       try {
         await loadScript(`/static/vendor/${bundle}${v}`);
-        // The engine module is pure (a factory export, no side effects), so
-        // the browser's module-map caching is exactly right: first mount
-        // fetches it, every later mount reuses it and just calls the factory.
+        // The engine and reader modules are pure factory exports (no side
+        // effects), so the browser's module-map caching is exactly right:
+        // first mount fetches them, every later mount reuses them.
         ({ createTerminal } = await import(
           /* @vite-ignore */ `/static/terminal.js${v}`
+        ));
+        ({ createReader } = await import(
+          /* @vite-ignore */ `/static/reader.js${v}`
         ));
         // chime.js sets up the in-page bell that plays when the SW delivers a
         // push notification. It self-boots via IIFE (attaches to SW messages),
@@ -144,6 +150,15 @@ export function TerminalIsland({ node, session }) {
       }
       if (cancelled || !rootRef.current) return;
 
+      // The engine renders the reader toggle affordances but owns no view
+      // state (#206 D3); it calls back into these opaque hooks, which the
+      // controller (created just below) fulfils.
+      const viewToggle = {
+        toggle: () =>
+          viewCtl?.swap(viewCtl.current === "xterm" ? "reader" : "xterm"),
+        isReader: () => viewCtl?.current === "reader",
+      };
+
       engine = createTerminal({
         node: node || "",
         session,
@@ -152,7 +167,41 @@ export function TerminalIsland({ node, session }) {
         // Diagnostic only: rides to the WS URL as &build=<hash> so a stale tab
         // identifies itself in the server's attach log (never affects routing).
         build: readLoadedBundleHash() || "",
+        viewToggle,
       });
+
+      // The reader is a sibling component mounted next to the terminal; the
+      // controller owns swap / mount / persistence / per-window state.
+      viewCtl = createViewController({
+        root: rootRef.current,
+        terminal: engine,
+        createReader,
+      });
+
+      // Assemble the page's test surface from the factory handles. The engine
+      // no longer self-wires a global (#206 D3); tests drive the handles.
+      const { reader } = viewCtl;
+      window.__mobuxView = {
+        swap: (mode) => viewCtl.swap(mode),
+        get current() {
+          return viewCtl.current;
+        },
+        send: (d) => engine.core.send(d),
+        test: {
+          ...engine.test,
+          readerAwaitRender: () => reader.awaitNextRender(),
+          readerForceRender: () => reader.forceRender(),
+          readerAtBottom: () => reader.atBottom,
+          readerForceScrollTop: () => reader.forceScrollTop(),
+          readerScrollY: () => reader.scrollY,
+          readerMaxScroll: () => reader.maxScroll,
+          readerInnerHeight: () => reader.innerHeight,
+          readerScrollBy: (dy) => reader.scrollBy(dy),
+          readerStickToBottom: () => reader.stickToBottom(),
+          statusBarOffsetHeight: () => reader.statusBarOffsetHeight(),
+          statusBarFilled: () => reader.statusBarFilled(),
+        },
+      };
 
       // Force a resize once the SPA layout has actually painted. The engine
       // sizes the PTY (cols/rows) from the host element's clientHeight, and it
@@ -187,6 +236,9 @@ export function TerminalIsland({ node, session }) {
       cancelled = true;
       resizeObsRef.current?.disconnect();
       resizeObsRef.current = null;
+      if (window.__mobuxView) delete window.__mobuxView;
+      viewCtl?.dispose();
+      viewCtl = null;
       engine?.dispose();
       engine = null;
     };

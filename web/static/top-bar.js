@@ -70,10 +70,14 @@ function ensureStyles() {
   document.head.appendChild(el);
 }
 
-// createTopBar({ send, toggleReader, isReader }) → { destroy() }
+// createTopBar({ send, toggleReader, isReader }) → { destroy(), sync() }
 //   send(str)        inject text/path into the terminal.
-//   toggleReader()   flip xterm <-> reader (terminal.js owns swapView).
+//   toggleReader()   flip the view — the SPA owns view state (#206 D3). When
+//                    null, no reader toggle is shown (engine runs standalone).
 //   isReader()       current view is reader → reflect the toggle icon.
+//   sync()           re-read isReader() and update the toggle icon; the owner
+//                    calls it after a view change (there is no `mobux:viewchange`
+//                    event anymore — the SPA drives the label directly).
 export function createTopBar({ send, toggleReader, isReader } = {}) {
   ensureStyles();
 
@@ -92,6 +96,7 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
 
   const readerBtn = document.createElement('button');
   readerBtn.type = 'button';
+  readerBtn.hidden = !toggleReader;
 
   function syncReaderBtn() {
     const reader = !!isReader?.();
@@ -122,9 +127,6 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
     e.preventDefault();
     window.location.href = '/settings';
   });
-  // Keep the toggle icon in sync when the view changes elsewhere
-  // (boot default, mobile path, future shortcuts).
-  window.addEventListener('mobux:viewchange', syncReaderBtn);
 
   // Mount at the TOP of the flex column so #terminal / #reader reflow below.
   const body = document.querySelector('.term-body') || document.body;
@@ -139,11 +141,13 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
     // (mic-overlay.js mounts its own root on document.body), so `bar.remove()`
     // alone would leave both behind.
     destroy() {
-      window.removeEventListener('mobux:viewchange', syncReaderBtn);
       attach.destroy?.();
       dictate.destroy?.();
       bar.remove();
       window.dispatchEvent(new Event('resize'));
     },
+    // Re-read isReader() and update the toggle icon. Called by the owner after
+    // a view change (boot default, per-window override, ribbon toggle).
+    sync: syncReaderBtn,
   };
 }

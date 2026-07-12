@@ -1685,7 +1685,7 @@ test("view swap persists as the server default view across reload", async ({
 });
 
 // ── Synthetic viewport (reader) ─────────────────────────────────────
-// Direct coverage of the translate3d-based scroller in reader-view.js.
+// Direct coverage of the translate3d-based scroller in reader.js.
 // All tests reset state via swap('xterm') / swap('reader') so they're
 // independent and can run in any order.
 
@@ -2610,7 +2610,7 @@ test("rb-speaking survives a buffer-change re-render mid-speech", async ({
 
   // Stub speak() so the utterance never auto-ends — speech stays "in
   // progress" across the forced re-render. The original utterance.onend
-  // is held by reader-view's speakNext closure and is simply never
+  // is held by the reader's speakNext closure and is simply never
   // invoked from the stub.
   await page.evaluate(() => {
     window.speechSynthesis.speak = () => {};
