@@ -263,6 +263,10 @@ async fn main() -> Result<()> {
             get(api_get_notification_prefs).put(api_set_notification_prefs),
         )
         .route(
+            "/api/settings/preferences",
+            get(api_get_ui_preferences).put(api_set_ui_preferences),
+        )
+        .route(
             "/api/settings/stt",
             get(api_get_stt_config).put(api_set_stt_config),
         )
@@ -1272,6 +1276,103 @@ async fn api_set_notification_prefs(
         .db
         .set_notification_prefs(req.into())
         .map_err(|e| AppError::internal(anyhow::anyhow!("writing prefs: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Serialize, Deserialize)]
+struct UiPrefsJson {
+    renderer: String,
+    theme: String,
+    default_view: String,
+    osc133_hint_dismissed: bool,
+    listen_voice: String,
+    listen_rate: f64,
+    listen_pitch: f64,
+}
+
+impl From<db::UiPreferences> for UiPrefsJson {
+    fn from(p: db::UiPreferences) -> Self {
+        // Tolerant on read: a row written before validation existed (or
+        // hand-edited in the sqlite file) must never brick a client's boot.
+        // Normalize the two enum-shaped fields and clamp the numeric ranges
+        // rather than serving garbage the client doesn't expect. Free-text
+        // fields (theme id, voice name) are served verbatim.
+        let renderer = if p.renderer == "sterk" {
+            "sterk"
+        } else {
+            "xterm"
+        }
+        .to_string();
+        let default_view = if p.default_view == "reader" {
+            "reader"
+        } else {
+            "xterm"
+        }
+        .to_string();
+        Self {
+            renderer,
+            theme: p.theme,
+            default_view,
+            osc133_hint_dismissed: p.osc133_hint_dismissed,
+            listen_voice: p.listen_voice,
+            listen_rate: p.listen_rate.clamp(0.5, 2.0),
+            listen_pitch: p.listen_pitch.clamp(0.5, 2.0),
+        }
+    }
+}
+
+impl UiPrefsJson {
+    /// Validate a client-submitted blob before it's written. Unlike the read
+    /// path, a write is rejected outright on a bad enum value instead of
+    /// silently clamped — a client sending garbage should see a 400, not have
+    /// its mistake quietly rewritten to a default it didn't ask for. Numeric
+    /// ranges are still clamped: a slider that overshoots isn't a client bug.
+    fn validate(self) -> Result<db::UiPreferences, String> {
+        if self.renderer != "xterm" && self.renderer != "sterk" {
+            return Err(format!(
+                "invalid renderer {:?}: must be \"xterm\" or \"sterk\"",
+                self.renderer
+            ));
+        }
+        if self.default_view != "xterm" && self.default_view != "reader" {
+            return Err(format!(
+                "invalid default_view {:?}: must be \"xterm\" or \"reader\"",
+                self.default_view
+            ));
+        }
+        Ok(db::UiPreferences {
+            renderer: self.renderer,
+            theme: self.theme,
+            default_view: self.default_view,
+            osc133_hint_dismissed: self.osc133_hint_dismissed,
+            listen_voice: self.listen_voice,
+            listen_rate: self.listen_rate.clamp(0.5, 2.0),
+            listen_pitch: self.listen_pitch.clamp(0.5, 2.0),
+        })
+    }
+}
+
+async fn api_get_ui_preferences(
+    State(state): State<AppState>,
+) -> Result<Json<UiPrefsJson>, AppError> {
+    let prefs = state
+        .db
+        .ui_preferences()
+        .map_err(|e| AppError::internal(anyhow::anyhow!("reading ui preferences: {e}")))?;
+    Ok(Json(prefs.into()))
+}
+
+async fn api_set_ui_preferences(
+    State(state): State<AppState>,
+    Json(req): Json<UiPrefsJson>,
+) -> Result<StatusCode, AppError> {
+    let prefs = req
+        .validate()
+        .map_err(|e| AppError::bad_request(anyhow::anyhow!(e)))?;
+    state
+        .db
+        .set_ui_preferences(prefs)
+        .map_err(|e| AppError::internal(anyhow::anyhow!("writing ui preferences: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2504,6 +2605,90 @@ impl IntoResponse for AppError {
 mod tests {
     use super::*;
 
+    // ── UI preferences validation (write) vs normalization (read) ───────────
+    //
+    // A PUT with a garbage enum value must 400, not silently clamp — the
+    // client made a mistake and should see it. A row read back (including one
+    // written before validation existed, or hand-edited) must never brick
+    // boot, so the read path stays tolerant.
+    #[test]
+    fn set_ui_preferences_rejects_invalid_renderer() {
+        let bad = UiPrefsJson {
+            renderer: "bogus".to_string(),
+            theme: "nord".to_string(),
+            default_view: "xterm".to_string(),
+            osc133_hint_dismissed: false,
+            listen_voice: String::new(),
+            listen_rate: 1.0,
+            listen_pitch: 1.0,
+        };
+        let err = bad.validate().expect_err("bogus renderer must be rejected");
+        assert!(
+            err.contains("renderer"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn set_ui_preferences_rejects_invalid_default_view() {
+        let bad = UiPrefsJson {
+            renderer: "xterm".to_string(),
+            theme: "nord".to_string(),
+            default_view: "bogus".to_string(),
+            osc133_hint_dismissed: false,
+            listen_voice: String::new(),
+            listen_rate: 1.0,
+            listen_pitch: 1.0,
+        };
+        let err = bad
+            .validate()
+            .expect_err("bogus default_view must be rejected");
+        assert!(
+            err.contains("default_view"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn set_ui_preferences_accepts_valid_enums_and_clamps_numerics() {
+        let ok = UiPrefsJson {
+            renderer: "sterk".to_string(),
+            theme: "nord".to_string(),
+            default_view: "reader".to_string(),
+            osc133_hint_dismissed: true,
+            listen_voice: "Daniel".to_string(),
+            listen_rate: 99.0,  // out of range: clamped, not rejected
+            listen_pitch: -5.0, // out of range: clamped, not rejected
+        }
+        .validate()
+        .expect("valid enums must be accepted");
+        assert_eq!(ok.renderer, "sterk");
+        assert_eq!(ok.default_view, "reader");
+        assert_eq!(ok.listen_rate, 2.0);
+        assert_eq!(ok.listen_pitch, 0.5);
+    }
+
+    #[test]
+    fn get_ui_preferences_normalizes_a_corrupt_row_instead_of_erroring() {
+        // Simulates a row that predates validation (or was hand-edited) —
+        // the read path must produce something the client can safely render,
+        // never propagate the garbage or fail the request.
+        let corrupt = db::UiPreferences {
+            renderer: "not-a-real-renderer".to_string(),
+            theme: "nord".to_string(),
+            default_view: "not-a-real-view".to_string(),
+            osc133_hint_dismissed: false,
+            listen_voice: String::new(),
+            listen_rate: 500.0,
+            listen_pitch: -500.0,
+        };
+        let json: UiPrefsJson = corrupt.into();
+        assert_eq!(json.renderer, "xterm");
+        assert_eq!(json.default_view, "xterm");
+        assert_eq!(json.listen_rate, 2.0);
+        assert_eq!(json.listen_pitch, 0.5);
+    }
+
     // ── serve_static cache headers (regression guard for the frozen-module
     // bug) ────────────────────────────────────────────────────────────────
     //
@@ -2574,6 +2759,112 @@ mod tests {
                  denied at the OS layer"
             );
         }
+    }
+
+    // Guard (#211): preferences live on the server, not per-device
+    // storage. The legacy localStorage keys that used to hold prefs must never
+    // reappear as a client-side source of truth in the web sources. Scans both
+    // the engine (web/static) and the SPA (web/spa/src) for the old keys —
+    // finding one means a preference silently regressed to per-device state.
+    //
+    // Two patterns are checked per file:
+    //   1. A forbidden key literal appears directly on a line alongside
+    //      `localStorage` (`localStorage.getItem("mobux:theme")`).
+    //   2. A hoisted const/let/var holds a forbidden key literal, and that
+    //      identifier is later passed into `localStorage.*Item(...)`
+    //      (`const K = "mobux:theme"; localStorage.getItem(K)`). Matched via
+    //      a declaration → identifier → usage chain rather than a plain
+    //      whole-file substring pair, so a coincidental same-string
+    //      CustomEvent name (terminal.js dispatches a `"mobux:theme"` event,
+    //      unrelated to storage) doesn't false-positive.
+    #[test]
+    fn no_preference_keys_read_from_local_storage() {
+        use std::fs;
+        // Keys that were per-device localStorage prefs and are now server-synced.
+        // `mobux.view.default` is the global default view; the per-window
+        // `mobux.view.<session>.<id>` override key is deliberately NOT here — it
+        // stays device-transient (see the PR classification table).
+        const FORBIDDEN: &[&str] = &[
+            "mobux:renderer",
+            "mobux:theme",
+            "mobux.listen.prefs",
+            "mobux.osc133.dismissed",
+            "mobux.view.default",
+        ];
+
+        let decl_re =
+            Regex::new(r#"(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*['"]([^'"]+)['"]"#)
+                .unwrap();
+
+        let roots = [
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/static"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/spa/src"),
+        ];
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack: Vec<std::path::PathBuf> = roots.to_vec();
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|n| n.to_str()) == Some("node_modules") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                let ext = path.extension().and_then(|e| e.to_str());
+                if !matches!(ext, Some("js") | Some("jsx")) {
+                    continue;
+                }
+                let Ok(src) = fs::read_to_string(&path) else {
+                    continue;
+                };
+
+                // Pattern 1: direct literal alongside localStorage on one line.
+                for line in src.lines() {
+                    if !line.contains("localStorage") {
+                        continue;
+                    }
+                    for key in FORBIDDEN {
+                        if line.contains(key) {
+                            offenders.push(format!("{}: {}", path.display(), line.trim()));
+                        }
+                    }
+                }
+
+                // Pattern 2: hoisted const/let/var holding a forbidden literal,
+                // later passed by identifier into localStorage.*Item(...).
+                for cap in decl_re.captures_iter(&src) {
+                    let ident = &cap[1];
+                    let value = &cap[2];
+                    if !FORBIDDEN.contains(&value) {
+                        continue;
+                    }
+                    let usage_re = Regex::new(&format!(
+                        r"localStorage\.(?:get|set|remove)Item\(\s*{}\b",
+                        regex::escape(ident)
+                    ))
+                    .unwrap();
+                    if usage_re.is_match(&src) {
+                        offenders.push(format!(
+                            "{}: `{ident}` holds forbidden key {value:?} and is passed to localStorage",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "preference keys must not be read/written via localStorage (they are \
+             server-synced via /api/settings/preferences):\n{}",
+            offenders.join("\n")
+        );
     }
 
     #[test]

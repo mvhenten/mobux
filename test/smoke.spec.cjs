@@ -555,18 +555,16 @@ test("reader view live-updates on new output", async ({ page }) => {
   await page.evaluate(() => window.__mobuxView.swap("xterm"));
 });
 
-test("long-press menu toggles reader view", async ({ page }, testInfo) => {
-  // Start clean: no stored view preference. Re-seed the renderer
-  // choice INSIDE this init script — the fixture's seed runs first
-  // (added in beforeEach), so a bare clear() would otherwise wipe it
-  // and a subsequent reload would pick the wrong backend.
-  const renderer = testInfo.project.use && testInfo.project.use.renderer;
-  await page.addInitScript((r) => {
+test("long-press menu toggles reader view", async ({ page }) => {
+  // Start clean: drop any per-window view override in localStorage. The
+  // renderer and default-view baseline are server-held and already reset to
+  // this project's renderer by the fixture, so clearing localStorage no longer
+  // wipes the backend choice.
+  await page.addInitScript(() => {
     try {
       localStorage.clear();
-      if (r === "sterk") localStorage.setItem("mobux:renderer", "sterk");
     } catch (_) {}
-  }, renderer);
+  });
   await page.goto(`${BASE}/app#/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
     timeout: 5000,
@@ -1547,15 +1545,24 @@ test("view preference persists per window", async ({ page }) => {
   await page.evaluate(() => window.__mobuxView.swap("reader"));
   await page.waitForTimeout(150);
 
-  const stored = await page.evaluate(
-    ({ session, id }) => ({
-      perWindow: localStorage.getItem(`mobux.view.${session}.${id}`),
-      default: localStorage.getItem("mobux.view.default"),
-    }),
+  // Per-window override stays in localStorage (device-transient, keyed on the
+  // volatile tmux window id). The default view is now a server preference.
+  const perWindow = await page.evaluate(
+    ({ session, id }) => localStorage.getItem(`mobux.view.${session}.${id}`),
     { session, id: activeId },
   );
-  expect(stored.perWindow).toBe("reader");
-  expect(stored.default).toBe("reader");
+  expect(perWindow).toBe("reader");
+  await expect
+    .poll(
+      async () =>
+        page
+          .evaluate(async () =>
+            (await fetch("/api/settings/preferences")).json(),
+          )
+          .then((p) => p.default_view),
+      { timeout: 4000 },
+    )
+    .toBe("reader");
 
   // Reload — should land in reader for this window
   await page.reload();

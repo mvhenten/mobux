@@ -1,11 +1,10 @@
-import { useEffect, useRef } from "preact/hooks";
-import { signal, computed } from "@preact/signals";
+import { useEffect } from "preact/hooks";
+import { signal } from "@preact/signals";
+import { getPref, setPref } from "../../lib/prefs.js";
 
-// Listen card. Ports listen-settings.js (settings-page wiring) and
-// listen-prefs.js (prefs schema). Uses the same localStorage key and
-// the same Web Speech API so existing phone preferences are preserved.
+// Listen card. Voice/rate/pitch are the server-held `listen_*` preferences,
+// global across devices. Uses the Web Speech API for playback.
 
-const STORAGE_KEY = "mobux.listen.prefs";
 const RATE_MIN = 0.5;
 const RATE_MAX = 2.0;
 const PITCH_MIN = 0.5;
@@ -18,40 +17,37 @@ function clamp(n, lo, hi, fallback) {
 }
 
 function loadPrefs() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { voice: "", rate: 1.0, pitch: 1.0 };
-    const p = JSON.parse(raw);
-    return {
-      voice: typeof p.voice === "string" ? p.voice : "",
-      rate: clamp(p.rate, RATE_MIN, RATE_MAX, 1.0),
-      pitch: clamp(p.pitch, PITCH_MIN, PITCH_MAX, 1.0),
-    };
-  } catch (_) {
-    return { voice: "", rate: 1.0, pitch: 1.0 };
-  }
+  const voice = getPref("listen_voice");
+  return {
+    voice: typeof voice === "string" ? voice : "",
+    rate: clamp(getPref("listen_rate"), RATE_MIN, RATE_MAX, 1.0),
+    pitch: clamp(getPref("listen_pitch"), PITCH_MIN, PITCH_MAX, 1.0),
+  };
 }
 
 function savePrefs(prefs) {
-  try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        voice: typeof prefs.voice === "string" ? prefs.voice : "",
-        rate: clamp(prefs.rate, RATE_MIN, RATE_MAX, 1.0),
-        pitch: clamp(prefs.pitch, PITCH_MIN, PITCH_MAX, 1.0),
-      }),
-    );
-  } catch (_) {}
+  setPref("listen_voice", typeof prefs.voice === "string" ? prefs.voice : "");
+  setPref("listen_rate", clamp(prefs.rate, RATE_MIN, RATE_MAX, 1.0));
+  setPref("listen_pitch", clamp(prefs.pitch, PITCH_MIN, PITCH_MAX, 1.0));
 }
 
 const available = signal(
   typeof window !== "undefined" && "speechSynthesis" in window,
 );
 const voices = signal([]);
-const prefs = signal(loadPrefs());
+// Seeded empty, not loadPrefs() — this module evaluates as part of the static
+// import chain (main.jsx -> app.jsx -> Settings.jsx -> this file), which runs
+// before main.jsx's boot() has awaited prefs.hydrate(). Reading the server
+// value happens in the mount effect below instead, exactly like Theme.jsx: by
+// the time ListenCard mounts, App has already rendered, which only happens
+// after hydrate() resolved.
+const prefs = signal({ voice: "", rate: 1.0, pitch: 1.0 });
 
 export function ListenCard() {
+  useEffect(() => {
+    prefs.value = loadPrefs();
+  }, []);
+
   // Populate voice list; Chrome fires voiceschanged asynchronously.
   useEffect(() => {
     if (!available.value) return;

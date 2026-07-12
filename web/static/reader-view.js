@@ -26,6 +26,7 @@
 
 import { tokenize, extractRuns } from './term-tokenizer.js';
 import { loadPrefs } from './listen-prefs.js';
+import * as prefs from './prefs.js';
 
 const SPEECH_AVAILABLE = 'speechSynthesis' in window;
 
@@ -165,7 +166,7 @@ export class ReaderView {
       '<span>Reader uses heuristics. <a href="/settings#shell-integration">Set up OSC 133 →</a></span>' +
       '<button type="button" class="reader-osc-dismiss" aria-label="Dismiss">×</button>';
     el.querySelector('.reader-osc-dismiss').addEventListener('click', () => {
-      try { localStorage.setItem('mobux.osc133.dismissed', '1'); } catch (_) {}
+      prefs.set('osc133_hint_dismissed', true);
       el.hidden = true;
     });
     return el;
@@ -173,8 +174,7 @@ export class ReaderView {
 
   _refreshOscHint() {
     if (!this._oscHint) return;
-    let dismissed = false;
-    try { dismissed = localStorage.getItem('mobux.osc133.dismissed') === '1'; } catch (_) {}
+    const dismissed = prefs.get('osc133_hint_dismissed') === true;
     this._oscHint.hidden = this.core.oscDetected || dismissed;
   }
 

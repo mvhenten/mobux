@@ -98,6 +98,216 @@ test("app route serves the SPA shell and Home lists sessions", async ({
   await expect(page.locator("#fabNew")).toBeVisible();
 });
 
+// ── server-synced UI preferences (#211) ───────────────────────────────
+
+const PREF_DEFAULTS = {
+  renderer: "xterm",
+  theme: "tomorrow-night-soft",
+  default_view: "xterm",
+  osc133_hint_dismissed: false,
+  listen_voice: "",
+  listen_rate: 1.0,
+  listen_pitch: 1.0,
+};
+
+async function putPrefs(page, prefs) {
+  const res = await page.request.put(`${BASE}/api/settings/preferences`, {
+    data: prefs,
+  });
+  if (!res.ok()) throw new Error(`PUT preferences: ${res.status()}`);
+}
+
+test("preferences API round-trips the whole blob", async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+
+  // A fresh row seeds to defaults; renderer/theme are always present strings.
+  const initial = await page.evaluate(async () =>
+    (await fetch("/api/settings/preferences")).json(),
+  );
+  expect(typeof initial.renderer).toBe("string");
+  expect(typeof initial.theme).toBe("string");
+
+  const put = {
+    renderer: "sterk",
+    theme: "nord",
+    default_view: "reader",
+    osc133_hint_dismissed: true,
+    listen_voice: "Daniel",
+    listen_rate: 1.4,
+    listen_pitch: 0.8,
+  };
+  try {
+    const status = await page.evaluate(async (body) => {
+      const r = await fetch("/api/settings/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return r.status;
+    }, put);
+    expect(status).toBe(204);
+
+    const got = await page.evaluate(async () =>
+      (await fetch("/api/settings/preferences")).json(),
+    );
+    expect(got).toMatchObject(put);
+  } finally {
+    await putPrefs(page, PREF_DEFAULTS);
+  }
+});
+
+test("terminal island reads the server renderer preference", async ({
+  page,
+}) => {
+  // Set the renderer to sterk on the server, then load a terminal fresh: the
+  // island must load the sterk vendor bundle, proving it booted from the
+  // server preference — there is no per-device localStorage renderer anymore.
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await putPrefs(page, { ...PREF_DEFAULTS, renderer: "sterk" });
+  try {
+    // about:blank first, so navigating to the terminal route is a full document
+    // load (not a hash-only change) and main.jsx re-runs — re-hydrating prefs
+    // before the island boots.
+    await page.goto("about:blank");
+    const sterkBundle = page.waitForRequest(
+      /\/static\/vendor\/sterk\.bundle\.js/,
+      { timeout: 20000 },
+    );
+    await page.goto(`${APP}#/s/${SEED}`, { waitUntil: "domcontentloaded" });
+    await sterkBundle;
+  } finally {
+    await putPrefs(page, PREF_DEFAULTS);
+  }
+});
+
+test("settings cards render the seeded server preferences, not built-in defaults", async ({
+  page,
+}) => {
+  // Regression test for a bug caught in review: RendererCard/ListenCard used
+  // to initialize their signals from getPref() at module-eval time, which
+  // runs before main.jsx's boot() has awaited hydrate(). That raced hydrate
+  // and rendered built-in defaults (xterm/1.0/1.0) even though the server
+  // held sterk/1.4 — and saving from that stale state reset the untouched
+  // prefs back to defaults. Both cards now read on mount instead (like
+  // ThemeCard already did), so a fresh load must show the seeded values.
+  const seeded = {
+    renderer: "sterk",
+    theme: "nord",
+    default_view: "reader",
+    osc133_hint_dismissed: true,
+    listen_voice: "",
+    listen_rate: 1.4,
+    listen_pitch: 0.6,
+  };
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await putPrefs(page, seeded);
+  try {
+    await page.goto("about:blank");
+    await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+
+    await expect(page.locator("#renderer-picker select")).toHaveValue("sterk");
+
+    const capable = await page.locator("#listenCapable").isVisible();
+    if (capable) {
+      await expect(page.locator("#listenRate")).toHaveValue("1.4");
+      await expect(page.locator("#listenPitch")).toHaveValue("0.6");
+    }
+  } finally {
+    await putPrefs(page, PREF_DEFAULTS);
+  }
+});
+
+test("changing one preference does not reset the others (GET-merge-PUT)", async ({
+  page,
+}) => {
+  // Regression test for a bug caught in review: prefs.js used to PUT the
+  // tab's boot-time snapshot on every change. Seed a full set of non-default
+  // values, change only the renderer through the UI, and confirm every other
+  // field the seed set is still intact server-side afterward.
+  const seeded = {
+    renderer: "xterm",
+    theme: "nord",
+    default_view: "reader",
+    osc133_hint_dismissed: true,
+    listen_voice: "",
+    listen_rate: 1.4,
+    listen_pitch: 0.6,
+  };
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await putPrefs(page, seeded);
+  try {
+    await page.goto("about:blank");
+    await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+
+    await page.locator("#renderer-picker select").selectOption("sterk");
+    await expect(
+      page.locator("#renderer-picker .settings-status"),
+    ).toBeVisible();
+
+    const after = await page.evaluate(async () =>
+      (await fetch("/api/settings/preferences")).json(),
+    );
+    expect(after.renderer).toBe("sterk");
+    expect(after).toMatchObject({
+      theme: "nord",
+      default_view: "reader",
+      osc133_hint_dismissed: true,
+      listen_rate: 1.4,
+      listen_pitch: 0.6,
+    });
+  } finally {
+    await putPrefs(page, PREF_DEFAULTS);
+  }
+});
+
+test("PUT rejects an invalid renderer/default_view with 400", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const badRenderer = await page.evaluate(async () => {
+    const r = await fetch("/api/settings/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        renderer: "not-a-renderer",
+        theme: "nord",
+        default_view: "xterm",
+        osc133_hint_dismissed: false,
+        listen_voice: "",
+        listen_rate: 1.0,
+        listen_pitch: 1.0,
+      }),
+    });
+    return r.status;
+  });
+  expect(badRenderer).toBe(400);
+
+  const badView = await page.evaluate(async () => {
+    const r = await fetch("/api/settings/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        renderer: "xterm",
+        theme: "nord",
+        default_view: "not-a-view",
+        osc133_hint_dismissed: false,
+        listen_voice: "",
+        listen_rate: 1.0,
+        listen_pitch: 1.0,
+      }),
+    });
+    return r.status;
+  });
+  expect(badView).toBe(400);
+
+  // Neither rejected write should have touched the stored row.
+  const got = await page.evaluate(async () =>
+    (await fetch("/api/settings/preferences")).json(),
+  );
+  expect(got.renderer).not.toBe("not-a-renderer");
+  expect(got.default_view).not.toBe("not-a-view");
+});
+
 // ── session lifecycle: create → rename → kill, all via the SPA UI ───────────
 
 // Reveal a row's hidden swipe action (rename/kill sit behind .session-item).

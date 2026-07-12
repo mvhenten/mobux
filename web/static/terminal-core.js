@@ -1,8 +1,8 @@
 // TerminalCore facade — picks the backend at construction time from the
 // `renderer` option passed down by the engine factory (terminal.js
 // createTerminal), which in turn gets it from the SPA host (TerminalIsland
-// resolves `localStorage['mobux:renderer']` and loads the matching vendor
-// bundle before constructing the engine).
+// resolves the server-held `renderer` preference and loads the matching
+// vendor bundle before constructing the engine).
 //
 // Two backends ship in mobux:
 //
@@ -10,11 +10,11 @@
 //   - `sterk`  — experimental. Wraps @kattebak/sterk (libterm + Ace).
 //                See terminal-core-sterk.js.
 //
-// The user toggles between them on the /settings page (key:
-// `mobux:renderer`, persisted in localStorage). The host loads the matching
-// vendor bundle (xterm.bundle.js or sterk.bundle.js) BEFORE constructing the
-// engine — so `window.Terminal` or `window.Sterk` is guaranteed to be
-// present when `new TerminalCore({...})` instantiates the chosen backend.
+// The user toggles between them on the /settings page (the server-held
+// `renderer` preference). The host loads the matching vendor bundle
+// (xterm.bundle.js or sterk.bundle.js) BEFORE constructing the engine — so
+// `window.Terminal` or `window.Sterk` is guaranteed to be present when
+// `new TerminalCore({...})` instantiates the chosen backend.
 //
 // Both backend modules check for their renderer global inside the
 // constructor (not at top-level), so importing both here is cheap and

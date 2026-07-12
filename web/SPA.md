@@ -30,8 +30,8 @@ client-side QR codes to the Install page.
 Phase 3 done:
 
 - **Listen card** (`components/settings/Listen.jsx`) — Voice/Rate/Pitch
-  controls, Test button, Web Speech API capability gate. Reads/writes the same
-  `mobux.listen.prefs` localStorage key as the old `listen-prefs.js` module.
+  controls, Test button, Web Speech API capability gate. Reads/writes the
+  server-held `listen_*` preferences (see "Preferences" below).
 - **Build-info card** (`components/settings/BuildInfo.jsx`) — Backend version +
   server bundle hash from a new `/api/build-info` endpoint; loaded bundle hash
   from `/static/build-info.json`; stale-UI warning when they diverge.
@@ -40,7 +40,7 @@ Phase 3 done:
   Install page. The server `/install` page and its Rust-side QR renderer are
   untouched.
 - Headless Playwright verification (7 tests, all green): all phase-2 checks
-  plus Listen card localStorage persistence, Build-info version/hash display,
+  plus Listen card persistence, Build-info version/hash display,
   and Install page QR SVG rendering.
 
 ## Status (phase 2)
@@ -96,7 +96,7 @@ web/spa/
       settings/           one component per Settings card
         Update.jsx          software self-update (host-pinned)
         Notifications.jsx   push-trigger prefs (4 checkboxes)
-        Renderer.jsx        xterm/sterk picker (localStorage)
+        Renderer.jsx        xterm/sterk picker (server pref)
         Theme.jsx           theme picker (imports /static/themes.js)
         ShellIntegration.jsx OSC-133 installer per shell
         Stt.jsx             speech provider (phase 1, moved here)
@@ -253,12 +253,32 @@ Ported in phase 2 (one component per card, in `components/settings/`):
 - **Notifications** (`Notifications.jsx`) — `GET|PUT /api/settings/notifications`
   (snake_case `bell` / `bell_emoji` / `program_exit` / `program_exit_nonzero`),
   auto-save on every checkbox change.
-- **Terminal renderer** (`Renderer.jsx`) — `localStorage['mobux:renderer']`.
+- **Terminal renderer** (`Renderer.jsx`) — server-held `renderer` preference.
 - **Theme** (`Theme.jsx`) — dynamically imports the backend `/static/themes.js`
-  module (single source of truth), persists + applies + broadcasts `mobux:theme`.
+  module (single source of truth), persists the server-held `theme` preference,
+  applies + broadcasts `mobux:theme`.
 - **Shell integration** (`ShellIntegration.jsx`) —
   `GET /api/shell-integration/status`, `POST .../install|uninstall` with a
   `{shell}` body; OSC-133 snippets shown verbatim.
+
+## Preferences (server-synced, #211)
+
+UI preferences are global server state, not per-device storage. mobux is
+single-user (one basic-auth user, one sqlite row), so there is no per-user or
+per-device modelling. `GET|PUT /api/settings/preferences` returns/replaces the
+whole blob: `renderer`, `theme`, `default_view`, `osc133_hint_dismissed`,
+`listen_voice`, `listen_rate`, `listen_pitch`.
+
+`/static/prefs.js` is the one client module both the SPA and the terminal engine
+share. `main.jsx` loads it and `await`s `hydrate()` (the whole blob, once)
+before first render, so the terminal island reads `renderer`/`theme`/etc.
+synchronously at boot. Every change PUTs the whole blob. No local caching: a
+server that's unreachable at boot falls back to defaults for that load.
+
+Genuinely device-local state stays in the browser: the per-window reader/xterm
+override (`mobux.view.<session>.<id>`, keyed on the volatile tmux window id),
+the selected node (`mobux:node`), the telemetry overlay toggle
+(`mobux:telemetry`), and the per-tab reload baseline (`sessionStorage`).
 
 ## Remaining work
 

@@ -23,4 +23,21 @@ import(
   /* @vite-ignore */ new URL("/static/telemetry.js", location.origin).href
 ).catch((e) => console.warn("telemetry.js load failed", e));
 
-render(<App />, document.getElementById("app"));
+// Server-held UI preferences (#211). Load the shared engine module and
+// fetch the whole blob before first render, so the terminal island reads the
+// renderer/theme/etc. the server holds — not per-device localStorage, which is
+// gone. hydrate() never rejects (it falls back to defaults if the server is
+// unreachable), so a brief blocking fetch here can't wedge boot.
+async function boot() {
+  try {
+    const prefs = await import(
+      /* @vite-ignore */ new URL("/static/prefs.js", location.origin).href
+    );
+    await prefs.hydrate();
+  } catch (e) {
+    console.warn("prefs.js load failed", e);
+  }
+  render(<App />, document.getElementById("app"));
+}
+
+boot();

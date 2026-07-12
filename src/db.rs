@@ -88,6 +88,41 @@ impl Default for NotificationPrefs {
     }
 }
 
+/// Global UI preferences. Single row, id=1, in `ui_preferences`. These were
+/// formerly per-device localStorage keys; mobux is single-user, so they now
+/// live on the server as one shared, authoritative row (#211).
+#[derive(Debug, Clone)]
+pub struct UiPreferences {
+    /// Terminal renderer: `xterm` (default) or `sterk`.
+    pub renderer: String,
+    /// Colour theme id (client-defined; server stores it verbatim).
+    pub theme: String,
+    /// Default terminal view on session open: `xterm` or `reader`.
+    pub default_view: String,
+    /// Whether the reader OSC-133 setup hint has been dismissed.
+    pub osc133_hint_dismissed: bool,
+    /// Web Speech voice name for Listen mode (empty = browser default).
+    pub listen_voice: String,
+    /// Listen speech rate, clamped 0.5–2.0.
+    pub listen_rate: f64,
+    /// Listen speech pitch, clamped 0.5–2.0.
+    pub listen_pitch: f64,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            renderer: "xterm".to_string(),
+            theme: "tomorrow-night-soft".to_string(),
+            default_view: "xterm".to_string(),
+            osc133_hint_dismissed: false,
+            listen_voice: String::new(),
+            listen_rate: 1.0,
+            listen_pitch: 1.0,
+        }
+    }
+}
+
 /// SQLite-backed state. Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct Db {
@@ -130,6 +165,21 @@ impl Db {
                 bell_emoji INTEGER NOT NULL,
                 program_exit INTEGER NOT NULL,
                 program_exit_nonzero INTEGER NOT NULL
+            );
+
+            -- UI preferences (#211): single global row of client
+            -- display/behaviour prefs. mobux is single-user, so there is no
+            -- per-user or per-device modelling — one row, the server is
+            -- authoritative, every client reads it at boot.
+            CREATE TABLE IF NOT EXISTS ui_preferences (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                renderer TEXT NOT NULL,
+                theme TEXT NOT NULL,
+                default_view TEXT NOT NULL,
+                osc133_hint_dismissed INTEGER NOT NULL,
+                listen_voice TEXT NOT NULL,
+                listen_rate REAL NOT NULL,
+                listen_pitch REAL NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS stt_config (
@@ -378,6 +428,91 @@ impl Db {
             ],
         )
         .context("upserting notification_prefs")?;
+        Ok(())
+    }
+
+    /// Read the single UI-preferences row, seeding defaults on first access.
+    pub fn ui_preferences(&self) -> Result<UiPreferences> {
+        let conn = self.lock_conn()?;
+        let row: Option<(String, String, String, i64, String, f64, f64)> = conn
+            .query_row(
+                "SELECT renderer, theme, default_view, osc133_hint_dismissed,
+                        listen_voice, listen_rate, listen_pitch
+                 FROM ui_preferences WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("reading ui_preferences")?;
+
+        if let Some((
+            renderer,
+            theme,
+            default_view,
+            osc133_hint_dismissed,
+            listen_voice,
+            listen_rate,
+            listen_pitch,
+        )) = row
+        {
+            return Ok(UiPreferences {
+                renderer,
+                theme,
+                default_view,
+                osc133_hint_dismissed: osc133_hint_dismissed != 0,
+                listen_voice,
+                listen_rate,
+                listen_pitch,
+            });
+        }
+
+        let defaults = UiPreferences::default();
+        Self::upsert_ui_preferences(&conn, &defaults)
+            .context("inserting default ui_preferences")?;
+        Ok(defaults)
+    }
+
+    /// Overwrite the UI-preferences row wholesale (the client PUTs the full blob).
+    pub fn set_ui_preferences(&self, prefs: UiPreferences) -> Result<()> {
+        let conn = self.lock_conn()?;
+        Self::upsert_ui_preferences(&conn, &prefs).context("upserting ui_preferences")?;
+        Ok(())
+    }
+
+    fn upsert_ui_preferences(conn: &Connection, prefs: &UiPreferences) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO ui_preferences
+                 (id, renderer, theme, default_view, osc133_hint_dismissed,
+                  listen_voice, listen_rate, listen_pitch)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                 renderer = excluded.renderer,
+                 theme = excluded.theme,
+                 default_view = excluded.default_view,
+                 osc133_hint_dismissed = excluded.osc133_hint_dismissed,
+                 listen_voice = excluded.listen_voice,
+                 listen_rate = excluded.listen_rate,
+                 listen_pitch = excluded.listen_pitch",
+            params![
+                prefs.renderer,
+                prefs.theme,
+                prefs.default_view,
+                prefs.osc133_hint_dismissed as i64,
+                prefs.listen_voice,
+                prefs.listen_rate,
+                prefs.listen_pitch,
+            ],
+        )?;
         Ok(())
     }
 
@@ -873,6 +1008,41 @@ mod tests {
         db.remove_subscription("https://push.example/abc")
             .expect("remove");
         assert!(db.list_subscriptions().expect("list 3").is_empty());
+    }
+
+    #[test]
+    fn ui_preferences_round_trip() {
+        let db = fresh_db();
+
+        // First read seeds and returns the defaults.
+        let defaults = db.ui_preferences().expect("seed defaults");
+        assert_eq!(defaults.renderer, "xterm");
+        assert_eq!(defaults.theme, "tomorrow-night-soft");
+        assert_eq!(defaults.default_view, "xterm");
+        assert!(!defaults.osc133_hint_dismissed);
+        assert_eq!(defaults.listen_voice, "");
+        assert_eq!(defaults.listen_rate, 1.0);
+        assert_eq!(defaults.listen_pitch, 1.0);
+
+        db.set_ui_preferences(UiPreferences {
+            renderer: "sterk".to_string(),
+            theme: "nord".to_string(),
+            default_view: "reader".to_string(),
+            osc133_hint_dismissed: true,
+            listen_voice: "Daniel".to_string(),
+            listen_rate: 1.4,
+            listen_pitch: 0.8,
+        })
+        .expect("write");
+
+        let got = db.ui_preferences().expect("read back");
+        assert_eq!(got.renderer, "sterk");
+        assert_eq!(got.theme, "nord");
+        assert_eq!(got.default_view, "reader");
+        assert!(got.osc133_hint_dismissed);
+        assert_eq!(got.listen_voice, "Daniel");
+        assert_eq!(got.listen_rate, 1.4);
+        assert_eq!(got.listen_pitch, 0.8);
     }
 
     #[test]

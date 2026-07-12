@@ -108,7 +108,7 @@ test('settings: STT provider switch + auto-save persists', async ({ page }) => {
   expect(cfg.providers.network.port).toBe(probe);
 });
 
-test('listen card renders controls and saves prefs to localStorage', async ({ page }) => {
+test('listen card renders controls and saves prefs to the server', async ({ page }) => {
   await page.goto(`${APP}#/settings`, { waitUntil: 'networkidle' });
   await expect(page.locator('#listen-settings h2')).toHaveText('Listen');
 
@@ -124,11 +124,18 @@ test('listen card renders controls and saves prefs to localStorage', async ({ pa
     await expect(page.locator('#listenPitch')).toBeVisible();
     await expect(page.locator('#listenTest')).toBeVisible();
 
-    // Changing rate persists to localStorage.
+    // Changing rate persists to the server-held preferences.
     await page.locator('#listenRate').fill('1.5');
     await page.locator('#listenRate').dispatchEvent('input');
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('mobux.listen.prefs') || '{}'));
-    expect(stored.rate).toBeCloseTo(1.5, 1);
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            async () => (await fetch('/api/settings/preferences')).json(),
+          ).then((p) => p.listen_rate),
+        { timeout: 6000 },
+      )
+      .toBeCloseTo(1.5, 1);
   }
 });
 
