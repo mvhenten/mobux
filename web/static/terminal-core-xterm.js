@@ -8,6 +8,8 @@
 // default). Exposes the same external surface as terminal-core-sterk.js so
 // consumers (terminal.js, reader-view.js, tests) use a single contract.
 
+import { openExternal } from "./external-link.js";
+
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
   "prev-window",
@@ -51,7 +53,11 @@ export class TerminalCoreXterm extends EventTarget {
     });
     this.term.open(host);
     if (WebLinksAddon) {
-      this.term.loadAddon(new WebLinksAddon());
+      // Route clicked links out of the app shell (system browser in the
+      // TWA) instead of xterm's default in-window window.open.
+      this.term.loadAddon(
+        new WebLinksAddon((_event, uri) => openExternal(uri)),
+      );
     }
 
     // Lock mouse protocol to NONE — prevents xterm.js from capturing

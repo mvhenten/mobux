@@ -495,6 +495,93 @@ test("external links: anchor-click in regular browser, intent:// in TWA", async 
   expect(twaResult.anchorClicked).toBe(false);
 });
 
+test("external links: isExternalUrl distinguishes shell-internal from off-origin", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(
+    () => typeof window.__mobuxIsExternalUrl === "function",
+    { timeout: 5000 },
+  );
+
+  const result = await page.evaluate(() => {
+    const isExternal = window.__mobuxIsExternalUrl;
+    return {
+      absoluteOther: isExternal("https://example.com/x"),
+      sameOrigin: isExternal(`${window.location.origin}/settings`),
+      relativePath: isExternal("/settings#shell-integration"),
+      hash: isExternal("#/s/foo"),
+      mailto: isExternal("mailto:x@example.com"),
+    };
+  });
+
+  expect(result.absoluteOther).toBe(true);
+  expect(result.sameOrigin).toBe(false);
+  expect(result.relativePath).toBe(false);
+  expect(result.hash).toBe(false);
+  // Non-http(s) schemes are left to the platform, not treated as external.
+  expect(result.mailto).toBe(false);
+});
+
+test("external links: delegated handler escapes off-origin anchors, leaves in-app anchors alone", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  // The delegated click handler is installed at SPA boot (main.jsx) and again
+  // by the engine — both no-op after the first via the window guard.
+  await page.waitForFunction(
+    () => window.__mobuxExternalLinkHandlerInstalled === true,
+    { timeout: 5000 },
+  );
+
+  const result = await page.evaluate(() => {
+    // Simulate the TWA so the escape path is the observable intent:// route.
+    Object.defineProperty(document, "referrer", {
+      configurable: true,
+      get: () => "android-app://io.github.mvhenten.mobux",
+    });
+    const origNavigate = window.__mobuxNavigateToUrl;
+
+    function fireClick(href) {
+      let navigatedToUrl = null;
+      window.__mobuxNavigateToUrl = (url) => {
+        navigatedToUrl = url;
+      };
+      const a = document.createElement("a");
+      a.href = href;
+      a.textContent = "link";
+      document.body.appendChild(a);
+      // Safety net: keep the page put regardless of what the handler decides.
+      const keepPut = (e) => e.preventDefault();
+      document.addEventListener("click", keepPut, true);
+      const ev = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      a.dispatchEvent(ev);
+      document.removeEventListener("click", keepPut, true);
+      a.remove();
+      return navigatedToUrl;
+    }
+
+    const external = fireClick("https://example.com/delegated");
+    const internal = fireClick(`${window.location.origin}/settings`);
+
+    window.__mobuxNavigateToUrl = origNavigate;
+    Object.defineProperty(document, "referrer", {
+      configurable: true,
+      get: () => "",
+    });
+    return { external, internal };
+  });
+
+  expect(result.external).toContain("intent://");
+  expect(result.external).toContain("example.com/delegated");
+  // In-app navigation must not be pushed out of the shell.
+  expect(result.internal).toBeNull();
+});
+
 test("reader view renders buffer text", async ({ page }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
 
