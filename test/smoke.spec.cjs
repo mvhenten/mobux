@@ -512,6 +512,7 @@ test("external links: isExternalUrl distinguishes shell-internal from off-origin
       relativePath: isExternal("/settings#shell-integration"),
       hash: isExternal("#/s/foo"),
       mailto: isExternal("mailto:x@example.com"),
+      protocolRelative: isExternal("//example.com/x"),
     };
   });
 
@@ -521,6 +522,9 @@ test("external links: isExternalUrl distinguishes shell-internal from off-origin
   expect(result.hash).toBe(false);
   // Non-http(s) schemes are left to the platform, not treated as external.
   expect(result.mailto).toBe(false);
+  // Protocol-relative URLs inherit the page's scheme and still resolve to a
+  // different origin — must be caught too.
+  expect(result.protocolRelative).toBe(true);
 });
 
 test("external links: delegated handler escapes off-origin anchors, leaves in-app anchors alone", async ({
