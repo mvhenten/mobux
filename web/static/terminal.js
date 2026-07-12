@@ -122,17 +122,20 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
     target.addEventListener(type, fn, opts);
     cleanups.push(() => target.removeEventListener(type, fn, opts));
   };
+  // Both no-op after dispose: a straggler event (an in-flight WS message, a
+  // resolving fetch) must not create new timers — `cleanups` has already
+  // been drained, so anything registered now would never be torn down.
   const later = (fn, ms) => {
+    if (disposed) return;
     const t = setTimeout(() => {
       if (!disposed) fn();
     }, ms);
     cleanups.push(() => clearTimeout(t));
-    return t;
   };
   const every = (fn, ms) => {
+    if (disposed) return;
     const t = setInterval(fn, ms);
     cleanups.push(() => clearInterval(t));
-    return t;
   };
 
   {
@@ -191,7 +194,8 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
       paneIndicator.textContent = `${current ? current.title : "?"} (${activeIndex + 1}/${panes.length})`;
     }
   }
-  core.addEventListener("panes", () => {
+  on(core, "panes", () => {
+    if (disposed) return;
     updatePaneUI();
     pruneViewPrefs();
     applyStoredViewForActiveWindow();
@@ -351,7 +355,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   // keyboard dismissal (input-bar.js's visualViewport handler).
   let revealScheduled = false;
   function scheduleReveal() {
-    if (revealScheduled) return;
+    if (disposed || revealScheduled) return;
     if (!loadquote || !loadquote.parentNode) return;
     revealScheduled = true;
     later(() => {
@@ -362,7 +366,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
       }, 300);
     }, 200);
   }
-  core.addEventListener("data", scheduleReveal);
+  on(core, "data", scheduleReveal);
 
   // A quiet session (already sitting at its prompt) never fires `data`, so
   // the splash would otherwise stick forever. Back it up with a timeout that
@@ -371,7 +375,7 @@ export function createTerminal({ node = "", session, host, renderer } = {}) {
   // silent case. `scheduleReveal` is idempotent, so racing with the data path
   // is harmless.
   const REVEAL_FALLBACK_MS = 1500;
-  core.addEventListener("open", () => {
+  on(core, "open", () => {
     later(scheduleReveal, REVEAL_FALLBACK_MS);
   });
 
