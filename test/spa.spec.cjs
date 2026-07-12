@@ -430,6 +430,29 @@ test("terminal island mounts and the PTY websocket connects", async ({
   );
 });
 
+// ── node-drop on re-entry (issue #210) ──────────────────────────────────────
+//
+// A session's node rides only in the hash URL (`#/s/<node>/<name>`), so a
+// re-entry by bare session name — a push-notification deep-link, the legacy
+// `/s/<name>` server redirect, a hand-typed/bookmarked link — must not
+// silently attach to the LOCAL host when the session actually lives on a
+// node. That's fixed at the URL-production layer, server-side, where the
+// knowledge actually lives: `push.rs::session_url` documents why its
+// session is always hub-local (the alert-bell hook only ever runs there),
+// and the `/s/{name}` route (`terminal_page` in src/main.rs) resolves an
+// ambiguous/hand-typed name against the real session inventory before
+// redirecting into the SPA. See:
+//   - src/main.rs `resolve_session_location_*` unit tests (pure decision
+//     logic: unique local, unique node, ambiguous, no match)
+//   - test/fleet/hub-proxy.spec.cjs (real ssh + real second tmux server —
+//     the only harness that can prove a notification-shaped URL actually
+//     lands on the right tmux, not just the right *route*)
+// A client-side "remember what node I last used" cache can't deliver this
+// guarantee (a notification opened on a second device, or a fresh browser
+// with no local storage, would still attach locally), so there is
+// deliberately no client-side mechanism here — the SPA renders whatever
+// (node, name) pair the URL already names.
+
 // ── terminal island: fills the viewport on mount (no too-short PTY) ─────────
 //
 // Regression guard for the "terminal mounts too short" bug: the SPA wraps the

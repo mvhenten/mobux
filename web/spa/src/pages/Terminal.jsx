@@ -6,6 +6,16 @@ import { TerminalIsland } from "../components/TerminalIsland.jsx";
 // the lifetime of the route. The island is keyed on (node, session): a
 // same-document navigation to a different pair unmounts the old island
 // (disposing its engine) and mounts a fresh scaffold for the new one.
+//
+// A node-less entry (`#/s/<name>`, no node segment) means the local host —
+// this component never guesses otherwise. Making a bare session-name link
+// (a push notification, a bookmark) resolve to the RIGHT node is a
+// server-side concern: `push.rs::session_url` only ever names the hub's own
+// local tmux (the alert-bell hook is hub-local only), and the legacy
+// `/s/{name}` redirect (`terminal_page` in src/main.rs) resolves an
+// ambiguous/hand-typed name against the real session inventory (local +
+// every configured node) before it ever reaches the SPA — see
+// `resolve_session_location` there (issue #210).
 export function TerminalPage({ node, name }) {
   useLayoutEffect(() => {
     document.body.classList.add("term-body");
