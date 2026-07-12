@@ -38,7 +38,9 @@ export function snapshot() {
 // synchronous get() from the engine returns server values, not defaults.
 export async function hydrate() {
   try {
-    const resp = await fetch(ENDPOINT, { headers: { Accept: "application/json" } });
+    const resp = await fetch(ENDPOINT, {
+      headers: { Accept: "application/json" },
+    });
     if (resp.ok) {
       const server = await resp.json();
       state = { ...DEFAULTS, ...server };
@@ -49,22 +51,57 @@ export async function hydrate() {
   return state;
 }
 
-// Apply one change locally and PUT the whole blob. Fire-and-forget on the
-// network: the in-memory value already applies for this session.
-export async function set(key, value) {
+// Serializes the GET-merge-PUT round trips below so overlapping calls (a
+// slider firing several `set()`s while being dragged) can't race each other's
+// GET against another's PUT and lose an update — see `persist()`.
+let writeQueue = Promise.resolve();
+
+async function persist(key, value) {
+  // GET-merge-PUT: fetch what the server holds *right now* and overlay only
+  // the changed field, instead of PUTting this tab's boot-time snapshot. A
+  // long-lived tab (or one whose hydrate() failed and fell back to defaults)
+  // must not stomp every other preference changed elsewhere since it booted.
+  // Still last-writer-wins on this one field if another writer's GET-PUT
+  // interleaves with this one — acceptable for a single-user tool, no
+  // versioning needed.
+  let base = state;
+  try {
+    const resp = await fetch(ENDPOINT, {
+      headers: { Accept: "application/json" },
+    });
+    if (resp.ok) {
+      base = { ...DEFAULTS, ...(await resp.json()) };
+    }
+  } catch (_) {
+    // GET failed: fall back to this tab's in-memory snapshot rather than
+    // losing the write entirely.
+  }
+
+  const merged = { ...base, [key]: value };
+  state = merged;
+
+  try {
+    await fetch(ENDPOINT, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(merged),
+    });
+  } catch (_) {
+    // PUT failed: in-memory state still applies to this tab/session.
+  }
+}
+
+// Apply one change locally (immediately, so a synchronous get() reflects it)
+// and queue the server round trip.
+export function set(key, value) {
   state = { ...state, [key]: value };
   try {
     window.dispatchEvent(
       new CustomEvent("mobux:prefschange", { detail: { key, value } }),
     );
   } catch (_) {}
-  try {
-    await fetch(ENDPOINT, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(state),
-    });
-  } catch (_) {}
+  writeQueue = writeQueue.then(() => persist(key, value));
+  return writeQueue;
 }
 
 if (typeof window !== "undefined") {

@@ -1,4 +1,4 @@
-import { useRef } from "preact/hooks";
+import { useEffect, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { getPref, setPref } from "../../lib/prefs.js";
 
@@ -15,11 +15,21 @@ function read() {
   return VALID.has(v) ? v : DEFAULT;
 }
 
-const renderer = signal(read());
+// Seeded to DEFAULT, not read() — this module evaluates as part of the static
+// import chain (main.jsx -> app.jsx -> Settings.jsx -> this file), which runs
+// before main.jsx's boot() has awaited prefs.hydrate(). Reading the server
+// value happens in the mount effect below instead, exactly like Theme.jsx:
+// by the time RendererCard mounts, App has already rendered, which only
+// happens after hydrate() resolved.
+const renderer = signal(DEFAULT);
 const status = signal(null);
 
 export function RendererCard() {
   const t = useRef(null);
+
+  useEffect(() => {
+    renderer.value = read();
+  }, []);
 
   const onChange = (e) => {
     const v = VALID.has(e.target.value) ? e.target.value : DEFAULT;

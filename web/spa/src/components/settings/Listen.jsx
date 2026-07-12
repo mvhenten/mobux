@@ -35,9 +35,19 @@ const available = signal(
   typeof window !== "undefined" && "speechSynthesis" in window,
 );
 const voices = signal([]);
-const prefs = signal(loadPrefs());
+// Seeded empty, not loadPrefs() — this module evaluates as part of the static
+// import chain (main.jsx -> app.jsx -> Settings.jsx -> this file), which runs
+// before main.jsx's boot() has awaited prefs.hydrate(). Reading the server
+// value happens in the mount effect below instead, exactly like Theme.jsx: by
+// the time ListenCard mounts, App has already rendered, which only happens
+// after hydrate() resolved.
+const prefs = signal({ voice: "", rate: 1.0, pitch: 1.0 });
 
 export function ListenCard() {
+  useEffect(() => {
+    prefs.value = loadPrefs();
+  }, []);
+
   // Populate voice list; Chrome fires voiceschanged asynchronously.
   useEffect(() => {
     if (!available.value) return;
