@@ -223,6 +223,19 @@ export function createTerminal({
     if (e.detail?.key === "theme") onThemeChange();
   });
 
+  // ── Renderer events (R13 links, R14 bell) ───────────────────────────
+  // The renderer detects URL activations and terminal bells; the UI owns the
+  // response. A clicked link leaves the app shell (system browser in the TWA);
+  // a terminal BEL rings mobux's chime. Neither adapter decides policy.
+  const linkSub = core.onLink((uri) => openExternal(uri));
+  cleanups.push(() => linkSub?.dispose?.());
+  const bellSub = core.onBell(() => {
+    try {
+      window.__mobuxChime?.();
+    } catch (_) {}
+  });
+  cleanups.push(() => bellSub?.dispose?.());
+
   // Enable overlay for touch devices
   if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
     overlay.style.pointerEvents = "auto";
@@ -697,6 +710,32 @@ export function createTerminal({
       awaitBufferChange: () =>
         new Promise((resolve) => {
           const sub = core.onBufferChanged(() => {
+            sub.dispose();
+            resolve();
+          });
+        }),
+      // ── Selection / links / bell probes (R12–R14) ─────────────────
+      getSelection: () => core.getSelection(),
+      hasSelection: () => core.hasSelection(),
+      clearSelection: () => core.clearSelection(),
+      selectAll: () => core.selectAll(),
+      awaitSelectionChange: () =>
+        new Promise((resolve) => {
+          const sub = core.onSelectionChange(() => {
+            sub.dispose();
+            resolve();
+          });
+        }),
+      awaitLink: () =>
+        new Promise((resolve) => {
+          const sub = core.onLink((uri) => {
+            sub.dispose();
+            resolve(uri);
+          });
+        }),
+      awaitBell: () =>
+        new Promise((resolve) => {
+          const sub = core.onBell(() => {
             sub.dispose();
             resolve();
           });

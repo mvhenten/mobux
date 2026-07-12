@@ -8,8 +8,8 @@
 //
 // Every sterk-specific reach-through lives here and nowhere else: the Ace
 // editor handle for theming, the `getViewportCellCount`/`getCellMetrics`
-// probes, the internal `buffer.alternate` comparison for alt-screen state,
-// and the `window.__sterk` debug handle the visual test matrix reads.
+// probes, the DEC-private-mode suppression (alt-screen + mouse off), and the
+// `window.__sterk` debug handle the visual test matrix reads.
 //
 // The sterk bundle (sterk.bundle.js) pins `window.Sterk = { createTerminal }`
 // before the engine is constructed.
@@ -131,10 +131,102 @@ export function createSterkRenderer(host, options = {}) {
     };
   };
 
+  // Disposables sterk hands back for the subscriptions/handlers this adapter
+  // registers on it; drained by dispose() so a remount leaves nothing behind.
+  const rendererCleanups = [];
+
+  // ── R13 links ───────────────────────────────────────────────────────
+  // Sterk detects URLs itself; a link provider re-detects the http(s) subset
+  // mobux opens and carries an `activate` handler. Provider links take
+  // precedence over built-in detection at the same position, so a click on a
+  // URL fans out to every onLink subscriber. The UI (terminal.js) decides how
+  // to open — mobux routes it out of the app shell.
+  const linkSubs = [];
+  const emitLink = (uri) => {
+    for (const cb of linkSubs.slice()) cb(uri);
+  };
+  const URL_RE = /https?:\/\/[^\s)"'>]+/g;
+  // Trailing punctuation is not part of the URL. xterm's WebLinks addon forbids
+  // a URL ending in punctuation (its final character class excludes `.,:!?` and
+  // brackets); strip the same trailing set so the boundary matches the addon —
+  // `see https://x/foo.` links `foo`, not `foo.`.
+  const TRAILING_PUNCT_RE = /[.,;:!?)\]}]+$/;
+  if (sterk.registerLinkProvider) {
+    const sub = sterk.registerLinkProvider({
+      provideLinks(bufferLineNumber, deliver) {
+        const line = sterk.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) return deliver(undefined);
+        const text = line.translateToString(false);
+        const links = [];
+        URL_RE.lastIndex = 0;
+        let m;
+        while ((m = URL_RE.exec(text)) !== null) {
+          const uri = m[0].replace(TRAILING_PUNCT_RE, "");
+          if (!uri) continue;
+          const startX = m.index + 1; // 1-based start column
+          const endX = m.index + uri.length; // 1-based inclusive last column
+          links.push({
+            range: {
+              start: { x: startX, y: bufferLineNumber },
+              end: { x: endX, y: bufferLineNumber },
+            },
+            text: uri,
+            activate: (_event, activatedUri) => emitLink(activatedUri),
+          });
+        }
+        deliver(links.length ? links : undefined);
+      },
+    });
+    if (sub && typeof sub.dispose === "function") rendererCleanups.push(sub);
+  }
+
+  // ── R16 alt-screen + mouse-off ──────────────────────────────────────
+  // mobux's standing policy: no alternate screen (tmux alt has no scrollback)
+  // and no mouse-protocol reporting (touch gestures are the input model). We
+  // own sterk, so we suppress the DEC private modes at the parser instead of
+  // patching internals. A CSI `?<mode>h`/`?<mode>l` may pack several modes;
+  // sterk's built-in handler applies the whole group all-or-nothing, so a
+  // sequence that mixes a blocked mode with an allowed one (e.g.
+  // `\x1b[?1049;25h`) would still switch the alt buffer if it fell through.
+  // Consume any sequence carrying a blocked mode and re-emit only the allowed
+  // modes so those still take effect; the re-emitted sequence carries no
+  // blocked mode, so it falls through normally (no recursion).
+  const blockedModes = new Set([
+    // mouse tracking + encodings — kept off on both renderers.
+    9, 1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016,
+  ]);
+  if (options.altScreen === false) {
+    blockedModes.add(47).add(1047).add(1049);
+  }
+  if (sterk.parser && sterk.parser.registerCsiHandler) {
+    const scalar = (p) => (Array.isArray(p) ? p[0] : p);
+    for (const final of ["h", "l"]) {
+      const sub = sterk.parser.registerCsiHandler(
+        { prefix: "?", final },
+        (params) => {
+          const modes = params.map(scalar);
+          if (!modes.some((m) => blockedModes.has(m))) return false;
+          const allowed = modes.filter((m) => !blockedModes.has(m));
+          if (allowed.length > 0) {
+            sterk.write(`\x1b[?${allowed.join(";")}${final}`);
+          }
+          return true;
+        },
+      );
+      if (sub && typeof sub.dispose === "function") rendererCleanups.push(sub);
+    }
+  }
+
   return {
     // R1 — teardown: sterk releases its DOM + internal listeners.
     dispose() {
       writeParsedSubs.length = 0;
+      linkSubs.length = 0;
+      for (const sub of rendererCleanups.splice(0)) {
+        try {
+          sub.dispose();
+        } catch (_) {}
+      }
       try {
         sterk.dispose();
       } catch (_) {}
@@ -211,12 +303,12 @@ export function createSterkRenderer(host, options = {}) {
       };
     },
 
-    // R9 — alt-screen state, via sterk's internal alternate/active comparison.
-    // A public isAlternateScreenActive() is the upstream sterk fix; until then
-    // the comparison is confined to this adapter.
+    // R9 — alt-screen state, via sterk's public `buffer.active.type` (same
+    // shape xterm reports). R16 keeps this false in normal operation by
+    // suppressing the alt-screen switch at the parser.
     isAlternateScreenActive() {
       try {
-        return sterk.buffer.alternate === sterk.buffer.active;
+        return sterk.buffer.active.type === "alternate";
       } catch (_) {
         return false;
       }
@@ -240,9 +332,10 @@ export function createSterkRenderer(host, options = {}) {
         opts.theme.foreground =
           theme.foreground || theme.palette[7] || "#c5c8c6";
       }
-      const editor = sterk.renderer && sterk.renderer.getEditor
-        ? sterk.renderer.getEditor()
-        : null;
+      const editor =
+        sterk.renderer && sterk.renderer.getEditor
+          ? sterk.renderer.getEditor()
+          : null;
       if (editor && typeof editor.setTheme === "function" && theme.aceTheme) {
         editor.setTheme(theme.aceTheme);
       }
@@ -256,15 +349,69 @@ export function createSterkRenderer(host, options = {}) {
       return sterk.options.fontSize;
     },
 
-    // R15 — input surface ownership. Sterk owns its own Ace-backed input path;
-    // the native-capture suppression the mobile bar needs lands with the
-    // upstream selection work (stage 3), so the toggle is a no-op today.
+    // R12 — selection. Sterk selects through Ace's native DOM selection, so
+    // copy / long-press act on real text (the substrate #137 builds on).
+    getSelection() {
+      return sterk.getSelection ? sterk.getSelection() : "";
+    },
+    hasSelection() {
+      return sterk.hasSelection ? sterk.hasSelection() : false;
+    },
+    clearSelection() {
+      sterk.clearSelection?.();
+    },
+    selectAll() {
+      sterk.selectAll?.();
+    },
+    onSelectionChange(cb) {
+      return sterk.onSelectionChange
+        ? sterk.onSelectionChange(cb)
+        : { dispose() {} };
+    },
+
+    // R13 — links. Subscribe to URL activations detected by the sterk link
+    // provider registered above; the UI decides how to open them.
+    onLink(cb) {
+      linkSubs.push(cb);
+      return {
+        dispose() {
+          const i = linkSubs.indexOf(cb);
+          if (i >= 0) linkSubs.splice(i, 1);
+        },
+      };
+    },
+
+    // R14 — bell. The UI decides what to do (mobux's chime).
+    onBell(cb) {
+      return sterk.onBell ? sterk.onBell(cb) : { dispose() {} };
+    },
+
+    // R15 — input surface ownership. Release sterk's Ace text-input so it can't
+    // steal focus or pop the soft keyboard while the mobile bar owns input;
+    // re-enable restores it. Confined to this adapter (mirrors the xterm
+    // textarea handling).
     focus() {
       try {
         host.querySelector(".ace_text-input")?.focus();
       } catch (_) {}
     },
-    setNativeInputEnabled(_enabled) {},
+    setNativeInputEnabled(enabled) {
+      const ta = host.querySelector(".ace_text-input");
+      if (enabled) {
+        if (ta) {
+          ta.removeAttribute("tabindex");
+          ta.style.pointerEvents = "";
+        }
+      } else {
+        try {
+          sterk.blur?.();
+        } catch (_) {}
+        if (ta) {
+          ta.setAttribute("tabindex", "-1");
+          ta.style.pointerEvents = "none";
+        }
+      }
+    },
 
     // Engine housekeeping used by window-switch / tmux commands.
     clear() {
@@ -304,8 +451,13 @@ function makeLineAdapter(line) {
     get isWrapped() {
       return line.isWrapped;
     },
+    // xterm-shaped semantics (D7): `trimRight` trims the RIGHT edge only, so
+    // column indices stay aligned with getCell(x). Sterk's own
+    // translateToString(true) trims both edges, which would shift every column
+    // on an indented line; read it raw and trim the right ourselves.
     translateToString(trimRight) {
-      return line.translateToString(trimRight);
+      const raw = line.translateToString(false);
+      return trimRight ? raw.replace(/\s+$/, "") : raw;
     },
     getCell(x) {
       return makeCellAdapter(line.getCell(x));
