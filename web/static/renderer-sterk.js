@@ -132,10 +132,6 @@ export function createSterkRenderer(host, options = {}) {
   };
 
   return {
-    // Internal renderer handle — confined to this file; consumers use the
-    // interface methods below, never `.term`.
-    term: debugHandle,
-
     // R1 — teardown: sterk releases its DOM + internal listeners.
     dispose() {
       writeParsedSubs.length = 0;

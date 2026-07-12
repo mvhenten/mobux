@@ -84,10 +84,6 @@ export function createXtermRenderer(host, options = {}) {
   };
 
   return {
-    // Internal renderer handle — confined to this file; consumers use the
-    // interface methods below, never `.term`.
-    term,
-
     // R1 — teardown: xterm releases its DOM + internal listeners.
     dispose() {
       try {
