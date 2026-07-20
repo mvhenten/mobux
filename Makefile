@@ -24,7 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-update-runner test-spa test-stt-ux test-stt-per-kind test-e2e \
+        test-smoke test-critical-path test-update-runner test-spa test-reader test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -216,6 +216,18 @@ test-spa:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/spa.spec.cjs
+
+# Reader font (issue #218): plain-output text renders proportional while
+# prompt/code stay monospace. Drives reader.js's real render pipeline with a
+# synthetic document snapshot (no tmux/PTY session needed). Same isolated
+# smoke instance as the rest of the suite.
+.PHONY: test-reader
+test-reader:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/reader-font.spec.cjs
 
 # Renderer conformance (issue #207, D10): one spec exercises the explicit
 # renderer interface (R1–R16) against BOTH adapters via the xterm/sterk
