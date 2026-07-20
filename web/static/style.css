@@ -18,6 +18,17 @@
   font-display: swap;
   unicode-range: U+2500-257F, U+2580-259F, U+25A0-25FF, U+2600-26FF, U+2700-27BF, U+2190-21FF;
 }
+/* Vendored proportional font for the reader's plain-output text (issue
+   #218). Command/prompt lines and code stay monospace — see --mono above —
+   because their alignment depends on fixed-width columns; plain output has
+   no such constraint and reads better proportional on a phone screen. */
+@font-face {
+  font-family: 'Inter';
+  src: url('/static/vendor/fonts/Inter-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg: #0f1115;
@@ -29,6 +40,7 @@
   --danger: #c45c5c;
   --border: #22262f;
   --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -685,7 +697,7 @@ h1, h2, h3 { margin: 0; }
 .rb-text .rb-line {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: 13px;
   line-height: 1.4;
 }
@@ -743,9 +755,19 @@ h1, h2, h3 { margin: 0; }
   padding: 0 !important;
   margin: 0;
   display: block;
-  font-family: var(--mono);
   font-size: 13px;
   line-height: 1.4;
+}
+/* A bubble is a run of consecutive same-background lines fused into one
+   chat-bubble container (see appendLinesWithBubbles in reader.js). Bubbles
+   can occur inside either a text block or a code block, so the font choice
+   follows the same rule as the unbubbled lines: proportional for plain
+   output, monospace for code. */
+.rb-text .rb-bubble-line {
+  font-family: var(--sans);
+}
+.rb-code .rb-bubble-line {
+  font-family: var(--mono);
 }
 
 .rb-speaker {
