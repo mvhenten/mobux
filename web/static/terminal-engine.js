@@ -79,7 +79,14 @@ export class TerminalEngine extends EventTarget {
     this._reconnectMin = 500;
     this._reconnectMax = 10000;
 
-    // OSC 133 (FinalTerm / shell-integration) markers.
+    // OSC 133 (FinalTerm / shell-integration) markers. Recorded by absolute
+    // row for all four kinds (diagnostics, oscMarkerCount), but only `A` is
+    // trustworthy for row-sensitive decisions under tmux — a passthrough
+    // envelope that carries no trailing text in the same shell write (as `B`
+    // never does) can land on a cursor position tmux resets to the pane's
+    // home row rather than the true one. See term-tokenizer.js's doc comment
+    // for the full story; the reader's prompt classification keys off `A`
+    // alone for this reason.
     this.oscMarkers = new Map();
     this.oscDetected = false;
 

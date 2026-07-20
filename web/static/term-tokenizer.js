@@ -9,7 +9,7 @@
 // Block types:
 //   blank   — empty line, used as a separator
 //   rule    — a horizontal-rule line (mostly box-drawing chars)
-//   prompt  — shell prompt line (OSC 133 A/B, or ends with $/#/>/❯ …)
+//   prompt  — shell prompt line (OSC 133 A, or ends with $/#/>/❯ …)
 //   header  — a single line like `[Section]` or `## Title`
 //   code    — inside triple-backtick fences
 //   text    — default; consecutive text lines coalesce into one block
@@ -67,9 +67,21 @@ function lineBubbleBg(runs) {
 // ── Main entry point ───────────────────────────────────────────────
 // `lines` is the document contract's logical-line array: each entry is
 // { runs, text, osc } (osc = 'A'|'B'|'C'|'D'|null). OSC 133 markers are
-// consulted before the heuristic classifiers: a row marked A/B is the prompt
+// consulted before the heuristic classifiers: a row marked A is the prompt
 // deterministically. Without markers the classifier falls back to the same
 // heuristics — same behaviour for shells without integration.
+//
+// Classification deliberately keys off A only, never B. tmux forwards each
+// DCS passthrough envelope bracketed by its own cursor-position sync; the D+A
+// pair rides one envelope immediately followed by the prompt's own text in
+// the same shell write, so it inherits the correct cursor position. B closes
+// the prompt with nothing riding after it in that write, so under real tmux
+// (3.4, confirmed; likely earlier too) it arrives as a lone envelope and
+// tmux's sync resets to the pane's home position instead of the true cursor
+// row — B lands on whatever line is at the top of the viewport, not the
+// prompt's own line. Trusting B for classification turns that line (e.g. a
+// motd banner) into a spurious prompt block. A alone is sufficient: it always
+// marks the start of the visible prompt text.
 export function tokenize(lines) {
   const blocks = [];
   let inFence = false;
@@ -104,10 +116,11 @@ export function tokenize(lines) {
       blocks.push({ type: "blank" });
       continue;
     }
-    // OSC 133 ; A / B marks the line as a prompt deterministically — no
-    // sigil-guessing. `C` and `D` mark output start/end; they don't change the
-    // line's own classification here.
-    const isOscPrompt = osc === "A" || osc === "B";
+    // OSC 133 ; A marks the line as a prompt deterministically — no
+    // sigil-guessing. `B`, `C`, and `D` don't change the line's own
+    // classification here — see the module doc comment for why `B` in
+    // particular is untrustworthy for row attribution under tmux.
+    const isOscPrompt = osc === "A";
     if (isRule(text)) {
       blocks.push({ type: "rule" });
       continue;

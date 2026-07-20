@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::shell_integration::{detect_session_shell, v2_snippet, Shell};
+use crate::shell_integration::{detect_session_shell, rcfile_snippet, Shell};
 
 /// Single-quote a shell word so it survives a remote shell's word-splitting
 /// unchanged (embedded `'` becomes `'\''`, the standard POSIX escape).
@@ -249,7 +249,7 @@ _mobux_activate_osc133() {
     unset PROMPT_COMMAND
     ",
     );
-    content.push_str(v2_snippet(Shell::Bash));
+    content.push_str(rcfile_snippet(Shell::Bash));
     content.push_str(
         "
 }
@@ -304,7 +304,7 @@ _mobux_activate_osc133() {
     unset -f precmd
     ",
     );
-    content.push_str(v2_snippet(Shell::Zsh));
+    content.push_str(rcfile_snippet(Shell::Zsh));
     content.push_str(
         "
 }

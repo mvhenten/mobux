@@ -14,7 +14,7 @@ const SHELLS = [
     rc: "~/.bashrc",
     snippet: `if [ -n "$TMUX" ]; then
     PS0='\\ePtmux;\\e\\e]133;C\\a\\e\\\\'
-    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e]133;A\\a\\e\\\\\\]'"$PS1"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'
+    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e\\e]133;A\\a\\e\\\\\\]'"$PS1"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'
 else
     PS0='\\e]133;C\\a'
     PS1='\\[\\e]133;D;$?\\a\\e]133;A\\a\\]'"$PS1"'\\[\\e]133;B\\a\\]'
@@ -25,7 +25,7 @@ fi`,
     rc: "~/.zshrc",
     snippet: `if [ -n "$TMUX" ]; then
     preexec() { print -Pn '\\ePtmux;\\e\\e]133;C\\a\\e\\\\' }
-    precmd()  { print -Pn '\\ePtmux;\\e\\e]133;D;'$?'\\a\\e]133;A\\a\\e\\\\' }
+    precmd()  { print -Pn '\\ePtmux;\\e\\e]133;D;'$?'\\a\\e\\e]133;A\\a\\e\\\\' }
 else
     preexec() { print -Pn '\\e]133;C\\a' }
     precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }

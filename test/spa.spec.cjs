@@ -17,6 +17,7 @@
 
 const { test, expect } = require("./fixtures.cjs");
 const { execSync } = require("child_process");
+const fs = require("fs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
 const APP = `${BASE}/app`;
@@ -1612,6 +1613,227 @@ test("settings: every ported card renders and consumes its endpoint", async ({
     "GET /api/build-info",
   ]) {
     expect(seen.has(want), `expected ${want}`).toBeTruthy();
+  }
+});
+
+// ── OSC 133: install path matches the displayed snippet, real tmux marker
+// attribution is correct (issue: OSC 133 markers lost + misattributed under
+// tmux) ───────────────────────────────────────────────────────────────────
+//
+// Two independent regressions, pinned separately:
+//
+//   1. The bash/zsh snippets wrap OSC 133 in tmux's DCS passthrough
+//      envelope. The D (command-finished) and A (prompt-start) markers ride
+//      ONE envelope; every embedded ESC inside it must be doubled, not just
+//      the first — an un-doubled ESC is silently eaten by tmux's passthrough
+//      unescaper, and the A marker never reaches the client. ShellIntegration
+//      .jsx renders a verbatim copy of the same snippet purely for display;
+//      this test proves the two never drift by comparing the JSX text to
+//      what actually lands in the installed rcfile.
+//   2. tmux forwards each passthrough envelope bracketed by its own cursor
+//      sync. The D+A envelope inherits the correct row because the shell's
+//      own prompt text rides the same write right after it; the B (prompt-
+//      end) envelope has nothing following it in that write, so under real
+//      tmux it lands on whatever row is at the top of the viewport instead
+//      of the prompt's own row. term-tokenizer.js classifies prompts off A
+//      alone for exactly this reason. This test drives a REAL bash shell in
+//      a REAL external tmux session (not a synthetic OSC injection) through
+//      the actual installed integration, and asserts the reader never turns
+//      unrelated content into a spurious prompt.
+
+const OSC_FENCE_OPEN = "# >>> mobux OSC 133 (managed) >>>";
+const OSC_FENCE_CLOSE = "# <<< mobux OSC 133 (managed) <<<";
+
+// Pull the snippet body back out of a rendered rcfile block: `render_block`
+// wraps it as `FENCE_OPEN\n# version: N\n<snippet>\n FENCE_CLOSE\n`.
+function extractInstalledSnippet(rcContent) {
+  const openIdx = rcContent.indexOf(OSC_FENCE_OPEN);
+  const closeIdx = rcContent.indexOf(OSC_FENCE_CLOSE);
+  if (openIdx === -1 || closeIdx === -1) return null;
+  const block = rcContent.slice(openIdx + OSC_FENCE_OPEN.length, closeIdx);
+  const lines = block.split("\n");
+  return lines.slice(2, -1).join("\n");
+}
+
+test("settings: bash OSC 133 snippet shown in the UI matches what actually gets installed", async ({
+  page,
+}) => {
+  const RC = `${SANDBOX_HOME}/.bashrc`;
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const bashCard = page.locator('.shell-card[data-shell="bash"]');
+  const stateEl = bashCard.locator('[data-role="state"]');
+  await stateEl.waitFor();
+
+  // Drive the real Install/Uninstall buttons (not the API directly) so the
+  // UI's own `states` signal updates the same way a real user's click would
+  // — a raw fetch bypasses the component's response handler and leaves the
+  // displayed state stale.
+  const initial = (await stateEl.textContent()).trim();
+  if (initial !== "not installed") {
+    await bashCard.locator("button", { hasText: /^Uninstall$/ }).click();
+    await expect(stateEl).toHaveText("not installed", { timeout: 6000 });
+  }
+
+  const displayedSnippet = await bashCard
+    .locator(".settings-snippet code")
+    .textContent();
+
+  await bashCard.locator("button", { hasText: /^Install$/ }).click();
+  await expect(stateEl).toHaveText(/installed v\d/, { timeout: 6000 });
+
+  const installedSnippet = extractInstalledSnippet(fs.readFileSync(RC, "utf8"));
+  expect(
+    installedSnippet,
+    "no fenced block found in installed rcfile",
+  ).not.toBeNull();
+  expect(installedSnippet).toBe(displayedSnippet);
+
+  // Every embedded OSC 133 start inside a tmux DCS envelope must be doubled
+  // — directly regresses the un-doubled ESC that dropped the A marker.
+  for (const envelope of installedSnippet.matchAll(/\\ePtmux;(.*?)\\e\\\\/g)) {
+    const body = envelope[1];
+    for (const m of body.matchAll(/]133;/g)) {
+      const before = body.slice(Math.max(0, m.index - 4), m.index);
+      expect(
+        before,
+        `un-doubled ESC before ]133; in ${JSON.stringify(body)}`,
+      ).toBe("\\e\\e");
+    }
+  }
+
+  await bashCard.locator("button", { hasText: /^Uninstall$/ }).click();
+  await expect(stateEl).toHaveText("not installed", { timeout: 6000 });
+});
+
+test("OSC 133: real tmux classifies prompts off the A marker; motd-like content never becomes a spurious prompt", async ({
+  page,
+}) => {
+  const RC = `${SANDBOX_HOME}/.bashrc`;
+  const MARK_SESSION = `osc133-mark-${process.pid}`;
+
+  // A page.evaluate fetch needs a document origin to resolve a relative URL
+  // — navigate before touching the API (a fresh `page` fixture starts on
+  // about:blank).
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.evaluate(async () => {
+    await fetch("/api/shell-integration/uninstall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shell: "bash" }),
+    });
+  });
+  // A PS1 that never ends in a prompt sigil ($/#/>/❯…) so the reader's
+  // fallback heuristic (isPrompt) can never independently classify it as a
+  // prompt — only a real OSC A marker can. Preexisting content (the fenced
+  // install wraps around it) is what the installer normally preserves.
+  fs.writeFileSync(RC, "PS1='mobuxtest: '\n");
+  await page.evaluate(async () => {
+    const res = await fetch("/api/shell-integration/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shell: "bash" }),
+    });
+    if (!res.ok) throw new Error(`install failed: ${res.status}`);
+  });
+
+  try {
+    tmux(`kill-session -t ${MARK_SESSION}`);
+  } catch (_) {}
+  // Plain `bash` (not --norc --noprofile): must source the real, fenced
+  // .bashrc like an actual user shell. Created BEFORE the page attaches, so
+  // the rcfile-built PS1 is what draws every prompt — never set PS1 via
+  // send-keys after boot, which clobbers the OSC-wrapped PS1 the snippet
+  // built (a known trap: send-keys races the shell's own rcfile sourcing).
+  tmux(`new-session -d -s ${MARK_SESSION} ${SHELL_ENV} bash`);
+
+  try {
+    await page.goto(`${APP}#/s/${MARK_SESSION}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.waitForFunction(
+      () => window.__mobuxView && window.__mobuxView.test,
+    );
+    await waitForClientAttached(tmux, MARK_SESSION);
+
+    // A throwaway warm-up command first: the session's very first prompt was
+    // drawn before the browser attached, so — by design — it carries no
+    // marker (only live PTY writes reach the OSC parser). Without this, the
+    // "echo hello" command below would land on that unmarked prompt row
+    // instead of a freshly A-marked one.
+    tmux(`send-keys -t ${MARK_SESSION} 'true' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'echo hello' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'ls' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'false' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'echo exit-was-$?' Enter`);
+    await page.waitForFunction(() => window.__mobuxView.test.oscDetected(), {
+      timeout: 8000,
+    });
+
+    await page.evaluate(() => window.__mobuxView.swap("reader"));
+
+    // Poll instead of a fixed sleep: each of the 5 commands above needs its
+    // own D+A round trip (WS send -> real bash -> real tmux -> WS receive ->
+    // buffer write -> OSC parse) before the reader has anything to show. Wait
+    // for the LAST command's own output (not just a prompt count), so a slow
+    // run can't read the buffer mid-sequence, before `echo exit-was-$?` has
+    // actually executed.
+    await expect
+      .poll(
+        async () => {
+          await page.evaluate(() =>
+            window.__mobuxView.test.readerForceRender(),
+          );
+          return page.$eval("#reader", (el) => el.textContent);
+        },
+        { timeout: 10000, message: "waiting for the exit-was-1 output line" },
+      )
+      .toContain("exit-was-1");
+
+    const bodyText = await page.$eval("#reader", (el) => el.textContent);
+    const promptTexts = await page.$$eval("#reader .rb-prompt", (els) =>
+      els.map((e) => e.textContent.trim()),
+    );
+    const oscPrompts = promptTexts.filter((t) => t.startsWith("mobuxtest:"));
+    const spurious = promptTexts.filter((t) => !t.startsWith("mobuxtest:"));
+
+    expect(
+      oscPrompts.length,
+      `expected >= 3 OSC-marked prompts, got ${JSON.stringify(promptTexts)}`,
+    ).toBeGreaterThanOrEqual(3);
+    // At least 3 of the 4 real typed commands must show up on an OSC-tagged
+    // prompt row — proving A-driven classification actually engages with
+    // live command text (which defeats the sigil heuristic), while
+    // tolerating a single row racing a real shell's own scheduling jitter.
+    const KNOWN_COMMANDS = ["echo hello", "ls", "false", "echo exit-was-$?"];
+    const matchedCommands = KNOWN_COMMANDS.filter((cmd) =>
+      oscPrompts.some((t) => t.includes(cmd)),
+    );
+    expect(
+      matchedCommands.length,
+      `expected >= 3 of ${JSON.stringify(KNOWN_COMMANDS)} on an OSC prompt row, matched ${JSON.stringify(matchedCommands)}; all prompt blocks: ${JSON.stringify(oscPrompts)}`,
+    ).toBeGreaterThanOrEqual(3);
+    // The regression: under the old code a lone B envelope landed on
+    // whatever row tmux's reset put the cursor at (top of viewport), turning
+    // that unrelated content into a spurious `.rb-prompt` block.
+    expect(
+      spurious,
+      `content misclassified as a prompt (marker-row misattribution): ${JSON.stringify(spurious)}`,
+    ).toEqual([]);
+
+    expect(bodyText).toContain("hello");
+    expect(bodyText).toContain("exit-was-1");
+  } finally {
+    try {
+      tmux(`kill-session -t ${MARK_SESSION}`);
+    } catch (_) {}
+    await page.evaluate(async () => {
+      await fetch("/api/shell-integration/uninstall", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shell: "bash" }),
+      });
+    });
   }
 });
 

@@ -6,9 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Return the v2 snippet for the given shell, suitable for injection
-/// into a mobux-managed rcfile (no FENCE markers).
-pub fn v2_snippet(shell: Shell) -> &'static str {
+/// Return the current OSC 133 snippet for the given shell, suitable for
+/// injection into a mobux-managed rcfile (no FENCE markers). The single
+/// source both the settings-page installer (`install`, below) and
+/// `tmux.rs`'s session auto-injection path build on — there is exactly one
+/// copy of each shell's snippet text in the Rust source.
+pub fn rcfile_snippet(shell: Shell) -> &'static str {
     shell.snippet()
 }
 
@@ -58,7 +61,19 @@ pub const FENCE_CLOSE: &str = "# <<< mobux OSC 133 (managed) <<<";
 // `allow-passthrough on` on the server when attaching (see
 // handle_ws in main.rs); without that, tmux would silently discard
 // the wrapped sequence.
-pub const CURRENT_VERSION: u32 = 2;
+//
+// v3: every embedded ESC inside a DCS passthrough envelope must be
+// doubled, not just the first one. The v2 bash/zsh envelopes combined
+// the D (command-finished) and A (prompt-start) markers into one
+// envelope but only doubled the ESC in front of `D`, leaving a single
+// un-doubled ESC in front of `]133;A`. tmux's passthrough unescaper
+// reads that lone ESC as a (malformed) unescape marker, drops it, and
+// forwards the literal bytes `]133;A` as plain text instead of an OSC
+// sequence — the A marker never reaches the client as a recognized
+// event. Confirmed against real tmux 3.4 with a raw WS byte capture:
+// the client received `...]133;D;0<BEL>]133;A<BEL>...` — no ESC
+// before the second `]133;A`.
+pub const CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -88,12 +103,14 @@ impl Shell {
 
 // Bash snippet. When running inside tmux (`$TMUX` is set), OSC 133
 // sequences are wrapped in tmux's DCS passthrough envelope
-// (`\ePtmux;\e<original>\e\\`, with embedded `\e` doubled), so tmux
-// forwards the inner sequence to the outer terminal instead of
-// dropping it. Outside tmux, the bare form is emitted.
+// (`\ePtmux;\e<original>\e\\`, with EVERY embedded `\e` doubled — the D
+// and A markers below share one envelope, so both of their `\e`s must
+// be doubled, not just the first), so tmux forwards the inner
+// sequence to the outer terminal instead of dropping it. Outside
+// tmux, the bare form is emitted.
 pub const BASH_SNIPPET: &str = "if [ -n \"$TMUX\" ]; then
     PS0='\\ePtmux;\\e\\e]133;C\\a\\e\\\\'
-    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e]133;A\\a\\e\\\\\\]'\"$PS1\"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'
+    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e\\e]133;A\\a\\e\\\\\\]'\"$PS1\"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'
 else
     PS0='\\e]133;C\\a'
     PS1='\\[\\e]133;D;$?\\a\\e]133;A\\a\\]'\"$PS1\"'\\[\\e]133;B\\a\\]'
@@ -101,7 +118,7 @@ fi";
 
 pub const ZSH_SNIPPET: &str = "if [ -n \"$TMUX\" ]; then
     preexec() { print -Pn '\\ePtmux;\\e\\e]133;C\\a\\e\\\\' }
-    precmd()  { print -Pn '\\ePtmux;\\e\\e]133;D;'$?'\\a\\e]133;A\\a\\e\\\\' }
+    precmd()  { print -Pn '\\ePtmux;\\e\\e]133;D;'$?'\\a\\e\\e]133;A\\a\\e\\\\' }
 else
     preexec() { print -Pn '\\e]133;C\\a' }
     precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }
@@ -483,12 +500,12 @@ mod tests {
         }
     }
 
-    /// CURRENT_VERSION must bump to 2 when the snippets switch to the
-    /// tmux-wrapping form, otherwise existing v1 installs would be
+    /// CURRENT_VERSION must bump to 3 when the snippets fix the un-doubled
+    /// ESC, otherwise existing v2 installs (which have the bug) would be
     /// reported as "installed" and never re-installed.
     #[test]
-    fn current_version_is_v2_for_tmux_wrap_snippets() {
-        assert_eq!(CURRENT_VERSION, 2);
+    fn current_version_is_v3_for_doubled_esc_snippets() {
+        assert_eq!(CURRENT_VERSION, 3);
     }
 
     #[test]
@@ -506,6 +523,102 @@ mod tests {
             matches!(st, ShellState::Outdated { version: 1 }),
             "got {st:?}"
         );
+    }
+
+    /// v2 regression: a v2 install (un-doubled ESC before the A marker) must
+    /// be reported Outdated, and re-running install must upgrade it in
+    /// place to v3 — this is the actual upgrade path a real v2 install goes
+    /// through in production.
+    #[test]
+    fn v2_install_is_reported_as_outdated_and_upgrades_to_v3() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tmp_home();
+        let rc = home.path().join(".bashrc");
+        let v2 = format!(
+            "{}\n# version: 2\n# old v2 snippet (undoubled ESC before A)\n{}\n",
+            FENCE_OPEN, FENCE_CLOSE
+        );
+        fs::write(&rc, &v2).unwrap();
+        let st = shell_state(home.path(), Shell::Bash);
+        assert!(
+            matches!(st, ShellState::Outdated { version: 2 }),
+            "got {st:?}"
+        );
+
+        install_with_home(home.path(), Shell::Bash).unwrap();
+        let st = shell_state(home.path(), Shell::Bash);
+        assert!(
+            matches!(st, ShellState::Installed { version: v } if v == CURRENT_VERSION),
+            "got {st:?}"
+        );
+        let c = read(&rc);
+        assert!(!c.contains("old v2 snippet"));
+        assert!(c.contains(&format!("# version: {CURRENT_VERSION}")));
+    }
+
+    /// Extract every tmux DCS-passthrough envelope (`\ePtmux;...\e\\`) from a
+    /// snippet's raw text.
+    fn tmux_envelopes(snippet: &str) -> Vec<&str> {
+        const OPEN: &str = "\\ePtmux;";
+        const CLOSE: &str = "\\e\\\\";
+        let mut out = vec![];
+        let mut rest = snippet;
+        while let Some(start) = rest.find(OPEN) {
+            let after_open = &rest[start + OPEN.len()..];
+            match after_open.find(CLOSE) {
+                Some(end) => {
+                    out.push(&after_open[..end]);
+                    rest = &after_open[end + CLOSE.len()..];
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// v3 regression: every embedded OSC 133 start (`]133;`) inside a tmux
+    /// DCS-passthrough envelope must be immediately preceded by a DOUBLED
+    /// ESC (`\e\e`), not a single `\e`. tmux's passthrough unescaper reads a
+    /// lone embedded ESC as a malformed unescape marker, drops it, and
+    /// forwards the following bytes as literal text instead of an OSC
+    /// sequence — this is exactly the v2 bug: the bash/zsh snippets combined
+    /// the D and A markers into one envelope but only doubled the ESC before
+    /// D, leaving the ESC before A un-doubled. Covers every shell (bash,
+    /// zsh, fish) and, since `rcfile_snippet` reads straight off
+    /// these same constants, both the settings-install path and tmux.rs's
+    /// session auto-injection rcfile path.
+    #[test]
+    fn every_embedded_osc133_start_is_doubled_inside_tmux_envelopes() {
+        for (name, snippet) in [
+            ("bash", BASH_SNIPPET),
+            ("zsh", ZSH_SNIPPET),
+            ("fish", FISH_SNIPPET),
+        ] {
+            let envelopes = tmux_envelopes(snippet);
+            assert!(
+                !envelopes.is_empty(),
+                "{name}: no tmux DCS-passthrough envelopes found"
+            );
+            for envelope in envelopes {
+                for (idx, _) in envelope.match_indices("]133;") {
+                    assert!(
+                        idx >= 4 && &envelope[idx - 4..idx] == "\\e\\e",
+                        "{name}: un-doubled ESC before `]133;` inside tmux envelope {envelope:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The settings-install path (`Shell::snippet` / `rcfile_snippet`) and
+    /// tmux.rs's session auto-injection path both build on the exact same
+    /// constants — asserted here so a future edit can't silently fork them.
+    #[test]
+    fn rcfile_snippet_is_the_single_source_for_every_shell() {
+        assert_eq!(rcfile_snippet(Shell::Bash), BASH_SNIPPET);
+        assert_eq!(rcfile_snippet(Shell::Zsh), ZSH_SNIPPET);
+        assert_eq!(rcfile_snippet(Shell::Fish), FISH_SNIPPET);
+        assert_eq!(rcfile_snippet(Shell::Bash), Shell::Bash.snippet());
     }
 
     #[test]
