@@ -994,10 +994,16 @@ test("OSC 133 ; A marks lines without a sigil as prompts", async ({ page }) => {
   // The text on the marked line ends with no recognised prompt sigil
   // and would otherwise classify as 'text'. With the OSC 133 ; A
   // marker emitted right before it, the tokenizer must classify it
-  // as a prompt.
+  // as a prompt. The B right after the prompt text (before the next
+  // line) mirrors what bash actually emits (A, the prompt text, then
+  // B) — client-side row attribution (osc133-attribution.js) takes the
+  // LAST visible run before the next A marker, so real shell output
+  // needs a B here for the same reason a real bash prompt has one:
+  // without it, "run output line" would look just as plausible a
+  // candidate as the prompt text itself.
   await injectRaw(
     page,
-    "\x1b]133;A\x07my-shell-prompt-no-sigil\nrun output line\n",
+    "\x1b]133;A\x07my-shell-prompt-no-sigil\n\x1b]133;B\x07run output line\n",
   );
   await page.waitForTimeout(250);
 

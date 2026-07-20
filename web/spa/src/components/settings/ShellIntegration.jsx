@@ -8,53 +8,31 @@ import { localGet, localFetch } from "../../lib/api.js";
 // the host that served the page (host-pinned helpers). The OSC-133 snippets are
 // static display content (verbatim from the Rust template).
 
+// Verbatim from src/shell_integration.rs's BASH_SNIPPET / ZSH_SNIPPET /
+// FISH_SNIPPET (the single Rust source both the installer and tmux.rs's
+// session auto-injection build on) — transcribed via
+// `serde_json::to_string` on the Rust constants, never hand-typed, so a
+// future snippet change can't silently drift from this display copy. A
+// Playwright test (`settings: <shell> OSC 133 snippet shown in the UI
+// matches what actually gets installed`) pins the two together.
 const SHELLS = [
   {
     id: "bash",
     rc: "~/.bashrc",
-    snippet: `if [ -n "$TMUX" ]; then
-    PS0='\\ePtmux;\\e\\e]133;C\\a\\e\\\\'
-    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e\\e]133;A\\a\\e\\\\\\]'"$PS1"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'
-else
-    PS0='\\e]133;C\\a'
-    PS1='\\[\\e]133;D;$?\\a\\e]133;A\\a\\]'"$PS1"'\\[\\e]133;B\\a\\]'
-fi`,
+    snippet:
+      "if [ -n \"$TMUX\" ]; then\n    PS0='\\ePtmux;\\e\\e]133;C\\a\\e\\\\'\n    PS1='\\[\\ePtmux;\\e\\e]133;D;$?\\a\\e\\e]133;A\\a\\e\\\\\\]'\"$PS1\"'\\[\\ePtmux;\\e\\e]133;B\\a\\e\\\\\\]'\nelse\n    PS0='\\e]133;C\\a'\n    PS1='\\[\\e]133;D;$?\\a\\e]133;A\\a\\]'\"$PS1\"'\\[\\e]133;B\\a\\]'\nfi",
   },
   {
     id: "zsh",
     rc: "~/.zshrc",
-    snippet: `if [ -n "$TMUX" ]; then
-    preexec() { print -Pn '\\ePtmux;\\e\\e]133;C\\a\\e\\\\' }
-    PROMPT=$'%{\\ePtmux;\\e\\e]133;D;%?\\a\\e\\e]133;A\\a\\e\\\\%}'"$PROMPT"
-else
-    preexec() { print -Pn '\\e]133;C\\a' }
-    precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }
-fi`,
+    snippet:
+      "if [ -n \"$TMUX\" ]; then\n    preexec() { print -Pn '\\ePtmux;\\e\\e]133;C\\a\\e\\\\' }\n    PROMPT=$'%{\\ePtmux;\\e\\e]133;D;%?\\a\\e\\e]133;A\\a\\e\\\\%}'\"$PROMPT\"\nelse\n    preexec() { print -Pn '\\e]133;C\\a' }\n    precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }\nfi",
   },
   {
     id: "fish",
     rc: "~/.config/fish/config.fish",
-    snippet: `if test -n "$TMUX"
-    function __mobux_osc133_preexec --on-event fish_preexec
-        printf '\\ePtmux;\\e\\e]133;C\\a\\e\\\\'
-    end
-    function __mobux_osc133_postexec --on-event fish_postexec
-        printf '\\ePtmux;\\e\\e]133;D;%s\\a\\e\\\\' $status
-    end
-    function __mobux_osc133_prompt --on-event fish_prompt
-        printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\'
-    end
-else
-    function __mobux_osc133_preexec --on-event fish_preexec
-        printf '\\e]133;C\\a'
-    end
-    function __mobux_osc133_postexec --on-event fish_postexec
-        printf '\\e]133;D;%s\\a' $status
-    end
-    function __mobux_osc133_prompt --on-event fish_prompt
-        printf '\\e]133;A\\a'
-    end
-end`,
+    snippet:
+      "if test -n \"$TMUX\"\n    function __mobux_osc133_preexec --on-event fish_preexec\n        printf '\\ePtmux;\\e\\e]133;C\\a\\e\\\\'\n    end\n    function __mobux_osc133_postexec --on-event fish_postexec\n        printf '\\ePtmux;\\e\\e]133;D;%s\\a\\e\\\\' $status\n    end\n    function __mobux_osc133_prompt --on-event fish_prompt\n        printf '\\ePtmux;\\e\\e]133;A\\a\\e\\\\'\n    end\nelse\n    function __mobux_osc133_preexec --on-event fish_preexec\n        printf '\\e]133;C\\a'\n    end\n    function __mobux_osc133_postexec --on-event fish_postexec\n        printf '\\e]133;D;%s\\a' $status\n    end\n    function __mobux_osc133_prompt --on-event fish_prompt\n        printf '\\e]133;A\\a'\n    end\nend",
   },
 ];
 

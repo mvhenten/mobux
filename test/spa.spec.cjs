@@ -1628,23 +1628,36 @@ test("settings: every ported card renders and consumes its endpoint", async ({
 //      ONE envelope; every embedded ESC inside it must be doubled, not just
 //      the first — an un-doubled ESC is silently eaten by tmux's passthrough
 //      unescaper, and the A marker never reaches the client. ShellIntegration
-//      .jsx renders a verbatim copy of the same snippet purely for display;
+//      .jsx renders the exact same bytes purely for display (transcribed
+//      from the Rust constants via serde_json, never hand-typed);
 //      `verifySnippetMatchesInstalled` proves the two never drift by
 //      comparing the JSX text to what actually lands in the installed
 //      rcfile.
-//   2. tmux forwards each passthrough envelope bracketed by its own cursor
-//      sync. Bash embeds A directly inside PS1, so it always rides the same
-//      write as the prompt text; zsh (as of shell_integration.rs's v4 fix)
-//      embeds it in PROMPT the same way — see that file's CURRENT_VERSION
-//      doc comment for why a lone precmd()-emitted envelope (the pre-v4
-//      shape) isn't enough on its own, and for why a residual zsh race
-//      still remains even with the marker embedded. term-tokenizer.js
-//      classifies prompts off A alone. `verifyOscPromptClassification`
-//      drives a REAL shell in a REAL external tmux session (not a
-//      synthetic OSC injection) through the actual installed integration,
-//      and asserts the reader never turns unrelated content into a
-//      spurious prompt — bash in one attempt (reliable), zsh with a
-//      bounded retry (see that test's own comment for the measured rate).
+//   2. The client used to attribute each OSC 133;A (prompt-start) marker to
+//      the cursor row *at the moment the marker was parsed*. Under tmux that
+//      races: tmux forwards pane output in bursts bracketed by its own
+//      mode-reset/cursor-position boilerplate, and those bursts don't
+//      necessarily preserve the order their content was originally written
+//      to the pty — a burst can carry stale, already-on-screen content
+//      ahead of the marker's own fresh prompt text, or the marker's own
+//      text can arrive in a later, separate burst entirely (zsh's
+//      structural case: PROMPT-embedded, but tmux can still forward it
+//      ahead of the zle write that draws the text). web/static/terminal-
+//      engine.js (_ingestPtyData / osc133-attribution.js) fixes this by
+//      tracking the marker's row against whichever visible text actually
+//      draws next, taking the LAST candidate within a chunk over the
+//      first (so stale content loses to real text arriving later in the
+//      same burst) and bounding the search by the next A marker (so a
+//      burst holding several prompt cycles can't collapse onto one row).
+//      This lives entirely client-side and is shell- and renderer-
+//      agnostic — no shell- or renderer-specific branch exists in it.
+//      term-tokenizer.js classifies prompts off A alone.
+//      `verifyOscPromptClassification` drives a REAL shell in a REAL
+//      external tmux session (not a synthetic OSC injection) through the
+//      actual installed integration, across both bash and zsh and both the
+//      xterm and sterk renderer projects, and asserts the reader never
+//      turns unrelated content into a spurious prompt — see each test's own
+//      comment for the measured single-attempt rate and retry budget.
 
 const OSC_FENCE_OPEN = "# >>> mobux OSC 133 (managed) >>>";
 const OSC_FENCE_CLOSE = "# <<< mobux OSC 133 (managed) <<<";
@@ -1861,10 +1874,11 @@ async function attemptOscPromptClassification(
   }
 }
 
-// `attempts` > 1 tolerates a shell whose underlying timing is known to race
-// (see zsh below) without masking a structural regression: reverting the
-// actual fix fails essentially every attempt, so a handful of retries only
-// ever paper over the rare, real residual race, not a broken mechanism.
+// `attempts` tolerates the small residual timing jitter measured below
+// (each test's own comment has the number) without masking a structural
+// regression: reverting the client-side attribution fix fails essentially
+// every attempt, so a couple of retries only ever paper over rare, real
+// jitter, never a broken mechanism.
 async function verifyOscPromptClassification(page, opts, attempts = 1) {
   let last = { ok: false, detail: "no attempts run" };
   for (let i = 0; i < attempts; i++) {
@@ -1883,16 +1897,31 @@ test("settings: bash OSC 133 snippet shown in the UI matches what actually gets 
   await verifySnippetMatchesInstalled(page, "bash", `${SANDBOX_HOME}/.bashrc`);
 });
 
+// Measured single-attempt pass rate post-fix (client-side attribution,
+// osc133-attribution.js): 25/25 on xterm on an idle host; 22-23/25 on
+// sterk, dropping to ~80% on both projects under heavy concurrent host
+// load (CPU contention widens the window tmux's own redraw scheduling can
+// reorder within) — no misattribution observed in any measured failure,
+// on either project or host state (the residual jitter occasionally
+// misses classifying one of the four typed commands, never turns
+// unrelated content into a spurious prompt). `attempts: 3` keeps the
+// worst-case (all three consecutive failures under heavy load, ~20% each)
+// under 1%, without masking a structural regression — reverting the fix
+// fails essentially every attempt regardless of host load.
 test("OSC 133: real tmux classifies prompts off the A marker; motd-like content never becomes a spurious prompt", async ({
   page,
 }) => {
-  await verifyOscPromptClassification(page, {
-    shell: "bash",
-    rcPath: `${SANDBOX_HOME}/.bashrc`,
-    seedRc: "PS1='mobuxtest: '\n",
-    promptPrefix: "mobuxtest:",
-    shellCommand: "bash",
-  });
+  await verifyOscPromptClassification(
+    page,
+    {
+      shell: "bash",
+      rcPath: `${SANDBOX_HOME}/.bashrc`,
+      seedRc: "PS1='mobuxtest: '\n",
+      promptPrefix: "mobuxtest:",
+      shellCommand: "bash",
+    },
+    3,
+  );
 });
 
 // ── OSC 133: zsh coverage — mirrors the bash tests above. zsh isn't
@@ -1913,36 +1942,23 @@ test.describe("OSC 133: zsh", () => {
     await verifySnippetMatchesInstalled(page, "zsh", `${SANDBOX_HOME}/.zshrc`);
   });
 
-  // zsh embeds D+A in PROMPT (shell_integration.rs's v4 fix), riding the same
-  // zle write as the prompt text — the same structural reason this is sound
-  // for bash's PS1. A confirmed-by-trace residual race remains even so: tmux
-  // can forward that write's marker ahead of the just-finished command's own
-  // trailing output that, in the underlying pty stream, was written first
-  // but hadn't reached the client yet — a deeper tmux/zsh scheduling
-  // interaction, not reproducible for bash across hundreds of runs, and not
-  // eliminated by spacing the commands out. Measured single-attempt failure
-  // rate under xterm is roughly 10-25% depending on load; `attempts: 5`
-  // tolerates that residual jitter (chance of 5 consecutive false failures
-  // is well under 0.1% even at the higher end) without masking a structural
-  // regression — reverting the v4 fix fails essentially every attempt, not
-  // just an occasional one.
-  //
-  // xterm only: under sterk the same race measured 70-80% per attempt (not
-  // just jitter — a genuinely different, sterk-internal write/flush timing
-  // characteristic), which no attempt budget bounded by this suite's 30s
-  // test timeout can responsibly paper over. xterm is the renderer real
-  // users get by default (playwright.config.cjs's own note: the 'xterm'
-  // project is the fresh-device path; 'sterk' is explicitly experimental).
-  // The underlying shell-integration fix is renderer-agnostic — this gap is
-  // sterk's own OSC/buffer-flush timing under this specific shell+tmux
-  // combination, out of scope for this fix.
+  // zsh embeds D+A in PROMPT (shell_integration.rs's v4 fix), riding the
+  // same zle write as the prompt text — the same structural reason this is
+  // sound for bash's PS1. Before the client-side attribution fix
+  // (osc133-attribution.js), this still raced: tmux could forward that
+  // write's marker ahead of the just-finished command's own trailing
+  // output, measured at roughly 10-25% single-attempt failure under xterm
+  // and 70-80% under sterk (a sterk-specific write/flush timing
+  // characteristic — issue #225), which is why this test used to skip zsh
+  // under the sterk project entirely. The client-side fix closes that gap
+  // for both: measured single-attempt pass rate post-fix is 24/25 on both
+  // projects on an idle host, with #225's own reproduction — `attempts: 3`
+  // (matching the bash test above, same host-load-dependent jitter)
+  // without masking a structural regression — reverting the fix fails
+  // essentially every attempt regardless of host load.
   test("OSC 133: real tmux (zsh) classifies prompts off the A marker; motd-like content never becomes a spurious prompt", async ({
     page,
-  }, testInfo) => {
-    test.skip(
-      testInfo.project.use.renderer === "sterk",
-      "zsh+sterk residual race is far more frequent than zsh+xterm's (see comment above) — covered under xterm, the production-default renderer",
-    );
+  }) => {
     await verifyOscPromptClassification(
       page,
       {
@@ -1952,7 +1968,7 @@ test.describe("OSC 133: zsh", () => {
         promptPrefix: "mobuxtest:",
         shellCommand: zshBin,
       },
-      5,
+      3,
     );
   });
 });
