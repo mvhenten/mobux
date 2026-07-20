@@ -25,7 +25,7 @@ fi`,
     rc: "~/.zshrc",
     snippet: `if [ -n "$TMUX" ]; then
     preexec() { print -Pn '\\ePtmux;\\e\\e]133;C\\a\\e\\\\' }
-    precmd()  { print -Pn '\\ePtmux;\\e\\e]133;D;'$?'\\a\\e\\e]133;A\\a\\e\\\\' }
+    PROMPT=$'%{\\ePtmux;\\e\\e]133;D;%?\\a\\e\\e]133;A\\a\\e\\\\%}'"$PROMPT"
 else
     preexec() { print -Pn '\\e]133;C\\a' }
     precmd()  { print -Pn '\\e]133;D;'$?'\\a\\e]133;A\\a' }
