@@ -8,13 +8,10 @@ import { localGet, localFetch } from "../../lib/api.js";
 // the host that served the page (host-pinned helpers). The OSC-133 snippets are
 // static display content (verbatim from the Rust template).
 
-// Verbatim from src/shell_integration.rs's BASH_SNIPPET / ZSH_SNIPPET /
-// FISH_SNIPPET (the single Rust source both the installer and tmux.rs's
-// session auto-injection build on) — transcribed via
-// `serde_json::to_string` on the Rust constants, never hand-typed, so a
-// future snippet change can't silently drift from this display copy. A
-// Playwright test (`settings: <shell> OSC 133 snippet shown in the UI
-// matches what actually gets installed`) pins the two together.
+// Static literal snippets kept in sync manually with the Rust installer.
+// The Playwright test verifySnippetMatchesInstalled (test/spa.spec.cjs)
+// guards against drift: it fails CI if the displayed snippet diverges from
+// what actually gets installed.
 const SHELLS = [
   {
     id: "bash",
