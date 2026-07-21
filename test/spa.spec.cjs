@@ -1837,8 +1837,15 @@ async function attemptOscPromptClassification(
       .toContain("exit-was-1");
 
     const bodyText = await page.$eval("#reader", (el) => el.textContent);
-    const promptTexts = await page.$$eval("#reader .rb-prompt", (els) =>
-      els.map((e) => e.textContent.trim()),
+    // A-marked rows that ran a command (C..D followed) render as the
+    // command-line header of a `.rb-command` block (issue #219) rather than
+    // a bare `.rb-prompt` — only a still-open, nothing-typed-yet prompt
+    // stays `.rb-prompt`. Query both: either shape is "real typed text
+    // landed on the row the A marker attributed", which is what this test
+    // proves.
+    const promptTexts = await page.$$eval(
+      "#reader .rb-prompt, #reader .rb-command-line",
+      (els) => els.map((e) => e.textContent.trim()),
     );
     const oscPrompts = promptTexts.filter((t) => t.startsWith(promptPrefix));
     const spurious = promptTexts.filter((t) => !t.startsWith(promptPrefix));
@@ -1865,7 +1872,7 @@ async function attemptOscPromptClassification(
     // The regression: under the old code a lone envelope (bash's B, or
     // zsh's pre-v4 precmd()-emitted D+A) landed on whatever row tmux's
     // cursor sync put the cursor at, turning unrelated content into a
-    // spurious `.rb-prompt` block.
+    // spurious `.rb-prompt`/`.rb-command-line` block.
     if (spurious.length > 0) {
       failures.push(
         `content misclassified as a prompt (marker-row misattribution): ${JSON.stringify(spurious)}`,

@@ -24,7 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-update-runner test-spa test-reader test-stt-ux test-stt-per-kind test-e2e \
+        test-smoke test-critical-path test-update-runner test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -210,17 +210,19 @@ test-stt-per-kind:
 # Same isolated smoke instance + isolated MOBUX_DATA_DIR as the rest of the
 # suite, so it never touches the live :5151 server or the live DB.
 #
-# Also runs reader-font.spec.cjs (issue #218): it's SPA/client-side reader
-# coverage with no dependency on the terminal engine or a live tmux/PTY
-# session, so it rides the same smoke instance rather than getting its own
-# CI step. `make test-reader` still exists standalone for local iteration.
+# Also runs reader-font.spec.cjs (issue #218) and reader-command-grouping.
+# spec.cjs (issue #219): both are SPA/client-side reader coverage with no
+# dependency on the terminal engine or a live tmux/PTY session, so they ride
+# the same smoke instance rather than getting their own CI step. `make
+# test-reader` / `make test-reader-grouping` still exist standalone for
+# local iteration.
 .PHONY: test-spa
 test-spa:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs
+		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs
 
 # Reader font (issue #218): plain-output text renders proportional while
 # prompt/code stay monospace. Drives reader.js's real render pipeline with a
@@ -233,6 +235,20 @@ test-reader:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/reader-font.spec.cjs
+
+# Reader command grouping (issue #219): OSC 133 C/D markers group each
+# command with its output into one block with a muted exit-status chip, and
+# the reader falls back to today's heuristic blocks without them. Drives
+# reader.js's real render pipeline with a synthetic document snapshot (no
+# tmux/PTY session needed). Same isolated smoke instance as the rest of the
+# suite.
+.PHONY: test-reader-grouping
+test-reader-grouping:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/reader-command-grouping.spec.cjs
 
 # Renderer conformance (issue #207, D10): one spec exercises the explicit
 # renderer interface (R1–R16) against BOTH adapters via the xterm/sterk
