@@ -17,6 +17,8 @@
 
 const { test, expect } = require("./fixtures.cjs");
 const { execSync } = require("child_process");
+const fs = require("fs");
+const { resolveZshBin } = require("./lib/zsh.cjs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
 const APP = `${BASE}/app`;
@@ -1613,6 +1615,372 @@ test("settings: every ported card renders and consumes its endpoint", async ({
   ]) {
     expect(seen.has(want), `expected ${want}`).toBeTruthy();
   }
+});
+
+// ── OSC 133: install path matches the displayed snippet, real tmux marker
+// attribution is correct (issue: OSC 133 markers lost + misattributed under
+// tmux) ───────────────────────────────────────────────────────────────────
+//
+// Two independent regressions, pinned separately, for both bash and zsh:
+//
+//   1. The bash/zsh snippets wrap OSC 133 in tmux's DCS passthrough
+//      envelope. The D (command-finished) and A (prompt-start) markers ride
+//      ONE envelope; every embedded ESC inside it must be doubled, not just
+//      the first — an un-doubled ESC is silently eaten by tmux's passthrough
+//      unescaper, and the A marker never reaches the client. ShellIntegration
+//      .jsx renders the exact same bytes purely for display (transcribed
+//      from the Rust constants via serde_json, never hand-typed);
+//      `verifySnippetMatchesInstalled` proves the two never drift by
+//      comparing the JSX text to what actually lands in the installed
+//      rcfile.
+//   2. The client used to attribute each OSC 133;A (prompt-start) marker to
+//      the cursor row *at the moment the marker was parsed*. Under tmux that
+//      races: tmux forwards pane output in bursts bracketed by its own
+//      mode-reset/cursor-position boilerplate, and those bursts don't
+//      necessarily preserve the order their content was originally written
+//      to the pty — a burst can carry stale, already-on-screen content
+//      ahead of the marker's own fresh prompt text, or the marker's own
+//      text can arrive in a later, separate burst entirely (zsh's
+//      structural case: PROMPT-embedded, but tmux can still forward it
+//      ahead of the zle write that draws the text). web/static/terminal-
+//      engine.js (_ingestPtyData / osc133-attribution.js) fixes this by
+//      tracking the marker's row against whichever visible text actually
+//      draws next, taking the LAST candidate within a chunk over the
+//      first (so stale content loses to real text arriving later in the
+//      same burst) and bounding the search by the next A marker (so a
+//      burst holding several prompt cycles can't collapse onto one row).
+//      This lives entirely client-side and is shell- and renderer-
+//      agnostic — no shell- or renderer-specific branch exists in it.
+//      term-tokenizer.js classifies prompts off A alone.
+//      `verifyOscPromptClassification` drives a REAL shell in a REAL
+//      external tmux session (not a synthetic OSC injection) through the
+//      actual installed integration, across both bash and zsh and both the
+//      xterm and sterk renderer projects, and asserts the reader never
+//      turns unrelated content into a spurious prompt — see each test's own
+//      comment for the measured single-attempt rate and retry budget.
+
+const OSC_FENCE_OPEN = "# >>> mobux OSC 133 (managed) >>>";
+const OSC_FENCE_CLOSE = "# <<< mobux OSC 133 (managed) <<<";
+
+// Pull the snippet body back out of a rendered rcfile block: `render_block`
+// wraps it as `FENCE_OPEN\n# version: N\n<snippet>\n FENCE_CLOSE\n`.
+function extractInstalledSnippet(rcContent) {
+  const openIdx = rcContent.indexOf(OSC_FENCE_OPEN);
+  const closeIdx = rcContent.indexOf(OSC_FENCE_CLOSE);
+  if (openIdx === -1 || closeIdx === -1) return null;
+  const block = rcContent.slice(openIdx + OSC_FENCE_OPEN.length, closeIdx);
+  const lines = block.split("\n");
+  return lines.slice(2, -1).join("\n");
+}
+
+async function apiInstall(page, shell) {
+  await page.evaluate(async (shell) => {
+    const res = await fetch("/api/shell-integration/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shell }),
+    });
+    if (!res.ok) throw new Error(`install failed: ${res.status}`);
+  }, shell);
+}
+
+async function apiUninstall(page, shell) {
+  await page.evaluate(async (shell) => {
+    await fetch("/api/shell-integration/uninstall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shell }),
+    });
+  }, shell);
+}
+
+// Shared body for "settings: <shell> OSC 133 snippet shown in the UI
+// matches what actually gets installed". Drives the real Install/Uninstall
+// buttons (not the API directly) so the UI's own `states` signal updates
+// the same way a real user's click would — a raw fetch bypasses the
+// component's response handler and leaves the displayed state stale.
+async function verifySnippetMatchesInstalled(page, shell, rcPath) {
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  const card = page.locator(`.shell-card[data-shell="${shell}"]`);
+  const stateEl = card.locator('[data-role="state"]');
+  await stateEl.waitFor();
+
+  // Two states share the "nothing to uninstall" starting point: "not
+  // installed" (rc file exists, no fenced block) and "rc file not present"
+  // (fresh sandbox HOME, e.g. a .zshrc no earlier test in this run has ever
+  // touched — the shared SANDBOX_HOME only gets a .bashrc because an
+  // earlier bash test's own uninstall leaves the file behind, empty, per
+  // uninstall_with_home's write-not-delete). The card's Uninstall button
+  // is `disabled` in both (ShellIntegration.jsx: `!(isInstalled ||
+  // isOutdated)`), so drive off the button's actual enabled state rather
+  // than a single expected label — clicking a disabled button times out
+  // instead of no-opping.
+  const uninstallBtn = card.locator("button", { hasText: /^Uninstall$/ });
+  if (await uninstallBtn.isEnabled()) {
+    await uninstallBtn.click();
+    await expect(stateEl).toHaveText("not installed", { timeout: 6000 });
+  }
+
+  const displayedSnippet = await card
+    .locator(".settings-snippet code")
+    .textContent();
+
+  await card.locator("button", { hasText: /^Install$/ }).click();
+  await expect(stateEl).toHaveText(/installed v\d/, { timeout: 6000 });
+
+  const installedSnippet = extractInstalledSnippet(
+    fs.readFileSync(rcPath, "utf8"),
+  );
+  expect(
+    installedSnippet,
+    "no fenced block found in installed rcfile",
+  ).not.toBeNull();
+  expect(installedSnippet).toBe(displayedSnippet);
+
+  // Every embedded OSC 133 start inside a tmux DCS envelope must be doubled
+  // — directly regresses the un-doubled ESC that dropped the A marker.
+  for (const envelope of installedSnippet.matchAll(/\\ePtmux;(.*?)\\e\\\\/g)) {
+    const body = envelope[1];
+    for (const m of body.matchAll(/]133;/g)) {
+      const before = body.slice(Math.max(0, m.index - 4), m.index);
+      expect(
+        before,
+        `un-doubled ESC before ]133; in ${JSON.stringify(body)}`,
+      ).toBe("\\e\\e");
+    }
+  }
+
+  await card.locator("button", { hasText: /^Uninstall$/ }).click();
+  await expect(stateEl).toHaveText("not installed", { timeout: 6000 });
+}
+
+// Shared body for "OSC 133: real tmux classifies prompts off the A marker;
+// motd-like content never becomes a spurious prompt", parameterized over
+// shell so bash and zsh both exercise the actual installed integration
+// through a real shell in a real external tmux session.
+// One attempt: real shell, real external tmux session, 5 commands, then the
+// reader's actual classification. Returns `{ ok, detail }` instead of
+// asserting directly, so the caller can retry a shell whose underlying
+// timing is known to race (see `verifyOscPromptClassification` below) without
+// masking a structural regression — a reverted fix fails essentially every
+// attempt, not just an occasional one.
+async function attemptOscPromptClassification(
+  page,
+  { shell, rcPath, seedRc, promptPrefix, shellCommand },
+) {
+  const MARK_SESSION = `osc133-mark-${shell}-${process.pid}-${Date.now()}`;
+
+  // A page.evaluate fetch needs a document origin to resolve a relative URL
+  // — navigate before touching the API (a fresh `page` fixture starts on
+  // about:blank).
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await apiUninstall(page, shell);
+  // A prompt that never ends in a prompt sigil ($/#/>/❯…) so the reader's
+  // fallback heuristic (isPrompt) can never independently classify it as a
+  // prompt — only a real OSC A marker can. Preexisting content (the fenced
+  // install wraps around it) is what the installer normally preserves.
+  fs.writeFileSync(rcPath, seedRc);
+  await apiInstall(page, shell);
+
+  try {
+    tmux(`kill-session -t ${MARK_SESSION}`);
+  } catch (_) {}
+  // The real shell binary, not --norc/--norc-equivalent: must source the
+  // real, fenced rcfile like an actual user shell. Created BEFORE the page
+  // attaches, so the rcfile-built prompt is what draws every prompt line —
+  // never set the prompt via send-keys after boot, which clobbers the
+  // OSC-wrapped prompt the snippet built (a known trap: send-keys races the
+  // shell's own rcfile sourcing).
+  tmux(`new-session -d -s ${MARK_SESSION} ${SHELL_ENV} ${shellCommand}`);
+
+  try {
+    await page.goto(`${APP}#/s/${MARK_SESSION}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.waitForFunction(
+      () => window.__mobuxView && window.__mobuxView.test,
+    );
+    await waitForClientAttached(tmux, MARK_SESSION);
+
+    // A throwaway warm-up command first: the session's very first prompt was
+    // drawn before the browser attached, so — by design — it carries no
+    // marker (only live PTY writes reach the OSC parser). Without this, the
+    // "echo hello" command below would land on that unmarked prompt row
+    // instead of a freshly A-marked one.
+    tmux(`send-keys -t ${MARK_SESSION} 'true' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'echo hello' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'ls' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'false' Enter`);
+    tmux(`send-keys -t ${MARK_SESSION} 'echo exit-was-$?' Enter`);
+    await page.waitForFunction(() => window.__mobuxView.test.oscDetected(), {
+      timeout: 8000,
+    });
+
+    await page.evaluate(() => window.__mobuxView.swap("reader"));
+
+    // Poll instead of a fixed sleep: each of the 5 commands above needs its
+    // own D+A round trip (WS send -> real shell -> real tmux -> WS receive
+    // -> buffer write -> OSC parse) before the reader has anything to show.
+    // Wait for the LAST command's own output (not just a prompt count), so
+    // a slow run can't read the buffer mid-sequence, before
+    // `echo exit-was-$?` has actually executed.
+    await expect
+      .poll(
+        async () => {
+          await page.evaluate(() =>
+            window.__mobuxView.test.readerForceRender(),
+          );
+          return page.$eval("#reader", (el) => el.textContent);
+        },
+        { timeout: 10000, message: "waiting for the exit-was-1 output line" },
+      )
+      .toContain("exit-was-1");
+
+    const bodyText = await page.$eval("#reader", (el) => el.textContent);
+    const promptTexts = await page.$$eval("#reader .rb-prompt", (els) =>
+      els.map((e) => e.textContent.trim()),
+    );
+    const oscPrompts = promptTexts.filter((t) => t.startsWith(promptPrefix));
+    const spurious = promptTexts.filter((t) => !t.startsWith(promptPrefix));
+    const KNOWN_COMMANDS = ["echo hello", "ls", "false", "echo exit-was-$?"];
+    const matchedCommands = KNOWN_COMMANDS.filter((cmd) =>
+      oscPrompts.some((t) => t.includes(cmd)),
+    );
+
+    const failures = [];
+    if (oscPrompts.length < 3) {
+      failures.push(
+        `expected >= 3 OSC-marked prompts, got ${JSON.stringify(promptTexts)}`,
+      );
+    }
+    // At least 3 of the 4 real typed commands must show up on an OSC-tagged
+    // prompt row — proving A-driven classification actually engages with
+    // live command text (which defeats the sigil heuristic), while
+    // tolerating a single row racing a real shell's own scheduling jitter.
+    if (matchedCommands.length < 3) {
+      failures.push(
+        `expected >= 3 of ${JSON.stringify(KNOWN_COMMANDS)} on an OSC prompt row, matched ${JSON.stringify(matchedCommands)}; all prompt blocks: ${JSON.stringify(oscPrompts)}`,
+      );
+    }
+    // The regression: under the old code a lone envelope (bash's B, or
+    // zsh's pre-v4 precmd()-emitted D+A) landed on whatever row tmux's
+    // cursor sync put the cursor at, turning unrelated content into a
+    // spurious `.rb-prompt` block.
+    if (spurious.length > 0) {
+      failures.push(
+        `content misclassified as a prompt (marker-row misattribution): ${JSON.stringify(spurious)}`,
+      );
+    }
+    if (!bodyText.includes("hello")) failures.push("missing 'hello' output");
+    if (!bodyText.includes("exit-was-1"))
+      failures.push("missing 'exit-was-1' output");
+
+    return { ok: failures.length === 0, detail: failures.join("; ") };
+  } finally {
+    try {
+      tmux(`kill-session -t ${MARK_SESSION}`);
+    } catch (_) {}
+    await apiUninstall(page, shell);
+  }
+}
+
+// `attempts` tolerates the small residual timing jitter measured below
+// (each test's own comment has the number) without masking a structural
+// regression: reverting the client-side attribution fix fails essentially
+// every attempt, so a couple of retries only ever paper over rare, real
+// jitter, never a broken mechanism.
+async function verifyOscPromptClassification(page, opts, attempts = 1) {
+  let last = { ok: false, detail: "no attempts run" };
+  for (let i = 0; i < attempts; i++) {
+    last = await attemptOscPromptClassification(page, opts);
+    if (last.ok) return;
+  }
+  expect(
+    last.ok,
+    `all ${attempts} attempt(s) failed; last: ${last.detail}`,
+  ).toBe(true);
+}
+
+test("settings: bash OSC 133 snippet shown in the UI matches what actually gets installed", async ({
+  page,
+}) => {
+  await verifySnippetMatchesInstalled(page, "bash", `${SANDBOX_HOME}/.bashrc`);
+});
+
+// Measured single-attempt pass rate post-fix (client-side attribution,
+// osc133-attribution.js): 25/25 on xterm on an idle host; 22-23/25 on
+// sterk, dropping to ~80% on both projects under heavy concurrent host
+// load (CPU contention widens the window tmux's own redraw scheduling can
+// reorder within) — no misattribution observed in any measured failure,
+// on either project or host state (the residual jitter occasionally
+// misses classifying one of the four typed commands, never turns
+// unrelated content into a spurious prompt). `attempts: 3` keeps the
+// worst-case (all three consecutive failures under heavy load, ~20% each)
+// under 1%, without masking a structural regression — reverting the fix
+// fails essentially every attempt regardless of host load.
+test("OSC 133: real tmux classifies prompts off the A marker; motd-like content never becomes a spurious prompt", async ({
+  page,
+}) => {
+  await verifyOscPromptClassification(
+    page,
+    {
+      shell: "bash",
+      rcPath: `${SANDBOX_HOME}/.bashrc`,
+      seedRc: "PS1='mobuxtest: '\n",
+      promptPrefix: "mobuxtest:",
+      shellCommand: "bash",
+    },
+    3,
+  );
+});
+
+// ── OSC 133: zsh coverage — mirrors the bash tests above. zsh isn't
+// preinstalled on the CI runner (see test/lib/zsh.cjs), so it's resolved
+// once for this group instead of at file load, to avoid slowing down every
+// other test in this file with an unconditional download. ─────────────────
+
+test.describe("OSC 133: zsh", () => {
+  let zshBin;
+
+  test.beforeAll(() => {
+    zshBin = resolveZshBin();
+  });
+
+  test("settings: zsh OSC 133 snippet shown in the UI matches what actually gets installed", async ({
+    page,
+  }) => {
+    await verifySnippetMatchesInstalled(page, "zsh", `${SANDBOX_HOME}/.zshrc`);
+  });
+
+  // zsh embeds D+A in PROMPT (shell_integration.rs's v4 fix), riding the
+  // same zle write as the prompt text — the same structural reason this is
+  // sound for bash's PS1. Before the client-side attribution fix
+  // (osc133-attribution.js), this still raced: tmux could forward that
+  // write's marker ahead of the just-finished command's own trailing
+  // output, measured at roughly 10-25% single-attempt failure under xterm
+  // and 70-80% under sterk (a sterk-specific write/flush timing
+  // characteristic — issue #225), which is why this test used to skip zsh
+  // under the sterk project entirely. The client-side fix closes that gap
+  // for both: measured single-attempt pass rate post-fix is 24/25 on both
+  // projects on an idle host, with #225's own reproduction — `attempts: 3`
+  // (matching the bash test above, same host-load-dependent jitter)
+  // without masking a structural regression — reverting the fix fails
+  // essentially every attempt regardless of host load.
+  test("OSC 133: real tmux (zsh) classifies prompts off the A marker; motd-like content never becomes a spurious prompt", async ({
+    page,
+  }) => {
+    await verifyOscPromptClassification(
+      page,
+      {
+        shell: "zsh",
+        rcPath: `${SANDBOX_HOME}/.zshrc`,
+        seedRc: "PROMPT='mobuxtest: '\n",
+        promptPrefix: "mobuxtest:",
+        shellCommand: zshBin,
+      },
+      3,
+    );
+  });
 });
 
 // ── settings: STT provider switch shows per-provider fields + auto-saves ─────

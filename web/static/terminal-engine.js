@@ -41,6 +41,20 @@
 
 import { openExternal } from "./external-link.js";
 import { createTerminalDocument } from "./terminal-document.js";
+import {
+  findOsc133AEnd,
+  scanForNextAAndCandidate,
+} from "./osc133-attribution.js";
+
+const oscTextDecoder = new TextDecoder("utf-8", { fatal: false });
+
+// The server always relays PTY output as WS Text frames built from
+// `String::from_utf8_lossy` (main.rs) — bytes/Blob arrive here only from
+// test fakes. Normalizing to a string once keeps OSC 133 A-marker
+// attribution (osc133-attribution.js) in one representation throughout.
+function oscInputToString(data) {
+  return typeof data === "string" ? data : oscTextDecoder.decode(data);
+}
 
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
@@ -79,18 +93,41 @@ export class TerminalEngine extends EventTarget {
     this._reconnectMin = 500;
     this._reconnectMax = 10000;
 
-    // OSC 133 (FinalTerm / shell-integration) markers.
+    // OSC 133 (FinalTerm / shell-integration) markers. Recorded by absolute
+    // row for all four kinds (diagnostics, oscMarkerCount), but only `A` is
+    // trustworthy for row-sensitive decisions under tmux — a passthrough
+    // envelope that carries no trailing text in the same shell write (as `B`
+    // never does) can land on a cursor position tmux resets to the pane's
+    // home row rather than the true one. See term-tokenizer.js's doc comment
+    // for the full story; the reader's prompt classification keys off `A`
+    // alone for this reason.
+    //
+    // `A`'s row is NOT recorded here at arrival time — the cursor position
+    // *when this handler fires* races the same way `B`'s does (see
+    // osc133-attribution.js). `_ingestPtyData` below attributes `A` instead,
+    // to the row its own prompt text draws on, and calls `oscMarkers.set`
+    // itself once a candidate is found. This handler still fires for `A`
+    // (the renderer's own parser is what actually finds the marker in the
+    // byte stream — robust across writes in a way a hand-rolled scanner
+    // isn't) but only uses it for `oscDetected`.
     this.oscMarkers = new Map();
     this.oscDetected = false;
+    // Is there a currently-open A cycle (seen the marker, no candidate row
+    // committed for it yet)? See _ingestPtyData's doc comment.
+    this._oscAOpen = false;
+    // Serializes _ingestPtyData calls — see that method's doc comment.
+    this._ingestChain = Promise.resolve();
 
     this._oscSub = this.renderer.registerOscHandler(133, (data) => {
       const kind = (data || "").charAt(0);
       if (kind !== "A" && kind !== "B" && kind !== "C" && kind !== "D") {
         return false;
       }
-      const buf = this.getActiveBuffer();
-      const absY = (buf.baseY || 0) + (buf.cursorY || 0);
-      this.oscMarkers.set(absY, kind);
+      if (kind !== "A") {
+        const buf = this.getActiveBuffer();
+        const absY = (buf.baseY || 0) + (buf.cursorY || 0);
+        this.oscMarkers.set(absY, kind);
+      }
       if (!this.oscDetected) {
         this.oscDetected = true;
         this.dispatchEvent(new Event("osc-detected"));
@@ -145,15 +182,15 @@ export class TerminalEngine extends EventTarget {
     this.ws.onmessage = async (ev) => {
       let bytes;
       if (typeof ev.data === "string") {
-        this.renderer.write(ev.data);
+        this._ingestPtyData(ev.data);
         bytes = ev.data;
       } else if (ev.data instanceof ArrayBuffer) {
         const u8 = new Uint8Array(ev.data);
-        this.renderer.write(u8);
+        this._ingestPtyData(u8);
         bytes = u8;
       } else if (ev.data instanceof Blob) {
         const u8 = new Uint8Array(await ev.data.arrayBuffer());
-        this.renderer.write(u8);
+        this._ingestPtyData(u8);
         bytes = u8;
       }
       this.dispatchEvent(new CustomEvent("data", { detail: bytes }));
@@ -285,8 +322,88 @@ export class TerminalEngine extends EventTarget {
   }
 
   // ── Renderer interface passthroughs ───────────────────────────────
+  // Routed through the same OSC 133 A-marker attribution pipeline as the
+  // live WS stream (_ingestPtyData) — history reload/test injection carry
+  // the same marker bytes a real prompt would, and should attribute them
+  // the same way. reloadHistory() below writes straight to the renderer
+  // instead: replayed scrollback text, never a live marker.
   write(data) {
-    return this.renderer.write(data);
+    return this._ingestPtyData(data);
+  }
+
+  // ── OSC 133 A-marker row attribution ───────────────────────────────
+  // See osc133-attribution.js for the scanning detail and the reasoning
+  // behind it (finalize on the first candidate found in a chunk; bound the
+  // search by the next A, not B/C/D). Every PTY write funnels through here
+  // (both the live WS stream and the public write() passthrough) so there
+  // is exactly one attribution path regardless of entry point. Nothing is
+  // ever withheld from rendering — every byte is handed to the renderer as
+  // soon as it's available; only the bookkeeping (which row is "the"
+  // prompt row) is deferred.
+  //
+  // Chunks are processed strictly one at a time through `_ingestChain`: a
+  // WS `onmessage` handler doesn't await the previous call before the next
+  // message's handler runs (fire-and-forget, for throughput), so without
+  // this queue two chunks could interleave mid-cycle and corrupt
+  // `_oscAOpen`. Queuing makes "chunk 1 fully done" a
+  // precondition for "start chunk 2".
+  _ingestPtyData(raw) {
+    const str = oscInputToString(raw);
+    const step = () => this._consumeChunk(str);
+    this._ingestChain = this._ingestChain.then(step, step);
+    return this._ingestChain;
+  }
+
+  async _consumeChunk(text) {
+    let cursor = 0;
+    for (;;) {
+      if (!this._oscAOpen) {
+        const markerEnd = findOsc133AEnd(text, cursor);
+        if (markerEnd === -1) {
+          await this._writeSlice(text, cursor, text.length);
+          return;
+        }
+        await this._writeSlice(text, cursor, markerEnd);
+        this._oscAOpen = true;
+        cursor = markerEnd;
+        continue;
+      }
+
+      const { candidateEnd, nextAEnd } = scanForNextAAndCandidate(text, cursor);
+      if (candidateEnd === cursor) {
+        // Nothing visible in what's available yet (the marker's own lone
+        // envelope, or still mid tmux redraw boilerplate) — write it
+        // through as-is and keep the cycle open for the next chunk to
+        // retry, whether or not a next A was also seen here.
+        await this._writeSlice(
+          text,
+          cursor,
+          nextAEnd === -1 ? text.length : nextAEnd,
+        );
+        if (nextAEnd === -1) return;
+        cursor = nextAEnd;
+        continue;
+      }
+      // Found a candidate — commit it immediately rather than continuing to
+      // watch for a "better" one in a later chunk (typed command echo, its
+      // output): see the module doc comment for why waiting would let that
+      // later, unrelated content overwrite an already-correct row.
+      await this._writeSlice(text, cursor, candidateEnd);
+      const buf = this.getActiveBuffer();
+      this.oscMarkers.set((buf.baseY || 0) + (buf.cursorY || 0), "A");
+      this._oscAOpen = false;
+      cursor = candidateEnd;
+      if (nextAEnd !== -1) {
+        await this._writeSlice(text, cursor, nextAEnd);
+        this._oscAOpen = true;
+        cursor = nextAEnd;
+      }
+    }
+  }
+
+  _writeSlice(text, from, to) {
+    if (to <= from) return Promise.resolve();
+    return this.renderer.write(text.slice(from, to));
   }
   onBufferChanged(cb) {
     return this.renderer.onBufferChanged(cb);
