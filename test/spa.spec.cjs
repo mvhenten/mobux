@@ -1705,9 +1705,19 @@ async function verifySnippetMatchesInstalled(page, shell, rcPath) {
   const stateEl = card.locator('[data-role="state"]');
   await stateEl.waitFor();
 
-  const initial = (await stateEl.textContent()).trim();
-  if (initial !== "not installed") {
-    await card.locator("button", { hasText: /^Uninstall$/ }).click();
+  // Two states share the "nothing to uninstall" starting point: "not
+  // installed" (rc file exists, no fenced block) and "rc file not present"
+  // (fresh sandbox HOME, e.g. a .zshrc no earlier test in this run has ever
+  // touched — the shared SANDBOX_HOME only gets a .bashrc because an
+  // earlier bash test's own uninstall leaves the file behind, empty, per
+  // uninstall_with_home's write-not-delete). The card's Uninstall button
+  // is `disabled` in both (ShellIntegration.jsx: `!(isInstalled ||
+  // isOutdated)`), so drive off the button's actual enabled state rather
+  // than a single expected label — clicking a disabled button times out
+  // instead of no-opping.
+  const uninstallBtn = card.locator("button", { hasText: /^Uninstall$/ });
+  if (await uninstallBtn.isEnabled()) {
+    await uninstallBtn.click();
     await expect(stateEl).toHaveText("not installed", { timeout: 6000 });
   }
 
