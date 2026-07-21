@@ -210,9 +210,8 @@ test-stt-per-kind:
 # Same isolated smoke instance + isolated MOBUX_DATA_DIR as the rest of the
 # suite, so it never touches the live :5151 server or the live DB.
 #
-# Also runs reader-font.spec.cjs (issue #218) and reader-command-grouping.
-# spec.cjs (issue #219): both are SPA/client-side reader coverage with no
-# dependency on the terminal engine or a live tmux/PTY session, so they ride
+# Also runs reader-font.spec.cjs (issue #218), reader-command-grouping.
+# spec.cjs (issue #219), and session-history.spec.cjs (issue #220): all ride
 # the same smoke instance rather than getting their own CI step. `make
 # test-reader` / `make test-reader-grouping` still exist standalone for
 # local iteration.
@@ -222,7 +221,7 @@ test-spa:
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs
+		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs
 
 # Reader font (issue #218): plain-output text renders proportional while
 # prompt/code stay monospace. Drives reader.js's real render pipeline with a
