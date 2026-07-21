@@ -94,18 +94,29 @@ export class TerminalEngine extends EventTarget {
     this._reconnectMax = 10000;
 
     // OSC 133 (FinalTerm / shell-integration) markers. Recorded by absolute
-    // row for all four kinds (diagnostics, oscMarkerCount), but only `A` is
-    // trustworthy for row-sensitive decisions under tmux — a passthrough
-    // envelope that carries no trailing text in the same shell write (as `B`
-    // never does) can land on a cursor position tmux resets to the pane's
-    // home row rather than the true one. See term-tokenizer.js's doc comment
-    // for the full story; the reader's prompt classification keys off `A`
-    // alone for this reason.
+    // row for all four kinds (diagnostics, oscMarkerCount, reader command
+    // grouping — issue #219), but only `A` is trustworthy for row-sensitive
+    // decisions under tmux — a passthrough envelope that carries no trailing
+    // text in the same shell write (as `B` never does) can land on a cursor
+    // position tmux resets to the pane's home row rather than the true one.
+    // See term-tokenizer.js's doc comment for the full story; the reader's
+    // prompt classification keys off `A` alone for this reason.
+    //
+    // A row's value is the full marker payload (`"C"`, `"D;0"`, `"A"`, …),
+    // not just the kind letter — the reader needs the exit code carried
+    // after `D;`. When two markers land on the same absolute row — which
+    // happens routinely, since the shell's PS1 emits `D;$?` immediately
+    // followed by `A` in the same write, and a zero-output command never
+    // moves the cursor between its `C` and that `D`/`A` — both are kept,
+    // joined by `|` (e.g. `"D;0|A"`, or `"C|D;0|A"` for a no-op command).
+    // See `_recordOscMarker`. Consumers must scan for a kind rather than
+    // compare the row's value for equality — see term-tokenizer.js's
+    // `oscHas`/`oscExitCode`.
     //
     // `A`'s row is NOT recorded here at arrival time — the cursor position
     // *when this handler fires* races the same way `B`'s does (see
     // osc133-attribution.js). `_ingestPtyData` below attributes `A` instead,
-    // to the row its own prompt text draws on, and calls `oscMarkers.set`
+    // to the row its own prompt text draws on, and calls `_recordOscMarker`
     // itself once a candidate is found. This handler still fires for `A`
     // (the renderer's own parser is what actually finds the marker in the
     // byte stream — robust across writes in a way a hand-rolled scanner
@@ -126,7 +137,7 @@ export class TerminalEngine extends EventTarget {
       if (kind !== "A") {
         const buf = this.getActiveBuffer();
         const absY = (buf.baseY || 0) + (buf.cursorY || 0);
-        this.oscMarkers.set(absY, kind);
+        this._recordOscMarker(absY, data);
       }
       if (!this.oscDetected) {
         this.oscDetected = true;
@@ -347,6 +358,14 @@ export class TerminalEngine extends EventTarget {
   // this queue two chunks could interleave mid-cycle and corrupt
   // `_oscAOpen`. Queuing makes "chunk 1 fully done" a
   // precondition for "start chunk 2".
+  // Record an OSC 133 marker on an absolute row, joining with whatever is
+  // already there rather than clobbering it — see the `oscMarkers` doc
+  // comment in the constructor for why two markers routinely share a row.
+  _recordOscMarker(absY, marker) {
+    const existing = this.oscMarkers.get(absY);
+    this.oscMarkers.set(absY, existing ? `${existing}|${marker}` : marker);
+  }
+
   _ingestPtyData(raw) {
     const str = oscInputToString(raw);
     const step = () => this._consumeChunk(str);
@@ -390,7 +409,7 @@ export class TerminalEngine extends EventTarget {
       // later, unrelated content overwrite an already-correct row.
       await this._writeSlice(text, cursor, candidateEnd);
       const buf = this.getActiveBuffer();
-      this.oscMarkers.set((buf.baseY || 0) + (buf.cursorY || 0), "A");
+      this._recordOscMarker((buf.baseY || 0) + (buf.cursorY || 0), "A");
       this._oscAOpen = false;
       cursor = candidateEnd;
       if (nextAEnd !== -1) {

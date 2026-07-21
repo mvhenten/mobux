@@ -13,7 +13,13 @@
 // ── Contract ────────────────────────────────────────────────────────────
 //   snapshot(): { lines, status }
 //     lines   logical lines (wrapped rows already joined), each:
-//               { runs: [{ text, attrs }], text, osc: 'A'|'B'|'C'|'D'|null }
+//               { runs: [{ text, attrs }], text, osc }
+//             `osc` is null, or one or more OSC 133 marker payloads joined by
+//             `|` when more than one lands on the same row (e.g. `'A'`,
+//             `'C'`, `'D;0'`, `'D;0|A'`) — see terminal-engine.js's
+//             `oscMarkers` doc comment. Consumers scan for a kind rather than
+//             compare for equality; term-tokenizer.js's `oscHas`/
+//             `oscExitCode` do this.
 //     status  the tmux status line as a separate field: { runs } | null
 //   subscribe(cb): Disposable    fires after each buffer write
 //   onOscDetected(cb): Disposable   fires the first time an OSC 133 marker lands

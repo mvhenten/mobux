@@ -687,6 +687,62 @@ h1, h2, h3 { margin: 0; }
   font-size: 17px;
 }
 
+/* Command block (issue #219): the OSC 133 C..D span grouped with the prompt
+   that started it — one block per command, its output, and a muted
+   pass/fail chip once the exit code is known (see rb-command-status below). */
+.rb-command {
+  margin-top: 8px;
+}
+.rb-command-line {
+  display: block;
+  position: relative;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: #8a93a6;
+  padding-right: 52px;
+  padding-top: 42px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rb-command-output {
+  display: block;
+  position: relative;
+  white-space: normal;
+  padding-right: 52px;
+  padding-top: 42px;
+}
+.rb-command-output .rb-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Exit status chip. Deliberately muted — no bright/saturated red or green —
+   so it reads as a quiet affordance rather than an alert, matching the
+   .rb-speaker.rb-speaking teal used elsewhere in the reader. */
+.rb-command-status {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.rb-command-status.rb-status-ok {
+  background: rgba(80, 150, 120, 0.16);
+  border-color: rgba(120, 190, 160, 0.4);
+  color: #a9d0bd;
+}
+.rb-command-status.rb-status-fail {
+  background: rgba(170, 120, 80, 0.18);
+  border-color: rgba(205, 165, 120, 0.45);
+  color: #d9c4a8;
+}
+
 .rb-text {
   display: block;
   position: relative;

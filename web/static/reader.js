@@ -376,6 +376,8 @@ function renderBlock(block) {
       return renderInlineBlock("rb rb-header", block.runs);
     case "prompt":
       return renderInlineBlock("rb rb-prompt", block.runs);
+    case "command":
+      return renderCommandBlock(block);
     case "text":
       return renderTextBlock(block);
     case "code":
@@ -393,6 +395,41 @@ function renderInlineBlock(className, runs) {
     addSpeakerIcon(el, "prompt", runs);
   }
   return el;
+}
+
+// A "command" block (issue #219) is the OSC 133 C..D span grouped with the
+// prompt line that started it: the command line, its output, and a muted
+// pass/fail chip once the exit code is known. `exitCode` is null while the
+// command is still running (no D marker yet) — the block just omits the
+// chip and grows on the next re-tokenize as more output streams in.
+function renderCommandBlock(block) {
+  const wrap = window.document.createElement("div");
+  wrap.className = "rb rb-command";
+
+  const cmdEl = window.document.createElement("div");
+  cmdEl.className = "rb-command-line";
+  appendRuns(cmdEl, block.runs);
+  addSpeakerIcon(cmdEl, "prompt", block.runs);
+  wrap.appendChild(cmdEl);
+
+  if (block.lines.length > 0) {
+    const outputEl = window.document.createElement("div");
+    outputEl.className = "rb-command-output";
+    appendLinesWithBubbles(outputEl, block.lines, "rb-line");
+    addSpeakerIcons(outputEl, "text");
+    wrap.appendChild(outputEl);
+  }
+
+  if (block.exitCode !== null) {
+    const ok = block.exitCode === 0;
+    const status = window.document.createElement("span");
+    status.className = `rb-command-status ${ok ? "rb-status-ok" : "rb-status-fail"}`;
+    status.textContent = ok ? "✓" : `✗ ${block.exitCode}`;
+    status.title = `exit ${block.exitCode}`;
+    wrap.appendChild(status);
+  }
+
+  return wrap;
 }
 
 function renderTextBlock(block) {
