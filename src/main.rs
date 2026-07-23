@@ -45,10 +45,12 @@ mod db;
 mod host_suggestions;
 mod nodes;
 mod push;
+mod session_history;
 mod shell_integration;
 mod ssl;
 mod stt_debug;
 mod stt_scripts;
+mod terminal_cursor;
 mod tmux;
 mod transcribe;
 mod update;
@@ -98,6 +100,10 @@ struct AppState {
     build_hash: String,
     /// Tracks background STT install state (phase + rolling output tail).
     stt_install: Arc<tokio::sync::Mutex<SttInstallState>>,
+    /// Per-session OSC 133-segmented conversation record (issue #220):
+    /// JSONL under `<data_dir>/history/<session>.jsonl`, fed from the PTY
+    /// relay in `handle_ws`, served paginated by `api_session_conversation`.
+    session_history: Arc<session_history::SessionHistoryStore>,
 }
 
 #[derive(Clone)]
@@ -193,6 +199,7 @@ async fn main() -> Result<()> {
             phase: InstallPhase::Idle,
             output_tail: vec![],
         })),
+        session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -229,6 +236,16 @@ async fn main() -> Result<()> {
             post(api_select_pane),
         )
         .route("/api/sessions/{name}/history", get(api_session_history))
+        // Distinct path from the tmux-scrollback `history` route above: this
+        // is the OSC 133-segmented conversation record (issue #220), a
+        // different shape (paginated JSON entries, not a scrollback blob)
+        // decoupled from terminal scrollback entirely. `history` was
+        // already taken by that pre-existing route (terminal-engine.js's
+        // initial-repaint fetch), so it can't be reused/extended here.
+        .route(
+            "/api/sessions/{name}/conversation",
+            get(api_session_conversation),
+        )
         .route("/api/sessions/{name}/command", post(api_tmux_command))
         .route(
             "/api/settings/nodes",
@@ -859,6 +876,48 @@ async fn api_session_history(
         .await
         .map_err(AppError::bad_request)?;
     Ok(history)
+}
+
+#[derive(Deserialize)]
+struct ConversationHistoryQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+/// GET /api/sessions/{name}/conversation — the OSC 133-segmented
+/// conversation record (issue #220), paginated by an opaque `seq`-based
+/// cursor. See `session_history.rs` for the storage/segmentation design and
+/// the PR description for the pinned contract.
+async fn api_session_conversation(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<ConversationHistoryQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_session_name(&state, &name)?;
+
+    let cursor = match q.cursor {
+        Some(raw) => Some(
+            session_history::decode_cursor(&raw)
+                .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("invalid cursor")))?,
+        ),
+        None => None,
+    };
+    let limit = q
+        .limit
+        .unwrap_or(session_history::DEFAULT_LIMIT)
+        .clamp(1, session_history::MAX_LIMIT);
+
+    let history = state.session_history.clone();
+    let (entries, next_seq) =
+        tokio::task::spawn_blocking(move || history.read_page(&name, cursor, limit))
+            .await
+            .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+            .map_err(AppError::internal)?;
+
+    Ok(Json(json!({
+        "entries": entries,
+        "nextCursor": session_history::encode_cursor(next_seq),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1872,8 +1931,9 @@ async fn terminal_ws(
         &user_agent,
     );
 
+    let session_history = state.session_history.clone();
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_ws(socket, name, ssh_target).await {
+        if let Err(err) = handle_ws(socket, name, ssh_target, session_history).await {
             eprintln!("ws error: {err:#}");
         }
     }))
@@ -1891,7 +1951,19 @@ async fn handle_ws(
     socket: axum::extract::ws::WebSocket,
     session_name: String,
     ssh_target: Option<String>,
+    session_history: Arc<session_history::SessionHistoryStore>,
 ) -> Result<()> {
+    // Only one attach at a time feeds the conversation-history segmenter for
+    // a given session — tmux mirrors the same output to every attached
+    // client, so a second concurrent tab must not double-segment and
+    // double-append (see `FeederGuard`'s doc comment). Held for this
+    // connection's whole lifetime; released automatically (RAII) on any
+    // return path, including an early `?` below.
+    let feeder_guard = session_history.try_acquire_feeder(&session_name);
+    let mut segmenter = feeder_guard
+        .as_ref()
+        .map(|_| session_history::Segmenter::new());
+
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 35,
@@ -1964,6 +2036,25 @@ async fn handle_ws(
                         // hook (see `tmux::install_bell_hook`), which
                         // tmux fires exactly once per real bell. Repaint
                         // chunks here are just rendering, never events.
+                        if let Some(seg) = segmenter.as_mut() {
+                            let produced = seg.feed(&chunk, session_history::now_ms());
+                            if !produced.is_empty() {
+                                let history = session_history.clone();
+                                let name = session_name.clone();
+                                // File I/O off the async task, same pattern
+                                // as `resolve_node_target`'s db lookup below.
+                                // A write failure is swallowed (`let _`),
+                                // same as every other best-effort side
+                                // channel in this loop (bell hook, etc.) —
+                                // it must never interrupt the live relay.
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    for entry in produced {
+                                        let _ = history.append(&name, entry);
+                                    }
+                                })
+                                .await;
+                            }
+                        }
                         let text = String::from_utf8_lossy(&chunk).to_string();
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
                             break;
@@ -2003,6 +2094,14 @@ async fn handle_ws(
                     Some(Err(_)) | None => break,
                 }
             }
+        }
+    }
+
+    if let Some(mut seg) = segmenter.take() {
+        if let Some(entry) = seg.flush(session_history::now_ms()) {
+            let history = session_history.clone();
+            let name = session_name.clone();
+            let _ = tokio::task::spawn_blocking(move || history.append(&name, entry)).await;
         }
     }
 
@@ -3093,6 +3192,7 @@ mod tests {
                 phase: InstallPhase::Idle,
                 output_tail: vec![],
             })),
+            session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
         };
         (state, dir)
     }
