@@ -24,7 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-update-runner test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
+        test-smoke test-critical-path test-update-runner test-spa test-reader test-reader-grouping test-reader-chat-history test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -211,17 +211,19 @@ test-stt-per-kind:
 # suite, so it never touches the live :5151 server or the live DB.
 #
 # Also runs reader-font.spec.cjs (issue #218), reader-command-grouping.
-# spec.cjs (issue #219), and session-history.spec.cjs (issue #220): all ride
-# the same smoke instance rather than getting their own CI step. `make
-# test-reader` / `make test-reader-grouping` still exist standalone for
-# local iteration.
+# spec.cjs (issue #219 + #221's synthetic-document coverage),
+# session-history.spec.cjs (issue #220), and reader-chat-history.spec.cjs
+# (issue #221's real-tmux chat-view coverage): all ride the same smoke
+# instance rather than getting their own CI step. `make test-reader` /
+# `make test-reader-grouping` / `make test-reader-chat-history` still exist
+# standalone for local iteration.
 .PHONY: test-spa
 test-spa:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs
+		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/reader-chat-history.spec.cjs
 
 # Reader font (issue #218): plain-output text renders proportional while
 # prompt/code stay monospace. Drives reader.js's real render pipeline with a
@@ -248,6 +250,19 @@ test-reader-grouping:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/reader-command-grouping.spec.cjs
+
+# Reader chat view (issue #221): real tmux+bash session, OSC 133 shell
+# integration installed, chat turns rendered left (command) / right
+# (output), decoupled from tmux's own (deliberately capped) scrollback via
+# the server's conversation-history endpoint. Same isolated smoke instance
+# as the rest of the suite.
+.PHONY: test-reader-chat-history
+test-reader-chat-history:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/reader-chat-history.spec.cjs
 
 # Renderer conformance (issue #207, D10): one spec exercises the explicit
 # renderer interface (R1–R16) against BOTH adapters via the xterm/sterk

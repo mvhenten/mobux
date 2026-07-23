@@ -12,10 +12,14 @@
 // mounts and unmounts it next to createTerminal and owns view state.
 //
 // ── Factory ─────────────────────────────────────────────────────────────
-//   createReader({ host, document, handlers }) → reader handle
+//   createReader({ host, document, handlers, session }) → reader handle
 //     host      the #reader element the reader owns.
 //     document  the terminal document contract: { snapshot, subscribe,
 //               onOscDetected, oscDetected }.
+//     session   tmux session name — fetches server-side conversation history
+//               (issue #220) from it for the chat view's past turns (issue
+//               #221). Omitted ⇒ no fetch; renders from the live document
+//               alone (used by synthetic-document tests).
 //     handlers  cross-cutting callbacks the reader's gestures call up to the
 //               owner (the terminal + the SPA view controller):
 //                 onCommandMenu()          long-press / swipe-up → tmux menu
@@ -24,6 +28,17 @@
 //                 onExit()                 double-tap → back to terminal + kbd
 //                 onTwoPullMove(pull, vh)  two-finger pull progress
 //                 onTwoPullEnd(pull, vh)   two-finger pull release
+//
+// ── Chat view (issue #221) ──────────────────────────────────────────────
+// Once at least one command has run through OSC 133 (C..D) grouping,
+// render() switches from the plain top-to-bottom block list to a chat
+// layout: each command is a turn, the typed command on the left, its
+// output/exit status on the right — see buildTurns()/renderCommandBlock().
+// Past turns come from the server's conversation-history endpoint
+// (decoupled from tmux scrollback, survives reattach); the still-open or
+// just-finished command comes from the live terminal document. Sessions
+// that never produce a command grouping (no shell integration, or nothing
+// typed yet) keep the original block-list rendering unchanged.
 //
 // ── Synthetic scrolling (D6) ────────────────────────────────────────────
 // Native `overflow: auto` on the target mobile WebViews has failed repeatedly
@@ -41,10 +56,19 @@ import { tokenize } from "./term-tokenizer.js";
 import { createGestureRecognizer } from "./touch.js";
 import { loadPrefs } from "./listen-prefs.js";
 import * as prefs from "./prefs.js";
+import { createChatHistory } from "./chat-history.js";
 
 const SPEECH_AVAILABLE = "speechSynthesis" in window;
 
 const RENDER_THROTTLE_MS = 50;
+// How many chat turns render at once (issue #221) — the rest sit behind the
+// "load older" affordance. All of a session's history is already resident in
+// memory once `chatHistory.loadAll()` resolves (the server's cursor only
+// pages forward, so there's no cheap way to fetch "just the last N" — see
+// chat-history.js), so this is a DOM/render-cost window, not a network one:
+// "load older" reveals more of what's already fetched instead of re-hitting
+// the endpoint.
+const CHAT_WINDOW_SIZE = 24;
 // A scroll counts as "at the bottom" (and so keeps following live output) only
 // when it reaches the very bottom edge. Streaming keeps the viewport exactly
 // there via the re-pin in render(); an explicit scroll away — even a little —
@@ -67,11 +91,27 @@ const BOTTOM_EPSILON_PX = 2;
 let speakingKey = null;
 let speakingOnEnd = null;
 
-export function createReader({ host, document: doc, handlers = {} } = {}) {
+export function createReader({
+  host,
+  document: doc,
+  handlers = {},
+  session = null,
+} = {}) {
   let mounted = false;
   let inner = null;
   let statusBar = null;
   let oscHint = null;
+
+  // Server-side conversation history (issue #220/#221) — the source of
+  // truth for everything already flushed. `null` when no session was given
+  // (unit-style tests driving a synthetic document) or before the first
+  // mount; the render path falls back to the live document alone in that
+  // case, matching the reader's pre-#221 behaviour.
+  let chatHistory = null;
+  let visibleTurnCount = CHAT_WINDOW_SIZE;
+  // The live tail command's text while it's still open (exitCode === null),
+  // or null when nothing is open — see render()'s refreshTailOnceClosed().
+  let openTailKey = null;
 
   let scrollY = 0;
   let maxScroll = 0;
@@ -89,6 +129,29 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
 
   const onWindowResize = () => handleResize();
   const onBufferChanged = () => scheduleRender();
+
+  // Pulls anything the server has recorded since the last fetch (see
+  // chat-history.js's refreshTail) — called at most once per command, right
+  // after render() observes the live tail command close (exitCode goes from
+  // null to non-null). The live document already shows that command's exit
+  // status and output instantly (see render()'s dedup against the live tail
+  // block), so this isn't on the critical path for what's on screen; it's
+  // what lets a *later* command's dedup check and a *later* "load older"
+  // reveal see this one as history rather than the transient live block.
+  // Deliberately not a poll/timer — nothing here needs the network more
+  // often than "a command just finished".
+  function refreshTailOnceClosed() {
+    if (!chatHistory) return;
+    chatHistory
+      .refreshTail()
+      .then(() => {
+        if (mounted) scheduleRender();
+      })
+      .catch(() => {
+        // Transient fetch failure — the live document keeps the reader
+        // useful in the meantime; the next command's completion retries.
+      });
+  }
 
   function applyTransform() {
     if (!inner) return;
@@ -133,6 +196,28 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     }, RENDER_THROTTLE_MS);
   }
 
+  // Reveals the next window of already-fetched history (see
+  // CHAT_WINDOW_SIZE's doc comment — this never hits the network, the data
+  // is already resident) and compensates scroll so the turns the user was
+  // already looking at don't jump.
+  function revealOlderTurns() {
+    const prevHeight = inner ? inner.scrollHeight : 0;
+    visibleTurnCount += CHAT_WINDOW_SIZE;
+    render();
+    if (!inner) return;
+    const delta = inner.scrollHeight - prevHeight;
+    setScroll(scrollY + delta);
+  }
+
+  function renderLoadOlderButton(hiddenCount) {
+    const btn = window.document.createElement("button");
+    btn.type = "button";
+    btn.className = "rb-chat-loadmore";
+    btn.textContent = `Load ${hiddenCount} older turn${hiddenCount === 1 ? "" : "s"}…`;
+    btn.addEventListener("click", () => revealOlderTurns());
+    return btn;
+  }
+
   function render() {
     if (!inner) return;
     const { lines, status } = doc.snapshot();
@@ -140,9 +225,58 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
 
     renderStatusBar(statusBar, status);
 
-    const blocks = tokenize(lines);
+    const liveBlocks = tokenize(lines);
+    const liveCommandBlocks = liveBlocks.filter((b) => b.type === "command");
+    const trailingBlock = liveBlocks[liveBlocks.length - 1];
+
+    // A command just closed (was the open tail last render, isn't open
+    // anymore) — pull it into chatHistory.turns once. See
+    // refreshTailOnceClosed's doc comment for why this, not a poll.
+    const tailBlock = liveCommandBlocks[liveCommandBlocks.length - 1];
+    const tailOpenNow = tailBlock && tailBlock.exitCode === null;
+    if (openTailKey && (!tailOpenNow || tailBlock.text !== openTailKey)) {
+      refreshTailOnceClosed();
+    }
+    openTailKey = tailOpenNow ? tailBlock.text : null;
+
+    const historyTurns = chatHistory ? chatHistory.turns : [];
+    // The chat layout (issue #221) only applies once there's at least one
+    // OSC 133 C..D command grouping to show — either already flushed to
+    // history or still open in the live buffer. Without it (no shell
+    // integration, or nothing typed yet) the reader renders exactly as it
+    // did before #221: the plain top-to-bottom block list.
+    const hasChatContent =
+      liveCommandBlocks.length > 0 ||
+      historyTurns.some((t) => t.kind === "command");
+
     const frag = window.document.createDocumentFragment();
-    for (const block of blocks) frag.appendChild(renderBlock(block));
+
+    if (!hasChatContent) {
+      for (const block of liveBlocks) frag.appendChild(renderBlock(block));
+    } else {
+      const turns = buildTurns(historyTurns, liveCommandBlocks);
+      const total = turns.length;
+      const visible = Math.min(visibleTurnCount, total);
+      const hiddenCount = total - visible;
+
+      if (hiddenCount > 0) {
+        frag.appendChild(renderLoadOlderButton(hiddenCount));
+      }
+      for (const turn of turns.slice(total - visible)) {
+        frag.appendChild(
+          turn.kind === "raw"
+            ? renderTextBlock({ lines: linesFromPlainText(turn.text) })
+            : renderCommandBlock(turn.block),
+        );
+      }
+      // The still-open idle prompt (nothing typed yet) isn't a turn — keep
+      // showing it exactly as before so the chat feed ends on "awaiting
+      // input" the same way the plain reader always has.
+      if (trailingBlock && trailingBlock.type === "prompt") {
+        frag.appendChild(renderInlineBlock("rb rb-prompt", trailingBlock.runs));
+      }
+    }
+
     inner.replaceChildren(frag);
     // After replaceChildren the previous speaker icon (if any) is gone;
     // re-apply rb-speaking to whichever fresh icon matches the key the
@@ -239,6 +373,25 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     scrollY = 0;
     maxScroll = 0;
     atBottom = true;
+    visibleTurnCount = CHAT_WINDOW_SIZE;
+    openTailKey = null;
+
+    // Server-side history (issue #220) is the source of truth for the chat
+    // view's past turns — see this file's module doc and buildTurns()
+    // below. No session (unit-style tests with a synthetic document) ⇒ no
+    // fetch; render() falls back to the live document alone.
+    chatHistory = session ? createChatHistory({ session }) : null;
+    if (chatHistory) {
+      chatHistory
+        .loadAll()
+        .then(() => {
+          if (mounted) scheduleRender();
+        })
+        .catch(() => {
+          // Endpoint unreachable — the live document still renders
+          // whatever's in the current buffer (see render()'s fallback).
+        });
+    }
 
     // The document's change subscription is the single source of truth for
     // "buffer changed" — history reload, WS data, and synthetic test injects
@@ -278,6 +431,7 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
       clearTimeout(renderTimer);
       renderTimer = null;
     }
+    chatHistory = null;
     inner = null;
     statusBar = null;
     oscHint = null;
@@ -363,6 +517,96 @@ function dominantBg(runs) {
       bestCount = c;
     }
   return best;
+}
+
+// ── Chat turns (issue #221) ─────────────────────────────────────────
+// Reconciles server-fetched history with the live document's still-open
+// tail into one ordered array `render()` slices for display. Both sources
+// normalize to the same shape renderCommandBlock() already renders (a
+// "block": { runs, lines, exitCode }) — a history turn's plain command/
+// output strings become single-run/plain-line equivalents of what the live
+// tokenizer already hands renderCommandBlock for a real terminal block, so
+// one render path covers a rich (coloured, bubbled) live command and a
+// plain-text historical one alike.
+function buildTurns(historyTurns, liveCommandBlocks) {
+  if (historyTurns.length === 0) {
+    // No history yet — session omitted (synthetic-document tests), brand
+    // new, or still loading. Show everything currently in the live buffer
+    // instead of going blank; this is also what makes a bare synthetic
+    // snapshot with several OSC 133 commands render all of them, matching
+    // the reader's pre-#221 behaviour.
+    return liveCommandBlocks.map(normalizeLiveBlock);
+  }
+  const turns = historyTurns.map(normalizeHistoryTurn);
+  const tailBlock = liveCommandBlocks[liveCommandBlocks.length - 1];
+  const newest = historyTurns[historyTurns.length - 1];
+  if (!tailBlock) return turns;
+  // The live block for a just-completed command usually lands in history
+  // within one buffer-changed tick (the same feeder WS attach appends to
+  // both) — drop it from the live side once it does, rather than show it
+  // twice. Still-open commands (exitCode === null) can never match, so they
+  // always render from the live side until they close.
+  const matchesNewestHistory =
+    newest.kind === "command" &&
+    newest.command === tailBlock.text &&
+    newest.exitCode === tailBlock.exitCode;
+  if (!matchesNewestHistory) {
+    turns.push(normalizeLiveBlock(tailBlock));
+    return turns;
+  }
+  // Matched by command text + exit code — but session_history.rs's simple
+  // byte-between-C-and-D capture can rarely land a command's `output` empty
+  // when the D marker fires a hair before its trailing bytes are flushed
+  // (a measured, low-rate timing gap — see session_history.rs's module doc
+  // and issue #220's review), while the live buffer, driven by a real
+  // terminal emulator parsing the same bytes, already has it. Never
+  // downgrade a turn that has content to one that doesn't — replace the
+  // history entry with the live block's fuller data instead of dropping it.
+  const historyTurn = turns[turns.length - 1];
+  const liveHasOutputHistoryLacks =
+    tailBlock.lines.length > 0 && historyTurn.block.lines.length === 0;
+  if (liveHasOutputHistoryLacks) {
+    turns[turns.length - 1] = normalizeLiveBlock(tailBlock);
+  }
+  return turns;
+}
+
+function normalizeHistoryTurn(turn) {
+  if (turn.kind === "raw") return { kind: "raw", text: turn.text };
+  return {
+    kind: "command",
+    block: {
+      runs: turn.command ? [{ text: turn.command, attrs: {} }] : [],
+      lines: linesFromPlainText(turn.output),
+      exitCode: turn.exitCode,
+    },
+  };
+}
+
+function normalizeLiveBlock(block) {
+  return {
+    kind: "command",
+    block: { runs: block.runs, lines: block.lines, exitCode: block.exitCode },
+  };
+}
+
+// Splits a server-provided plain string (already ANSI-stripped by
+// chat-history.js) into the same { runs, text, bubbleBg } line shape the
+// live tokenizer produces, minus colour (history carries none) — so
+// appendLinesWithBubbles/appendRuns render it identically either way. A
+// blank line gets an empty runs array so appendRuns falls back to its own
+// nbsp placeholder, matching how the live path renders a blank buffer row.
+// Trailing blank lines from the output's own final newline are dropped, same
+// as the terminal document trims a trailing blank buffer row.
+function linesFromPlainText(text) {
+  if (!text) return [];
+  const raw = text.split("\n");
+  while (raw.length > 0 && raw[raw.length - 1] === "") raw.pop();
+  return raw.map((t) => ({
+    runs: t.length ? [{ text: t, attrs: {} }] : [],
+    text: t,
+    bubbleBg: null,
+  }));
 }
 
 // ── Block rendering ────────────────────────────────────────────────

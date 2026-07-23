@@ -687,31 +687,60 @@ h1, h2, h3 { margin: 0; }
   font-size: 17px;
 }
 
-/* Command block (issue #219): the OSC 133 C..D span grouped with the prompt
-   that started it — one block per command, its output, and a muted
-   pass/fail chip once the exit code is known (see rb-command-status below). */
+/* Chat turn (issue #219 grouping, issue #221 chat layout): the OSC 133 C..D
+   span grouped with the prompt that started it, laid out as a dialogue with
+   the shell — what you typed on the left, what came back on the right — one
+   turn per command, its output, and a muted pass/fail chip once the exit
+   code is known (see rb-command-status below). Sourced either from the live
+   terminal document (still-open/just-finished command, full colour/bubble
+   fidelity) or from the server's conversation history (plain text, past
+   turns) — see reader.js's buildTurns(). */
 .rb-command {
-  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  margin-top: 14px;
+  gap: 6px;
 }
 .rb-command-line {
   display: block;
   position: relative;
+  align-self: flex-start;
+  max-width: 90%;
+  box-sizing: border-box;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: #8a93a6;
-  padding-right: 52px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px 10px 10px 3px;
   padding-top: 42px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  padding-right: 52px;
+  padding-bottom: 8px;
+  padding-left: 10px;
+  /* Command text stays on its own line(s) and scrolls horizontally rather
+     than reflowing — alignment/readability of a shell command depends on
+     its own line breaks, not the viewport width (issue #221 R4). */
+  white-space: pre;
+  overflow-x: auto;
 }
 .rb-command-output {
   display: block;
   position: relative;
+  align-self: flex-end;
+  max-width: 90%;
+  box-sizing: border-box;
   white-space: normal;
-  padding-right: 52px;
+  background: rgba(122, 138, 158, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px 10px 3px 10px;
   padding-top: 42px;
+  padding-right: 52px;
+  padding-bottom: 8px;
+  padding-left: 10px;
 }
 .rb-command-output .rb-line {
+  /* Prose output reflows to the viewport width, not the terminal's column
+     count (issue #221 R4) — proportional face, wraps normally. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--sans);
@@ -721,10 +750,12 @@ h1, h2, h3 { margin: 0; }
 
 /* Exit status chip. Deliberately muted — no bright/saturated red or green —
    so it reads as a quiet affordance rather than an alert, matching the
-   .rb-speaker.rb-speaking teal used elsewhere in the reader. */
+   .rb-speaker.rb-speaking teal used elsewhere in the reader. Docked to the
+   response side, same as the output it belongs to. */
 .rb-command-status {
   display: inline-block;
-  margin-top: 2px;
+  align-self: flex-end;
+  margin-top: 0;
   padding: 1px 7px;
   border-radius: 4px;
   border: 1px solid;
@@ -741,6 +772,28 @@ h1, h2, h3 { margin: 0; }
   background: rgba(170, 120, 80, 0.18);
   border-color: rgba(205, 165, 120, 0.45);
   color: #d9c4a8;
+}
+
+/* "Load older" (issue #221): sits above the currently-rendered window of
+   chat turns whenever more of the session's history is already fetched but
+   not yet rendered (see reader.js's CHAT_WINDOW_SIZE). Muted, centred, no
+   chip styling — a quiet affordance, not a call to action. */
+.rb-chat-loadmore {
+  display: block;
+  width: 100%;
+  margin: 4px 0 10px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #7a8496;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.rb-chat-loadmore:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .rb-text {

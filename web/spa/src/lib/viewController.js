@@ -47,6 +47,10 @@ export function createViewController({ root, terminal, createReader }) {
   const reader = createReader({
     host: readerEl,
     document: terminal.document,
+    // Server-side conversation history (issue #220) is keyed by session
+    // name — the reader fetches its chat-view past turns from
+    // `/api/sessions/{session}/conversation` (issue #221).
+    session: core.session,
     handlers: {
       onCommandMenu: () => terminal.openCommandMenu(),
       onSwitchWindow: (dir) => core.switchWindow(dir),
