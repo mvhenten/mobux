@@ -50,6 +50,7 @@ mod shell_integration;
 mod ssl;
 mod stt_debug;
 mod stt_scripts;
+mod terminal_cursor;
 mod tmux;
 mod transcribe;
 mod update;

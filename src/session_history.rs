@@ -3,12 +3,17 @@
 //! markers as they flow — decoupled from tmux scrollback and the terminal
 //! screen model.
 //!
-//! This is deliberately simpler than the browser's OSC 133 handling
-//! (`web/static/osc133-attribution.js`): the client has to attribute a
-//! marker to the correct *screen row* under tmux's out-of-order redraw
-//! bursts, because it renders a live buffer. This module only ever appends —
-//! there is no row/cursor model, so a marker is always handled relative to
-//! whatever bytes have already arrived, never "which row is this."
+//! Simpler than the browser's OSC 133 handling
+//! (`web/static/osc133-attribution.js`), which renders a live buffer and so
+//! has to attribute a marker to the correct *screen row* under tmux's
+//! out-of-order redraw bursts. This module only ever appends — a marker is
+//! always handled relative to whatever bytes have already arrived, never
+//! "which row is this" — but it does carry a minimal cursor/row model
+//! (`terminal_cursor.rs`) just for `command` extraction: enough to tell the
+//! row the shell echoed the typed command onto apart from a status-bar
+//! redraw or mode-toggle escape landing elsewhere via CSI cursor
+//! positioning. See `terminal_cursor.rs`'s module doc for how that model
+//! works; `output`/`exit_code` never go through it (see below).
 //!
 //! ## Marker semantics (measured against a real tmux+bash session)
 //!
@@ -20,38 +25,28 @@
 //! capture off a real tmux pane confirms this exact byte order (see the PR
 //! description for the hex dump). Consequently:
 //!
-//! - `command` text is taken from whatever was buffered *before* `C` (the
-//!   previous prompt string + the user's typed line, glued together on one
-//!   line, since a single-line `PS1` never embeds a newline) — the *last*
-//!   line of that buffered span (see [`last_line`]). This mirrors the
+//! - `command` text is the row the cursor model most recently completed
+//!   with a `\n` before `C` fired (see
+//!   [`terminal_cursor::CursorModel::take_command_line`]) — the previous
+//!   prompt string and the user's typed line, glued together on one line,
+//!   since a single-line `PS1` never embeds a newline. This mirrors the
 //!   browser reader's own `.rb-command-line`, which likewise keeps the
 //!   prompt and the command on one combined line (see
-//!   `test/reader-command-grouping.spec.cjs`). It's the *last* line, not
-//!   the first: a freshly attached WS connection's first bytes are tmux's
+//!   `test/reader-command-grouping.spec.cjs`). Keying off the row, not just
+//!   "the last line of whatever's buffered", is what keeps a status-bar
+//!   redraw or terminal-mode-toggle escape — both delivered via CSI cursor
+//!   positioning rather than a literal newline — from bleeding into the
+//!   command text: they land on a different row (or no row-completing `\n`
+//!   at all), so they never become the "most recently completed" row.
+//!   Likewise, a freshly attached WS connection's first bytes are tmux's
 //!   full-screen repaint of whatever's already on screen, with no OSC 133
-//!   markers of its own; that content lands in the same buffered span as
-//!   the next real command (nothing clears `pending` in between, since no
-//!   marker occurred), so taking the first line picks the repaint's banner
-//!   text instead of the command — the last line is the real one,
-//!   regardless of how much unrelated content precedes it.
-//!
-//!   **Known limitation, not fully solved**: tmux's redraw protocol moves
-//!   between screen rows with cursor-positioning CSI (`ESC[<row>;<col>H`),
-//!   not literal `\n` bytes — a real capture against a live instance
-//!   showed the previous prompt/status-line row and the real command
-//!   line arriving in the *same* `\n`-delimited span, so `command` can
-//!   still carry leading terminal-mode-toggle noise (and occasionally
-//!   tmux's status-bar text) ahead of the real text. Rarer still, tmux can
-//!   deliver a burst out of order relative to when it was originally
-//!   written (the exact problem `osc133-attribution.js` exists to solve
-//!   client-side, with real row/cursor tracking), which can leave
-//!   `command` empty or truncated for a given cycle. Solving this
-//!   properly means reimplementing that row attribution here — explicitly
-//!   out of scope per the design brief ("simpler... no cursor
-//!   attribution"). `output` and `exit_code` are unaffected (see below).
+//!   markers of its own; that content completes its own rows same as any
+//!   other text, but the *next* real command's `\r\n` always completes a
+//!   later row, which is what wins.
 //! - `output` is exactly the bytes between `C` and `D`, verbatim (`output =
-//!   bytes until D`, per the design brief) — no attempt to strip ANSI. This
-//!   held up reliably against a live instance even when `command` didn't.
+//!   bytes until D`, per the design brief) — no attempt to strip ANSI, and
+//!   never routed through the cursor model. This held up reliably against a
+//!   live instance.
 //! - `exit_code` comes from `D;<code>`.
 //! - `A` (and `B`, bash's post-prompt marker) are pure boundary markers —
 //!   they never produce their own entry, per the two entry shapes in the
@@ -77,6 +72,8 @@ use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL, Engine};
 use serde::{Deserialize, Serialize};
+
+use crate::terminal_cursor::CursorModel;
 
 /// A completed command block: one shell command, its output, and how it
 /// ended.
@@ -209,6 +206,7 @@ pub struct Segmenter {
     scan_buf: Vec<u8>,
     pending: Vec<u8>,
     open: Option<OpenCommand>,
+    cursor: CursorModel,
 }
 
 impl Default for Segmenter {
@@ -223,6 +221,7 @@ impl Segmenter {
             scan_buf: Vec::new(),
             pending: Vec::new(),
             open: None,
+            cursor: CursorModel::new(),
         }
     }
 
@@ -273,6 +272,13 @@ impl Segmenter {
 
     fn consume_plain(&mut self, n: usize, now_ms: i64, events: &mut Vec<PendingEntry>) {
         let bytes: Vec<u8> = self.scan_buf.drain(0..n).collect();
+        // Every non-marker byte also feeds the cursor model, regardless of
+        // whether a command is currently open — it needs continuous cursor
+        // tracking to stay in sync with tmux's own screen state (an open
+        // command's own output can move the cursor via CSI just like
+        // anything else), even though only the row content it derives at
+        // the next `C` (see `handle_marker`) is ever consumed.
+        self.cursor.feed(&bytes);
         if let Some(open) = &mut self.open {
             if open.output.len() < MAX_COMMAND_OUTPUT_BYTES {
                 let room = MAX_COMMAND_OUTPUT_BYTES - open.output.len();
@@ -300,7 +306,7 @@ impl Segmenter {
                 if let Some(open) = self.open.take() {
                     events.push(open.finish(None, now_ms));
                 }
-                let command = last_line(&self.pending);
+                let command = self.cursor.take_command_line();
                 self.pending.clear();
                 self.open = Some(OpenCommand {
                     command,
@@ -317,6 +323,13 @@ impl Segmenter {
                 // bytes since the last boundary don't leak into the next
                 // command's text.
                 self.pending.clear();
+                // The command that just closed may still have output
+                // trailing behind it on the wire (nothing forces it to
+                // stop the instant D fires) — without this, that trailing
+                // activity could win the *next* command's `take_command_line`
+                // fallback even though it belongs to this one. See
+                // `CursorModel::mark_output_boundary`'s doc comment.
+                self.cursor.mark_output_boundary();
             }
             Marker::A | Marker::B => {
                 // Pure boundary — no entry of its own, per the two entry
@@ -324,42 +337,6 @@ impl Segmenter {
             }
         }
     }
-}
-
-/// The last line of a buffered pre-`C` span, with its line terminators
-/// trimmed — this is the actual typed command's echoed line (see the
-/// module doc comment for why it's the *last*, not first, line).
-///
-/// A freshly attached WS connection's first bytes are tmux's full-screen
-/// repaint of whatever is already on screen (measured in production: a
-/// terminal-init burst plus a repeated motd+prompt repaint, all newline-
-/// delimited, none of it carrying any OSC 133 marker). Without a marker to
-/// clear `pending` in between, that repaint content and the next real
-/// command's echoed line end up concatenated in the same buffered span —
-/// taking the *first* line would pick the repaint's first line instead of
-/// the command. The buffered span always ends at the `\r\n` the terminal
-/// echoes for the Enter keystroke (confirmed against a real capture), so
-/// stripping that trailing terminator and then taking everything after
-/// whatever `\n` remains reliably isolates the real command line
-/// regardless of how much unrelated content precedes it.
-fn last_line(buf: &[u8]) -> String {
-    let mut trimmed = buf;
-    if trimmed.last() == Some(&b'\n') {
-        trimmed = &trimmed[..trimmed.len() - 1];
-        if trimmed.last() == Some(&b'\r') {
-            trimmed = &trimmed[..trimmed.len() - 1];
-        }
-    }
-    let start = trimmed
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let mut line = &trimmed[start..];
-    if line.last() == Some(&b'\r') {
-        line = &line[..line.len() - 1];
-    }
-    String::from_utf8_lossy(line).into_owned()
 }
 
 enum MarkerMatch {
@@ -794,11 +771,11 @@ mod tests {
 
     #[test]
     fn command_text_keeps_the_prompt_prefix_like_the_client_reader_does() {
-        // No cursor/row tracking server-side, so the command field is
-        // whatever was on the line before C — prompt included. This
-        // matches the browser reader's own `.rb-command-line`, which is
-        // likewise the whole prompt+command line, not a stripped bare
-        // command (see test/reader-command-grouping.spec.cjs).
+        // The command field is whatever's on the completed row before C —
+        // prompt included, not a stripped bare command. This matches the
+        // browser reader's own `.rb-command-line`, which is likewise the
+        // whole prompt+command line (see
+        // test/reader-command-grouping.spec.cjs).
         let mut seg = Segmenter::new();
         let events = feed_str(
             &mut seg,
@@ -818,12 +795,12 @@ mod tests {
         // OSC 133 install, real WS attach): a freshly attached WS
         // connection's very first bytes are tmux's full-screen repaint of
         // whatever's already on screen — terminal-init sequences plus a
-        // multi-line motd/prompt redraw, none of it carrying a marker.
-        // With no marker to clear `pending` first, that repaint content
-        // and the next real command's echoed line land in the same
-        // buffered span. Taking the *first* line of that span (the
-        // original, wrong implementation) picked the repaint's banner
-        // text as the "command"; the fix takes the *last* line instead.
+        // multi-line motd/prompt redraw, none of it carrying a marker. Each
+        // repaint line completes its own row same as any other text; the
+        // real command's own `\r\n` completes a later row, which is what
+        // the cursor model hands back at `C` — this used to instead take
+        // the *first* line of the whole unmarked span (picking the
+        // repaint's banner text) before the cursor model existed.
         let repaint_burst = "\x1b[?1049h\x1b[?1h\x1b=\x1b[H\x1b[2J\x1b[?25h\r\n\
              Welcome to Ubuntu — motd banner line one\r\n\
              Last login: Tue Jul 21 07:00:00 2026\r\n";
@@ -848,6 +825,65 @@ mod tests {
         assert_eq!(command, "mvhenten@sandbox:~$ echo hello");
         assert_eq!(output, "hello\r\n");
         assert_eq!(*exit_code, Some(0));
+    }
+
+    #[test]
+    fn command_survives_a_status_bar_redraw_between_echo_and_c() {
+        // Reproduces the exact bug this module's cursor model exists to
+        // fix: tmux redraws its status bar by repositioning the cursor
+        // with CSI (`ESC[<row>;<col>H`), writing status text, then
+        // repositioning back — none of it newline-delimited, so it can
+        // land, byte-wise, between the command's own `\r\n` and `C`. The
+        // old flat-buffer `last_line` heuristic took whatever followed the
+        // last `\n` in that span; since the status-bar noise here has no
+        // trailing `\n` of its own, that would have picked the noise
+        // itself (`"\x1b[24;1H\x1b[K[ 0:bash* ]\x1b[2;1H"`) as `command`
+        // instead of the real line. The cursor model instead keys off the
+        // row that last completed via `\n` — row 0, the command's own
+        // echoed line — which the status-bar redraw (row 23) never
+        // touches.
+        let mut seg = Segmenter::new();
+        let events = feed_str(
+            &mut seg,
+            "mvhenten@sandbox:~$ echo hi\r\n\
+             \x1b[24;1H\x1b[K[ 0:bash* ]\x1b[2;1H\
+             \x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07",
+            1,
+        );
+        assert_eq!(events.len(), 1);
+        let PendingEntry::Command {
+            command,
+            output,
+            exit_code,
+            ..
+        } = &events[0]
+        else {
+            panic!("expected a command entry, got {events:?}");
+        };
+        assert_eq!(command, "mvhenten@sandbox:~$ echo hi");
+        assert_eq!(output, "hi\r\n");
+        assert_eq!(*exit_code, Some(0));
+    }
+
+    #[test]
+    fn command_never_carries_a_mode_toggle_escape_riding_the_same_line() {
+        // A terminal-mode-toggle CSI (bracketed-paste-off, in this case)
+        // landing on the exact same row as the echoed command, before its
+        // `\r\n` — the old byte-flat approach had no CSI parser at all, so
+        // these bytes were treated as literal characters and ended up
+        // inside the "last line" verbatim. The cursor model's `csi_dispatch`
+        // recognizes `?2004l` as a private-mode reset with no text effect,
+        // so it's never `print`ed into the row.
+        let mut seg = Segmenter::new();
+        let events = feed_str(
+            &mut seg,
+            "mvhenten@sandbox:~$ echo hi\x1b[?2004l\r\n\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07\x1b]133;A\x07",
+            1,
+        );
+        let PendingEntry::Command { command, .. } = &events[0] else {
+            panic!("expected command entry");
+        };
+        assert_eq!(command, "mvhenten@sandbox:~$ echo hi");
     }
 
     #[test]
