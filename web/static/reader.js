@@ -44,6 +44,21 @@
 // produce a command grouping (no shell integration, or nothing typed yet)
 // keep the original block-list rendering unchanged.
 //
+// ── Off the PTY hot path (issue #230) ───────────────────────────────────
+// The chat view once measurably destabilized the terminal ENGINE's own OSC
+// 133 marker classification under load (unrelated content occasionally
+// misclassified as its own prompt row) — not from render() being slow in
+// isolation (it wasn't), but from render()'s DOM-rebuild and its
+// `recomputeBounds()` layout read running on the same setTimeout macrotask
+// tier the PTY WS message intake and the renderer's own write-completion
+// signalling share, and from forceRender() (the poll-driven test surface)
+// repeating that full cost on every tick regardless of whether anything had
+// changed. See scheduleRender()'s and render()'s own doc comments for the
+// fix: the DOM write is scheduled on an animation frame instead of an
+// arbitrary timer tick, the layout-forcing bounds read defers one frame
+// further by default, and a `dirty` flag makes a redundant forceRender()
+// call a no-op.
+//
 // ── Synthetic scrolling (D6) ────────────────────────────────────────────
 // Native `overflow: auto` on the target mobile WebViews has failed repeatedly
 // (engaged-only-after-fresh-touch on iOS Safari, locked state on Android
@@ -117,6 +132,23 @@ export function createReader({
   // or null when nothing is open — see render()'s refreshTailOnceClosed().
   let openTailKey = null;
 
+  // Set whenever something render() would need to reflect has actually
+  // happened (a document mutation, freshly-loaded history) — cleared right
+  // after render() rebuilds the DOM. forceRender() (the test-only API
+  // spa.spec.cjs/reader-chat-history.spec.cjs poll in a tight loop to
+  // observe newly-arrived WS data) checks this and no-ops when nothing is
+  // pending, instead of unconditionally repeating the full snapshot-walk +
+  // buildTurns + DOM-rebuild pipeline. Issue #230's real CPU-profile
+  // capture, taken WHILE mimicking that poll loop, found forceRender()
+  // alone accounted for the majority of main-thread busy time during an OSC
+  // 133 burst — an unthrottled, uncoalesced repeat of render()'s full cost
+  // on every poll tick, competing directly with the engine's own PTY
+  // message processing for the same thread. scheduleRender() doesn't need
+  // this gate — every caller that reaches it (onBufferChanged, a history
+  // load/refresh landing) already corresponds to a real change, and its own
+  // `renderTimer` already collapses a burst of those into one render.
+  let dirty = true;
+
   let scrollY = 0;
   let maxScroll = 0;
   // True when the viewport is at the bottom edge (following live output).
@@ -125,6 +157,14 @@ export function createReader({
   let atBottom = true;
 
   let renderTimer = null;
+  // Pending requestAnimationFrame handles for the two deferral points below
+  // (scheduleRender's render-on-next-frame, render()'s deferBounds
+  // settle-on-the-frame-after) — cancelled on unmount() so a rAF callback
+  // scheduled by one mount cycle can never run against a DIFFERENT mount's
+  // fresh `inner`/state after a fast unmount+remount (view toggle, or the
+  // same-document remount terminal.js's dispose() does).
+  let renderRafId = null;
+  let boundsRafId = null;
   let changeSub = null;
   let oscSub = null;
   let resizeObserver = null;
@@ -132,7 +172,10 @@ export function createReader({
   const postRenderCallbacks = [];
 
   const onWindowResize = () => handleResize();
-  const onBufferChanged = () => scheduleRender();
+  const onBufferChanged = () => {
+    dirty = true;
+    scheduleRender();
+  };
 
   // Pulls anything the server has recorded since the last fetch (see
   // chat-history.js's refreshTail) — called at most once per command, right
@@ -150,6 +193,7 @@ export function createReader({
     chatHistory
       .refreshTail()
       .then(() => {
+        dirty = true;
         if (mounted) scheduleRender();
       })
       .catch(() => {
@@ -197,18 +241,37 @@ export function createReader({
     if (renderTimer !== null) return;
     renderTimer = setTimeout(() => {
       renderTimer = null;
-      render();
+      // The DOM mutation itself runs on the next animation frame rather
+      // than directly in this timer callback, and render() defers its own
+      // layout-dependent bookkeeping one frame further (see render()'s
+      // `deferBounds` doc comment) — issue #230's real CPU-profile capture
+      // (not wall-clock deltas — those had already ruled out render()'s
+      // own duration) found the reader's render() was the single largest
+      // main-thread consumer during an OSC 133 burst, because it runs on
+      // the SAME setTimeout macrotask tier the PTY WS message intake and
+      // the renderer's own write-completion signalling share. A `setTimeout`
+      // callback lands at an arbitrary point relative to that traffic; an
+      // animation-frame callback runs at the point the browser has already
+      // set aside for this frame's rendering work, off the critical path.
+      renderRafId = requestAnimationFrame(() => {
+        renderRafId = null;
+        if (mounted) render({ deferBounds: true });
+      });
     }, RENDER_THROTTLE_MS);
   }
 
   // Reveals the next window of already-fetched history (see
   // CHAT_WINDOW_SIZE's doc comment — this never hits the network, the data
   // is already resident) and compensates scroll so the turns the user was
-  // already looking at don't jump.
+  // already looking at don't jump. A user-triggered, one-shot click handler
+  // — not the PTY hot path — so it opts back into the immediate
+  // (non-deferred) bounds read render()'s `deferBounds` doc comment
+  // describes: the delta math below needs `inner.scrollHeight` to reflect
+  // the just-added turns right now, not one frame from now.
   function revealOlderTurns() {
     const prevHeight = inner ? inner.scrollHeight : 0;
     visibleTurnCount += CHAT_WINDOW_SIZE;
-    render();
+    render({ deferBounds: false });
     if (!inner) return;
     const delta = inner.scrollHeight - prevHeight;
     setScroll(scrollY + delta);
@@ -223,7 +286,31 @@ export function createReader({
     return btn;
   }
 
-  function render() {
+  // `deferBounds` (default true): see scheduleRender()'s doc comment.
+  // `recomputeBounds()` reads `scrollHeight`/`clientHeight`/`offsetHeight` —
+  // right after `replaceChildren()` below, that forces the browser to
+  // synchronously recompute style+layout on the spot instead of doing it
+  // lazily on its own schedule. Issue #230's real CPU-profile capture
+  // (Chrome DevTools Protocol `Tracing.start`, not `performance.now()`
+  // deltas around render() — those measure the JS bracket, not a
+  // forced-reflow cost that lands on whichever call happens to trigger it)
+  // found this forced reflow was the single largest self-time entry on the
+  // main thread during an OSC 133 burst with the chat view active, ahead of
+  // every OSC-attribution function itself — and NOT just from the
+  // throttled scheduleRender() path: `forceRender()` (the test surface
+  // `spa.spec.cjs` and `reader-chat-history.spec.cjs` poll on) calls
+  // render() directly, and a real-tmux OSC test polls it in a tight loop
+  // while commands are still streaming in over the WS, each call forcing
+  // its own synchronous reflow squarely inside the burst window being
+  // measured. Defer by default so every caller gets the frame-timed read
+  // unless it explicitly opts out. The DOM content write above is never
+  // deferred — only the layout-dependent bookkeeping after it — so a
+  // caller reading `.textContent`/`.querySelectorAll(...)` synchronously
+  // right after calling render() still sees this call's content.
+  // revealOlderTurns() is the one caller that legitimately needs the
+  // bounds read to happen NOW (its own prevHeight/newHeight scroll-
+  // compensation math), so it opts out explicitly.
+  function render({ deferBounds = true } = {}) {
     if (!inner) return;
     const { lines, status } = doc.snapshot();
     const wasAtBottom = atBottom;
@@ -287,17 +374,34 @@ export function createReader({
     // re-apply rb-speaking to whichever fresh icon matches the key the
     // synthesizer is currently reading.
     reapplySpeakingState(inner);
+    // The content this render() call needed to reflect is now on screen —
+    // see the `dirty` doc comment. Cleared here (synchronously, right after
+    // the DOM rebuild) rather than in settleBounds() below: a caller polling
+    // forceRender() again before the deferred bounds settle still correctly
+    // sees nothing new to do.
+    dirty = false;
 
-    recomputeBounds();
-    if (wasAtBottom) scrollY = maxScroll;
-    else scrollY = Math.min(scrollY, maxScroll);
-    applyTransform();
+    const settleBounds = () => {
+      recomputeBounds();
+      if (wasAtBottom) scrollY = maxScroll;
+      else scrollY = Math.min(scrollY, maxScroll);
+      applyTransform();
 
-    // Drain one-shot post-render callbacks (see awaitNextRender()). Snapshot
-    // and clear first so callbacks registered during drain wait for the NEXT
-    // render, not the current one.
-    const cbs = postRenderCallbacks.splice(0);
-    for (const cb of cbs) cb();
+      // Drain one-shot post-render callbacks (see awaitNextRender()).
+      // Snapshot and clear first so callbacks registered during drain wait
+      // for the NEXT render, not this one.
+      const cbs = postRenderCallbacks.splice(0);
+      for (const cb of cbs) cb();
+    };
+
+    if (deferBounds) {
+      boundsRafId = requestAnimationFrame(() => {
+        boundsRafId = null;
+        settleBounds();
+      });
+    } else {
+      settleBounds();
+    }
   }
 
   function buildOscHint() {
@@ -380,6 +484,7 @@ export function createReader({
     atBottom = true;
     visibleTurnCount = CHAT_WINDOW_SIZE;
     openTailKey = null;
+    dirty = true;
 
     // Server-side history (issue #220) is the source of truth for the chat
     // view's past turns — see this file's module doc and buildTurns()
@@ -403,6 +508,7 @@ export function createReader({
         chatHistory
           .loadAll()
           .then(() => {
+            dirty = true;
             if (mounted) scheduleRender();
           })
           .catch(() => {
@@ -450,6 +556,14 @@ export function createReader({
       clearTimeout(renderTimer);
       renderTimer = null;
     }
+    if (renderRafId !== null) {
+      cancelAnimationFrame(renderRafId);
+      renderRafId = null;
+    }
+    if (boundsRafId !== null) {
+      cancelAnimationFrame(boundsRafId);
+      boundsRafId = null;
+    }
     chatHistory = null;
     inner = null;
     statusBar = null;
@@ -466,7 +580,14 @@ export function createReader({
     dispose,
     scrollBy,
     stickToBottom,
-    forceRender: () => render(),
+    // See the `dirty` doc comment — a no-op when nothing has changed since
+    // the last render, so a caller polling this in a loop (spa.spec.cjs,
+    // reader-chat-history.spec.cjs) doesn't pay the full snapshot-walk +
+    // buildTurns + DOM-rebuild cost on every tick, only when there's
+    // actually something new to reflect.
+    forceRender: () => {
+      if (dirty) render();
+    },
     awaitNextRender: () =>
       new Promise((resolve) => postRenderCallbacks.push(resolve)),
     forceScrollTop: () => {
