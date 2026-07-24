@@ -298,9 +298,23 @@ test("reader: chat view merges server history with a still-open live command, wi
 }) => {
   await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
 
+  // Server-recorded `command` carries the whole prompt row, same as the
+  // live tokenizer's block `text` (session_history.rs parses it off the
+  // same byte stream) — see buildTurns()'s matching doc for why the two
+  // are compared for exact equality.
   const historyEntries = [
-    { seq: 1, command: "echo one", output: "one\n", exitCode: 0 },
-    { seq: 2, command: "echo two", output: "two\n", exitCode: 0 },
+    {
+      seq: 1,
+      command: "user@host:~$ echo one",
+      output: "one\n",
+      exitCode: 0,
+    },
+    {
+      seq: 2,
+      command: "user@host:~$ echo two",
+      output: "two\n",
+      exitCode: 0,
+    },
   ];
   // The live buffer's tail replays the SAME "echo two" the history already
   // has (as if the WS feeder recorded it a moment ago) plus a brand new

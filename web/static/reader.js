@@ -29,16 +29,20 @@
 //                 onTwoPullMove(pull, vh)  two-finger pull progress
 //                 onTwoPullEnd(pull, vh)   two-finger pull release
 //
-// ── Chat view (issue #221) ──────────────────────────────────────────────
+// ── Chat view (issue #221, #230) ────────────────────────────────────────
 // Once at least one command has run through OSC 133 (C..D) grouping,
 // render() switches from the plain top-to-bottom block list to a chat
 // layout: each command is a turn, the typed command on the left, its
 // output/exit status on the right — see buildTurns()/renderCommandBlock().
-// Past turns come from the server's conversation-history endpoint
-// (decoupled from tmux scrollback, survives reattach); the still-open or
-// just-finished command comes from the live terminal document. Sessions
-// that never produce a command grouping (no shell integration, or nothing
-// typed yet) keep the original block-list rendering unchanged.
+// Any command still present in the live terminal document (open, or
+// completed but not yet scrolled out of the terminal's own bounded buffer)
+// renders from that live document — the real terminal emulator's own
+// attribution, not the server segmenter. Only turns that have scrolled out
+// of the live buffer entirely fall back to the server's conversation-
+// history endpoint (decoupled from tmux scrollback, survives reattach) —
+// see buildTurns()'s own doc for the sourcing rule. Sessions that never
+// produce a command grouping (no shell integration, or nothing typed yet)
+// keep the original block-list rendering unchanged.
 //
 // ── Synthetic scrolling (D6) ────────────────────────────────────────────
 // Native `overflow: auto` on the target mobile WebViews has failed repeatedly
@@ -134,12 +138,13 @@ export function createReader({
   // chat-history.js's refreshTail) — called at most once per command, right
   // after render() observes the live tail command close (exitCode goes from
   // null to non-null). The live document already shows that command's exit
-  // status and output instantly (see render()'s dedup against the live tail
-  // block), so this isn't on the critical path for what's on screen; it's
-  // what lets a *later* command's dedup check and a *later* "load older"
-  // reveal see this one as history rather than the transient live block.
-  // Deliberately not a poll/timer — nothing here needs the network more
-  // often than "a command just finished".
+  // status and output instantly (buildTurns() renders it from the live
+  // block regardless), so this isn't on the critical path for what's on
+  // screen; it's what keeps history caught up so that once this command
+  // eventually scrolls out of the live document's own bounded buffer,
+  // it's already safely recorded to fall back to — and so a "load older"
+  // reveal sees it. Deliberately not a poll/timer — nothing here needs the
+  // network more often than "a command just finished".
   function refreshTailOnceClosed() {
     if (!chatHistory) return;
     chatHistory
@@ -382,15 +387,29 @@ export function createReader({
     // fetch; render() falls back to the live document alone.
     chatHistory = session ? createChatHistory({ session }) : null;
     if (chatHistory) {
-      chatHistory
-        .loadAll()
-        .then(() => {
-          if (mounted) scheduleRender();
-        })
-        .catch(() => {
-          // Endpoint unreachable — the live document still renders
-          // whatever's in the current buffer (see render()'s fallback).
-        });
+      // Mount frequently lands mid-burst — swap-to-reader only waits for
+      // the FIRST OSC marker (issue #230's review), so a run of several
+      // quick commands is often still streaming in over the WS when this
+      // fires. Kicking off the history fetch (and the response's JSON
+      // parse + regex-based stripAnsi work) inline would compete with that
+      // stream on the same client for CPU/network right when tmux's own
+      // redraw-burst reordering is already the tightest — a self-inflicted
+      // version of the timing sensitivity issue #230's review measured.
+      // Yielding one tick first lets whatever's already in flight drain
+      // before the fetch goes out; buildTurns() only ever gets to use this
+      // once it's resolved either way.
+      setTimeout(() => {
+        if (!mounted) return;
+        chatHistory
+          .loadAll()
+          .then(() => {
+            if (mounted) scheduleRender();
+          })
+          .catch(() => {
+            // Endpoint unreachable — the live document still renders
+            // whatever's in the current buffer (see render()'s fallback).
+          });
+      }, 0);
     }
 
     // The document's change subscription is the single source of truth for
@@ -519,15 +538,50 @@ function dominantBg(runs) {
   return best;
 }
 
-// ── Chat turns (issue #221) ─────────────────────────────────────────
-// Reconciles server-fetched history with the live document's still-open
-// tail into one ordered array `render()` slices for display. Both sources
-// normalize to the same shape renderCommandBlock() already renders (a
-// "block": { runs, lines, exitCode }) — a history turn's plain command/
-// output strings become single-run/plain-line equivalents of what the live
-// tokenizer already hands renderCommandBlock for a real terminal block, so
-// one render path covers a rich (coloured, bubbled) live command and a
+// ── Chat turns (issue #221, #230) ────────────────────────────────────
+// Reconciles server-fetched history with the live document into one
+// ordered array `render()` slices for display. Both sources normalize to
+// the same shape renderCommandBlock() already renders (a "block": { runs,
+// lines, exitCode }) — a history turn's plain command/output strings
+// become single-run/plain-line equivalents of what the live tokenizer
+// already hands renderCommandBlock for a real terminal block, so one
+// render path covers a rich (coloured, bubbled) live command and a
 // plain-text historical one alike.
+//
+// Sourcing rule: any CLOSED command still present in the live document
+// supersedes its history counterpart, rendering from the LIVE path never
+// the server segmenter — regardless of whether it completed just now or
+// several turns ago. session_history.rs's minimal byte-between-C-and-D
+// cursor model can, under tmux's own redraw-burst timing, land a command's
+// text empty (`""`), bled into the next entry, or lose its output entirely
+// (issue #230's review); the live buffer is driven by a real terminal
+// emulator parsing the same bytes and doesn't have that gap.
+//
+// Matching can't lean on a raw trailing-N-entries count: the live document
+// and the fetched history are two independently-updated views of the same
+// event stream (refreshTailOnceClosed() only pulls history forward on a
+// detected open→closed edge, which a fast burst of commands can skip
+// entirely — see that function's doc), so at any given render the live
+// buffer can legitimately be a few commands BEHIND where history has
+// already reached, or missing one it hasn't finished classifying yet
+// (term-tokenizer.js only turns a C..D span into a "command" block once the
+// D marker lands). Cutting history's last N entries by position would treat
+// those in-sync (already-correct) rows as superseded and silently drop the
+// ones actually behind — never acceptable, so this never removes a history
+// entry it can't specifically justify.
+//
+// Each closed live block is matched to its own history entry by identity
+// (command text + exit code, immutable once a command has finished — an
+// exact match is unambiguous) and supersedes it in place. A live block with
+// no match — its history counterpart hasn't landed yet, or is one of the
+// corrupted/bled rows above and will never textually match — is spliced in
+// right after the most recent match found so far (or at the very front if
+// none yet), preserving chronological order without deleting anything: the
+// worst case is a corrupted history row rendering ALONGSIDE the clean live
+// one, never in place of it. Raw (non-command) history entries are never
+// covered by the live document's command tokenizer, so they're untouched.
+// A still-open command (no D marker yet) can never have a history
+// counterpart, so it's always appended last.
 function buildTurns(historyTurns, liveCommandBlocks) {
   if (historyTurns.length === 0) {
     // No history yet — session omitted (synthetic-document tests), brand
@@ -537,38 +591,76 @@ function buildTurns(historyTurns, liveCommandBlocks) {
     // the reader's pre-#221 behaviour.
     return liveCommandBlocks.map(normalizeLiveBlock);
   }
+  if (liveCommandBlocks.length === 0) {
+    // Nothing left in the live buffer (un-instrumented segment, or every
+    // command has scrolled out of the terminal's own scrollback) — history
+    // is the only source left.
+    return historyTurns.map(normalizeHistoryTurn);
+  }
+
   const turns = historyTurns.map(normalizeHistoryTurn);
   const tailBlock = liveCommandBlocks[liveCommandBlocks.length - 1];
-  const newest = historyTurns[historyTurns.length - 1];
-  if (!tailBlock) return turns;
-  // The live block for a just-completed command usually lands in history
-  // within one buffer-changed tick (the same feeder WS attach appends to
-  // both) — drop it from the live side once it does, rather than show it
-  // twice. Still-open commands (exitCode === null) can never match, so they
-  // always render from the live side until they close.
-  const matchesNewestHistory =
-    newest.kind === "command" &&
-    newest.command === tailBlock.text &&
-    newest.exitCode === tailBlock.exitCode;
-  if (!matchesNewestHistory) {
-    turns.push(normalizeLiveBlock(tailBlock));
-    return turns;
+  const tailOpen = tailBlock.exitCode === null;
+  const closedLiveBlocks = tailOpen
+    ? liveCommandBlocks.slice(0, -1)
+    : liveCommandBlocks;
+
+  // supersedes: historyTurns index -> the live block replacing it in place.
+  // inserts: historyTurns index (or -1 for "before everything") -> live
+  // blocks with no match, to splice in right after that index. Both built
+  // in one forward pass — closed live blocks and history are both
+  // chronological, so the search pointer only moves forward, which also
+  // pairs a repeated identical command with its correct occurrence.
+  const supersedes = new Map();
+  const inserts = new Map();
+  let searchFrom = 0;
+  let lastAnchor = -1;
+  for (const block of closedLiveBlocks) {
+    let foundIdx = -1;
+    for (let i = searchFrom; i < historyTurns.length; i++) {
+      const t = historyTurns[i];
+      // The live block's `text` is the whole prompt row (prompt + typed
+      // command, e.g. "user@host:~$ echo two" — term-tokenizer.js never
+      // strips the prompt off it); the server's `command` field is the same
+      // row content it parsed off the live byte stream, so in real usage
+      // it carries the prompt too and the two are byte-for-byte equal.
+      // Exact equality deliberately, not a substring/suffix check: a
+      // corrupted live block from the same class of tmux redraw-burst
+      // bleeding this whole function exists to route AROUND (issue #230's
+      // review) can easily contain an unrelated command's text as a
+      // substring, which a loose match would misidentify as a match and
+      // supersede the WRONG history entry with garbage — worse than
+      // leaving both visible.
+      if (
+        t.kind === "command" &&
+        t.exitCode === block.exitCode &&
+        t.command.length > 0 &&
+        block.text === t.command
+      ) {
+        foundIdx = i;
+        break;
+      }
+    }
+    if (foundIdx === -1) {
+      if (!inserts.has(lastAnchor)) inserts.set(lastAnchor, []);
+      inserts.get(lastAnchor).push(block);
+      continue;
+    }
+    supersedes.set(foundIdx, block);
+    searchFrom = foundIdx + 1;
+    lastAnchor = foundIdx;
   }
-  // Matched by command text + exit code — but session_history.rs's simple
-  // byte-between-C-and-D capture can rarely land a command's `output` empty
-  // when the D marker fires a hair before its trailing bytes are flushed
-  // (a measured, low-rate timing gap — see session_history.rs's module doc
-  // and issue #220's review), while the live buffer, driven by a real
-  // terminal emulator parsing the same bytes, already has it. Never
-  // downgrade a turn that has content to one that doesn't — replace the
-  // history entry with the live block's fuller data instead of dropping it.
-  const historyTurn = turns[turns.length - 1];
-  const liveHasOutputHistoryLacks =
-    tailBlock.lines.length > 0 && historyTurn.block.lines.length === 0;
-  if (liveHasOutputHistoryLacks) {
-    turns[turns.length - 1] = normalizeLiveBlock(tailBlock);
-  }
-  return turns;
+
+  const merged = (inserts.get(-1) || []).map(normalizeLiveBlock);
+  turns.forEach((turn, i) => {
+    merged.push(
+      supersedes.has(i) ? normalizeLiveBlock(supersedes.get(i)) : turn,
+    );
+    for (const block of inserts.get(i) || [])
+      merged.push(normalizeLiveBlock(block));
+  });
+  if (tailOpen) merged.push(normalizeLiveBlock(tailBlock));
+  return merged;
 }
 
 function normalizeHistoryTurn(turn) {
