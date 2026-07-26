@@ -1,8 +1,9 @@
 // top-bar.js — slim desktop top bar.
 //
 // On a non-touch browser the user types straight into xterm.js, which
-// captures the keyboard — so the three touch-only affordances (attach,
-// dictate, reader toggle) have no keyboard shortcut and nowhere to live.
+// captures the keyboard — so the touch-only affordances (attach, dictate,
+// the reader and read-mode toggles) have no keyboard shortcut and nowhere to
+// live.
 // This bar surfaces them as icon buttons. It's the desktop counterpart to
 // the mobile input bar (input-bar.js); the two are mutually exclusive via
 // the isMobile gate in terminal.js.
@@ -70,15 +71,25 @@ function ensureStyles() {
   document.head.appendChild(el);
 }
 
-// createTopBar({ send, toggleReader, isReader }) → { destroy(), sync() }
+// createTopBar({ send, toggleReader, isReader, toggleRead, isRead })
+//   → { destroy(), sync() }
 //   send(str)        inject text/path into the terminal.
 //   toggleReader()   flip the view — the SPA owns view state (#206 D3). When
 //                    null, no reader toggle is shown (engine runs standalone).
 //   isReader()       current view is reader → reflect the toggle icon.
-//   sync()           re-read isReader() and update the toggle icon; the owner
-//                    calls it after a view change (there is no `mobux:viewchange`
-//                    event anymore — the SPA drives the label directly).
-export function createTopBar({ send, toggleReader, isReader } = {}) {
+//   toggleRead()     the same pair for read mode (#235); null ⇒ no button.
+//   isRead()         current view is read mode → reflect the toggle icon.
+//   sync()           re-read isReader()/isRead() and update the toggle icons;
+//                    the owner calls it after a view change (there is no
+//                    `mobux:viewchange` event anymore — the SPA drives the
+//                    labels directly).
+export function createTopBar({
+  send,
+  toggleReader,
+  isReader,
+  toggleRead,
+  isRead,
+} = {}) {
   ensureStyles();
 
   const bar = document.createElement('div');
@@ -98,19 +109,26 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
   readerBtn.type = 'button';
   readerBtn.hidden = !toggleReader;
 
-  function syncReaderBtn() {
+  const readBtn = document.createElement('button');
+  readBtn.type = 'button';
+  readBtn.hidden = !toggleRead;
+
+  function syncToggleBtns() {
     const reader = !!isReader?.();
     readerBtn.textContent = reader ? '▣' : '📖';
     readerBtn.title = reader ? 'Switch to terminal view' : 'Switch to reader view';
+    const read = !!isRead?.();
+    readBtn.textContent = read ? '▣' : '💬';
+    readBtn.title = read ? 'Switch to terminal view' : 'Switch to read mode';
   }
-  syncReaderBtn();
+  syncToggleBtns();
 
   const settingsBtn = document.createElement('button');
   settingsBtn.type = 'button';
   settingsBtn.title = 'Settings';
   settingsBtn.textContent = '⚙';
 
-  bar.append(attachBtn, micBtn, readerBtn, settingsBtn);
+  bar.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn);
 
   const attach = createAttachAction({ send });
   const dictate = createDictateAction({ send, button: micBtn });
@@ -120,7 +138,13 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
   readerBtn.addEventListener('click', (e) => {
     e.preventDefault();
     toggleReader?.();
-    syncReaderBtn();
+    syncToggleBtns();
+  });
+
+  readBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    toggleRead?.();
+    syncToggleBtns();
   });
 
   settingsBtn.addEventListener('click', (e) => {
@@ -146,8 +170,9 @@ export function createTopBar({ send, toggleReader, isReader } = {}) {
       bar.remove();
       window.dispatchEvent(new Event('resize'));
     },
-    // Re-read isReader() and update the toggle icon. Called by the owner after
-    // a view change (boot default, per-window override, ribbon toggle).
-    sync: syncReaderBtn,
+    // Re-read isReader()/isRead() and update the toggle icons. Called by the
+    // owner after a view change (boot default, per-window override, ribbon
+    // toggle).
+    sync: syncToggleBtns,
   };
 }

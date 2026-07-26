@@ -119,6 +119,11 @@ const RENDERER_OPTIONS = {
 //              has no knowledge of what a "reader" is — view state lives in the
 //              owner (the SPA's TerminalIsland, issue #206 D3). Absent ⇒ no
 //              reader toggle is shown and the engine runs standalone.
+//   readToggle the same contract for read mode (#235): `{ toggle(), isRead()
+//              }`. A second button rather than a third state on the reader
+//              toggle, so read mode is one tap from either other view. The
+//              engine knows no more about a "read mode" than it does about a
+//              reader. Absent ⇒ no read-mode button is shown.
 //
 // The engine used to be a self-booting module: it read window.MOBUX_* at
 // eval time, so a second (node, session) in the same document silently kept
@@ -134,6 +139,7 @@ export function createTerminal({
   renderer,
   build = "",
   viewToggle = null,
+  readToggle = null,
 } = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
 
@@ -465,6 +471,19 @@ export function createTerminal({
           : "Switch to reader view";
       }
     }
+    const readBtn = $("readModeBtn");
+    if (readBtn) {
+      if (!readToggle) {
+        readBtn.hidden = true;
+      } else {
+        readBtn.hidden = false;
+        const isRead = !!readToggle.isRead?.();
+        readBtn.textContent = isRead ? "▣" : "💬";
+        readBtn.title = isRead
+          ? "Switch to terminal view"
+          : "Switch to read mode";
+      }
+    }
     topBar?.sync?.();
   }
 
@@ -482,6 +501,20 @@ export function createTerminal({
     }
   }
 
+  // Ribbon read-mode button (mobile input bar).
+  const readModeBtn = $("readModeBtn");
+  if (readModeBtn) {
+    if (readToggle) {
+      on(readModeBtn, "mousedown", (e) => e.preventDefault());
+      on(readModeBtn, "click", (e) => {
+        e.preventDefault();
+        readToggle.toggle();
+      });
+    } else {
+      readModeBtn.hidden = true;
+    }
+  }
+
   // ── Desktop top bar ─────────────────────────────────────────────────
   // On a non-touch browser xterm.js owns the keyboard, so attach / dictate /
   // reader-toggle have no shortcut. Mount a slim top bar with those three as
@@ -495,6 +528,8 @@ export function createTerminal({
       send: (d) => core.send(d),
       toggleReader: viewToggle ? () => viewToggle.toggle() : null,
       isReader: () => !!viewToggle?.isReader?.(),
+      toggleRead: readToggle ? () => readToggle.toggle() : null,
+      isRead: () => !!readToggle?.isRead?.(),
     });
   }
   if (!isMobile) ensureTopBar();
