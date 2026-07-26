@@ -1736,11 +1736,52 @@ async function storedDefaultView(page) {
     .then((p) => p.default_view);
 }
 
+// Write a value the API would reject straight into the preferences row. Node's
+// built-in sqlite is behind a flag on the Node 22 CI runs and stable after, and
+// the flag is accepted by every version that has the module, so pass it always.
+const { execFileSync } = require("child_process");
+const SMOKE_DATA_DIR = process.env.MOBUX_DATA_DIR || "/tmp/mobux-smoke";
+
+function writeStoredDefaultView(value) {
+  execFileSync(
+    process.execPath,
+    [
+      "--experimental-sqlite",
+      "-e",
+      'const { DatabaseSync } = require("node:sqlite");' +
+        "const db = new DatabaseSync(process.argv[1]);" +
+        'db.prepare("UPDATE ui_preferences SET default_view = ? WHERE id = 1")' +
+        ".run(process.argv[2]);" +
+        "db.close();",
+      `${SMOKE_DATA_DIR}/mobux.db`,
+      value,
+    ],
+    { stdio: "pipe" },
+  );
+}
+
 async function activeWindowIndex(page) {
   const panes = await (
     await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)
   ).json();
   return panes.findIndex((p) => p.active);
+}
+
+function clientWindowId(page) {
+  return page.evaluate(() => window.__mobuxView.test.activeWindowId());
+}
+
+// Drive a real tmux window switch and wait until the *client* has taken it in.
+// The panes API answers as soon as tmux has switched, but the view controller
+// keys per-window state on core.panes/activeIndex, which only catch up when the
+// `panes` event fires — so anything asserted off the API alone races the very
+// bookkeeping these tests are about.
+async function switchWindowAndSettle(page, dir) {
+  const before = await clientWindowId(page);
+  await page.evaluate((d) => window.__mobuxView.test.switchWindow(d), dir);
+  await expect
+    .poll(() => clientWindowId(page), { timeout: 10000 })
+    .not.toBe(before);
 }
 
 test("read mode: swapping to read shows #readmode and hides both other views", async ({
@@ -1854,45 +1895,91 @@ test('read mode: default_view "read" is accepted and boots into read mode', asyn
   await expect(page.locator("#readmode")).toBeVisible();
 });
 
-test("read mode: an unknown default_view is rejected and leaves the row alone", async ({
+test("read mode: an unknown stored default_view still reads back as xterm", async ({
   page,
 }) => {
+  // The read normalisation is unreachable over HTTP — writes are validated, so
+  // a bogus value can only get into the row the way a hand-edit or an older
+  // build would put it there. Poke it straight into sqlite, which is the only
+  // way to exercise the arm the server actually relies on.
   await bootIsland(page);
-  const before = await storedDefaultView(page);
+  writeStoredDefaultView("bogus");
 
-  expect(await putDefaultView(page, "bogus")).toBe(400);
-  expect(await storedDefaultView(page)).toBe(before);
-  expect(await storedDefaultView(page)).not.toBe("bogus");
+  expect(await storedDefaultView(page)).toBe("xterm");
+
+  await page.goto("about:blank");
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await expect
+    .poll(async () => await page.evaluate(() => window.__mobuxView.current), {
+      timeout: 5000,
+    })
+    .toBe("xterm");
+  await expect(page.locator("#terminal")).toBeVisible();
 });
+
+// The two guards that keep read mode out of per-window view state are
+// independent, and each needs a window whose stored view would otherwise win.
+// Without a stored view on the target window, `applyStoredViewForActiveWindow`
+// falls back to the `default_view` preference — which `swap("read")` has just
+// set to "read" — and the swap-away never happens, so the guards go untested.
 
 test("read mode: a tmux window switch does not swap the view", async ({
   page,
 }) => {
-  // The view controller keys view state on the tmux window and re-applies it
-  // on every `panes` event. The conversation record is per session, so read
-  // mode stays out of that map — a window switch must not swap it away.
+  // Gates the early return in applyStoredViewForActiveWindow: the target
+  // window is left in the reader, so on the `panes` event its stored view is
+  // a real, different destination and the fallback to `default_view` — which
+  // swap("read") has just set to "read" — cannot mask a missing guard.
   await bootIsland(page);
+  const homeIndex = await activeWindowIndex(page);
+  const homeId = await clientWindowId(page);
+
+  await switchWindowAndSettle(page, "next");
+  // A real tmux switch, not just a client-side belief about one.
+  expect(await activeWindowIndex(page)).not.toBe(homeIndex);
+  await page.evaluate(() => window.__mobuxView.swap("reader"));
+  await expect(page.locator("#reader")).toBeVisible();
+
+  await switchWindowAndSettle(page, "prev");
+  expect(await clientWindowId(page)).toBe(homeId);
   await page.evaluate(() => window.__mobuxView.swap("read"));
   await expect(page.locator("#readmode")).toBeVisible();
 
-  const before = await activeWindowIndex(page);
-  await page.evaluate(() => window.__mobuxView.test.switchWindow("next"));
-  await expect
-    .poll(() => activeWindowIndex(page), { timeout: 10000 })
-    .not.toBe(before);
-  // The panes refresh that follows the switch is what re-applies the stored
-  // view; give it room to land before asserting nothing moved.
-  await page.waitForTimeout(1000);
+  await switchWindowAndSettle(page, "next");
 
   expect(await page.evaluate(() => window.__mobuxView.current)).toBe("read");
   await expect(page.locator("#readmode")).toBeVisible();
   await expect(page.locator("#terminal")).toBeHidden();
 
-  await page.evaluate(() => window.__mobuxView.test.switchWindow("prev"));
-  await expect
-    .poll(() => activeWindowIndex(page), { timeout: 10000 })
-    .toBe(before);
   await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await switchWindowAndSettle(page, "prev");
+});
+
+test("read mode: entering read mode does not become the window's stored view", async ({
+  page,
+}) => {
+  // Gates the windowViews write guard: leave read mode from a *different*
+  // window, so nothing overwrites what entering it may have stored, then come
+  // back and see which view the home window reopens in.
+  await bootIsland(page);
+  const homeId = await clientWindowId(page);
+
+  await page.evaluate(() => window.__mobuxView.swap("read"));
+  await expect(page.locator("#readmode")).toBeVisible();
+
+  await switchWindowAndSettle(page, "next");
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await expect(page.locator("#terminal")).toBeVisible();
+
+  await switchWindowAndSettle(page, "prev");
+  expect(await clientWindowId(page)).toBe(homeId);
+
+  expect(await page.evaluate(() => window.__mobuxView.current)).toBe("xterm");
+  await expect(page.locator("#terminal")).toBeVisible();
+  await expect(page.locator("#readmode")).toBeHidden();
 });
 
 // ── Synthetic viewport (reader) ─────────────────────────────────────

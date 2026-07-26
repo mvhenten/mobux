@@ -29,7 +29,7 @@ const VIEWS = ["xterm", "reader", "read"];
 
 export function createViewController({
   root,
-  session = "",
+  session,
   terminal,
   createReader,
   createReadMode,

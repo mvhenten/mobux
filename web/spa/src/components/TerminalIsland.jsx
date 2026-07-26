@@ -218,15 +218,11 @@ export function TerminalIsland({ node, session }) {
           statusBarOffsetHeight: () => reader.statusBarOffsetHeight(),
           statusBarFilled: () => reader.statusBarFilled(),
           readModeMounted: () => readMode.mounted,
-          readModeSession: () => readMode.session,
-          readModeEntryCount: () => readMode.entryCount,
-          readModeSetEntries: (entries) => readMode.setEntries(entries),
-          readModeAppendEntries: (entries) => readMode.appendEntries(entries),
-          readModeAtBottom: () => readMode.atBottom,
-          readModeScrollY: () => readMode.scrollY,
-          readModeMaxScroll: () => readMode.maxScroll,
-          readModeScrollBy: (dy) => readMode.scrollBy(dy),
-          readModeStickToBottom: () => readMode.stickToBottom(),
+          // The tmux window the controller keys per-window view state on. The
+          // panes API is the server's answer; this is the client's, and only
+          // this one has taken the `panes` event.
+          activeWindowId: () =>
+            engine.core.panes[engine.core.activeIndex]?.id || null,
         },
       };
 
