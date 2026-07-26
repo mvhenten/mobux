@@ -1956,10 +1956,12 @@ async fn handle_ws(
     // Only one attach at a time feeds the conversation-history segmenter for
     // a given session — tmux mirrors the same output to every attached
     // client, so a second concurrent tab must not double-segment and
-    // double-append (see `FeederGuard`'s doc comment). Held for this
-    // connection's whole lifetime; released automatically (RAII) on any
-    // return path, including an early `?` below.
-    let feeder_guard = session_history.try_acquire_feeder(&session_name);
+    // double-append (see `FeederGuard`'s doc comment). Held until this
+    // connection ends; released automatically (RAII) on any return path,
+    // including an early `?` below. A connection that loses the race retries
+    // in the PTY-read branch below, so the slot the departing feeder frees is
+    // picked up by whoever is still attached.
+    let mut feeder_guard = session_history.try_acquire_feeder(&session_name);
     let mut segmenter = feeder_guard
         .as_ref()
         .map(|_| session_history::Segmenter::new());
@@ -2036,6 +2038,24 @@ async fn handle_ws(
                         // hook (see `tmux::install_bell_hook`), which
                         // tmux fires exactly once per real bell. Repaint
                         // chunks here are just rendering, never events.
+                        //
+                        // A connection that lost the feeder race keeps
+                        // trying: the holder's departure frees the slot but
+                        // nothing else re-acquires it, so without this a
+                        // still-attached client relays forever and records
+                        // nothing. Retried before the chunk is fed, and on
+                        // every chunk rather than on a timer — the window
+                        // between the slot freeing and the new segmenter
+                        // existing is a window in which a whole command
+                        // goes unrecorded, and one uncontended mutex is
+                        // nothing next to the copy, the lossy decode and
+                        // the awaited send this branch already does.
+                        if feeder_guard.is_none() {
+                            feeder_guard = session_history.try_acquire_feeder(&session_name);
+                            if feeder_guard.is_some() {
+                                segmenter = Some(session_history::Segmenter::new());
+                            }
+                        }
                         if let Some(seg) = segmenter.as_mut() {
                             let produced = seg.feed(&chunk, session_history::now_ms());
                             if !produced.is_empty() {

@@ -365,6 +365,244 @@ test.describe("conversation history: zsh", () => {
   });
 });
 
+// ── Recording lifecycle across attach/detach (issue #237) ────────────
+//
+// The two tests below drive the write path — `handle_ws`'s feeder handling
+// and `Segmenter::flush` — rather than the endpoint's shape. Every step is
+// sequenced on an observed fact (tmux's own client count, or an entry
+// landing in the log), never on a sleep: this file's history of flake
+// (#223, #183) makes a timing window an unacceptable way to order a test.
+
+// tmux's view of how many clients are attached — the server-side truth the
+// WS relay's lifetime is tied to, so it is what the steps below wait on.
+function attachedClientCount(session) {
+  try {
+    return tmux(`list-clients -t ${session} -F x`)
+      .toString()
+      .split("\n")
+      .filter((l) => l.trim()).length;
+  } catch (_) {
+    // A throw is "tmux could not answer", not "nobody is attached" — the
+    // barriers below wait for a count of 0, and returning 0 here would let
+    // a broken tmux satisfy one of them.
+    return -1;
+  }
+}
+
+async function waitForClientCount(session, n) {
+  await expect
+    .poll(() => attachedClientCount(session), {
+      timeout: 10000,
+      message: `waiting for ${n} attached tmux client(s) on ${session}`,
+    })
+    .toBe(n);
+}
+
+async function attachSessionPage(context, session) {
+  const attached = await context.newPage();
+  await attached.goto(`${APP}#/s/${session}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await attached.waitForFunction(
+    () => window.__mobuxView && window.__mobuxView.test,
+  );
+  await waitForClientAttached(tmux, session);
+  return attached;
+}
+
+// A bash session with a known PS1 — with the real shell-integration
+// snippet installed or deliberately without it — torn down (session +
+// snippet) whatever the body does. `page` stays on a non-session route: it
+// is the fetch client only, so it never takes a WS attach of its own and
+// never competes for the recording slot.
+async function withSession(page, { instrumented }, body) {
+  const session = `histlifecycle-${process.pid}-${Date.now()}`;
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await apiUninstall(page, "bash");
+  fs.writeFileSync(`${SANDBOX_HOME}/.bashrc`, "PS1='lifecycletest: '\n");
+  if (instrumented) await apiInstall(page, "bash");
+  try {
+    tmux(`kill-session -t ${session}`);
+  } catch (_) {}
+  tmux(`new-session -d -s ${session} ${SHELL_ENV} bash`);
+  await page.goto(`${APP}#/`, { waitUntil: "domcontentloaded" });
+  try {
+    await body(session);
+  } finally {
+    try {
+      tmux(`kill-session -t ${session}`);
+    } catch (_) {}
+    await apiUninstall(page, "bash");
+  }
+}
+
+async function fetchEntries(page, session) {
+  const { status, body } = await fetchConversation(page, session, "?limit=500");
+  expect(status).toBe(200);
+  return body.entries;
+}
+
+async function commandEntries(page, session) {
+  return (await fetchEntries(page, session)).filter((e) => "command" in e);
+}
+
+// Exact, not "at least": these tests send one command at a time and wait
+// for its entry before the next, so an extra entry means two feeders
+// recorded the same bytes — which is the failure mode the recording slot
+// exists to prevent.
+async function waitForCommandCount(page, session, n) {
+  await expect
+    .poll(async () => (await commandEntries(page, session)).length, {
+      timeout: 15000,
+      message: `waiting for exactly ${n} command entries`,
+    })
+    .toBe(n);
+}
+
+test("conversation history: a client that loses the recording slot picks it up when the holder detaches", async ({
+  context,
+  page,
+}) => {
+  // The steps below wait on real tmux and on entries landing in the log;
+  // their budgets add up past the suite's 30s default.
+  test.setTimeout(90000);
+  await withSession(page, { instrumented: true }, async (session) => {
+    const first = await attachSessionPage(context, session);
+    await waitForClientCount(session, 1);
+
+    // The very first prompt drew before anything attached, so it carries no
+    // marker (same warm-up as attemptConversationHistory above).
+    tmux(`send-keys -t ${session} 'true' Enter`);
+    await waitForCommandCount(page, session, 1);
+    tmux(`send-keys -t ${session} 'echo handover-one' Enter`);
+    await waitForCommandCount(page, session, 2);
+
+    // `second` attaches while `first` is provably the recorder — it has
+    // already written an entry — so `second` loses the slot every run. No
+    // race decides which of the two holds it.
+    const second = await attachSessionPage(context, session);
+    await waitForClientCount(session, 2);
+
+    const beforeHandover = await commandEntries(page, session);
+    await first.close();
+    await waitForClientCount(session, 1);
+
+    // tmux drops the departing client before the relay handling it returns
+    // and frees the recording slot, so "one client left" does not mean "the
+    // slot is free" — a command sent on that edge finishes before the
+    // survivor can take over. Re-sending each tick converges instead of
+    // betting on that gap: every send after the handover is recorded, and a
+    // handover that never happens leaves the count where it was.
+    //
+    // The assertion is the entry count, not the text of any entry. Under
+    // tmux's redraw-burst reordering a `C..D` window can capture repaint
+    // bytes and the previous line's echo, so neither `command` nor `output`
+    // is a sound thing to match on here (see attemptConversationHistory's
+    // doc comment, and the 3-attempt harness it needs to survive that).
+    // That an entry exists at all is what the handover is about.
+    await expect
+      .poll(
+        async () => {
+          tmux(`send-keys -t ${session} 'echo handover-two' Enter`);
+          return (await commandEntries(page, session)).length;
+        },
+        {
+          timeout: 20000,
+          intervals: [1000],
+          message: "waiting for the surviving client to record a command",
+        },
+      )
+      .toBeGreaterThan(beforeHandover.length);
+    await second.close();
+
+    // The record the departing client wrote survives the handover intact —
+    // entries are append-only, so this is exact, not a text match.
+    const afterHandover = await commandEntries(page, session);
+    expect(
+      afterHandover.slice(0, beforeHandover.length).map((e) => e.seq),
+    ).toEqual(beforeHandover.map((e) => e.seq));
+  });
+});
+
+test("conversation history: detaching an instrumented session appends no trailing raw entry", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(60000);
+  await withSession(page, { instrumented: true }, async (session) => {
+    const attached = await attachSessionPage(context, session);
+    await waitForClientCount(session, 1);
+
+    tmux(`send-keys -t ${session} 'true' Enter`);
+    await waitForCommandCount(page, session, 1);
+    tmux(`send-keys -t ${session} 'echo flushcheck' Enter`);
+    await waitForCommandCount(page, session, 2);
+
+    // The relay flushes its segmenter and appends before it kills the
+    // attach subprocess, so tmux dropping to zero clients means whatever
+    // detach was going to write is already on disk. Nothing to settle for.
+    await attached.close();
+    await waitForClientCount(session, 0);
+
+    // Not "no raw entries at all": a fresh attach repaints the whole screen
+    // into `pending`, and at a 35x120 PTY that burst exceeds
+    // RAW_FLUSH_THRESHOLD and is emitted as raw entries during `feed`,
+    // before any `C`. Those are unrelated to the detach flush. What the
+    // flush change removes is the entry appended *after* the conversation's
+    // last command.
+    const entries = await fetchEntries(page, session);
+    const lastCommand = entries.map((e) => "command" in e).lastIndexOf(true);
+    expect(lastCommand).toBeGreaterThanOrEqual(0);
+    const trailing = entries.slice(lastCommand + 1).filter((e) => "raw" in e);
+    expect(
+      trailing,
+      `raw entries after the last command: ${JSON.stringify(trailing)}`,
+    ).toEqual([]);
+  });
+});
+
+// The other half of the flush contract, and the half that is easy to break
+// by accident: a session with no shell integration has no markers, so raw
+// entries ARE its record and detach must still write the tail. Covered
+// end-to-end here because CI compiles the Rust tests without running them
+// (`ci.yml`'s `cargo test --no-run`), so the unit test that pins this
+// exactly never executes there.
+test("conversation history: detaching a session with no shell integration still records its tail", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(60000);
+  await withSession(page, { instrumented: false }, async (session) => {
+    const attached = await attachSessionPage(context, session);
+    await waitForClientCount(session, 1);
+
+    tmux(`send-keys -t ${session} 'echo plain-tail-marker' Enter`);
+    await expect
+      .poll(() => tmux(`capture-pane -p -t ${session}`).toString(), {
+        timeout: 10000,
+        message: "waiting for the command to run in the pane",
+      })
+      .toContain("plain-tail-marker");
+
+    await attached.close();
+    await waitForClientCount(session, 0);
+
+    const entries = await fetchEntries(page, session);
+    expect(entries.filter((e) => "command" in e)).toEqual([]);
+    // The marker must be in the LAST entry and nowhere before it. Only
+    // detach writes the last entry; everything earlier was drained mid-
+    // stream at RAW_FLUSH_THRESHOLD. Asserting over the whole record would
+    // still pass once a bigger PTY, a MOTD or a longer prompt pushes the
+    // marker into a drained chunk — at which point it would be testing the
+    // drain, not the flush.
+    expect(
+      entries.slice(0, -1).map((e) => e.raw),
+      "the marker must reach the record through flush, not a mid-stream drain",
+    ).not.toContain(expect.stringContaining("plain-tail-marker"));
+    expect(entries.at(-1).raw).toContain("plain-tail-marker");
+  });
+});
+
 test("conversation history: unknown/never-attached session returns an empty page, not an error", async ({
   page,
 }) => {
