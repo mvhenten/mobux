@@ -1947,6 +1947,9 @@ struct ResizeMsg {
     rows: u16,
 }
 
+/// How often a connection without the feeder slot retries for it.
+const FEEDER_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn handle_ws(
     socket: axum::extract::ws::WebSocket,
     session_name: String,
@@ -1956,10 +1959,12 @@ async fn handle_ws(
     // Only one attach at a time feeds the conversation-history segmenter for
     // a given session — tmux mirrors the same output to every attached
     // client, so a second concurrent tab must not double-segment and
-    // double-append (see `FeederGuard`'s doc comment). Held for this
-    // connection's whole lifetime; released automatically (RAII) on any
-    // return path, including an early `?` below.
-    let feeder_guard = session_history.try_acquire_feeder(&session_name);
+    // double-append (see `FeederGuard`'s doc comment). Held until this
+    // connection ends; released automatically (RAII) on any return path,
+    // including an early `?` below. A connection that loses the race retries
+    // in the PTY-read branch below, so the slot the departing feeder frees is
+    // picked up by whoever is still attached.
+    let mut feeder_guard = session_history.try_acquire_feeder(&session_name);
     let mut segmenter = feeder_guard
         .as_ref()
         .map(|_| session_history::Segmenter::new());
@@ -2026,6 +2031,8 @@ async fn handle_ws(
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
+    let mut last_feeder_attempt = std::time::Instant::now();
+
     loop {
         tokio::select! {
             maybe_out = rx.recv() => {
@@ -2036,6 +2043,25 @@ async fn handle_ws(
                         // hook (see `tmux::install_bell_hook`), which
                         // tmux fires exactly once per real bell. Repaint
                         // chunks here are just rendering, never events.
+                        //
+                        // A connection that lost the feeder race keeps
+                        // trying: the holder's departure frees the slot but
+                        // nothing else re-acquires it, so without this a
+                        // still-attached client relays forever and records
+                        // nothing. Rate-limited to once a second so the
+                        // mutex is not touched per 8 KiB chunk. A segmenter
+                        // that starts mid-stream may produce one partial
+                        // entry — the same jitter the record already carries
+                        // from any mid-stream attach.
+                        if feeder_guard.is_none()
+                            && last_feeder_attempt.elapsed() >= FEEDER_RETRY_INTERVAL
+                        {
+                            last_feeder_attempt = std::time::Instant::now();
+                            feeder_guard = session_history.try_acquire_feeder(&session_name);
+                            if feeder_guard.is_some() {
+                                segmenter = Some(session_history::Segmenter::new());
+                            }
+                        }
                         if let Some(seg) = segmenter.as_mut() {
                             let produced = seg.feed(&chunk, session_history::now_ms());
                             if !produced.is_empty() {

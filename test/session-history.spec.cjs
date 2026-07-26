@@ -365,6 +365,185 @@ test.describe("conversation history: zsh", () => {
   });
 });
 
+// ── Recording lifecycle across attach/detach (issue #237) ────────────
+//
+// The two tests below drive the write path — `handle_ws`'s feeder handling
+// and `Segmenter::flush` — rather than the endpoint's shape. Every step is
+// sequenced on an observed fact (tmux's own client count, or an entry
+// landing in the log), never on a sleep: this file's history of flake
+// (#223, #183) makes a timing window an unacceptable way to order a test.
+
+// tmux's view of how many clients are attached — the server-side truth the
+// WS relay's lifetime is tied to, so it is what the steps below wait on.
+function attachedClientCount(session) {
+  try {
+    return tmux(`list-clients -t ${session} -F x`)
+      .toString()
+      .split("\n")
+      .filter((l) => l.trim()).length;
+  } catch (_) {
+    return 0;
+  }
+}
+
+async function waitForClientCount(session, n) {
+  await expect
+    .poll(() => attachedClientCount(session), {
+      timeout: 10000,
+      message: `waiting for ${n} attached tmux client(s) on ${session}`,
+    })
+    .toBe(n);
+}
+
+async function attachSessionPage(context, session) {
+  const attached = await context.newPage();
+  await attached.goto(`${APP}#/s/${session}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await attached.waitForFunction(
+    () => window.__mobuxView && window.__mobuxView.test,
+  );
+  await waitForClientAttached(tmux, session);
+  return attached;
+}
+
+// A bash session with the real shell-integration snippet installed and a
+// known PS1, torn down (session + snippet) whatever the body does. `page`
+// stays on a non-session route: it is the fetch client only, so it never
+// takes a WS attach of its own and never competes for the recording slot.
+async function withInstrumentedSession(page, body) {
+  const session = `histlifecycle-${process.pid}-${Date.now()}`;
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await apiUninstall(page, "bash");
+  fs.writeFileSync(`${SANDBOX_HOME}/.bashrc`, "PS1='lifecycletest: '\n");
+  await apiInstall(page, "bash");
+  try {
+    tmux(`kill-session -t ${session}`);
+  } catch (_) {}
+  tmux(`new-session -d -s ${session} ${SHELL_ENV} bash`);
+  await page.goto(`${APP}#/`, { waitUntil: "domcontentloaded" });
+  try {
+    await body(session);
+  } finally {
+    try {
+      tmux(`kill-session -t ${session}`);
+    } catch (_) {}
+    await apiUninstall(page, "bash");
+  }
+}
+
+async function fetchEntries(page, session) {
+  const { status, body } = await fetchConversation(page, session, "?limit=500");
+  expect(status).toBe(200);
+  return body.entries;
+}
+
+async function recordedOutput(page, session) {
+  return (await fetchEntries(page, session))
+    .filter((e) => "command" in e)
+    .map((e) => e.output)
+    .join("");
+}
+
+async function waitForCommandCount(page, session, n) {
+  await expect
+    .poll(
+      async () =>
+        (await fetchEntries(page, session)).filter((e) => "command" in e)
+          .length,
+      { timeout: 15000, message: `waiting for ${n} command entries` },
+    )
+    .toBeGreaterThanOrEqual(n);
+}
+
+test("conversation history: a client that loses the recording slot picks it up when the holder detaches", async ({
+  context,
+  page,
+}) => {
+  await withInstrumentedSession(page, async (session) => {
+    const first = await attachSessionPage(context, session);
+    await waitForClientCount(session, 1);
+
+    // The very first prompt drew before anything attached, so it carries no
+    // marker (same warm-up as attemptConversationHistory above).
+    tmux(`send-keys -t ${session} 'true' Enter`);
+    await waitForCommandCount(page, session, 1);
+    tmux(`send-keys -t ${session} 'echo handover-one' Enter`);
+    await waitForCommandCount(page, session, 2);
+
+    // `second` attaches while `first` is provably the recorder — it has
+    // already written an entry — so `second` loses the slot every run. No
+    // race decides which of the two holds it.
+    const second = await attachSessionPage(context, session);
+    await waitForClientCount(session, 2);
+
+    await first.close();
+    await waitForClientCount(session, 1);
+
+    // tmux drops the departing client before the relay handling it returns
+    // and frees the recording slot, so "one client left" does not mean "the
+    // slot is free" — a command sent on that edge finishes before the
+    // survivor can take over. Re-sending each tick converges on the answer
+    // instead of betting on that gap: every send after the handover is
+    // recorded, and a handover that never happens fails the poll.
+    await expect
+      .poll(
+        async () => {
+          tmux(`send-keys -t ${session} 'echo handover-two' Enter`);
+          return await recordedOutput(page, session);
+        },
+        {
+          timeout: 20000,
+          intervals: [1000],
+          message: "waiting for the surviving client to record a command",
+        },
+      )
+      .toContain("handover-two");
+    await second.close();
+
+    // Output text, not command text: output is the raw bytes between `C`
+    // and `D`, unaffected by the redraw-burst timing gap that can leave
+    // `command` empty (see attemptConversationHistory's doc comment).
+    expect(await recordedOutput(page, session)).toContain("handover-one");
+  });
+});
+
+test("conversation history: detaching an instrumented session appends no trailing raw entry", async ({
+  context,
+  page,
+}) => {
+  await withInstrumentedSession(page, async (session) => {
+    const attached = await attachSessionPage(context, session);
+    await waitForClientCount(session, 1);
+
+    tmux(`send-keys -t ${session} 'true' Enter`);
+    await waitForCommandCount(page, session, 1);
+    tmux(`send-keys -t ${session} 'echo flushcheck' Enter`);
+    await waitForCommandCount(page, session, 2);
+
+    // The relay flushes its segmenter and appends before it kills the
+    // attach subprocess, so tmux dropping to zero clients means whatever
+    // detach was going to write is already on disk. Nothing to settle for.
+    await attached.close();
+    await waitForClientCount(session, 0);
+
+    // Not "no raw entries at all": a fresh attach repaints the whole screen
+    // into `pending`, and at a 35x120 PTY that burst exceeds
+    // RAW_FLUSH_THRESHOLD and is emitted as raw entries during `feed`,
+    // before any `C`. Those are unrelated to the detach flush. What the
+    // flush change removes is the entry appended *after* the conversation's
+    // last command.
+    const entries = await fetchEntries(page, session);
+    const lastCommand = entries.map((e) => "command" in e).lastIndexOf(true);
+    expect(lastCommand).toBeGreaterThanOrEqual(0);
+    const trailing = entries.slice(lastCommand + 1).filter((e) => "raw" in e);
+    expect(
+      trailing,
+      `raw entries after the last command: ${JSON.stringify(trailing)}`,
+    ).toEqual([]);
+  });
+});
+
 test("conversation history: unknown/never-attached session returns an empty page, not an error", async ({
   page,
 }) => {

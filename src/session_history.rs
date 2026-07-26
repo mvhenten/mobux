@@ -207,6 +207,7 @@ pub struct Segmenter {
     pending: Vec<u8>,
     open: Option<OpenCommand>,
     cursor: CursorModel,
+    seen_marker: bool,
 }
 
 impl Default for Segmenter {
@@ -222,6 +223,7 @@ impl Segmenter {
             pending: Vec::new(),
             open: None,
             cursor: CursorModel::new(),
+            seen_marker: false,
         }
     }
 
@@ -258,9 +260,23 @@ impl Segmenter {
     /// Flush whatever is in flight — an open command with no `D` yet, or
     /// buffered un-instrumented content — as a best-effort entry. Call this
     /// once, when the PTY relay this segmenter is attached to disconnects.
+    ///
+    /// On an instrumented session the trailing `pending` remainder is
+    /// dropped rather than recorded. Between one command's `D` and the next
+    /// command's `C` it holds the prompt plus whatever else wrote to the
+    /// screen, so emitting it wedges a raw entry into the conversation on
+    /// every detach — and a phone that backgrounds and reconnects detaches
+    /// often. Anything past `RAW_FLUSH_THRESHOLD` was already emitted during
+    /// `feed`, so what is dropped is the sub-threshold tail. Without a
+    /// marker there is no conversation to protect, and raw entries are the
+    /// whole record, so that case is unchanged.
     pub fn flush(&mut self, now_ms: i64) -> Option<PendingEntry> {
         if let Some(open) = self.open.take() {
             return Some(open.finish(None, now_ms));
+        }
+        if self.seen_marker {
+            self.pending.clear();
+            return None;
         }
         if !self.pending.is_empty() {
             let raw = String::from_utf8_lossy(&self.pending).into_owned();
@@ -298,6 +314,7 @@ impl Segmenter {
     }
 
     fn handle_marker(&mut self, marker: Marker, now_ms: i64, events: &mut Vec<PendingEntry>) {
+        self.seen_marker = true;
         match marker {
             Marker::C => {
                 // A stray C with no preceding D (shouldn't happen with a
@@ -1039,6 +1056,16 @@ mod tests {
             }
             other => panic!("expected a command entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn instrumented_session_drops_the_trailing_prompt_remainder_on_flush() {
+        let mut seg = Segmenter::new();
+        feed_str(&mut seg, "cmd\r\n\x1b]133;C\x07out", 1);
+        let events = feed_str(&mut seg, "\x1b]133;D;0\x07\x1b]133;A\x07", 2);
+        assert_eq!(events.len(), 1);
+        feed_str(&mut seg, "mvhenten@sandbox:~$ ", 3);
+        assert_eq!(seg.flush(4), None);
     }
 
     #[test]
