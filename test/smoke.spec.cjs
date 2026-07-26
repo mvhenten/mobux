@@ -1690,6 +1690,308 @@ test("view swap persists as the server default view across reload", async ({
     .toBe("reader");
 });
 
+// ── Read mode as a third view (#235) ────────────────────────────────
+// Read mode mounts inside the terminal island, next to the terminal and the
+// reader, because the server only records a session's conversation while a
+// WebSocket is attached. These tests cover the seam — the host element, the
+// two toggles, the boot default, and the per-window exclusion — not what read
+// mode renders (test/read-mode-render.spec.cjs owns that).
+
+async function bootIsland(page) {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 15000 },
+  );
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await page.waitForTimeout(150);
+}
+
+async function revealRibbon(page) {
+  await page.evaluate(() =>
+    document.getElementById("inputBar").classList.remove("hidden"),
+  );
+}
+
+// PUT the whole blob back with one field changed, so the project's renderer
+// survives the write.
+async function putDefaultView(page, view) {
+  return page.evaluate(async (v) => {
+    const prefs = await (await fetch("/api/settings/preferences")).json();
+    const res = await fetch("/api/settings/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...prefs, default_view: v }),
+    });
+    return res.status;
+  }, view);
+}
+
+async function storedDefaultView(page) {
+  return page
+    .evaluate(async () => (await fetch("/api/settings/preferences")).json())
+    .then((p) => p.default_view);
+}
+
+// Write a value the API would reject straight into the preferences row. Node's
+// built-in sqlite is behind a flag on the Node 22 CI runs and stable after, and
+// the flag is accepted by every version that has the module, so pass it always.
+const { execFileSync } = require("child_process");
+const SMOKE_DATA_DIR = process.env.MOBUX_DATA_DIR || "/tmp/mobux-smoke";
+
+function writeStoredDefaultView(value) {
+  execFileSync(
+    process.execPath,
+    [
+      "--experimental-sqlite",
+      "-e",
+      'const { DatabaseSync } = require("node:sqlite");' +
+        "const db = new DatabaseSync(process.argv[1]);" +
+        // The server holds its own connection to this file; neither side
+        // handles a busy database, so wait rather than throw on a lock.
+        'db.exec("PRAGMA busy_timeout = 5000");' +
+        'db.prepare("UPDATE ui_preferences SET default_view = ? WHERE id = 1")' +
+        ".run(process.argv[2]);" +
+        "db.close();",
+      `${SMOKE_DATA_DIR}/mobux.db`,
+      value,
+    ],
+    { stdio: "pipe" },
+  );
+}
+
+async function activeWindowIndex(page) {
+  const panes = await (
+    await page.request.get(`${BASE}/api/sessions/${SESSION}/panes`)
+  ).json();
+  return panes.findIndex((p) => p.active);
+}
+
+function clientWindowId(page) {
+  return page.evaluate(() => window.__mobuxView.test.activeWindowId());
+}
+
+// Drive a real tmux window switch and wait until the *client* has taken it in.
+// The panes API answers as soon as tmux has switched, but the view controller
+// keys per-window state on core.panes/activeIndex, which only catch up when the
+// `panes` event fires — so anything asserted off the API alone races the very
+// bookkeeping these tests are about.
+async function switchWindowAndSettle(page, dir) {
+  const before = await clientWindowId(page);
+  await page.evaluate((d) => window.__mobuxView.test.switchWindow(d), dir);
+  await expect
+    .poll(() => clientWindowId(page), { timeout: 10000 })
+    .not.toBe(before);
+}
+
+test("read mode: swapping to read shows #readmode and hides both other views", async ({
+  page,
+}) => {
+  await bootIsland(page);
+
+  await page.evaluate(() => window.__mobuxView.swap("reader"));
+  await expect(page.locator("#reader")).toBeVisible();
+
+  await page.evaluate(() => window.__mobuxView.swap("read"));
+  expect(await page.evaluate(() => window.__mobuxView.current)).toBe("read");
+  await expect(page.locator("#readmode")).toBeVisible();
+  await expect(page.locator("#terminal")).toBeHidden();
+  await expect(page.locator("#reader")).toBeHidden();
+  expect(
+    await page.evaluate(() => window.__mobuxView.test.readModeMounted()),
+  ).toBe(true);
+
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await expect(page.locator("#readmode")).toBeHidden();
+});
+
+test("read mode: the ribbon button reflects the view and is clickable from read mode", async ({
+  page,
+}) => {
+  await bootIsland(page);
+  await revealRibbon(page);
+
+  const btn = page.locator("#readModeBtn");
+  await expect(btn).toBeVisible();
+  await expect(btn).toHaveText("💬");
+
+  await btn.scrollIntoViewIfNeeded();
+  await btn.click({ force: true });
+  await expect(page.locator("#readmode")).toBeVisible();
+  await expect(btn).toBeVisible();
+  await expect(btn).toHaveText("▣");
+
+  // Reachable from inside read mode: the ribbon is still on screen and the
+  // second tap comes back out.
+  await btn.scrollIntoViewIfNeeded();
+  await btn.click({ force: true });
+  await expect(page.locator("#terminal")).toBeVisible();
+  await expect(page.locator("#readmode")).toBeHidden();
+  await expect(btn).toHaveText("💬");
+});
+
+test("read mode: the reader toggle goes to the reader, not the terminal", async ({
+  page,
+}) => {
+  await bootIsland(page);
+  await revealRibbon(page);
+
+  await page.evaluate(() => window.__mobuxView.swap("read"));
+  await expect(page.locator("#readmode")).toBeVisible();
+
+  await page.locator("#viewToggleBtn").scrollIntoViewIfNeeded();
+  await page.locator("#viewToggleBtn").click({ force: true });
+
+  expect(await page.evaluate(() => window.__mobuxView.current)).toBe("reader");
+  await expect(page.locator("#reader")).toBeVisible();
+  await expect(page.locator("#readmode")).toBeHidden();
+
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+});
+
+test("read mode: returning to the terminal still re-sizes the PTY", async ({
+  page,
+}) => {
+  // The engine sizes the PTY from #terminal's clientHeight, which is zero
+  // while another view is showing — so the swap back has to kick a resize or
+  // the terminal comes back at the wrong row count. Observed on the wire.
+  const sent = [];
+  page.on("websocket", (ws) => {
+    ws.on("framesent", (frame) => sent.push(String(frame.payload)));
+  });
+
+  await bootIsland(page);
+  await page.evaluate(() => window.__mobuxView.swap("read"));
+  await expect(page.locator("#readmode")).toBeVisible();
+
+  const mark = sent.length;
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await expect
+    .poll(
+      () =>
+        sent.slice(mark).filter((p) => p.includes('"type":"resize"')).length,
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0);
+});
+
+test('read mode: default_view "read" is accepted and boots into read mode', async ({
+  page,
+}) => {
+  await bootIsland(page);
+
+  expect(await putDefaultView(page, "read")).toBe(204);
+  expect(await storedDefaultView(page)).toBe("read");
+
+  await page.reload();
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await expect
+    .poll(async () => await page.evaluate(() => window.__mobuxView.current), {
+      timeout: 5000,
+    })
+    .toBe("read");
+  await expect(page.locator("#readmode")).toBeVisible();
+});
+
+test("read mode: an unknown stored default_view still reads back as xterm", async ({
+  page,
+}) => {
+  // The read normalisation is unreachable over HTTP — writes are validated, so
+  // a bogus value can only get into the row the way a hand-edit or an older
+  // build would put it there. Poke it straight into sqlite, which is the only
+  // way to exercise the arm the server actually relies on.
+  await bootIsland(page);
+
+  // Prove the poke lands in the row this server reads before trusting what it
+  // says about a bogus one. A MOBUX_DATA_DIR pointing somewhere the server
+  // isn't would otherwise let the test write to a file nothing reads, see the
+  // seeded "xterm", and pass having proved nothing.
+  writeStoredDefaultView("reader");
+  expect(await storedDefaultView(page)).toBe("reader");
+
+  writeStoredDefaultView("bogus");
+  expect(await storedDefaultView(page)).toBe("xterm");
+
+  await page.goto("about:blank");
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await expect
+    .poll(async () => await page.evaluate(() => window.__mobuxView.current), {
+      timeout: 5000,
+    })
+    .toBe("xterm");
+  await expect(page.locator("#terminal")).toBeVisible();
+});
+
+// The two guards that keep read mode out of per-window view state are
+// independent, and each needs a window whose stored view would otherwise win.
+// Without a stored view on the target window, `applyStoredViewForActiveWindow`
+// falls back to the `default_view` preference — which `swap("read")` has just
+// set to "read" — and the swap-away never happens, so the guards go untested.
+
+test("read mode: a tmux window switch does not swap the view", async ({
+  page,
+}) => {
+  // Gates the early return in applyStoredViewForActiveWindow: the target
+  // window is left in the reader, so on the `panes` event its stored view is
+  // a real, different destination and the fallback to `default_view` — which
+  // swap("read") has just set to "read" — cannot mask a missing guard.
+  await bootIsland(page);
+  const homeIndex = await activeWindowIndex(page);
+  const homeId = await clientWindowId(page);
+
+  await switchWindowAndSettle(page, "next");
+  // A real tmux switch, not just a client-side belief about one.
+  expect(await activeWindowIndex(page)).not.toBe(homeIndex);
+  await page.evaluate(() => window.__mobuxView.swap("reader"));
+  await expect(page.locator("#reader")).toBeVisible();
+
+  await switchWindowAndSettle(page, "prev");
+  expect(await clientWindowId(page)).toBe(homeId);
+  await page.evaluate(() => window.__mobuxView.swap("read"));
+  await expect(page.locator("#readmode")).toBeVisible();
+
+  await switchWindowAndSettle(page, "next");
+
+  expect(await page.evaluate(() => window.__mobuxView.current)).toBe("read");
+  await expect(page.locator("#readmode")).toBeVisible();
+  await expect(page.locator("#terminal")).toBeHidden();
+
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await switchWindowAndSettle(page, "prev");
+});
+
+test("read mode: entering read mode does not become the window's stored view", async ({
+  page,
+}) => {
+  // Gates the windowViews write guard: leave read mode from a *different*
+  // window, so nothing overwrites what entering it may have stored, then come
+  // back and see which view the home window reopens in.
+  await bootIsland(page);
+  const homeId = await clientWindowId(page);
+
+  await page.evaluate(() => window.__mobuxView.swap("read"));
+  await expect(page.locator("#readmode")).toBeVisible();
+
+  await switchWindowAndSettle(page, "next");
+  await page.evaluate(() => window.__mobuxView.swap("xterm"));
+  await expect(page.locator("#terminal")).toBeVisible();
+
+  await switchWindowAndSettle(page, "prev");
+  expect(await clientWindowId(page)).toBe(homeId);
+
+  expect(await page.evaluate(() => window.__mobuxView.current)).toBe("xterm");
+  await expect(page.locator("#terminal")).toBeVisible();
+  await expect(page.locator("#readmode")).toBeHidden();
+});
+
 // ── Synthetic viewport (reader) ─────────────────────────────────────
 // Direct coverage of the translate3d-based scroller in reader.js.
 // All tests reset state via swap('xterm') / swap('reader') so they're

@@ -7,22 +7,37 @@
 // default. `mobux:viewchange` and the engine-owned `window.__mobuxView` are
 // gone; tests drive the factory handles, assembled here for the page.
 //
-//   createViewController({ root, terminal, createReader }) → {
+// There are three views: the terminal, the reader, and read mode (#235).
+//
+//   createViewController({ root, session, terminal, createReader,
+//                          createReadMode }) → {
 //     swap(mode), get current, dispose()
 //   }
 //     root        the island root element (holds #terminal, #reader,
-//                 #touchOverlay, #viewToggleBtn).
+//                 #readmode, #touchOverlay, #viewToggleBtn, #readModeBtn).
+//     session     the tmux session name, handed to read mode (its record is
+//                 keyed on the session alone).
 //     terminal    the createTerminal() handle: { core, document,
 //                 openCommandMenu, refreshViewToggle, showInputBar,
 //                 twoPullMove, twoPullEnd, test }.
 //     createReader the reader factory (from /static/reader.js).
+//     createReadMode the read-mode factory (from /static/read-mode.js).
 
 import { getPref, setPref } from "./prefs.js";
 
-export function createViewController({ root, terminal, createReader }) {
+const VIEWS = ["xterm", "reader", "read"];
+
+export function createViewController({
+  root,
+  session,
+  terminal,
+  createReader,
+  createReadMode,
+}) {
   const { core } = terminal;
   const termEl = root.querySelector("#terminal");
   const readerEl = root.querySelector("#reader");
+  const readModeEl = root.querySelector("#readmode");
   const overlay = root.querySelector("#touchOverlay");
 
   let current = "xterm";
@@ -41,7 +56,8 @@ export function createViewController({ root, terminal, createReader }) {
   }
 
   function storedDefaultView() {
-    return getPref("default_view") === "reader" ? "reader" : "xterm";
+    const stored = getPref("default_view");
+    return VIEWS.includes(stored) ? stored : "xterm";
   }
 
   const reader = createReader({
@@ -62,20 +78,26 @@ export function createViewController({ root, terminal, createReader }) {
     },
   });
 
+  const readMode = createReadMode({
+    host: readModeEl,
+    session,
+    handlers: {
+      onExit: () => {
+        swap("xterm");
+        terminal.showInputBar?.();
+      },
+    },
+  });
+
   function applyView(mode, { persist = true } = {}) {
-    if (mode !== "xterm" && mode !== "reader") return;
+    if (!VIEWS.includes(mode)) return;
     if (mode === current) {
       terminal.refreshViewToggle?.();
       return;
     }
-    if (mode === "reader") {
-      termEl.classList.add("hidden");
-      // The reader has its own gesture recogniser on #reader. Disable the
-      // terminal overlay so it doesn't sit on top and eat every touch.
-      if (overlay) overlay.style.pointerEvents = "none";
-      reader.mount();
-    } else {
-      reader.unmount();
+    if (current === "reader") reader.unmount();
+    if (current === "read") readMode.unmount();
+    if (mode === "xterm") {
       termEl.classList.remove("hidden");
       if (
         overlay &&
@@ -87,12 +109,24 @@ export function createViewController({ root, terminal, createReader }) {
       setTimeout(() => {
         if (!disposed) core.resize();
       }, 0);
+    } else {
+      termEl.classList.add("hidden");
+      // The reader and read mode each have their own gesture recogniser on
+      // their host. Disable the terminal overlay so it doesn't sit on top and
+      // eat every touch.
+      if (overlay) overlay.style.pointerEvents = "none";
+      if (mode === "reader") reader.mount();
+      else readMode.mount();
     }
     current = mode;
     if (persist) {
       setPref("default_view", mode);
-      const wid = activeWindowId();
-      if (wid) windowViews.set(wid, mode);
+      // Read mode is session-scoped and the per-window map is window-scoped,
+      // so read mode never enters it — see applyStoredViewForActiveWindow.
+      if (mode !== "read") {
+        const wid = activeWindowId();
+        if (wid) windowViews.set(wid, mode);
+      }
     }
     terminal.refreshViewToggle?.();
   }
@@ -102,6 +136,10 @@ export function createViewController({ root, terminal, createReader }) {
   }
 
   function applyStoredViewForActiveWindow() {
+    // The conversation record is per session, so a window change means nothing
+    // to read mode; re-applying a window's stored view here would swap the
+    // user out of it and back on every `panes` event.
+    if (current === "read") return;
     const wid = activeWindowId();
     const stored = (wid && windowViews.get(wid)) || null;
     applyView(stored || storedDefaultView(), { persist: false });
@@ -125,9 +163,10 @@ export function createViewController({ root, terminal, createReader }) {
 
   // Land in the preferred view at boot, before the first /panes refresh
   // resolves. The per-window override (if any) is applied by onPanes later.
-  if (storedDefaultView() === "reader") {
+  const bootView = storedDefaultView();
+  if (bootView !== "xterm") {
     setTimeout(() => {
-      if (!disposed) applyView("reader", { persist: false });
+      if (!disposed) applyView(bootView, { persist: false });
     }, 0);
   }
   terminal.refreshViewToggle?.();
@@ -137,6 +176,7 @@ export function createViewController({ root, terminal, createReader }) {
     disposed = true;
     core.removeEventListener("panes", onPanes);
     reader.dispose();
+    readMode.dispose();
   }
 
   return {
@@ -145,6 +185,7 @@ export function createViewController({ root, terminal, createReader }) {
       return current;
     },
     reader,
+    readMode,
     dispose,
   };
 }

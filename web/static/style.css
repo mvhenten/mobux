@@ -665,6 +665,8 @@ h1, h2, h3 { margin: 0; }
   margin-left: auto;
 }
 #reader.hidden { display: none; }
+/* Before read mode's first mount the host carries no .cv-host class yet. */
+#readmode.hidden { display: none; }
 #terminal.hidden { display: none; }
 #touchOverlay.hidden { display: none; }
 

@@ -1364,10 +1364,10 @@ impl From<db::UiPreferences> for UiPrefsJson {
             "xterm"
         }
         .to_string();
-        let default_view = if p.default_view == "reader" {
-            "reader"
-        } else {
-            "xterm"
+        let default_view = match p.default_view.as_str() {
+            "reader" => "reader",
+            "read" => "read",
+            _ => "xterm",
         }
         .to_string();
         Self {
@@ -1396,9 +1396,9 @@ impl UiPrefsJson {
                 self.renderer
             ));
         }
-        if self.default_view != "xterm" && self.default_view != "reader" {
+        if !matches!(self.default_view.as_str(), "xterm" | "reader" | "read") {
             return Err(format!(
-                "invalid default_view {:?}: must be \"xterm\" or \"reader\"",
+                "invalid default_view {:?}: must be \"xterm\", \"reader\" or \"read\"",
                 self.default_view
             ));
         }
@@ -2976,6 +2976,27 @@ mod tests {
         assert_eq!(ok.listen_rate, 2.0);
         assert_eq!(ok.listen_pitch, 0.5);
         assert_eq!(ok.selected_node, "gpu-box");
+    }
+
+    #[test]
+    fn set_ui_preferences_accepts_read_as_a_default_view() {
+        let ok = UiPrefsJson {
+            renderer: "xterm".to_string(),
+            theme: "nord".to_string(),
+            default_view: "read".to_string(),
+            osc133_hint_dismissed: false,
+            listen_voice: String::new(),
+            listen_rate: 1.0,
+            listen_pitch: 1.0,
+            selected_node: String::new(),
+        }
+        .validate()
+        .expect("read must be accepted as a default_view");
+        assert_eq!(ok.default_view, "read");
+
+        // The read path normalises, so it has to know the value too.
+        let round_tripped: UiPrefsJson = ok.into();
+        assert_eq!(round_tripped.default_view, "read");
     }
 
     #[test]

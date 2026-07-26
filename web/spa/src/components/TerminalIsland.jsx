@@ -124,6 +124,7 @@ export function TerminalIsland({ node, session }) {
     (async () => {
       let createTerminal;
       let createReader;
+      let createReadMode;
       try {
         await loadScript(`/static/vendor/${bundle}${v}`);
         // The engine and reader modules are pure factory exports (no side
@@ -134,6 +135,9 @@ export function TerminalIsland({ node, session }) {
         ));
         ({ createReader } = await import(
           /* @vite-ignore */ `/static/reader.js${v}`
+        ));
+        ({ createReadMode } = await import(
+          /* @vite-ignore */ `/static/read-mode.js${v}`
         ));
         // chime.js sets up the in-page bell that plays when the SW delivers a
         // push notification. It self-boots via IIFE (attaches to SW messages),
@@ -150,13 +154,22 @@ export function TerminalIsland({ node, session }) {
       }
       if (cancelled || !rootRef.current) return;
 
-      // The engine renders the reader toggle affordances but owns no view
+      // The engine renders the view toggle affordances but owns no view
       // state (#206 D3); it calls back into these opaque hooks, which the
       // controller (created just below) fulfils.
+      //
+      // 📖 is the terminal↔reader toggle: from read mode it goes to the
+      // reader, which is what its icon says. 💬 is read mode's own button,
+      // so read mode is one tap away from either other view (#235).
       const viewToggle = {
         toggle: () =>
-          viewCtl?.swap(viewCtl.current === "xterm" ? "reader" : "xterm"),
+          viewCtl?.swap(viewCtl.current === "reader" ? "xterm" : "reader"),
         isReader: () => viewCtl?.current === "reader",
+      };
+      const readToggle = {
+        toggle: () =>
+          viewCtl?.swap(viewCtl.current === "read" ? "xterm" : "read"),
+        isRead: () => viewCtl?.current === "read",
       };
 
       engine = createTerminal({
@@ -168,19 +181,23 @@ export function TerminalIsland({ node, session }) {
         // identifies itself in the server's attach log (never affects routing).
         build: readLoadedBundleHash() || "",
         viewToggle,
+        readToggle,
       });
 
-      // The reader is a sibling component mounted next to the terminal; the
-      // controller owns swap / mount / persistence / per-window state.
+      // The reader and read mode are sibling components mounted next to the
+      // terminal; the controller owns swap / mount / persistence / per-window
+      // state.
       viewCtl = createViewController({
         root: rootRef.current,
+        session,
         terminal: engine,
         createReader,
+        createReadMode,
       });
 
       // Assemble the page's test surface from the factory handles. The engine
       // no longer self-wires a global (#206 D3); tests drive the handles.
-      const { reader } = viewCtl;
+      const { reader, readMode } = viewCtl;
       window.__mobuxView = {
         swap: (mode) => viewCtl.swap(mode),
         get current() {
@@ -200,6 +217,12 @@ export function TerminalIsland({ node, session }) {
           readerStickToBottom: () => reader.stickToBottom(),
           statusBarOffsetHeight: () => reader.statusBarOffsetHeight(),
           statusBarFilled: () => reader.statusBarFilled(),
+          readModeMounted: () => readMode.mounted,
+          // The tmux window the controller keys per-window view state on. The
+          // panes API is the server's answer; this is the client's, and only
+          // this one has taken the `panes` event.
+          activeWindowId: () =>
+            engine.core.panes[engine.core.activeIndex]?.id || null,
         },
       };
 
@@ -254,6 +277,7 @@ export function TerminalIsland({ node, session }) {
     <div ref={rootRef} class="term-body-spa">
       <div id="terminal" />
       <div id="reader" class="hidden" />
+      <div id="readmode" class="hidden" />
       <div id="loadquote">
         <q id="quote" />
         <br />
@@ -308,6 +332,9 @@ export function TerminalIsland({ node, session }) {
         <div id="inputRibbon" class="input-ribbon">
           <button id="viewToggleBtn" title="Toggle reader/terminal view">
             📖
+          </button>
+          <button id="readModeBtn" title="Switch to read mode">
+            💬
           </button>
           <button id="uploadBtn" title="Attach file">
             📎
