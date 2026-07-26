@@ -211,17 +211,18 @@ test-stt-per-kind:
 # suite, so it never touches the live :5151 server or the live DB.
 #
 # Also runs reader-font.spec.cjs (issue #218), reader-command-grouping.
-# spec.cjs (issue #219), and session-history.spec.cjs (issue #220): all ride
-# the same smoke instance rather than getting their own CI step. `make
-# test-reader` / `make test-reader-grouping` still exist standalone for
-# local iteration.
+# spec.cjs (issue #219), session-history.spec.cjs (issue #220) and
+# read-mode-render.spec.cjs (issue #234): all ride the same smoke instance
+# rather than getting their own CI step. `make test-reader` /
+# `make test-reader-grouping` / `make test-read-mode-render` still exist
+# standalone for local iteration.
 .PHONY: test-spa
 test-spa:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs
+		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs
 
 # Reader font (issue #218): plain-output text renders proportional while
 # prompt/code stay monospace. Drives reader.js's real render pipeline with a
@@ -248,6 +249,19 @@ test-reader-grouping:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/reader-command-grouping.spec.cjs
+
+# Read mode renderer (issue #234): the recorded conversation as a dialogue —
+# command left, output right, muted exit chip, escapes stripped. Drives
+# read-mode.js with synthetic entries handed to setEntries/appendEntries, so
+# no tmux/PTY session and no terminal document are involved. Same isolated
+# smoke instance as the rest of the suite.
+.PHONY: test-read-mode-render
+test-read-mode-render:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/read-mode-render.spec.cjs
 
 # Renderer conformance (issue #207, D10): one spec exercises the explicit
 # renderer interface (R1–R16) against BOTH adapters via the xterm/sterk
