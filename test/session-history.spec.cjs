@@ -446,13 +446,17 @@ async function commandEntries(page, session) {
   return (await fetchEntries(page, session)).filter((e) => "command" in e);
 }
 
+// Exact, not "at least": these tests send one command at a time and wait
+// for its entry before the next, so an extra entry means two feeders
+// recorded the same bytes — which is the failure mode the recording slot
+// exists to prevent.
 async function waitForCommandCount(page, session, n) {
   await expect
     .poll(async () => (await commandEntries(page, session)).length, {
       timeout: 15000,
-      message: `waiting for ${n} command entries`,
+      message: `waiting for exactly ${n} command entries`,
     })
-    .toBeGreaterThanOrEqual(n);
+    .toBe(n);
 }
 
 test("conversation history: a client that loses the recording slot picks it up when the holder detaches", async ({

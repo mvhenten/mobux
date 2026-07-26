@@ -595,9 +595,13 @@ impl SessionHistoryStore {
 
     pub fn try_acquire_feeder(self: &Arc<Self>, session: &str) -> Option<FeederGuard> {
         let mut active = self.active_feeders.lock().ok()?;
-        if !active.insert(session.to_string()) {
+        // Checked before inserting: a connection without the slot calls this
+        // on every chunk, and that path must not allocate to find out it
+        // still cannot have it.
+        if active.contains(session) {
             return None;
         }
+        active.insert(session.to_string());
         Some(FeederGuard {
             store: self.clone(),
             session: session.to_string(),
