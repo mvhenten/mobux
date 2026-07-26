@@ -1750,6 +1750,9 @@ function writeStoredDefaultView(value) {
       "-e",
       'const { DatabaseSync } = require("node:sqlite");' +
         "const db = new DatabaseSync(process.argv[1]);" +
+        // The server holds its own connection to this file; neither side
+        // handles a busy database, so wait rather than throw on a lock.
+        'db.exec("PRAGMA busy_timeout = 5000");' +
         'db.prepare("UPDATE ui_preferences SET default_view = ? WHERE id = 1")' +
         ".run(process.argv[2]);" +
         "db.close();",
@@ -1903,8 +1906,15 @@ test("read mode: an unknown stored default_view still reads back as xterm", asyn
   // build would put it there. Poke it straight into sqlite, which is the only
   // way to exercise the arm the server actually relies on.
   await bootIsland(page);
-  writeStoredDefaultView("bogus");
 
+  // Prove the poke lands in the row this server reads before trusting what it
+  // says about a bogus one. A MOBUX_DATA_DIR pointing somewhere the server
+  // isn't would otherwise let the test write to a file nothing reads, see the
+  // seeded "xterm", and pass having proved nothing.
+  writeStoredDefaultView("reader");
+  expect(await storedDefaultView(page)).toBe("reader");
+
+  writeStoredDefaultView("bogus");
   expect(await storedDefaultView(page)).toBe("xterm");
 
   await page.goto("about:blank");
