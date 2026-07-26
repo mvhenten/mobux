@@ -56,7 +56,6 @@ export function createReadMode({ host, session = "", handlers = {} } = {}) {
       host,
       {
         onScroll: (dy) => scrollBy(dy),
-        onTap: () => {},
         // Read mode is not a live view: no long-press command menu, and no
         // horizontal window switch, because the record is per session and
         // windows have no meaning in it.
@@ -129,8 +128,9 @@ export function createReadMode({ host, session = "", handlers = {} } = {}) {
     scroller = createSyntheticScroller({ host, inner });
 
     mountGestures();
+    // A fresh scroller starts at the bottom, and render() runs through
+    // contentChanged, so the first paint is already pinned there.
     render();
-    scroller.stickToBottom();
   }
 
   function unmount() {
@@ -194,41 +194,60 @@ export function ansiToText(input) {
 
   while (i < n) {
     const ch = input[i];
-    if (ch !== "\u001b") {
-      out += ch;
-      i++;
+    if (ch === "\u001b") {
+      i = skipEscape(input, i + 1);
       continue;
     }
+    // 8-bit C1 introducers. tmux normalises to 7-bit, but anything reaching
+    // storage unnormalised would otherwise leak its parameters into the
+    // rendered text.
+    const code = input.charCodeAt(i);
+    if (code >= 0x80 && code <= 0x9f) {
+      if (code === 0x9b) i = skipControlSequence(input, i + 1);
+      else if (isC1StringIntroducer(code)) i = skipStringSequence(input, i + 1);
+      else i += 1;
+      continue;
+    }
+    out += ch;
     i++;
-    if (i >= n) break;
-    const kind = input[i];
-    if (kind === "[") {
-      i = skipControlSequence(input, i + 1);
-      continue;
-    }
-    // OSC (including any OSC 133 marker that leaked into `output`), DCS, SOS,
-    // PM and APC all run until BEL or ST.
-    if (
-      kind === "]" ||
-      kind === "P" ||
-      kind === "X" ||
-      kind === "^" ||
-      kind === "_"
-    ) {
-      i = skipStringSequence(input, i + 1);
-      continue;
-    }
-    // SS2 / SS3 shift the single character that follows.
-    if (kind === "N" || kind === "O") {
-      i += 2;
-      continue;
-    }
-    // Everything else: optional intermediates, then one final byte.
-    while (i < n && isIntermediateByte(input.charCodeAt(i))) i++;
-    if (i < n) i++;
   }
 
   return normaliseControls(out);
+}
+
+function skipEscape(text, start) {
+  const n = text.length;
+  if (start >= n) return n;
+  const kind = text[start];
+  if (kind === "[") return skipControlSequence(text, start + 1);
+  // OSC (including any OSC 133 marker that leaked into `output`), DCS, SOS,
+  // PM and APC.
+  if (
+    kind === "]" ||
+    kind === "P" ||
+    kind === "X" ||
+    kind === "^" ||
+    kind === "_"
+  ) {
+    return skipStringSequence(text, start + 1);
+  }
+  // SS2 / SS3 shift the single character that follows.
+  if (kind === "N" || kind === "O") return start + 2;
+  // Everything else: optional intermediates, then one final byte.
+  let i = start;
+  while (i < n && isIntermediateByte(text.charCodeAt(i))) i++;
+  return i < n ? i + 1 : n;
+}
+
+// DCS, SOS, OSC, PM, APC.
+function isC1StringIntroducer(code) {
+  return (
+    code === 0x90 ||
+    code === 0x98 ||
+    code === 0x9d ||
+    code === 0x9e ||
+    code === 0x9f
+  );
 }
 
 function isIntermediateByte(code) {
@@ -248,12 +267,21 @@ function skipControlSequence(text, start) {
   return i;
 }
 
+// A string sequence whose terminator never arrives must not swallow the rest
+// of the turn. An entry's tail can end mid-sequence by construction — storage
+// keeps the first 256 KiB and the wire cap keeps the last 16 KiB — and output
+// disappearing with nothing on screen to say so is the one failure read mode
+// cannot have. Bound the scan the way xterm.js's own OSC parser does: BEL and
+// ST end the string, a newline or an ESC that is not ST aborts it, and the
+// aborting byte is left in place to be handled as itself.
 function skipStringSequence(text, start) {
   let i = start;
   const n = text.length;
   while (i < n) {
-    if (text[i] === "\u0007") return i + 1;
-    if (text[i] === "\u001b" && text[i + 1] === "\\") return i + 2;
+    const ch = text[i];
+    if (ch === "\u0007" || ch === "\u009c") return i + 1;
+    if (ch === "\n") return i;
+    if (ch === "\u001b") return text[i + 1] === "\\" ? i + 2 : i;
     i++;
   }
   return n;
@@ -263,14 +291,30 @@ function normaliseControls(text) {
   return text
     .replace(/\r\n/g, "\n")
     .split("\n")
-    .map((line) => {
-      // A line rewritten in place by bare carriage returns — a progress bar —
-      // renders as its final state, not a hundred overwritten copies.
-      const at = line.lastIndexOf("\r");
-      const kept = at === -1 ? line : line.slice(at + 1);
-      return kept.replace(/[\u0000-\u0008\u000b-\u001f]/g, "");
-    })
+    .map((line) => lastWrittenSegment(stripControls(line)))
     .join("\n");
+}
+
+// Tabs and carriage returns survive this pass; the rest of C0, DEL and the
+// whole C1 block do not.
+function stripControls(line) {
+  return line.replace(
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g,
+    "",
+  );
+}
+
+// A line rewritten in place by bare carriage returns — a progress bar —
+// renders as its final state rather than a hundred overwritten copies. The
+// final state is the last segment that was actually written: a progress bar's
+// last byte is nearly always the carriage return before the shell's next
+// output, and taking the empty tail after it would erase the line.
+function lastWrittenSegment(line) {
+  const segments = line.split("\r");
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (segments[i] !== "") return segments[i];
+  }
+  return "";
 }
 
 // ── DOM ────────────────────────────────────────────────────────────

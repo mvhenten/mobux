@@ -51,6 +51,9 @@
   --exit-fail-bg: rgba(170, 120, 80, 0.18);
   --exit-fail-border: rgba(205, 165, 120, 0.45);
   --exit-fail-fg: #d9c4a8;
+  /* Inline link inside a dark panel — the reader's OSC 133 hint and read
+     mode's empty state both point at /settings#shell-integration. */
+  --panel-link: #7ec8ff;
 }
 
 * { box-sizing: border-box; }
@@ -650,7 +653,7 @@ h1, h2, h3 { margin: 0; }
   font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   color: #c8cdd6;
 }
-.reader-osc-hint a { color: #7ec8ff; }
+.reader-osc-hint a { color: var(--panel-link); }
 .reader-osc-dismiss {
   background: transparent;
   border: 0;
@@ -992,7 +995,7 @@ h1, h2, h3 { margin: 0; }
   line-height: 1.5;
 }
 .cv-empty-text { margin: 0; }
-.cv-empty-link { color: #7ec8ff; }
+.cv-empty-link { color: var(--panel-link); }
 
 #touchOverlay {
   position: absolute;
