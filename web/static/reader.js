@@ -26,31 +26,19 @@
 //                 onTwoPullEnd(pull, vh)   two-finger pull release
 //
 // ── Synthetic scrolling (D6) ────────────────────────────────────────────
-// Native `overflow: auto` on the target mobile WebViews has failed repeatedly
-// (engaged-only-after-fresh-touch on iOS Safari, locked state on Android
-// Chrome with large scrollbacks). The reader renders into an inner box and
-// translates it itself, driven by the same gesture recogniser + physics engine
-// that powers the terminal view. `_scrollY` is positive-down in CSS pixels:
-//   _scrollY = 0          → top of content visible
-//   _scrollY = _maxScroll → bottom of content visible
-// The inner box is translated by `translate3d(0, -_scrollY, 0)`. `scrollBy(dy)`
-// adds `dy`, matching the terminal's convention so finger-DOWN reveals content
-// above (dy < 0 from the recogniser), preserving muscle memory between views.
+// The reader does not scroll natively — it renders into an inner box that
+// synthetic-scroll.js translates, driven by the same gesture recogniser +
+// physics engine that powers the terminal view. See that module for why.
 
 import { tokenize } from "./term-tokenizer.js";
 import { createGestureRecognizer } from "./touch.js";
+import { createSyntheticScroller } from "./synthetic-scroll.js";
 import { loadPrefs } from "./listen-prefs.js";
 import * as prefs from "./prefs.js";
 
 const SPEECH_AVAILABLE = "speechSynthesis" in window;
 
 const RENDER_THROTTLE_MS = 50;
-// A scroll counts as "at the bottom" (and so keeps following live output) only
-// when it reaches the very bottom edge. Streaming keeps the viewport exactly
-// there via the re-pin in render(); an explicit scroll away — even a little —
-// drops the follow so the reader holds position (R2). The epsilon only absorbs
-// sub-pixel rounding, not a real scroll-up.
-const BOTTOM_EPSILON_PX = 2;
 
 // Module-level "what is currently speaking" tracker.
 //
@@ -72,57 +60,15 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
   let inner = null;
   let statusBar = null;
   let oscHint = null;
-
-  let scrollY = 0;
-  let maxScroll = 0;
-  // True when the viewport is at the bottom edge (following live output).
-  // Captured at the most recent scroll/render so the re-pin doesn't re-derive
-  // it from the about-to-change maxScroll.
-  let atBottom = true;
+  let scroller = null;
 
   let renderTimer = null;
   let changeSub = null;
   let oscSub = null;
-  let resizeObserver = null;
   let gestures = null;
   const postRenderCallbacks = [];
 
-  const onWindowResize = () => handleResize();
   const onBufferChanged = () => scheduleRender();
-
-  function applyTransform() {
-    if (!inner) return;
-    inner.style.transform = `translate3d(0, ${-scrollY}px, 0)`;
-  }
-
-  function setScroll(y) {
-    const clamped = Math.max(0, Math.min(maxScroll, y));
-    atBottom = clamped >= maxScroll - BOTTOM_EPSILON_PX;
-    if (clamped === scrollY) return;
-    scrollY = clamped;
-    applyTransform();
-  }
-
-  function recomputeBounds() {
-    if (!inner) {
-      maxScroll = 0;
-      return;
-    }
-    const innerH = inner.scrollHeight;
-    const statusH = statusBar ? statusBar.offsetHeight : 0;
-    const hostH = host.clientHeight - statusH;
-    maxScroll = Math.max(0, innerH - hostH);
-  }
-
-  function handleResize() {
-    if (!mounted || !inner) return;
-    // Host height changed (orientation, virtual keyboard, parent layout).
-    // Re-measure and re-pin if we were at the bottom.
-    recomputeBounds();
-    if (atBottom) scrollY = maxScroll;
-    else scrollY = Math.min(scrollY, maxScroll);
-    applyTransform();
-  }
 
   function scheduleRender() {
     if (!mounted) return;
@@ -136,23 +82,19 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
   function render() {
     if (!inner) return;
     const { lines, status } = doc.snapshot();
-    const wasAtBottom = atBottom;
 
-    renderStatusBar(statusBar, status);
+    scroller.contentChanged(() => {
+      renderStatusBar(statusBar, status);
 
-    const blocks = tokenize(lines);
-    const frag = window.document.createDocumentFragment();
-    for (const block of blocks) frag.appendChild(renderBlock(block));
-    inner.replaceChildren(frag);
-    // After replaceChildren the previous speaker icon (if any) is gone;
-    // re-apply rb-speaking to whichever fresh icon matches the key the
-    // synthesizer is currently reading.
-    reapplySpeakingState(inner);
-
-    recomputeBounds();
-    if (wasAtBottom) scrollY = maxScroll;
-    else scrollY = Math.min(scrollY, maxScroll);
-    applyTransform();
+      const blocks = tokenize(lines);
+      const frag = window.document.createDocumentFragment();
+      for (const block of blocks) frag.appendChild(renderBlock(block));
+      inner.replaceChildren(frag);
+      // After replaceChildren the previous speaker icon (if any) is gone;
+      // re-apply rb-speaking to whichever fresh icon matches the key the
+      // synthesizer is currently reading.
+      reapplySpeakingState(inner);
+    });
 
     // Drain one-shot post-render callbacks (see awaitNextRender()). Snapshot
     // and clear first so callbacks registered during drain wait for the NEXT
@@ -211,13 +153,12 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
 
   function scrollBy(dy) {
     if (!mounted) return;
-    setScroll(scrollY + dy);
+    scroller.scrollBy(dy);
   }
 
   function stickToBottom() {
     if (!mounted) return;
-    atBottom = true;
-    setScroll(maxScroll);
+    scroller.stickToBottom();
   }
 
   function mount() {
@@ -236,20 +177,12 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     // mid-session (e.g. the user just enabled shell integration and reloaded).
     oscSub = doc.onOscDetected(() => refreshOscHint());
 
-    scrollY = 0;
-    maxScroll = 0;
-    atBottom = true;
+    scroller = createSyntheticScroller({ host, inner, footerEl: statusBar });
 
     // The document's change subscription is the single source of truth for
     // "buffer changed" — history reload, WS data, and synthetic test injects
     // all flow through it.
     changeSub = doc.subscribe(onBufferChanged);
-
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(() => handleResize());
-      resizeObserver.observe(host);
-    }
-    window.addEventListener("resize", onWindowResize);
 
     mountGestures();
     render();
@@ -269,11 +202,10 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
       oscSub.dispose();
       oscSub = null;
     }
-    if (resizeObserver) {
-      resizeObserver.disconnect();
-      resizeObserver = null;
+    if (scroller) {
+      scroller.dispose();
+      scroller = null;
     }
-    window.removeEventListener("resize", onWindowResize);
     if (renderTimer !== null) {
       clearTimeout(renderTimer);
       renderTimer = null;
@@ -296,25 +228,21 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     forceRender: () => render(),
     awaitNextRender: () =>
       new Promise((resolve) => postRenderCallbacks.push(resolve)),
-    forceScrollTop: () => {
-      atBottom = false;
-      scrollY = 0;
-      applyTransform();
-    },
+    forceScrollTop: () => scroller?.scrollToTop(),
     get mounted() {
       return mounted;
     },
     get scrollY() {
-      return scrollY;
+      return scroller ? scroller.scrollY : 0;
     },
     get maxScroll() {
-      return maxScroll;
+      return scroller ? scroller.maxScroll : 0;
     },
     get innerHeight() {
-      return inner ? inner.scrollHeight : 0;
+      return scroller ? scroller.innerHeight : 0;
     },
     get atBottom() {
-      return atBottom;
+      return scroller ? scroller.atBottom : true;
     },
     statusBarOffsetHeight: () => (statusBar ? statusBar.offsetHeight : 0),
     statusBarFilled: () =>
