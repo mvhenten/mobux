@@ -382,7 +382,10 @@ function attachedClientCount(session) {
       .split("\n")
       .filter((l) => l.trim()).length;
   } catch (_) {
-    return 0;
+    // A throw is "tmux could not answer", not "nobody is attached" — the
+    // barriers below wait for a count of 0, and returning 0 here would let
+    // a broken tmux satisfy one of them.
+    return -1;
   }
 }
 
@@ -407,16 +410,17 @@ async function attachSessionPage(context, session) {
   return attached;
 }
 
-// A bash session with the real shell-integration snippet installed and a
-// known PS1, torn down (session + snippet) whatever the body does. `page`
-// stays on a non-session route: it is the fetch client only, so it never
-// takes a WS attach of its own and never competes for the recording slot.
-async function withInstrumentedSession(page, body) {
+// A bash session with a known PS1 — with the real shell-integration
+// snippet installed or deliberately without it — torn down (session +
+// snippet) whatever the body does. `page` stays on a non-session route: it
+// is the fetch client only, so it never takes a WS attach of its own and
+// never competes for the recording slot.
+async function withSession(page, { instrumented }, body) {
   const session = `histlifecycle-${process.pid}-${Date.now()}`;
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
   await apiUninstall(page, "bash");
   fs.writeFileSync(`${SANDBOX_HOME}/.bashrc`, "PS1='lifecycletest: '\n");
-  await apiInstall(page, "bash");
+  if (instrumented) await apiInstall(page, "bash");
   try {
     tmux(`kill-session -t ${session}`);
   } catch (_) {}
@@ -438,21 +442,16 @@ async function fetchEntries(page, session) {
   return body.entries;
 }
 
-async function recordedOutput(page, session) {
-  return (await fetchEntries(page, session))
-    .filter((e) => "command" in e)
-    .map((e) => e.output)
-    .join("");
+async function commandEntries(page, session) {
+  return (await fetchEntries(page, session)).filter((e) => "command" in e);
 }
 
 async function waitForCommandCount(page, session, n) {
   await expect
-    .poll(
-      async () =>
-        (await fetchEntries(page, session)).filter((e) => "command" in e)
-          .length,
-      { timeout: 15000, message: `waiting for ${n} command entries` },
-    )
+    .poll(async () => (await commandEntries(page, session)).length, {
+      timeout: 15000,
+      message: `waiting for ${n} command entries`,
+    })
     .toBeGreaterThanOrEqual(n);
 }
 
@@ -460,7 +459,10 @@ test("conversation history: a client that loses the recording slot picks it up w
   context,
   page,
 }) => {
-  await withInstrumentedSession(page, async (session) => {
+  // The steps below wait on real tmux and on entries landing in the log;
+  // their budgets add up past the suite's 30s default.
+  test.setTimeout(90000);
+  await withSession(page, { instrumented: true }, async (session) => {
     const first = await attachSessionPage(context, session);
     await waitForClientCount(session, 1);
 
@@ -477,20 +479,28 @@ test("conversation history: a client that loses the recording slot picks it up w
     const second = await attachSessionPage(context, session);
     await waitForClientCount(session, 2);
 
+    const beforeHandover = await commandEntries(page, session);
     await first.close();
     await waitForClientCount(session, 1);
 
     // tmux drops the departing client before the relay handling it returns
     // and frees the recording slot, so "one client left" does not mean "the
     // slot is free" — a command sent on that edge finishes before the
-    // survivor can take over. Re-sending each tick converges on the answer
-    // instead of betting on that gap: every send after the handover is
-    // recorded, and a handover that never happens fails the poll.
+    // survivor can take over. Re-sending each tick converges instead of
+    // betting on that gap: every send after the handover is recorded, and a
+    // handover that never happens leaves the count where it was.
+    //
+    // The assertion is the entry count, not the text of any entry. Under
+    // tmux's redraw-burst reordering a `C..D` window can capture repaint
+    // bytes and the previous line's echo, so neither `command` nor `output`
+    // is a sound thing to match on here (see attemptConversationHistory's
+    // doc comment, and the 3-attempt harness it needs to survive that).
+    // That an entry exists at all is what the handover is about.
     await expect
       .poll(
         async () => {
           tmux(`send-keys -t ${session} 'echo handover-two' Enter`);
-          return await recordedOutput(page, session);
+          return (await commandEntries(page, session)).length;
         },
         {
           timeout: 20000,
@@ -498,13 +508,15 @@ test("conversation history: a client that loses the recording slot picks it up w
           message: "waiting for the surviving client to record a command",
         },
       )
-      .toContain("handover-two");
+      .toBeGreaterThan(beforeHandover.length);
     await second.close();
 
-    // Output text, not command text: output is the raw bytes between `C`
-    // and `D`, unaffected by the redraw-burst timing gap that can leave
-    // `command` empty (see attemptConversationHistory's doc comment).
-    expect(await recordedOutput(page, session)).toContain("handover-one");
+    // The record the departing client wrote survives the handover intact —
+    // entries are append-only, so this is exact, not a text match.
+    const afterHandover = await commandEntries(page, session);
+    expect(
+      afterHandover.slice(0, beforeHandover.length).map((e) => e.seq),
+    ).toEqual(beforeHandover.map((e) => e.seq));
   });
 });
 
@@ -512,7 +524,8 @@ test("conversation history: detaching an instrumented session appends no trailin
   context,
   page,
 }) => {
-  await withInstrumentedSession(page, async (session) => {
+  test.setTimeout(60000);
+  await withSession(page, { instrumented: true }, async (session) => {
     const attached = await attachSessionPage(context, session);
     await waitForClientCount(session, 1);
 
@@ -541,6 +554,40 @@ test("conversation history: detaching an instrumented session appends no trailin
       trailing,
       `raw entries after the last command: ${JSON.stringify(trailing)}`,
     ).toEqual([]);
+  });
+});
+
+// The other half of the flush contract, and the half that is easy to break
+// by accident: a session with no shell integration has no markers, so raw
+// entries ARE its record and detach must still write the tail. Covered
+// end-to-end here because CI compiles the Rust tests without running them
+// (`ci.yml`'s `cargo test --no-run`), so the unit test that pins this
+// exactly never executes there.
+test("conversation history: detaching a session with no shell integration still records its tail", async ({
+  context,
+  page,
+}) => {
+  test.setTimeout(60000);
+  await withSession(page, { instrumented: false }, async (session) => {
+    const attached = await attachSessionPage(context, session);
+    await waitForClientCount(session, 1);
+
+    tmux(`send-keys -t ${session} 'echo plain-tail-marker' Enter`);
+    await expect
+      .poll(() => tmux(`capture-pane -p -t ${session}`).toString(), {
+        timeout: 10000,
+        message: "waiting for the command to run in the pane",
+      })
+      .toContain("plain-tail-marker");
+
+    await attached.close();
+    await waitForClientCount(session, 0);
+
+    const entries = await fetchEntries(page, session);
+    expect(entries.filter((e) => "command" in e)).toEqual([]);
+    // Nothing here reached RAW_FLUSH_THRESHOLD, so the whole record is what
+    // detach flushed. Gate the flush, not the threshold drain.
+    expect(entries.map((e) => e.raw).join("")).toContain("plain-tail-marker");
   });
 });
 

@@ -270,6 +270,11 @@ impl Segmenter {
     /// `feed`, so what is dropped is the sub-threshold tail. Without a
     /// marker there is no conversation to protect, and raw entries are the
     /// whole record, so that case is unchanged.
+    ///
+    /// `seen_marker` latches on the first marker of any kind, so a single
+    /// OSC 133 sequence in ordinary output — `cat` of a file carrying one,
+    /// an ssh into an instrumented host — makes this connection's segmenter
+    /// treat the session as instrumented for the rest of its life.
     pub fn flush(&mut self, now_ms: i64) -> Option<PendingEntry> {
         if let Some(open) = self.open.take() {
             return Some(open.finish(None, now_ms));

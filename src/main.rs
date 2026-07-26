@@ -1947,9 +1947,6 @@ struct ResizeMsg {
     rows: u16,
 }
 
-/// How often a connection without the feeder slot retries for it.
-const FEEDER_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
 async fn handle_ws(
     socket: axum::extract::ws::WebSocket,
     session_name: String,
@@ -2031,8 +2028,6 @@ async fn handle_ws(
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    let mut last_feeder_attempt = std::time::Instant::now();
-
     loop {
         tokio::select! {
             maybe_out = rx.recv() => {
@@ -2048,15 +2043,14 @@ async fn handle_ws(
                         // trying: the holder's departure frees the slot but
                         // nothing else re-acquires it, so without this a
                         // still-attached client relays forever and records
-                        // nothing. Rate-limited to once a second so the
-                        // mutex is not touched per 8 KiB chunk. A segmenter
-                        // that starts mid-stream may produce one partial
-                        // entry — the same jitter the record already carries
-                        // from any mid-stream attach.
-                        if feeder_guard.is_none()
-                            && last_feeder_attempt.elapsed() >= FEEDER_RETRY_INTERVAL
-                        {
-                            last_feeder_attempt = std::time::Instant::now();
+                        // nothing. Retried before the chunk is fed, and on
+                        // every chunk rather than on a timer — the window
+                        // between the slot freeing and the new segmenter
+                        // existing is a window in which a whole command
+                        // goes unrecorded, and one uncontended mutex is
+                        // nothing next to the copy, the lossy decode and
+                        // the awaited send this branch already does.
+                        if feeder_guard.is_none() {
                             feeder_guard = session_history.try_acquire_feeder(&session_name);
                             if feeder_guard.is_some() {
                                 segmenter = Some(session_history::Segmenter::new());
