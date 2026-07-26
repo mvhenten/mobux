@@ -41,6 +41,19 @@
   --border: #22262f;
   --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace;
   --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* Exit-status chip. Deliberately muted — no bright/saturated red or green —
+     so it reads as a quiet affordance rather than an alert. Shared by the
+     reader's .rb-command-status and read mode's .cv-exit so the two views
+     say pass/fail in one visual language. */
+  --exit-ok-bg: rgba(80, 150, 120, 0.16);
+  --exit-ok-border: rgba(120, 190, 160, 0.4);
+  --exit-ok-fg: #a9d0bd;
+  --exit-fail-bg: rgba(170, 120, 80, 0.18);
+  --exit-fail-border: rgba(205, 165, 120, 0.45);
+  --exit-fail-fg: #d9c4a8;
+  /* Inline link inside a dark panel — the reader's OSC 133 hint and read
+     mode's empty state both point at /settings#shell-integration. */
+  --panel-link: #7ec8ff;
 }
 
 * { box-sizing: border-box; }
@@ -640,7 +653,7 @@ h1, h2, h3 { margin: 0; }
   font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   color: #c8cdd6;
 }
-.reader-osc-hint a { color: #7ec8ff; }
+.reader-osc-hint a { color: var(--panel-link); }
 .reader-osc-dismiss {
   background: transparent;
   border: 0;
@@ -719,9 +732,8 @@ h1, h2, h3 { margin: 0; }
   line-height: 1.4;
 }
 
-/* Exit status chip. Deliberately muted — no bright/saturated red or green —
-   so it reads as a quiet affordance rather than an alert, matching the
-   .rb-speaker.rb-speaking teal used elsewhere in the reader. */
+/* Exit status chip. The muted pass/fail palette lives in :root as
+   --exit-ok-* / --exit-fail-* so read mode's .cv-exit wears the same one. */
 .rb-command-status {
   display: inline-block;
   margin-top: 2px;
@@ -733,14 +745,14 @@ h1, h2, h3 { margin: 0; }
   line-height: 1.5;
 }
 .rb-command-status.rb-status-ok {
-  background: rgba(80, 150, 120, 0.16);
-  border-color: rgba(120, 190, 160, 0.4);
-  color: #a9d0bd;
+  background: var(--exit-ok-bg);
+  border-color: var(--exit-ok-border);
+  color: var(--exit-ok-fg);
 }
 .rb-command-status.rb-status-fail {
-  background: rgba(170, 120, 80, 0.18);
-  border-color: rgba(205, 165, 120, 0.45);
-  color: #d9c4a8;
+  background: var(--exit-fail-bg);
+  border-color: var(--exit-fail-border);
+  color: var(--exit-fail-fg);
 }
 
 .rb-text {
@@ -863,6 +875,127 @@ h1, h2, h3 { margin: 0; }
   display: none;
 }
 
+/* ── Read mode ────────────────────────────────────────────────
+   The recorded conversation as a dialogue: what you typed on the left,
+   what came back on the right. Synthetic scrolling as in the reader —
+   the host is a fixed-size viewport with no overflow and .cv-inner is
+   translated by JS. */
+.cv-host {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  box-sizing: border-box;
+  color: var(--text);
+  background: var(--bg);
+  touch-action: none;
+}
+.cv-host.hidden { display: none; }
+.cv-inner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 12px 14px 24px;
+  box-sizing: border-box;
+  will-change: transform;
+}
+
+.cv-turn {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 14px;
+}
+.cv-cmd {
+  align-self: flex-start;
+  max-width: 88%;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
+  color: #c8ccd4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The prompt prefix stays on screen but steps back, so the typed command
+   is what the eye lands on. */
+.cv-cmd-prompt {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+.cv-cmd--empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.cv-out {
+  align-self: flex-end;
+  max-width: 88%;
+  margin-top: 4px;
+}
+.cv-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.cv-trunc {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.cv-exit {
+  align-self: flex-end;
+  display: inline-block;
+  max-width: 88%;
+  margin-top: 4px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.cv-exit.cv-exit--ok {
+  background: var(--exit-ok-bg);
+  border-color: var(--exit-ok-border);
+  color: var(--exit-ok-fg);
+}
+.cv-exit.cv-exit--fail {
+  background: var(--exit-fail-bg);
+  border-color: var(--exit-fail-border);
+  color: var(--exit-fail-fg);
+}
+
+/* Unattributed bytes: full width, no dialogue side, no exit chip. */
+.cv-raw {
+  margin: 0 0 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.cv-empty-text { margin: 0; }
+.cv-empty-link { color: var(--panel-link); }
 
 #touchOverlay {
   position: absolute;
