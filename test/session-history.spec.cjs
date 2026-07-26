@@ -589,9 +589,17 @@ test("conversation history: detaching a session with no shell integration still 
 
     const entries = await fetchEntries(page, session);
     expect(entries.filter((e) => "command" in e)).toEqual([]);
-    // Nothing here reached RAW_FLUSH_THRESHOLD, so the whole record is what
-    // detach flushed. Gate the flush, not the threshold drain.
-    expect(entries.map((e) => e.raw).join("")).toContain("plain-tail-marker");
+    // The marker must be in the LAST entry and nowhere before it. Only
+    // detach writes the last entry; everything earlier was drained mid-
+    // stream at RAW_FLUSH_THRESHOLD. Asserting over the whole record would
+    // still pass once a bigger PTY, a MOTD or a longer prompt pushes the
+    // marker into a drained chunk — at which point it would be testing the
+    // drain, not the flush.
+    expect(
+      entries.slice(0, -1).map((e) => e.raw),
+      "the marker must reach the record through flush, not a mid-stream drain",
+    ).not.toContain(expect.stringContaining("plain-tail-marker"));
+    expect(entries.at(-1).raw).toContain("plain-tail-marker");
   });
 });
 
