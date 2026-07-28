@@ -703,6 +703,14 @@ function entryBytes(body) {
   return body.entries.reduce((n, e) => n + JSON.stringify(e).length, 0);
 }
 
+// A line of exactly `byteLength` bytes, newline included, carrying a seq a
+// forward scan would return.
+function decoyLine(seq, byteLength) {
+  const base = Buffer.byteLength(JSON.stringify({ seq, raw: "", ts: 0 }));
+  const padded = "p".repeat(byteLength - 1 - base);
+  return JSON.stringify({ seq, raw: padded, ts: 0 }) + "\n";
+}
+
 test.describe("conversation endpoint: paging contract", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
@@ -938,6 +946,102 @@ test.describe("conversation endpoint: paging contract", () => {
       const tail = await fetchConversation(page, session, "?tail=50");
       expect(tail.status).toBe(200);
       expect(seqsOf(tail.body)).toEqual([2]);
+    });
+  });
+
+  // `append` writes a line and its newline separately, and a large line is
+  // copied incrementally, so a poll can observe a prefix that ends inside a
+  // multi-byte character — which terminal output carries constantly. Every
+  // mode must skip that line rather than fail on it.
+  test("conversation endpoint: a line torn inside a multi-byte character is skipped, not an error", async ({
+    page,
+  }) => {
+    await withSeededHistory(
+      [rawEntry(1), rawEntry(2)],
+      async (session, file) => {
+        const complete = await fetchConversation(page, session);
+        expect(seqsOf(complete.body)).toEqual([1, 2]);
+        const atEof = encodeURIComponent(complete.body.nextCursor);
+        const legacy = encodeURIComponent(makeCursor("v1:1"));
+
+        const third = Buffer.from(JSON.stringify(rawEntry(3, "€€€")), "utf8");
+        const cut = third.indexOf(0xe2) + 1;
+        fs.appendFileSync(file, third.subarray(0, cut));
+
+        const fresh = await fetchConversation(page, session);
+        expect(fresh.status).toBe(200);
+        expect(seqsOf(fresh.body)).toEqual([1, 2]);
+
+        const polled = await fetchConversation(
+          page,
+          session,
+          `?cursor=${atEof}`,
+        );
+        expect(polled.status).toBe(200);
+        expect(seqsOf(polled.body)).toEqual([]);
+
+        const fallback = await fetchConversation(
+          page,
+          session,
+          `?cursor=${legacy}`,
+        );
+        expect(fallback.status).toBe(200);
+        expect(seqsOf(fallback.body)).toEqual([2]);
+
+        const tail = await fetchConversation(page, session, "?tail=10");
+        expect(tail.status).toBe(200);
+        expect(seqsOf(tail.body)).toEqual([1, 2]);
+
+        fs.appendFileSync(
+          file,
+          Buffer.concat([third.subarray(cut), Buffer.from("\n")]),
+        );
+        const settled = await fetchConversation(page, session);
+        expect(seqsOf(settled.body)).toEqual([1, 2, 3]);
+        expect(settled.body.entries[2].raw).toBe("€€€");
+      },
+    );
+  });
+
+  // The seek is the reason the cursor carries an offset at all, and its
+  // absence is invisible in a page's contents alone. Rewriting the bytes
+  // before the offset into an entry a scan would return makes the two
+  // strategies disagree.
+  test("conversation endpoint: a cursor with a trusted offset seeks past content a full scan would return", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4, 5].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session, file) => {
+      const first = await fetchConversation(page, session, "?limit=3");
+      expect(seqsOf(first.body)).toEqual([1, 2, 3]);
+      const offset = Number(decodeCursor(first.body.nextCursor).split(":")[2]);
+      expect(offset).toBe(Buffer.byteLength(jsonl(entries.slice(0, 3))));
+
+      const rest = fs.readFileSync(file).subarray(offset);
+      fs.writeFileSync(
+        file,
+        Buffer.concat([Buffer.from(decoyLine(90, offset)), rest]),
+      );
+
+      const scanned = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor("v1:3"))}`,
+      );
+      expect(
+        seqsOf(scanned.body),
+        "the decoy must be something a full scan returns",
+      ).toEqual([90, 4, 5]);
+
+      const seeked = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      );
+      expect(
+        seqsOf(seeked.body),
+        "a trusted offset must seek, never rescan from byte 0",
+      ).toEqual([4, 5]);
     });
   });
 

@@ -725,6 +725,11 @@ impl SessionHistoryStore {
     /// a poll sitting at the newest entry does work proportional to what is
     /// new rather than to the whole history. An untrusted offset costs a
     /// full forward scan and returns the same page.
+    ///
+    /// Validation and the read that follows share one handle. Two opens
+    /// would let a trim land between them, shifting every offset down so
+    /// the read starts past the entry validation just approved — the one
+    /// case where a stale offset would skip a seq instead of falling back.
     pub fn read_page(
         &self,
         session: &str,
@@ -733,21 +738,31 @@ impl SessionHistoryStore {
     ) -> anyhow::Result<Page> {
         let path = self.file_path(session);
         let floor = cursor.map(|c| c.seq).unwrap_or(0);
-        let file_len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
-        if let Some(offset) = cursor.and_then(|c| c.offset) {
-            if offset_resumes_at_seq(&path, offset, floor, file_len) {
-                if offset == file_len {
-                    return Ok(Page {
-                        entries: Vec::new(),
-                        next_seq: floor,
-                        next_offset: offset,
-                    });
-                }
-                return scan_forward(&path, offset, floor, limit);
+        let Ok(file) = File::open(&path) else {
+            return Ok(Page {
+                entries: Vec::new(),
+                next_seq: floor,
+                next_offset: 0,
+            });
+        };
+        let file_len = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
+
+        let from_offset = match cursor.and_then(|c| c.offset) {
+            Some(offset) if offset == file_len => {
+                return Ok(Page {
+                    entries: Vec::new(),
+                    next_seq: floor,
+                    next_offset: offset,
+                })
             }
-        }
-        scan_forward(&path, 0, floor, limit)
+            Some(offset) if offset < file_len && resumes_at_seq(&mut reader, offset, floor)? => {
+                offset
+            }
+            _ => 0,
+        };
+        scan_forward(&mut reader, from_offset, floor, limit)
     }
 
     /// Returns the newest entries, oldest of the page first, read backwards
@@ -831,34 +846,28 @@ fn cap_output_for_wire(value: &mut serde_json::Value) {
     );
 }
 
-/// Whether a cursor's byte offset can be trusted to resume at
-/// `cursor_seq + 1`. Seqs are contiguous within the retained range, and a
-/// trim only ever shifts offsets down, so a stale offset lands on later
-/// content and fails this check. `offset == file_len` means "nothing new
-/// that is fully written yet" — authoritative about the file's length, not
-/// about its contents.
-fn offset_resumes_at_seq(path: &Path, offset: u64, cursor_seq: u64, file_len: u64) -> bool {
-    if offset > file_len {
-        return false;
+/// Whether a cursor's byte offset resumes at `cursor_seq + 1`. Seqs are
+/// contiguous within the retained range, and a trim only ever shifts
+/// offsets down, so a stale offset lands on later content and fails this
+/// check. Called on the same handle the page is then read from, and only
+/// for an offset strictly inside the file: `offset == file_len` means
+/// "nothing new that is fully written yet", which is a property of the
+/// file's length rather than its contents.
+fn resumes_at_seq(
+    reader: &mut BufReader<File>,
+    offset: u64,
+    cursor_seq: u64,
+) -> anyhow::Result<bool> {
+    reader.seek(SeekFrom::Start(offset))?;
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line)?;
+    if !line.ends_with(b"\n") {
+        return Ok(false);
     }
-    if offset == file_len {
-        return true;
-    }
-    let Ok(file) = File::open(path) else {
-        return false;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+        return Ok(false);
     };
-    let mut reader = BufReader::new(file);
-    if reader.seek(SeekFrom::Start(offset)).is_err() {
-        return false;
-    }
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || !line.ends_with('\n') {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-        return false;
-    };
-    value.get("seq").and_then(|s| s.as_u64()) == Some(cursor_seq + 1)
+    Ok(value.get("seq").and_then(|s| s.as_u64()) == Some(cursor_seq + 1))
 }
 
 /// Reads forward from `from_offset`, skipping entries at or below `floor`,
@@ -866,38 +875,34 @@ fn offset_resumes_at_seq(path: &Path, offset: u64, cursor_seq: u64, file_len: u6
 /// first. A page always carries at least one entry, even one that alone
 /// exceeds the budget, so pagination can never stall.
 ///
-/// A trailing line with no newline is a `writeln!` caught mid-write and is
-/// never consumed: every offset this returns lands on a line boundary.
-fn scan_forward(path: &Path, from_offset: u64, floor: u64, limit: usize) -> anyhow::Result<Page> {
+/// Lines are read as bytes, never as text: `append` writes a line and its
+/// newline separately, and a large line is copied incrementally, so a read
+/// can land inside a multi-byte character. Such a line has no newline yet
+/// and is never consumed — every offset this returns lands on a line
+/// boundary — but it must not fail the read either.
+fn scan_forward(
+    reader: &mut BufReader<File>,
+    from_offset: u64,
+    floor: u64,
+    limit: usize,
+) -> anyhow::Result<Page> {
     let mut entries: Vec<serde_json::Value> = Vec::new();
     let mut next_seq = floor;
     let mut next_offset = from_offset;
     let mut used = 0usize;
 
-    let Ok(file) = File::open(path) else {
-        return Ok(Page {
-            entries,
-            next_seq,
-            next_offset,
-        });
-    };
-    let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from_offset))?;
 
     let mut position = from_offset;
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 || !line.ends_with('\n') {
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 || !line.ends_with(b"\n") {
             break;
         }
         position += read as u64;
-        if line.trim().is_empty() {
-            next_offset = position;
-            continue;
-        }
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&line) else {
             next_offset = position;
             continue;
         };
@@ -1689,6 +1694,120 @@ mod tests {
             .unwrap();
         assert!(page.entries.is_empty());
         assert_eq!(page.next_offset, caught_up.next_offset);
+    }
+
+    #[test]
+    fn a_line_torn_inside_a_multibyte_character_is_skipped_not_an_error() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 2);
+        let caught_up = store.read_page("s1", None, 50).unwrap();
+
+        let line = serde_json::json!({"seq": 3, "raw": "€€€", "ts": 0}).to_string();
+        let bytes = line.as_bytes();
+        let cut = bytes.iter().position(|&b| b == 0xe2).unwrap() + 1;
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(store.file_path("s1"))
+            .unwrap();
+        f.write_all(&bytes[..cut]).unwrap();
+        drop(f);
+
+        for cursor in [
+            None,
+            Some(cursor_of(&caught_up)),
+            Some(PageCursor {
+                seq: 1,
+                offset: None,
+            }),
+        ] {
+            let page = store.read_page("s1", cursor, 50).unwrap();
+            let seqs: Vec<u64> = page
+                .entries
+                .iter()
+                .map(|e| e["seq"].as_u64().unwrap())
+                .collect();
+            let expected: Vec<u64> = match cursor.map(|c| c.seq).unwrap_or(0) {
+                0 => vec![1, 2],
+                1 => vec![2],
+                _ => vec![],
+            };
+            assert_eq!(seqs, expected, "cursor {cursor:?}");
+        }
+
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(store.file_path("s1"))
+            .unwrap();
+        f.write_all(&bytes[cut..]).unwrap();
+        f.write_all(b"\n").unwrap();
+        drop(f);
+        let page = store.read_page("s1", None, 50).unwrap();
+        assert_eq!(page.entries.len(), 3);
+        assert_eq!(page.entries[2]["raw"], "€€€");
+    }
+
+    /// A line of exactly `byte_length` bytes, newline included, carrying a
+    /// seq a forward scan would return.
+    fn decoy_line(seq: u64, byte_length: usize) -> String {
+        let base = serde_json::json!({"seq": seq, "raw": "", "ts": 0})
+            .to_string()
+            .len();
+        let padded = "p".repeat(byte_length - 1 - base);
+        format!(
+            "{}\n",
+            serde_json::json!({"seq": seq, "raw": padded, "ts": 0})
+        )
+    }
+
+    #[test]
+    fn a_trusted_offset_seeks_past_content_a_full_scan_would_return() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 5);
+        let first = store.read_page("s1", None, 3).unwrap();
+        assert_eq!(first.next_seq, 3);
+
+        // Everything before the offset becomes one entry a scan from byte 0
+        // would return, at exactly the same byte length so the offset still
+        // lands on seq 4.
+        let path = store.file_path("s1");
+        let bytes = fs::read(&path).unwrap();
+        let offset = first.next_offset as usize;
+        let mut rewritten = decoy_line(90, offset).into_bytes();
+        rewritten.extend_from_slice(&bytes[offset..]);
+        fs::write(&path, &rewritten).unwrap();
+
+        let scanned = store
+            .read_page(
+                "s1",
+                Some(PageCursor {
+                    seq: 3,
+                    offset: None,
+                }),
+                50,
+            )
+            .unwrap();
+        let scanned_seqs: Vec<u64> = scanned
+            .entries
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            scanned_seqs,
+            vec![90, 4, 5],
+            "the decoy must be something a full scan returns"
+        );
+
+        let seeked = store.read_page("s1", Some(cursor_of(&first)), 50).unwrap();
+        let seeked_seqs: Vec<u64> = seeked
+            .entries
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            seeked_seqs,
+            vec![4, 5],
+            "a trusted offset must seek, never rescan from byte 0"
+        );
     }
 
     #[test]
