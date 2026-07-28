@@ -1007,6 +1007,48 @@ test.describe("conversation endpoint: paging contract", () => {
     );
   });
 
+  // The hotter of the two offset arms: a poll that is already at the
+  // newest entry answers from the file's length alone and never reads its
+  // contents. Deleting that arm leaves the output byte-identical, so the
+  // gate has to make reading the file observable — the whole file becomes
+  // one entry a scan would return, at the same length so the cursor still
+  // sits at the end of it.
+  test("conversation endpoint: a cursor at the end of the file answers without reading its contents", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4, 5].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session, file) => {
+      const caughtUp = await fetchConversation(page, session);
+      expect(seqsOf(caughtUp.body)).toEqual([1, 2, 3, 4, 5]);
+      const fileLength = fs.statSync(file).size;
+      expect(decodeCursor(caughtUp.body.nextCursor)).toBe(`v2:5:${fileLength}`);
+
+      fs.writeFileSync(file, decoyLine(90, fileLength));
+      expect(fs.statSync(file).size).toBe(fileLength);
+
+      const scanned = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor("v1:5"))}`,
+      );
+      expect(
+        seqsOf(scanned.body),
+        "the decoy must be something a full scan returns",
+      ).toEqual([90]);
+
+      const polled = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(caughtUp.body.nextCursor)}`,
+      );
+      expect(
+        seqsOf(polled.body),
+        "a cursor at the end of the file must not read its contents",
+      ).toEqual([]);
+      expect(polled.body.nextCursor).toBe(caughtUp.body.nextCursor);
+    });
+  });
+
   // The seek is the reason the cursor carries an offset at all, and its
   // absence is invisible in a page's contents alone. Rewriting the bytes
   // before the offset into an entry a scan would return makes the two

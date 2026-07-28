@@ -1768,6 +1768,47 @@ mod tests {
     }
 
     #[test]
+    fn a_caught_up_offset_answers_without_reading_the_files_contents() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 5);
+        let caught_up = store.read_page("s1", None, 50).unwrap();
+        assert_eq!(caught_up.next_seq, 5);
+
+        // The whole file becomes one entry a scan would return, at exactly
+        // the same length so the cursor still sits at the end of it.
+        let path = store.file_path("s1");
+        let file_len = fs::metadata(&path).unwrap().len() as usize;
+        fs::write(&path, decoy_line(90, file_len)).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len() as usize, file_len);
+
+        let scanned = store
+            .read_page(
+                "s1",
+                Some(PageCursor {
+                    seq: 5,
+                    offset: None,
+                }),
+                50,
+            )
+            .unwrap();
+        assert_eq!(
+            scanned.entries[0]["seq"].as_u64().unwrap(),
+            90,
+            "the decoy must be something a full scan returns"
+        );
+
+        let polled = store
+            .read_page("s1", Some(cursor_of(&caught_up)), 50)
+            .unwrap();
+        assert!(
+            polled.entries.is_empty(),
+            "a cursor at the end of the file must not read its contents"
+        );
+        assert_eq!(polled.next_seq, caught_up.next_seq);
+        assert_eq!(polled.next_offset, caught_up.next_offset);
+    }
+
+    #[test]
     fn a_trusted_offset_seeks_past_content_a_full_scan_would_return() {
         let (_dir, store) = temp_store();
         fill(&store, "s1", 5);
