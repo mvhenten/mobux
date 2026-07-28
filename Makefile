@@ -263,6 +263,18 @@ test-read-mode-render:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/read-mode-render.spec.cjs
 
+# Conversation history endpoint (issues #220, #233): the recording path
+# against a real tmux+bash/zsh session, and the paging contract — offset
+# cursor, tail, byte-bounded pages — against a seeded log. Runs as part of
+# `make test-spa`; standalone here for local iteration.
+.PHONY: test-session-history
+test-session-history:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/session-history.spec.cjs
+
 # Renderer conformance (issue #207, D10): one spec exercises the explicit
 # renderer interface (R1–R16) against BOTH adapters via the xterm/sterk
 # Playwright projects. A renderer is conformant when this suite is green on its

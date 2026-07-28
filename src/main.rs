@@ -882,18 +882,63 @@ async fn api_session_history(
 struct ConversationHistoryQuery {
     cursor: Option<String>,
     limit: Option<usize>,
+    tail: Option<usize>,
 }
 
 /// GET /api/sessions/{name}/conversation — the OSC 133-segmented
-/// conversation record (issue #220), paginated by an opaque `seq`-based
-/// cursor. See `session_history.rs` for the storage/segmentation design and
-/// the PR description for the pinned contract.
+/// conversation record (issue #220), served in opaquely-cursored pages
+/// (issue #233). See `session_history.rs` for the storage/segmentation
+/// design.
+///
+/// ```text
+/// GET /api/sessions/{name}/conversation
+///       ?cursor=<opaque>    resume forward from a previous page (exclusive)
+///       ?limit=<n>          max entries in a forward page
+///       ?tail=<n>           the newest n entries
+/// → 200 { "entries": [ … ], "nextCursor": "<opaque>" }
+/// ```
+///
+/// The three modes are mutually exclusive: neither parameter gives a
+/// forward page from the oldest retained entry; `cursor` (optionally with
+/// `limit`) resumes forward from it, exclusive; `tail` gives the newest
+/// entries. `tail` alongside `cursor` or `limit` is a 400 — `tail` carries
+/// its own count, so a second one is ambiguous. `limit` defaults to 50;
+/// both it and `tail` clamp to 1..500 rather than rejecting.
+///
+/// `output` is truncated for transport to the last
+/// `MAX_WIRE_OUTPUT_BYTES`, and a truncated entry carries
+/// `outputTruncatedBytes`, the count dropped from the front; the field is
+/// absent otherwise. A page carries at most `MAX_PAGE_BYTES` of entry JSON
+/// counted after that cap — a forward page stops early, a `tail` page drops
+/// from its oldest end so the newest survive — but always at least one
+/// entry, so a page can never stall.
+///
+/// `nextCursor` is always present and decodes to `v2:<seq>:<offset>`: the
+/// last entry in the page and the byte offset just past its line, which is
+/// what makes a steady-state poll a seek rather than a scan of the whole
+/// history. An empty page echoes the supplied cursor; an empty or absent
+/// file gives the zero cursor. `v1:<seq>` cursors still decode, with the
+/// offset unknown, so no client holding one breaks.
+///
+/// An unparseable cursor and a malformed session name are both a 400. A
+/// well-formed name with no history is an empty page with the zero cursor.
 async fn api_session_conversation(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<ConversationHistoryQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_session_name(&state, &name)?;
+
+    if q.tail.is_some() && q.cursor.is_some() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "tail and cursor are mutually exclusive"
+        )));
+    }
+    if q.tail.is_some() && q.limit.is_some() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "tail carries its own count; limit is ambiguous alongside it"
+        )));
+    }
 
     let cursor = match q.cursor {
         Some(raw) => Some(
@@ -902,21 +947,27 @@ async fn api_session_conversation(
         ),
         None => None,
     };
-    let limit = q
-        .limit
-        .unwrap_or(session_history::DEFAULT_LIMIT)
-        .clamp(1, session_history::MAX_LIMIT);
 
     let history = state.session_history.clone();
-    let (entries, next_seq) =
-        tokio::task::spawn_blocking(move || history.read_page(&name, cursor, limit))
-            .await
-            .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-            .map_err(AppError::internal)?;
+    let page = match q.tail {
+        Some(tail) => {
+            let count = tail.clamp(1, session_history::MAX_LIMIT);
+            tokio::task::spawn_blocking(move || history.read_tail(&name, count)).await
+        }
+        None => {
+            let limit = q
+                .limit
+                .unwrap_or(session_history::DEFAULT_LIMIT)
+                .clamp(1, session_history::MAX_LIMIT);
+            tokio::task::spawn_blocking(move || history.read_page(&name, cursor, limit)).await
+        }
+    }
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
 
     Ok(Json(json!({
-        "entries": entries,
-        "nextCursor": session_history::encode_cursor(next_seq),
+        "entries": page.entries,
+        "nextCursor": session_history::encode_cursor(page.next_seq, page.next_offset),
     })))
 }
 
