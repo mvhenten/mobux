@@ -673,11 +673,11 @@ function jsonl(entries) {
 // through exactly the path a recorded session would. A wrong data dir
 // yields an empty page, which fails these assertions loudly rather than
 // passing quietly.
-async function withSeededHistory(entries, body) {
+async function withSeededFile(contents, body) {
   const session = `histseed-${process.pid}-${Date.now()}-${seedCounter++}`;
   const file = `${HISTORY_DIR}/${session}.jsonl`;
   fs.mkdirSync(HISTORY_DIR, { recursive: true });
-  fs.writeFileSync(file, jsonl(entries));
+  fs.writeFileSync(file, contents);
   try {
     return await body(session, file);
   } finally {
@@ -685,6 +685,10 @@ async function withSeededHistory(entries, body) {
       fs.unlinkSync(file);
     } catch (_) {}
   }
+}
+
+async function withSeededHistory(entries, body) {
+  return withSeededFile(jsonl(entries), body);
 }
 
 function decodeCursor(cursor) {
@@ -1063,16 +1067,24 @@ test.describe("conversation endpoint: paging contract", () => {
 
     // A supplied cursor does not change that: a file with no content
     // cannot account for a seq, and echoing one would strand the client on
-    // a floor no entry reaches if the record later starts over.
-    for (const cursor of ["v1:7", "v2:7:0", "v2:7:400"]) {
-      const carried = await fetchConversation(
-        page,
-        session,
-        `?cursor=${encodeURIComponent(makeCursor(cursor))}`,
-      );
-      expect(carried.status, cursor).toBe(200);
-      expect(carried.body.entries, cursor).toEqual([]);
-      expect(decodeCursor(carried.body.nextCursor), cursor).toBe("v2:0:0");
-    }
+    // a floor no entry reaches if the record later starts over. Both the
+    // absent file and the zero-byte one, which are separate paths.
+    await withSeededFile("", async (seeded) => {
+      for (const name of [session, seeded]) {
+        for (const cursor of ["v1:7", "v2:7:0", "v2:7:400"]) {
+          const where = `${name === session ? "absent" : "empty"} ${cursor}`;
+          const carried = await fetchConversation(
+            page,
+            name,
+            `?cursor=${encodeURIComponent(makeCursor(cursor))}`,
+          );
+          expect(carried.status, where).toBe(200);
+          expect(carried.body.entries, where).toEqual([]);
+          expect(decodeCursor(carried.body.nextCursor), where).toBe("v2:0:0");
+        }
+        const tail = await fetchConversation(page, name, "?tail=10");
+        expect(decodeCursor(tail.body.nextCursor), name).toBe("v2:0:0");
+      }
+    });
   });
 });
