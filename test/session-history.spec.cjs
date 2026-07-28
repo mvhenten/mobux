@@ -16,6 +16,7 @@
 // .spec.cjs).
 
 const fs = require("fs");
+const path = require("path");
 const { test, expect } = require("./fixtures.cjs");
 const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
 const { resolveZshBin } = require("./lib/zsh.cjs");
@@ -626,4 +627,506 @@ test("conversation history: invalid cursor is a 400, not a silent empty page", a
     "?cursor=not-a-real-cursor",
   );
   expect(status).toBe(400);
+});
+
+// ── Page shape: offset cursor, tail, byte budget (issue #233) ─────────
+//
+// The clauses below are the endpoint's read path, so they run against a
+// seeded log rather than a real tmux session: what a page holds, where its
+// cursor points and where the byte budget cuts are properties of the file,
+// and a real shell cannot produce a 600 KiB entry or an exactly-known byte
+// offset on demand. The recording path keeps its own coverage above.
+//
+// CI runs the Rust unit tests through `cargo test --no-run` (`ci.yml`), so
+// these are the gate and the unit tests mirroring them are additive.
+
+// The smoke instance's MOBUX_DATA_DIR: the Makefile's smoke-start puts the
+// sandbox HOME inside it.
+const DATA_DIR = process.env.MOBUX_TEST_DATA_DIR || path.dirname(SANDBOX_HOME);
+const HISTORY_DIR = `${DATA_DIR}/history`;
+const MAX_WIRE_OUTPUT_BYTES = 16 * 1024;
+const MAX_PAGE_BYTES = 512 * 1024;
+const MAX_LIMIT = 500;
+
+let seedCounter = 0;
+
+function rawEntry(seq, raw = `raw-${seq}`) {
+  return { seq, raw, ts: 1000 + seq };
+}
+
+function commandEntry(seq, output) {
+  return {
+    seq,
+    command: `cmd-${seq}`,
+    output,
+    exitCode: 0,
+    startedAt: 1000 + seq,
+    endedAt: 1001 + seq,
+  };
+}
+
+function jsonl(entries) {
+  return entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
+}
+
+// The seeded file is the server's own store file, so the endpoint reads it
+// through exactly the path a recorded session would. A wrong data dir
+// yields an empty page, which fails these assertions loudly rather than
+// passing quietly.
+async function withSeededFile(contents, body) {
+  const session = `histseed-${process.pid}-${Date.now()}-${seedCounter++}`;
+  const file = `${HISTORY_DIR}/${session}.jsonl`;
+  fs.mkdirSync(HISTORY_DIR, { recursive: true });
+  fs.writeFileSync(file, contents);
+  try {
+    return await body(session, file);
+  } finally {
+    try {
+      fs.unlinkSync(file);
+    } catch (_) {}
+  }
+}
+
+async function withSeededHistory(entries, body) {
+  return withSeededFile(jsonl(entries), body);
+}
+
+function decodeCursor(cursor) {
+  return Buffer.from(cursor, "base64url").toString("utf8");
+}
+
+function makeCursor(text) {
+  return Buffer.from(text, "utf8").toString("base64url");
+}
+
+function seqsOf(body) {
+  return body.entries.map((e) => e.seq);
+}
+
+function entryBytes(body) {
+  return body.entries.reduce((n, e) => n + JSON.stringify(e).length, 0);
+}
+
+// A line of exactly `byteLength` bytes, newline included, carrying a seq a
+// forward scan would return.
+function decoyLine(seq, byteLength) {
+  const base = Buffer.byteLength(JSON.stringify({ seq, raw: "", ts: 0 }));
+  const padded = "p".repeat(byteLength - 1 - base);
+  return JSON.stringify({ seq, raw: padded, ts: 0 }) + "\n";
+}
+
+test.describe("conversation endpoint: paging contract", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  });
+
+  test("conversation endpoint: neither tail nor cursor pages forward from the oldest retained entry", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4, 5].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session) => {
+      const { status, body } = await fetchConversation(page, session);
+      expect(status).toBe(200);
+      expect(seqsOf(body)).toEqual([1, 2, 3, 4, 5]);
+
+      const limited = await fetchConversation(page, session, "?limit=2");
+      expect(seqsOf(limited.body)).toEqual([1, 2]);
+    });
+  });
+
+  test("conversation endpoint: tail returns the newest entries, and its cursor resumes forward with no gap or duplicate", async ({
+    page,
+  }) => {
+    const entries = Array.from({ length: 10 }, (_, i) => rawEntry(i + 1));
+    await withSeededHistory(entries, async (session, file) => {
+      const { status, body } = await fetchConversation(
+        page,
+        session,
+        "?tail=3",
+      );
+      expect(status).toBe(200);
+      expect(seqsOf(body)).toEqual([8, 9, 10]);
+
+      const cursor = encodeURIComponent(body.nextCursor);
+      const caughtUp = await fetchConversation(
+        page,
+        session,
+        `?cursor=${cursor}`,
+      );
+      expect(seqsOf(caughtUp.body)).toEqual([]);
+
+      fs.appendFileSync(file, jsonl([rawEntry(11), rawEntry(12)]));
+      const resumed = await fetchConversation(
+        page,
+        session,
+        `?cursor=${cursor}`,
+      );
+      expect(seqsOf(resumed.body)).toEqual([11, 12]);
+    });
+  });
+
+  test("conversation endpoint: tail alongside cursor or limit is a 400", async ({
+    page,
+  }) => {
+    await withSeededHistory([rawEntry(1)], async (session) => {
+      const cursor = encodeURIComponent(makeCursor("v2:1:0"));
+      const withCursor = await fetchConversation(
+        page,
+        session,
+        `?tail=2&cursor=${cursor}`,
+      );
+      expect(withCursor.status).toBe(400);
+
+      const withLimit = await fetchConversation(
+        page,
+        session,
+        "?tail=2&limit=2",
+      );
+      expect(withLimit.status).toBe(400);
+    });
+  });
+
+  test("conversation endpoint: limit and tail clamp to 1..500 rather than rejecting", async ({
+    page,
+  }) => {
+    const entries = Array.from({ length: 520 }, (_, i) => rawEntry(i + 1));
+    await withSeededHistory(entries, async (session) => {
+      const bigLimit = await fetchConversation(page, session, "?limit=99999");
+      expect(bigLimit.status).toBe(200);
+      expect(bigLimit.body.entries).toHaveLength(MAX_LIMIT);
+      expect(seqsOf(bigLimit.body)[0]).toBe(1);
+
+      const zeroLimit = await fetchConversation(page, session, "?limit=0");
+      expect(zeroLimit.status).toBe(200);
+      expect(seqsOf(zeroLimit.body)).toEqual([1]);
+
+      const bigTail = await fetchConversation(page, session, "?tail=99999");
+      expect(bigTail.status).toBe(200);
+      expect(bigTail.body.entries).toHaveLength(MAX_LIMIT);
+      expect(seqsOf(bigTail.body).at(-1)).toBe(520);
+
+      const zeroTail = await fetchConversation(page, session, "?tail=0");
+      expect(zeroTail.status).toBe(200);
+      expect(seqsOf(zeroTail.body)).toEqual([520]);
+    });
+  });
+
+  test("conversation endpoint: output over the wire cap keeps its end and reports the bytes it dropped", async ({
+    page,
+  }) => {
+    const output = `HEAD-MARKER${"A".repeat(20000)}TAIL-MARKER`;
+    await withSeededHistory([commandEntry(1, output)], async (session) => {
+      const { status, body } = await fetchConversation(page, session);
+      expect(status).toBe(200);
+      const entry = body.entries[0];
+      expect(entry.output).toHaveLength(MAX_WIRE_OUTPUT_BYTES);
+      expect(entry.output.endsWith("TAIL-MARKER")).toBe(true);
+      expect(entry.output.includes("HEAD-MARKER")).toBe(false);
+      expect(entry.outputTruncatedBytes).toBe(
+        output.length - MAX_WIRE_OUTPUT_BYTES,
+      );
+    });
+  });
+
+  test("conversation endpoint: an entry inside the wire cap carries no outputTruncatedBytes", async ({
+    page,
+  }) => {
+    await withSeededHistory(
+      [commandEntry(1, "short output")],
+      async (session) => {
+        const { body } = await fetchConversation(page, session);
+        expect(body.entries[0].output).toBe("short output");
+        expect("outputTruncatedBytes" in body.entries[0]).toBe(false);
+      },
+    );
+  });
+
+  test("conversation endpoint: nextCursor decodes to v2:<seq>:<offset> at the end of the file, and a poll on it returns an empty page", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session, file) => {
+      const { body } = await fetchConversation(page, session);
+      const fileLength = fs.statSync(file).size;
+      expect(decodeCursor(body.nextCursor)).toBe(`v2:4:${fileLength}`);
+
+      const polled = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(body.nextCursor)}`,
+      );
+      expect(polled.status).toBe(200);
+      expect(polled.body.entries).toEqual([]);
+      expect(polled.body.nextCursor).toBe(body.nextCursor);
+    });
+  });
+
+  test("conversation endpoint: a v1 cursor and a v2 cursor with a wrong offset both return the correct page", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4, 5].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session) => {
+      const legacy = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor("v1:2"))}`,
+      );
+      expect(legacy.status).toBe(200);
+      expect(seqsOf(legacy.body)).toEqual([3, 4, 5]);
+      expect(decodeCursor(legacy.body.nextCursor).startsWith("v2:5:")).toBe(
+        true,
+      );
+
+      // An offset that is a real line boundary but the wrong one — it
+      // points at seq 4, one entry past where seq 2's cursor resumes. A
+      // trusted offset would silently skip seq 3; the seq check must catch
+      // it and fall back to a scan.
+      const pastSeqThree = Buffer.byteLength(jsonl(entries.slice(0, 3)));
+      const misplaced = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor(`v2:2:${pastSeqThree}`))}`,
+      );
+      expect(misplaced.status).toBe(200);
+      expect(seqsOf(misplaced.body)).toEqual([3, 4, 5]);
+
+      const midLine = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor("v2:2:7"))}`,
+      );
+      expect(midLine.status).toBe(200);
+      expect(seqsOf(midLine.body)).toEqual([3, 4, 5]);
+    });
+  });
+
+  test("conversation endpoint: the byte budget bounds a page, keeps the newest on tail, and skips no seq", async ({
+    page,
+  }) => {
+    const entries = Array.from({ length: 60 }, (_, i) =>
+      commandEntry(i + 1, "x".repeat(20 * 1024)),
+    );
+    await withSeededHistory(entries, async (session) => {
+      const { status, body } = await fetchConversation(
+        page,
+        session,
+        "?tail=200",
+      );
+      expect(status).toBe(200);
+      expect(body.entries.length).toBeLessThan(60);
+      expect(body.entries.length).toBeGreaterThan(0);
+      expect(entryBytes(body)).toBeLessThanOrEqual(MAX_PAGE_BYTES);
+      expect(seqsOf(body).at(-1)).toBe(60);
+
+      const walked = [];
+      let cursor = "";
+      for (let i = 0; i < 60; i++) {
+        const forward = await fetchConversation(
+          page,
+          session,
+          cursor
+            ? `?limit=500&cursor=${encodeURIComponent(cursor)}`
+            : "?limit=500",
+        );
+        expect(forward.status).toBe(200);
+        expect(entryBytes(forward.body)).toBeLessThanOrEqual(MAX_PAGE_BYTES);
+        if (forward.body.entries.length === 0) break;
+        walked.push(...seqsOf(forward.body));
+        cursor = forward.body.nextCursor;
+      }
+      expect(walked).toEqual(entries.map((e) => e.seq));
+    });
+  });
+
+  test("conversation endpoint: a page whose first entry alone exceeds the budget still returns it", async ({
+    page,
+  }) => {
+    const oversized = rawEntry(1, "x".repeat(MAX_PAGE_BYTES + 1024));
+    await withSeededHistory([oversized, rawEntry(2)], async (session) => {
+      const forward = await fetchConversation(page, session, "?limit=50");
+      expect(forward.status).toBe(200);
+      expect(seqsOf(forward.body)).toEqual([1]);
+
+      const tail = await fetchConversation(page, session, "?tail=50");
+      expect(tail.status).toBe(200);
+      expect(seqsOf(tail.body)).toEqual([2]);
+    });
+  });
+
+  // `append` writes a line and its newline separately, and a large line is
+  // copied incrementally, so a poll can observe a prefix that ends inside a
+  // multi-byte character — which terminal output carries constantly. Every
+  // mode must skip that line rather than fail on it.
+  test("conversation endpoint: a line torn inside a multi-byte character is skipped, not an error", async ({
+    page,
+  }) => {
+    await withSeededHistory(
+      [rawEntry(1), rawEntry(2)],
+      async (session, file) => {
+        const complete = await fetchConversation(page, session);
+        expect(seqsOf(complete.body)).toEqual([1, 2]);
+        const atEof = encodeURIComponent(complete.body.nextCursor);
+        const legacy = encodeURIComponent(makeCursor("v1:1"));
+
+        const third = Buffer.from(JSON.stringify(rawEntry(3, "€€€")), "utf8");
+        const cut = third.indexOf(0xe2) + 1;
+        fs.appendFileSync(file, third.subarray(0, cut));
+
+        const fresh = await fetchConversation(page, session);
+        expect(fresh.status).toBe(200);
+        expect(seqsOf(fresh.body)).toEqual([1, 2]);
+
+        const polled = await fetchConversation(
+          page,
+          session,
+          `?cursor=${atEof}`,
+        );
+        expect(polled.status).toBe(200);
+        expect(seqsOf(polled.body)).toEqual([]);
+
+        const fallback = await fetchConversation(
+          page,
+          session,
+          `?cursor=${legacy}`,
+        );
+        expect(fallback.status).toBe(200);
+        expect(seqsOf(fallback.body)).toEqual([2]);
+
+        const tail = await fetchConversation(page, session, "?tail=10");
+        expect(tail.status).toBe(200);
+        expect(seqsOf(tail.body)).toEqual([1, 2]);
+
+        fs.appendFileSync(
+          file,
+          Buffer.concat([third.subarray(cut), Buffer.from("\n")]),
+        );
+        const settled = await fetchConversation(page, session);
+        expect(seqsOf(settled.body)).toEqual([1, 2, 3]);
+        expect(settled.body.entries[2].raw).toBe("€€€");
+      },
+    );
+  });
+
+  // The hotter of the two offset arms: a poll that is already at the
+  // newest entry answers from the file's length alone and never reads its
+  // contents. Deleting that arm leaves the output byte-identical, so the
+  // gate has to make reading the file observable — the whole file becomes
+  // one entry a scan would return, at the same length so the cursor still
+  // sits at the end of it.
+  test("conversation endpoint: a cursor at the end of the file answers without reading its contents", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4, 5].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session, file) => {
+      const caughtUp = await fetchConversation(page, session);
+      expect(seqsOf(caughtUp.body)).toEqual([1, 2, 3, 4, 5]);
+      const fileLength = fs.statSync(file).size;
+      expect(decodeCursor(caughtUp.body.nextCursor)).toBe(`v2:5:${fileLength}`);
+
+      fs.writeFileSync(file, decoyLine(90, fileLength));
+      expect(fs.statSync(file).size).toBe(fileLength);
+
+      const scanned = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor("v1:5"))}`,
+      );
+      expect(
+        seqsOf(scanned.body),
+        "the decoy must be something a full scan returns",
+      ).toEqual([90]);
+
+      const polled = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(caughtUp.body.nextCursor)}`,
+      );
+      expect(
+        seqsOf(polled.body),
+        "a cursor at the end of the file must not read its contents",
+      ).toEqual([]);
+      expect(polled.body.nextCursor).toBe(caughtUp.body.nextCursor);
+    });
+  });
+
+  // The seek is the reason the cursor carries an offset at all, and its
+  // absence is invisible in a page's contents alone. Rewriting the bytes
+  // before the offset into an entry a scan would return makes the two
+  // strategies disagree.
+  test("conversation endpoint: a cursor with a trusted offset seeks past content a full scan would return", async ({
+    page,
+  }) => {
+    const entries = [1, 2, 3, 4, 5].map((seq) => rawEntry(seq));
+    await withSeededHistory(entries, async (session, file) => {
+      const first = await fetchConversation(page, session, "?limit=3");
+      expect(seqsOf(first.body)).toEqual([1, 2, 3]);
+      const offset = Number(decodeCursor(first.body.nextCursor).split(":")[2]);
+      expect(offset).toBe(Buffer.byteLength(jsonl(entries.slice(0, 3))));
+
+      const rest = fs.readFileSync(file).subarray(offset);
+      fs.writeFileSync(
+        file,
+        Buffer.concat([Buffer.from(decoyLine(90, offset)), rest]),
+      );
+
+      const scanned = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor("v1:3"))}`,
+      );
+      expect(
+        seqsOf(scanned.body),
+        "the decoy must be something a full scan returns",
+      ).toEqual([90, 4, 5]);
+
+      const seeked = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(first.body.nextCursor)}`,
+      );
+      expect(
+        seqsOf(seeked.body),
+        "a trusted offset must seek, never rescan from byte 0",
+      ).toEqual([4, 5]);
+    });
+  });
+
+  test("conversation endpoint: a malformed session name is a 400", async ({
+    page,
+  }) => {
+    const { status } = await fetchConversation(page, "not a valid name");
+    expect(status).toBe(400);
+  });
+
+  test("conversation endpoint: a well-formed name with no history is an empty page with the zero cursor", async ({
+    page,
+  }) => {
+    const session = `nohistory-${process.pid}-${Date.now()}`;
+    const { status, body } = await fetchConversation(page, session);
+    expect(status).toBe(200);
+    expect(body.entries).toEqual([]);
+    expect(decodeCursor(body.nextCursor)).toBe("v2:0:0");
+
+    // A supplied cursor does not change that: a file with no content
+    // cannot account for a seq, and echoing one would strand the client on
+    // a floor no entry reaches if the record later starts over. Both the
+    // absent file and the zero-byte one, which are separate paths.
+    await withSeededFile("", async (seeded) => {
+      for (const name of [session, seeded]) {
+        for (const cursor of ["v1:7", "v2:7:0", "v2:7:400"]) {
+          const where = `${name === session ? "absent" : "empty"} ${cursor}`;
+          const carried = await fetchConversation(
+            page,
+            name,
+            `?cursor=${encodeURIComponent(makeCursor(cursor))}`,
+          );
+          expect(carried.status, where).toBe(200);
+          expect(carried.body.entries, where).toEqual([]);
+          expect(decodeCursor(carried.body.nextCursor), where).toBe("v2:0:0");
+        }
+        const tail = await fetchConversation(page, name, "?tail=10");
+        expect(decodeCursor(tail.body.nextCursor), name).toBe("v2:0:0");
+      }
+    });
+  });
 });
