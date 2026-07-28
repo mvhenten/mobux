@@ -1006,14 +1006,46 @@ async fn api_telemetry(body: String) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// Strip a client-supplied filename down to `[A-Za-z0-9._-]`, replacing
+/// everything else with `_`. Keeps the upload path safe to interpolate into
+/// the remote-write shell command (`tmux::write_remote_file`) as well as
+/// the local one — no character survives that could break out of the
+/// single-quoted word ssh sends to the remote shell.
+fn sanitize_upload_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// POST /api/upload?node=<name> — save an attached file where the terminal
+/// the user is looking at can actually reach it. `?node=` follows the same
+/// contract as every other node-aware route (`resolve_node_target`): absent
+/// means the hub's local `/tmp/mobux-uploads`, unchanged from before; a
+/// configured node streams the bytes over the same `ssh -o BatchMode=yes`
+/// pipe the rest of the node-aware handlers use and returns the path on
+/// THAT host, so the pasted path resolves in the remote shell instead of
+/// naming a file that only exists on the hub.
 async fn api_upload(
+    State(state): State<AppState>,
+    Query(q): Query<NodeQuery>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     use std::fs;
     use std::path::PathBuf;
 
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
     let upload_dir = PathBuf::from("/tmp/mobux-uploads");
-    fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
+
+    if target.is_none() {
+        fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
+    }
 
     if let Some(field) = multipart
         .next_field()
@@ -1021,34 +1053,38 @@ async fn api_upload(
         .map_err(|e| AppError::bad_request(e.into()))?
     {
         let filename = field.file_name().unwrap_or("upload").to_string();
-
-        // Sanitize filename
-        let safe_name = filename
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+        let safe_name = sanitize_upload_filename(&filename);
 
         // Add timestamp to avoid collisions
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let dest = upload_dir.join(format!("{ts}-{safe_name}"));
+        let dest_filename = format!("{ts}-{safe_name}");
 
         let data = field
             .bytes()
             .await
             .map_err(|e| AppError::bad_request(e.into()))?;
-        fs::write(&dest, &data).map_err(|e| AppError::bad_request(e.into()))?;
+
+        let dest_display = match target.as_deref() {
+            None => {
+                let dest = upload_dir.join(&dest_filename);
+                fs::write(&dest, &data).map_err(|e| AppError::bad_request(e.into()))?;
+                dest.to_string_lossy().into_owned()
+            }
+            Some(ssh_target) => {
+                let upload_dir_str = upload_dir
+                    .to_str()
+                    .ok_or_else(|| AppError::internal(anyhow::anyhow!("upload dir not utf-8")))?;
+                tmux::write_remote_file(ssh_target, upload_dir_str, &dest_filename, &data)
+                    .await
+                    .map_err(AppError::bad_request)?
+            }
+        };
 
         return Ok(Json(json!({
-            "path": dest.to_string_lossy(),
+            "path": dest_display,
             "size": data.len(),
             "name": safe_name,
         })));

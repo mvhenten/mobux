@@ -16,13 +16,30 @@ import telemetry from './telemetry.js';
 import { createMicOverlay, faultMessage } from './mic-overlay.js';
 import { openExternal } from './external-link.js';
 
+// Append `?node=<name>` to an API path; no node ⇒ path untouched (local
+// host). Mirrors web/spa/src/lib/nodes.js's `withNode` — same contract, but
+// duplicated here because this engine layer (web/static) is a separate
+// bundle from the React SPA and shares no modules with it. terminal.js's own
+// `nodeQuery()` is the same idea, inlined at its one call site; this one is
+// exported so both input-bar.js and top-bar.js can pass a node through to
+// the shared attach action.
+function withNode(path, node) {
+  if (!node) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}node=${encodeURIComponent(node)}`;
+}
+
 // ── File attach (any file type) ─────────────────────────────────────
 // Owns a hidden <input type=file>, POSTs the picked file to /api/upload, and
 // drops the returned path into the terminal via send().
 //
-//   createAttachAction({ send, onError }) → { trigger(), destroy() }
+//   createAttachAction({ send, onError, node }) → { trigger(), destroy() }
 //     onError(message)  optional — surface an upload failure in the UI.
-export function createAttachAction({ send, onError } = {}) {
+//     node              current remote node name ("" ⇒ local host). Rides
+//                        along as ?node=<name> so the file lands (and the
+//                        returned path resolves) on whichever host the
+//                        terminal is actually attached to (#issue upload
+//                        follows attached node).
+export function createAttachAction({ send, onError, node } = {}) {
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
   fileInput.accept = '*/*';
@@ -32,7 +49,7 @@ export function createAttachAction({ send, onError } = {}) {
   async function uploadFile(file) {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
+    const res = await fetch(withNode('/api/upload', node), { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
     // Send path directly to terminal, ready to use.

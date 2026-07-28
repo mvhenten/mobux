@@ -417,7 +417,7 @@ export function createTerminal({
   let inputBar = null;
   function ensureInputBar() {
     if (!inputBar) {
-      inputBar = createInputBar(core, (d) => core.send(d));
+      inputBar = createInputBar(core, (d) => core.send(d), node);
     }
     return inputBar;
   }
@@ -530,6 +530,7 @@ export function createTerminal({
       isReader: () => !!viewToggle?.isReader?.(),
       toggleRead: readToggle ? () => readToggle.toggle() : null,
       isRead: () => !!readToggle?.isRead?.(),
+      node,
     });
   }
   if (!isMobile) ensureTopBar();

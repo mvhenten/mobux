@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::shell_integration::{detect_session_shell, rcfile_snippet, Shell};
@@ -11,6 +13,26 @@ use crate::shell_integration::{detect_session_shell, rcfile_snippet, Shell};
 /// unchanged (embedded `'` becomes `'\''`, the standard POSIX escape).
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The one-shot, non-interactive `ssh` exec every remote command (tmux or
+/// otherwise) runs over: no pty, no prompt — `BatchMode=yes` refuses rather
+/// than hangs on a password/host-key prompt, and `ConnectTimeout=3` bounds
+/// how long a dead node can stall a request. `remote_cmd` is handed to the
+/// remote shell as a single already-quoted string (see `tmux_command` and
+/// `write_remote_file` for how their callers build it).
+fn ssh_exec_command(ssh_target: &str, remote_cmd: &str) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=3",
+        ssh_target,
+        "--",
+        remote_cmd,
+    ]);
+    cmd
 }
 
 /// Build the command every tmux-invoking function runs, with `tmux_args` as
@@ -48,30 +70,13 @@ pub fn tmux_command(target: Option<&str>, tmux_args: &[&str]) -> Command {
             cmd
         }
         Some(ssh_target) => {
-            let mut cmd = Command::new("ssh");
             let quoted: Vec<String> = tmux_args.iter().map(|a| shell_quote(a)).collect();
             let remote_cmd = format!("tmux {}", quoted.join(" "));
-            cmd.args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=3",
-                ssh_target,
-                "--",
-                &remote_cmd,
-            ]);
-            cmd
+            ssh_exec_command(ssh_target, &remote_cmd)
         }
     }
 }
 
-/// FIFO path pipe-pane's own `cat` writer and our reader rendezvous on for
-/// a session-history tap (see [`PanePipeTap`]). Scoped by both the tmux
-/// socket (`tmux_bin` encodes `MOBUX_TMUX_SOCKET` when set — see
-/// `handle_ws`) and the session name: two tmux servers, or two runs on the
-/// same host, must never share a fifo. `/tmp` rather than the app's data
-/// dir: transient, self-cleaning OS state, matching the app's existing use
-/// of `/tmp` for other short-lived scratch files (upload staging).
 fn pipe_pane_fifo_path(tmux_bin: &str, session: &str) -> String {
     let socket_tag: String = tmux_bin
         .chars()
@@ -326,6 +331,72 @@ impl Drop for PanePipeTap {
         }
         let _ = std::fs::remove_file(&self.fifo_path);
     }
+}
+
+/// Build the `mkdir -p <dir> && cat > <dest>` ssh command that
+/// `write_remote_file` runs, plus the full remote destination path. Split
+/// out from `write_remote_file` so the command construction — the part that
+/// actually matters for injection-safety — is unit-testable without
+/// spawning a real `ssh`, mirroring `tmux_command`. `dest_dir` and `dest`
+/// are individually shell-quoted (`filename` is additionally pre-sanitized
+/// by the caller to `[A-Za-z0-9._-]`, but this stays injection-safe even if
+/// that ever changes).
+fn build_write_remote_command(
+    ssh_target: &str,
+    dest_dir: &str,
+    filename: &str,
+) -> (Command, String) {
+    let dest = format!("{}/{}", dest_dir.trim_end_matches('/'), filename);
+    let remote_cmd = format!(
+        "mkdir -p {} && cat > {}",
+        shell_quote(dest_dir),
+        shell_quote(&dest)
+    );
+    (ssh_exec_command(ssh_target, &remote_cmd), dest)
+}
+
+/// Write `data` to `<dest_dir>/<filename>` on `ssh_target`, over the same
+/// `BatchMode` ssh exec every other remote op uses — but piped over stdin
+/// (`cat >`) instead of `.output()`, since the payload is arbitrary upload
+/// bytes rather than a command's own argv. `mkdir -p` first so the remote
+/// upload directory doesn't need to pre-exist, mirroring the local
+/// `fs::create_dir_all` the caller runs for the non-remote case. Returns the
+/// full remote path so the caller can hand it back to a client that will
+/// paste it into a shell running ON `ssh_target` — a hub-local path there
+/// resolves to nothing.
+pub async fn write_remote_file(
+    ssh_target: &str,
+    dest_dir: &str,
+    filename: &str,
+    data: &[u8],
+) -> Result<String> {
+    let (mut cmd, dest) = build_write_remote_command(ssh_target, dest_dir, filename);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn ssh to {ssh_target} for upload"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("ssh stdin unavailable for upload")?;
+    stdin
+        .write_all(data)
+        .await
+        .with_context(|| format!("failed to stream upload bytes to {ssh_target}"))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .with_context(|| format!("ssh upload to {ssh_target} failed"))?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("remote upload to {ssh_target} failed: {msg}"));
+    }
+    Ok(dest)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -945,6 +1016,36 @@ mod tests {
     }
 
     #[test]
+    fn write_remote_command_targets_the_node_not_the_hub() {
+        // Regression: an upload while attached to a remote node used to
+        // write under the HUB's local /tmp/mobux-uploads and hand back that
+        // hub-local path, which doesn't exist on the remote shell the user
+        // is actually looking at. The command built here must run entirely
+        // on `ssh_target` (mkdir + write both inside the remote command
+        // string handed to ssh) and the returned path must be the one that
+        // resolves there.
+        let (cmd, dest) = build_write_remote_command(
+            "mvhenten@devbox",
+            "/tmp/mobux-uploads",
+            "1700000000000-photo.jpg",
+        );
+        assert_eq!(dest, "/tmp/mobux-uploads/1700000000000-photo.jpg");
+        assert_eq!(cmd.as_std().get_program().to_string_lossy(), "ssh");
+        assert_eq!(
+            argv(&cmd),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "mvhenten@devbox",
+                "--",
+                "mkdir -p '/tmp/mobux-uploads' && cat > '/tmp/mobux-uploads/1700000000000-photo.jpg'",
+            ]
+        );
+    }
+
+    #[test]
     fn tmux_program_and_args_splits_the_socket_flag() {
         assert_eq!(
             tmux_program_and_args("tmux -L histflake-test"),
@@ -1068,5 +1169,90 @@ mod tests {
         .expect("drain must return once the pane mismatch is detected, not hang forever");
 
         assert!(rx.recv().await.is_none());
+    }
+
+    #[test]
+    fn write_remote_command_quotes_a_directory_with_a_trailing_slash() {
+        let (_, dest) = build_write_remote_command("devbox", "/tmp/mobux-uploads/", "f.txt");
+        // No double slash from a caller-supplied trailing one.
+        assert_eq!(dest, "/tmp/mobux-uploads/f.txt");
+    }
+
+    #[test]
+    fn write_remote_command_survives_a_single_quote_in_the_filename() {
+        // Sanitize_upload_filename (main.rs) never lets a quote through in
+        // practice, but the command builder must stay injection-safe on its
+        // own — a quote here must not let the filename break out of the
+        // single-quoted word and inject a second shell command.
+        let (cmd, dest) = build_write_remote_command("devbox", "/tmp/mobux-uploads", "it's.txt");
+        assert_eq!(dest, "/tmp/mobux-uploads/it's.txt");
+        let remote_cmd = argv(&cmd).pop().expect("remote command string");
+        assert_eq!(
+            remote_cmd,
+            r"mkdir -p '/tmp/mobux-uploads' && cat > '/tmp/mobux-uploads/it'\''s.txt'",
+        );
+    }
+
+    // Injection proof: actually hand the built remote command string to a
+    // REAL `sh -c`, exactly as the remote sshd would — ssh does no
+    // interpretation of its own; it just execs the user's shell with this
+    // string as `-c '<remote_cmd>'`. So running it through a local `sh -c`
+    // here reproduces precisely what happens on the node, without needing a
+    // live ssh connection.
+    //
+    // Single-quoting is what does the work: POSIX says nothing inside a
+    // single-quoted string is special except a literal `'` — not `$(`, not
+    // backticks, not `;`, not a newline. `shell_quote` escapes the one
+    // character that matters and leaves everything else untouched, so a
+    // filename carrying a command substitution, a backtick command, or an
+    // embedded newline all land as inert literal bytes in the path — never
+    // executed. sanitize_upload_filename (main.rs) already strips all of
+    // these before a real upload ever reaches this code; this test proves
+    // the command builder doesn't ALSO need that to stay safe.
+    #[tokio::test]
+    async fn write_remote_command_is_injection_safe_against_a_real_shell() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest_dir = dir.path().to_str().expect("utf8 tempdir");
+        let canary = dir.path().join("PWNED");
+
+        let adversarial_filename = "$(touch PWNED)`touch PWNED`;touch PWNED\ntouch-PWNED.txt";
+        let (cmd, dest) = build_write_remote_command("devbox", dest_dir, adversarial_filename);
+        let remote_cmd = argv(&cmd).pop().expect("remote command string");
+
+        let mut sh = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&remote_cmd)
+            .current_dir(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        sh.stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"payload")
+            .await
+            .expect("write payload");
+        let output = sh.wait_with_output().await.expect("sh -c exited");
+        assert!(
+            output.status.success(),
+            "sh -c failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // No command embedded in the filename ran — the canary file was
+        // never created.
+        assert!(
+            !canary.exists(),
+            "injected command executed: PWNED canary file exists"
+        );
+
+        // The file landed under the LITERAL adversarial name, newline and
+        // all — never interpreted.
+        assert_eq!(dest, format!("{dest_dir}/{adversarial_filename}"));
+        let written = fs::read_to_string(&dest)
+            .expect("uploaded file exists under its literal, unexecuted name");
+        assert_eq!(written, "payload");
     }
 }

@@ -10,7 +10,7 @@
 import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
 
-export function createInputBar(engine, send) {
+export function createInputBar(engine, send, node = '') {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
   const input = document.getElementById('inputText');
@@ -183,6 +183,7 @@ export function createInputBar(engine, send) {
   const uploadBtn = document.getElementById('uploadBtn');
   const attach = createAttachAction({
     send,
+    node,
     onError: (msg) => showError(msg, uploadBtn),
   });
   if (uploadBtn) {

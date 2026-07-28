@@ -71,7 +71,7 @@ function ensureStyles() {
   document.head.appendChild(el);
 }
 
-// createTopBar({ send, toggleReader, isReader, toggleRead, isRead })
+// createTopBar({ send, toggleReader, isReader, toggleRead, isRead, node })
 //   → { destroy(), sync() }
 //   send(str)        inject text/path into the terminal.
 //   toggleReader()   flip the view — the SPA owns view state (#206 D3). When
@@ -79,6 +79,8 @@ function ensureStyles() {
 //   isReader()       current view is reader → reflect the toggle icon.
 //   toggleRead()     the same pair for read mode (#235); null ⇒ no button.
 //   isRead()         current view is read mode → reflect the toggle icon.
+//   node             current remote node name ("" ⇒ local host) — passed
+//                     through to the shared attach action.
 //   sync()           re-read isReader()/isRead() and update the toggle icons;
 //                    the owner calls it after a view change (there is no
 //                    `mobux:viewchange` event anymore — the SPA drives the
@@ -89,6 +91,7 @@ export function createTopBar({
   isReader,
   toggleRead,
   isRead,
+  node,
 } = {}) {
   ensureStyles();
 
@@ -130,7 +133,7 @@ export function createTopBar({
 
   bar.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn);
 
-  const attach = createAttachAction({ send });
+  const attach = createAttachAction({ send, node });
   const dictate = createDictateAction({ send, button: micBtn });
 
   attachBtn.addEventListener('click', (e) => { e.preventDefault(); attach.trigger(); });
