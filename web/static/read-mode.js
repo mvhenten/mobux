@@ -193,7 +193,7 @@ export function createReadMode({
   }
 
   function visible() {
-    return window.document.visibilityState !== "hidden";
+    return window.document.visibilityState === "visible";
   }
 
   function startTimer() {
