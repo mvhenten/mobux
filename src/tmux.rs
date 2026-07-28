@@ -339,8 +339,9 @@ impl Drop for PanePipeTap {
 /// actually matters for injection-safety — is unit-testable without
 /// spawning a real `ssh`, mirroring `tmux_command`. `dest_dir` and `dest`
 /// are individually shell-quoted (`filename` is additionally pre-sanitized
-/// by the caller to `[A-Za-z0-9._-]`, but this stays injection-safe even if
-/// that ever changes).
+/// by the caller — `main.rs::sanitize_upload_filename` — to strip every
+/// shell metacharacter, but this stays injection-safe even if that ever
+/// changes).
 fn build_write_remote_command(
     ssh_target: &str,
     dest_dir: &str,
@@ -353,6 +354,47 @@ fn build_write_remote_command(
         shell_quote(&dest)
     );
     (ssh_exec_command(ssh_target, &remote_cmd), dest)
+}
+
+/// Spawn `cmd` (stdio not yet configured), stream `data` to its stdin, and
+/// wait for it to exit — preferring the REAL cause of a failure over an
+/// artifact of the plumbing. `target_desc` names what's being written to,
+/// for error messages only.
+///
+/// A remote-side failure (auth refusal, `mkdir` denied, disk full) can make
+/// the process exit before all bytes are written, so `write_all` can hit a
+/// broken pipe well before the exit status/stderr are available — that
+/// EPIPE is not the real cause. So the write error is NOT propagated
+/// immediately: `wait_with_output` runs first, and a non-zero exit reports
+/// the process's own stderr; the write error only surfaces if the process
+/// otherwise claims success (some other, genuinely unexplained failure).
+///
+/// Split out from `write_remote_file` so this ordering is testable against
+/// a real (local) shell without a live ssh connection — `sh -c` runs the
+/// exact same kind of command ssh execs on the remote end.
+async fn stream_stdin_then_wait(mut cmd: Command, data: &[u8], target_desc: &str) -> Result<()> {
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn upload to {target_desc}"))?;
+    let mut stdin = child.stdin.take().context("stdin unavailable for upload")?;
+
+    let write_result = stdin.write_all(data).await;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .with_context(|| format!("upload to {target_desc} failed"))?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("remote upload to {target_desc} failed: {msg}"));
+    }
+    write_result.with_context(|| format!("failed to stream upload bytes to {target_desc}"))?;
+    Ok(())
 }
 
 /// Write `data` to `<dest_dir>/<filename>` on `ssh_target`, over the same
@@ -370,32 +412,8 @@ pub async fn write_remote_file(
     filename: &str,
     data: &[u8],
 ) -> Result<String> {
-    let (mut cmd, dest) = build_write_remote_command(ssh_target, dest_dir, filename);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn ssh to {ssh_target} for upload"))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("ssh stdin unavailable for upload")?;
-    stdin
-        .write_all(data)
-        .await
-        .with_context(|| format!("failed to stream upload bytes to {ssh_target}"))?;
-    drop(stdin);
-
-    let output = child
-        .wait_with_output()
-        .await
-        .with_context(|| format!("ssh upload to {ssh_target} failed"))?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!("remote upload to {ssh_target} failed: {msg}"));
-    }
+    let (cmd, dest) = build_write_remote_command(ssh_target, dest_dir, filename);
+    stream_stdin_then_wait(cmd, data, ssh_target).await?;
     Ok(dest)
 }
 
@@ -1254,5 +1272,55 @@ mod tests {
         let written = fs::read_to_string(&dest)
             .expect("uploaded file exists under its literal, unexecuted name");
         assert_eq!(written, "payload");
+    }
+
+    // Regression: a remote command that exits (and prints why) before
+    // reading all of stdin used to surface the generic "failed to stream
+    // upload bytes" — the broken-pipe write error — instead of the real
+    // reason. `stream_stdin_then_wait` must prefer the process's own
+    // stderr whenever it actually ran and failed.
+    #[tokio::test]
+    async fn stream_stdin_then_wait_prefers_remote_stderr_over_a_broken_pipe_write() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo 'disk full' >&2; exit 1");
+
+        // A payload much larger than a pipe buffer, so `write_all` is still
+        // writing (and hits EPIPE) well after `sh` has already exited.
+        let data = vec![b'x'; 8 * 1024 * 1024];
+
+        let err = stream_stdin_then_wait(cmd, &data, "devbox")
+            .await
+            .expect_err("a failing remote command must surface as an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("disk full"),
+            "must surface the remote's real stderr, not a generic write error: {msg}"
+        );
+        assert!(
+            !msg.contains("failed to stream"),
+            "must not report the broken-pipe write error when the remote's own \
+             stderr explains the failure: {msg}"
+        );
+    }
+
+    // The write error is still reported — it just isn't the FIRST thing
+    // checked — when the process itself claims success despite it (a
+    // genuinely unexplained local failure with no remote-side cause).
+    #[tokio::test]
+    async fn stream_stdin_then_wait_surfaces_the_write_error_when_the_process_still_succeeds() {
+        // Closes stdin immediately and exits 0 without reading it — same
+        // broken-pipe shape on the write side, but nothing in stderr to
+        // prefer instead.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec 0<&-; exit 0");
+
+        let data = vec![b'x'; 8 * 1024 * 1024];
+        let err = stream_stdin_then_wait(cmd, &data, "devbox")
+            .await
+            .expect_err("a write failure must not be silently swallowed");
+        assert!(
+            err.to_string().contains("failed to stream"),
+            "falls back to the write error when the process reports success: {err}"
+        );
     }
 }

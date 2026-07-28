@@ -64,7 +64,39 @@ function ensureStyles() {
 @keyframes mobuxTopMicPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(176, 106, 106, 0.45); }
   50%      { box-shadow: 0 0 0 4px rgba(176, 106, 106, 0); }
-}`;
+}
+/* Failure state — same red tint + toast pattern as the mobile input bar's
+   #uploadBtn.rec-error / .input-toast (style.css), so an attach failure
+   looks and behaves identically on both surfaces. Without this the desktop
+   attach button was a dead button: the server can now fail a remote upload
+   (ssh down, remote mkdir denied, disk full) where the old local-only write
+   effectively never did, and there was nowhere on this bar to show it. */
+#mobux-top-bar button.rec-error {
+  border-color: #ff6b6b;
+  background: #5a1f1f;
+  color: #ffd2d2;
+  animation: mobuxTopRecErrorFlash 0.5s ease-in-out 2;
+}
+@keyframes mobuxTopRecErrorFlash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 80, 80, 0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(255, 80, 80, 0.55); }
+}
+#mobux-top-bar-toast {
+  position: fixed;
+  top: 40px;
+  right: 8px;
+  max-width: 320px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: monospace;
+  line-height: 1.3;
+  background: #5a1f1f;
+  color: #ffd2d2;
+  border: 1px solid #ff6b6b;
+  z-index: 50;
+}
+#mobux-top-bar-toast.hidden { display: none; }`;
   const el = document.createElement('style');
   el.id = STYLE_ID;
   el.textContent = css;
@@ -131,9 +163,35 @@ export function createTopBar({
   settingsBtn.title = 'Settings';
   settingsBtn.textContent = '⚙';
 
-  bar.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn);
+  const toast = document.createElement('div');
+  toast.id = 'mobux-top-bar-toast';
+  toast.className = 'hidden';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
 
-  const attach = createAttachAction({ send, node });
+  bar.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn, toast);
+
+  // Visible failure feedback — mirrors input-bar.js's showError(): tint the
+  // button briefly and show a short, accessible message. A failed upload
+  // must never be silent (dead-button rule); the mic action already routes
+  // its own faults through mic-overlay.js, so this is attach-only for now.
+  let toastTimer = null;
+  function showError(msg, btn) {
+    toast.textContent = msg;
+    toast.classList.remove('hidden');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.add('hidden'), 4000);
+    if (btn) {
+      btn.classList.add('rec-error');
+      setTimeout(() => btn.classList.remove('rec-error'), 1500);
+    }
+  }
+
+  const attach = createAttachAction({
+    send,
+    node,
+    onError: (msg) => showError(msg, attachBtn),
+  });
   const dictate = createDictateAction({ send, button: micBtn });
 
   attachBtn.addEventListener('click', (e) => { e.preventDefault(); attach.trigger(); });

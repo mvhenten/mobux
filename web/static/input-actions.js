@@ -20,9 +20,9 @@ import { openExternal } from './external-link.js';
 // host). Mirrors web/spa/src/lib/nodes.js's `withNode` — same contract, but
 // duplicated here because this engine layer (web/static) is a separate
 // bundle from the React SPA and shares no modules with it. terminal.js's own
-// `nodeQuery()` is the same idea, inlined at its one call site; this one is
-// exported so both input-bar.js and top-bar.js can pass a node through to
-// the shared attach action.
+// `nodeQuery()` is the same idea, inlined at its one call site; `node` is
+// threaded through `createAttachAction`'s options instead, since both
+// input-bar.js and top-bar.js call it, not this helper directly.
 function withNode(path, node) {
   if (!node) return path;
   return `${path}${path.includes('?') ? '&' : '?'}node=${encodeURIComponent(node)}`;
@@ -63,7 +63,10 @@ export function createAttachAction({ send, onError, node } = {}) {
       await uploadFile(file);
     } catch (err) {
       console.error('Upload failed:', err);
-      onError?.('Attach failed: upload error');
+      // The server's error text is specific and actionable (unknown node,
+      // a remote mkdir/ssh failure and why) — surface it verbatim rather
+      // than a generic constant that throws that detail away.
+      onError?.('Attach failed: ' + (err?.message || 'upload error'));
     }
     // Reset so the same file can be re-selected.
     fileInput.value = '';

@@ -1006,11 +1006,15 @@ async fn api_telemetry(body: String) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-/// Strip a client-supplied filename down to `[A-Za-z0-9._-]`, replacing
-/// everything else with `_`. Keeps the upload path safe to interpolate into
-/// the remote-write shell command (`tmux::write_remote_file`) as well as
-/// the local one — no character survives that could break out of the
-/// single-quoted word ssh sends to the remote shell.
+/// Strip a client-supplied filename down to Unicode alphanumerics plus
+/// `.`, `-`, `_`, replacing everything else with `_` — unchanged from the
+/// pre-existing local-only behavior (e.g. `naïve—file.txt` keeps its
+/// letters: `naïve_file.txt`). No shell metacharacter, quote, or control
+/// character survives, which is what actually matters here: it keeps the
+/// upload path safe to interpolate into the remote-write shell command
+/// (`tmux::write_remote_file`) as well as the local one — no character
+/// survives that could break out of the single-quoted word ssh sends to
+/// the remote shell.
 fn sanitize_upload_filename(filename: &str) -> String {
     filename
         .chars()
@@ -1077,9 +1081,13 @@ async fn api_upload(
                 let upload_dir_str = upload_dir
                     .to_str()
                     .ok_or_else(|| AppError::internal(anyhow::anyhow!("upload dir not utf-8")))?;
+                // A failure here is the remote host/network/ssh, not a bad
+                // request — the one client-facing 400 for a bad `?node=`
+                // (unknown node name) is already handled upstream by
+                // `resolve_node_target`.
                 tmux::write_remote_file(ssh_target, upload_dir_str, &dest_filename, &data)
                     .await
-                    .map_err(AppError::bad_request)?
+                    .map_err(AppError::internal)?
             }
         };
 
@@ -1888,11 +1896,23 @@ async fn resolve_node_target(
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
-    found.map(|n| Some(n.target)).ok_or_else(|| {
+    let target = found.map(|n| n.target).ok_or_else(|| {
         AppError::bad_request(anyhow::anyhow!(
             "unknown node {name:?} — check Settings › Nodes"
         ))
-    })
+    })?;
+    // A target starting with `-` would be read by ssh's own getopt as an
+    // option rather than a host argument (e.g. `-oProxyCommand=...`),
+    // running on the HUB instead of failing to connect. `ssh_exec_command`
+    // (tmux.rs) always passes the target as a bare argv element before
+    // `--`, so this is the one choke point every node-aware route already
+    // goes through to reject it.
+    if target.starts_with('-') {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "node {name:?} has an invalid target {target:?} — check Settings › Nodes"
+        )));
+    }
+    Ok(Some(target))
 }
 
 /// The terminal WS query: the shared `?node=<name>` (see `resolve_node_target`)
@@ -3464,6 +3484,67 @@ mod tests {
         std::fs::File::create(stt_dir.join(".installed")).unwrap();
         let resp2 = api_stt_status(State(state)).await.unwrap();
         assert_eq!(resp2.0["installed"], true);
+    }
+
+    // Regression: a node's stored ssh target starting with `-` (e.g.
+    // `-oProxyCommand=...`) would be read by ssh's own getopt as an option
+    // rather than a host argument once handed to `ssh_exec_command`
+    // (tmux.rs) — executing on the HUB instead of failing to reach the
+    // node. `resolve_node_target` is the one choke point every node-aware
+    // route goes through, so rejecting it there covers all of them,
+    // including the upload path this PR added.
+    #[tokio::test]
+    async fn resolve_node_target_rejects_a_target_starting_with_a_dash() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .replace_nodes(vec![("evil".to_string(), "-oProxyCommand=pwn".to_string())])
+            .expect("seed node");
+
+        let err = resolve_node_target(&state, Some("evil"))
+            .await
+            .expect_err("a leading-dash target must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("invalid target"),
+            "error names the problem: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_node_target_accepts_a_normal_target() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .replace_nodes(vec![("devbox".to_string(), "user@devbox".to_string())])
+            .expect("seed node");
+
+        let target = resolve_node_target(&state, Some("devbox"))
+            .await
+            .expect("a well-formed target resolves");
+        assert_eq!(target.as_deref(), Some("user@devbox"));
+    }
+
+    // sanitize_upload_filename's contract (main.rs, used by api_upload) is
+    // what actually matters for the ssh path in tmux.rs::write_remote_file:
+    // no shell metacharacter, quote, or control character survives, even
+    // though it keeps Unicode letters (it is NOT ASCII-only [A-Za-z0-9._-]).
+    #[test]
+    fn sanitize_upload_filename_keeps_unicode_letters_strips_shell_metacharacters() {
+        assert_eq!(sanitize_upload_filename("naïve—file.txt"), "naïve_file.txt");
+
+        let adversarial = "$(touch PWNED);`x`\n'.txt";
+        let safe = sanitize_upload_filename(adversarial);
+        for dangerous in ['$', '(', ')', ';', '`', '\n', '\''] {
+            assert!(
+                !safe.contains(dangerous),
+                "{safe:?} must not contain {dangerous:?}"
+            );
+        }
+        assert!(safe.ends_with(".txt"));
+        assert!(safe.contains("touch"));
+        assert!(safe.contains("PWNED"));
     }
 
     #[tokio::test]

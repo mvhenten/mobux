@@ -455,6 +455,48 @@ test("terminal island mounts and the PTY websocket connects", async ({
   );
 });
 
+// Regression: the desktop top bar's attach button used to be a dead button
+// on any upload failure — createAttachAction was wired with no `onError`
+// and top-bar.js had no error surface at all. That was always a gap, but
+// remote uploads (this PR) added a whole new likely-failure class (ssh
+// down, remote mkdir denied, disk full) on top of a local `fs::write` that
+// essentially never fails. This drives the real desktop code path (forces
+// non-touch so the top bar mounts instead of the mobile input bar) and
+// asserts the server's actual error text reaches the user, not silence.
+test.describe("desktop top bar: attach failure surfaces a real error", () => {
+  test.use({ viewport: { width: 1280, height: 800 }, hasTouch: false });
+
+  test("a failed upload shows the server's error text, not a dead button", async ({
+    page,
+  }) => {
+    const serverError =
+      'remote upload to gpubox failed: mkdir: cannot create directory: Permission denied';
+    await page.route(/\/api\/upload(\?.*)?$/, (route) =>
+      route.fulfill({ status: 500, contentType: "text/plain", body: serverError }),
+    );
+
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+
+    const topBar = page.locator("#mobux-top-bar");
+    await expect(topBar).toHaveCount(1);
+    const toast = page.locator("#mobux-top-bar-toast");
+    await expect(toast).toHaveClass(/hidden/);
+
+    await page
+      .locator('input[type="file"]')
+      .setInputFiles({
+        name: "note.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("hello"),
+      });
+
+    await expect(toast).not.toHaveClass(/hidden/);
+    await expect(toast).toHaveText(`Attach failed: ${serverError}`);
+  });
+});
+
 // ── ws URL carries the node segment (node-drop guard, #185/#210) ────────────
 //
 // The node rides only in the hash URL (`#/s/<node>/<name>`) and must reach the
