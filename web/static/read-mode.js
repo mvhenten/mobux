@@ -12,15 +12,29 @@
 // through setEntries / appendEntries and nothing else.
 //
 // ── Factory ─────────────────────────────────────────────────────────────
-//   createReadMode({ host, session, handlers }) → read-mode handle
+//   createReadMode({ host, session, handlers, fetchPage, pollIntervalMs })
 //     host      the element read mode owns.
 //     session   the tmux session name the entries belong to. The conversation
 //               record is keyed on session name alone, so there is no node.
 //     handlers  cross-cutting callbacks:
 //                 onExit()  double-tap → back to the terminal
+//     fetchPage (path) → Promise of { entries, nextCursor }. The SPA passes
+//               lib/api.js's apiGet, so a failure arrives as an ApiError.
+//               Omitted, read mode fetches nothing and is driven entirely by
+//               setEntries / appendEntries.
+//     pollIntervalMs  refresh cadence; three seconds by default.
 //
-// There is no fetching here. The poll loop feeds this component; it does not
-// live in it.
+// ── The loop (issue #236) ───────────────────────────────────────────────
+// Mount is one request for the newest turns; every refresh after it resumes
+// from the cursor the last response handed back, and new entries are appended
+// to the DOM rather than rebuilding it. The tab going hidden stops the timer;
+// coming back visible restarts it with an immediate fetch. One request is in
+// flight at a time — a tick arriving on top of a pending one is dropped, and
+// the interval is the retry interval, so there is no backoff and no queue.
+//
+// A failed fetch keeps the last good content and says so in a strip at the
+// bottom. It is caught here and never escalated to the SPA's fail-hard error
+// page: a stale conversation is not a dead app.
 //
 // ── Synthetic scrolling ─────────────────────────────────────────────────
 // Read mode does not scroll natively — it renders into an inner box that
@@ -42,13 +56,34 @@ const PROMPT_SIGILS = ["$ ", "% ", "# ", "❯ ", "➜ "];
 const EMPTY_COMMAND_TEXT = "(command not recorded)";
 const EMPTY_STATE_TEXT =
   "Nothing recorded yet. Commands appear here as they finish.";
+const ERROR_TEXT = "can't reach the server — retrying";
 
-export function createReadMode({ host, session = "", handlers = {} } = {}) {
+// Three seconds so a finished command appears while you are still looking at
+// the screen. The mount asks for the newest turns; a refresh is bounded by the
+// endpoint's own page budget, so the limit is a ceiling, not an expectation.
+const POLL_INTERVAL_MS = 3000;
+const MOUNT_TAIL = 200;
+const REFRESH_LIMIT = 500;
+
+export function createReadMode({
+  host,
+  session = "",
+  handlers = {},
+  fetchPage = null,
+  pollIntervalMs = POLL_INTERVAL_MS,
+} = {}) {
   let mounted = false;
   let inner = null;
   let scroller = null;
   let gestures = null;
   let entries = [];
+  let cursor = null;
+  let inflight = null;
+  let timer = null;
+  let errorEl = null;
+  // Bumped on unmount so a response that lands after it can neither advance
+  // the cursor nor paint into the next mount's DOM.
+  let generation = 0;
 
   function mountGestures() {
     if (gestures) return;
@@ -115,6 +150,87 @@ export function createReadMode({ host, session = "", handlers = {} } = {}) {
     });
   }
 
+  // Without a cursor there is nothing to resume from, so the request is the
+  // mount request — which is also what a failed mount retries with.
+  function conversationPath() {
+    const params =
+      cursor === null
+        ? { tail: String(MOUNT_TAIL) }
+        : { cursor, limit: String(REFRESH_LIMIT) };
+    const query = new URLSearchParams(params).toString();
+    return `/api/sessions/${encodeURIComponent(session)}/conversation?${query}`;
+  }
+
+  function applyPage(page) {
+    const fetched = Array.isArray(page?.entries) ? page.entries : [];
+    const first = cursor === null;
+    if (typeof page?.nextCursor === "string" && page.nextCursor !== "") {
+      cursor = page.nextCursor;
+    }
+    clearError();
+    if (first) setEntries(fetched);
+    else appendEntries(fetched);
+  }
+
+  function poll() {
+    if (!mounted || !fetchPage) return Promise.resolve();
+    if (inflight) return inflight;
+    const gen = generation;
+    const request = fetchPage(conversationPath())
+      .then(
+        (page) => {
+          if (gen === generation) applyPage(page);
+        },
+        () => {
+          if (gen === generation) showError();
+        },
+      )
+      .finally(() => {
+        if (gen === generation) inflight = null;
+      });
+    inflight = request;
+    return request;
+  }
+
+  function visible() {
+    return window.document.visibilityState !== "hidden";
+  }
+
+  function startTimer() {
+    if (timer !== null) return;
+    timer = window.setInterval(poll, pollIntervalMs);
+  }
+
+  function stopTimer() {
+    if (timer === null) return;
+    window.clearInterval(timer);
+    timer = null;
+  }
+
+  // A phone in a pocket does not poll; picking it back up refreshes at once
+  // rather than waiting out an interval.
+  function onVisibilityChange() {
+    if (!mounted) return;
+    if (!visible()) {
+      stopTimer();
+      return;
+    }
+    startTimer();
+    poll();
+  }
+
+  function showError() {
+    if (!mounted || errorEl) return;
+    errorEl = makeEl("div", "cv-error", ERROR_TEXT);
+    host.appendChild(errorEl);
+  }
+
+  function clearError() {
+    if (!errorEl) return;
+    errorEl.remove();
+    errorEl = null;
+  }
+
   function mount() {
     if (mounted) return;
     mounted = true;
@@ -131,12 +247,25 @@ export function createReadMode({ host, session = "", handlers = {} } = {}) {
     // A fresh scroller starts at the bottom, and render() runs through
     // contentChanged, so the first paint is already pinned there.
     render();
+
+    if (!fetchPage) return;
+    window.document.addEventListener("visibilitychange", onVisibilityChange);
+    if (!visible()) return;
+    startTimer();
+    poll();
   }
 
   function unmount() {
     if (!mounted) return;
     mounted = false;
     host.classList.add("hidden");
+
+    generation++;
+    stopTimer();
+    window.document.removeEventListener("visibilitychange", onVisibilityChange);
+    inflight = null;
+    cursor = null;
+    errorEl = null;
 
     unmountGestures();
     if (scroller) {
@@ -151,12 +280,21 @@ export function createReadMode({ host, session = "", handlers = {} } = {}) {
     unmount();
   }
 
+  // Fetch now and resolve once the resulting render is on screen — the whole
+  // of read mode's imperative surface. There is deliberately no forceRender():
+  // a caller that can re-render on demand is a caller that can spin, which is
+  // what made PR #230's poll loop the main thread's busiest tenant.
+  function refreshNow() {
+    return poll();
+  }
+
   return {
     mount,
     unmount,
     dispose,
     setEntries,
     appendEntries,
+    refreshNow,
     scrollBy,
     stickToBottom,
     get session() {

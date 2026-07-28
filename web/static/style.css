@@ -999,6 +999,24 @@ h1, h2, h3 { margin: 0; }
 .cv-empty-text { margin: 0; }
 .cv-empty-link { color: var(--panel-link); }
 
+/* A failed poll keeps the turns it already drew and says so here. Pinned to
+   the host's bottom edge rather than the translated content box, so it stays
+   put wherever the conversation is scrolled to. */
+.cv-error {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+}
+
 #touchOverlay {
   position: absolute;
   top: 0;

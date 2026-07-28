@@ -211,18 +211,19 @@ test-stt-per-kind:
 # suite, so it never touches the live :5151 server or the live DB.
 #
 # Also runs reader-font.spec.cjs (issue #218), reader-command-grouping.
-# spec.cjs (issue #219), session-history.spec.cjs (issue #220) and
-# read-mode-render.spec.cjs (issue #234): all ride the same smoke instance
-# rather than getting their own CI step. `make test-reader` /
-# `make test-reader-grouping` / `make test-read-mode-render` still exist
-# standalone for local iteration.
+# spec.cjs (issue #219), session-history.spec.cjs (issue #220),
+# read-mode-render.spec.cjs (issue #234) and read-mode.spec.cjs (issue #236):
+# all ride the same smoke instance rather than getting their own CI step.
+# `make test-reader` / `make test-reader-grouping` / `make
+# test-read-mode-render` / `make test-read-mode` still exist standalone for
+# local iteration.
 .PHONY: test-spa
 test-spa:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs
+		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs
 
 # Reader font (issue #218): plain-output text renders proportional while
 # prompt/code stay monospace. Drives reader.js's real render pipeline with a
@@ -262,6 +263,19 @@ test-read-mode-render:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/read-mode-render.spec.cjs
+
+# Read mode's live loop (issue #236): the mount fetch, the cursored refresh,
+# the hidden-tab stop, the single-flight guard and the error strip — driven
+# both against a scripted fetcher (no tmux) and end to end against a real
+# tmux+bash/zsh session through the real endpoint. Runs as part of
+# `make test-spa`; standalone here for local iteration.
+.PHONY: test-read-mode
+test-read-mode:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/read-mode.spec.cjs
 
 # Conversation history endpoint (issues #220, #233): the recording path
 # against a real tmux+bash/zsh session, and the paging contract — offset

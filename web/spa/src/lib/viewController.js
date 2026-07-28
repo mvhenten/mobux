@@ -21,8 +21,10 @@
 //                 openCommandMenu, refreshViewToggle, showInputBar,
 //                 twoPullMove, twoPullEnd, test }.
 //     createReader the reader factory (from /static/reader.js).
-//     createReadMode the read-mode factory (from /static/read-mode.js).
+//     createReadMode the read-mode factory (from /static/read-mode.js), wired
+//                 here to apiGet so its poll loop has a fetcher (#236).
 
+import { apiGet } from "./api.js";
 import { getPref, setPref } from "./prefs.js";
 
 const VIEWS = ["xterm", "reader", "read"];
@@ -81,6 +83,11 @@ export function createViewController({
   const readMode = createReadMode({
     host: readModeEl,
     session,
+    // Read mode is a static module and cannot import the SPA's lib, so the
+    // fetcher is handed in. apiGet is the one the SPA uses everywhere else,
+    // which is what makes a failure an ApiError read mode can catch into its
+    // own strip instead of letting it reach the fail-hard page.
+    fetchPage: apiGet,
     handlers: {
       onExit: () => {
         swap("xterm");
