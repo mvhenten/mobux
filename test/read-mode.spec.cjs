@@ -101,6 +101,21 @@ async function installHarness(page) {
           return realClearInterval(id);
         };
 
+        // Same idea for the visibility listener: count what read mode adds to
+        // the document from here on, so an unmount that forgets to take it off
+        // again is visible.
+        state.visibilityListeners = 0;
+        const realAdd = document.addEventListener.bind(document);
+        const realRemove = document.removeEventListener.bind(document);
+        document.addEventListener = (type, fn, opts) => {
+          if (type === "visibilitychange") state.visibilityListeners++;
+          return realAdd(type, fn, opts);
+        };
+        document.removeEventListener = (type, fn, opts) => {
+          if (type === "visibilitychange") state.visibilityListeners--;
+          return realRemove(type, fn, opts);
+        };
+
         const fetchPage = (path) => {
           state.requests.push(path);
           const step = state.script.shift() || state.fallback;
@@ -149,6 +164,9 @@ async function installHarness(page) {
       },
       liveTimers() {
         return window.__rmState.timers.size;
+      },
+      visibilityListeners() {
+        return window.__rmState.visibilityListeners;
       },
       release(payload) {
         for (const resolve of window.__rmState.hangReleases.splice(0)) {
@@ -407,6 +425,7 @@ test("read mode: unmounting stops the poll", async ({ page }) => {
     })
     .toBeGreaterThanOrEqual(3);
   expect(await page.evaluate(() => window.__rm.liveTimers())).toBe(1);
+  expect(await page.evaluate(() => window.__rm.visibilityListeners())).toBe(1);
 
   const atUnmount = await page.evaluate(() => {
     window.__rm.unmount();
@@ -414,8 +433,65 @@ test("read mode: unmounting stops the poll", async ({ page }) => {
   });
   await page.waitForTimeout(500);
   expect(await page.evaluate(() => window.__rm.requestCount())).toBe(atUnmount);
-  // Nothing is left ticking either: a timer that only no-ops is still a leak.
+  // Nothing is left ticking either: a timer that only no-ops is still a leak,
+  // and so is a visibility listener on a component that no longer exists.
   expect(await page.evaluate(() => window.__rm.liveTimers())).toBe(0);
+  expect(await page.evaluate(() => window.__rm.visibilityListeners())).toBe(0);
+});
+
+test("read mode: a response that lands after an unmount cannot corrupt the next mount", async ({
+  page,
+}) => {
+  await installHarness(page);
+  await createReadMode(page, {
+    pollIntervalMs: 60000,
+    script: [
+      // The mount fetch that is still in flight when the view is swapped away.
+      { kind: "hang" },
+      // The next mount's own fetch, which resolves first and sets the cursor.
+      { kind: "ok", entries: [turn(1), turn(2)], nextCursor: "CUR-1" },
+    ],
+    fallback: { kind: "ok", entries: [], nextCursor: "CUR-1" },
+  });
+
+  await page.evaluate(() => window.__rm.mount());
+  await page.evaluate(() => window.__rm.unmount());
+  await mountAndSettle(page);
+  expect(await page.evaluate(() => window.__rm.snapshot())).toMatchObject({
+    seqs: ["1", "2"],
+  });
+
+  // The abandoned request finally answers, with the page it was asked for. By
+  // then a cursor is held, so an unguarded apply would take it for a refresh
+  // and append the same two turns underneath themselves.
+  await page.evaluate(async () => {
+    window.__rm.release({
+      entries: [
+        {
+          seq: 1,
+          command: "spec$ synthetic-1",
+          output: "output 1\n",
+          exitCode: 0,
+        },
+        {
+          seq: 2,
+          command: "spec$ synthetic-2",
+          output: "output 2\n",
+          exitCode: 0,
+        },
+      ],
+      nextCursor: "CUR-STALE",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  });
+
+  const { seqs } = await page.evaluate(() => window.__rm.snapshot());
+  expect(seqs).toEqual(["1", "2"]);
+  expect(new Set(seqs).size).toBe(seqs.length);
+  // The cursor the stale page carried is not the one the next refresh uses.
+  await page.evaluate(() => window.__rm.refreshNow());
+  const requests = await page.evaluate(() => window.__rm.requests());
+  expect(param(requests[requests.length - 1], "cursor")).toBe("CUR-1");
 });
 
 // ── e2e level ──────────────────────────────────────────────────────
@@ -474,6 +550,27 @@ function readModeView(page) {
 
 function refreshReadMode(page) {
   return page.evaluate(() => window.__mobuxView.test.readModeRefreshNow());
+}
+
+// Park the turn elements currently on screen so a later refresh can be checked
+// against the nodes themselves. Equal `data-seq` values prove nothing here: a
+// rebuild reproduces them exactly, and the whole point of appending is that the
+// nodes already rendered are the same objects afterwards.
+function holdRenderedTurns(page) {
+  return page.evaluate(() => {
+    window.__rmHeldTurns = Array.from(
+      document.querySelectorAll("#readmode .cv-turn"),
+    );
+    return window.__rmHeldTurns.length;
+  });
+}
+
+function heldTurnsSurvived(page) {
+  return page.evaluate(() => {
+    const held = window.__rmHeldTurns || [];
+    const now = Array.from(document.querySelectorAll("#readmode .cv-turn"));
+    return held.every((node, i) => now[i] === node);
+  });
 }
 
 // One attempt: a warm-up plus three commands with known exit codes, then read
@@ -558,7 +655,10 @@ async function attemptReadModeE2E(
         detail: `expected ${commands.length} recorded command entries before swapping, got ${recorded.length}`,
       };
     }
-    const markerRecorded = recorded.some((e) => e.output.includes(marker));
+    // Which recorded turn the echo landed under. The rendered turns are the
+    // recorded command entries in the same order, so this index is the one the
+    // marker has to appear under on screen — anywhere else is misattribution.
+    const markerAt = recorded.findIndex((e) => e.output.includes(marker));
 
     // From here on, read mode is the only thing asking the endpoint for pages.
     await page.route(isConversationUrl, record);
@@ -574,17 +674,23 @@ async function attemptReadModeE2E(
     } else if (view.chips.join("|") !== ["✓", "✓", "✗ 1", "✓"].join("|")) {
       failures.push(`unexpected exit chips: ${JSON.stringify(view.chips)}`);
     }
-    if (markerRecorded && !view.outputs.some((t) => t.includes(marker))) {
-      failures.push(`recorded output ${marker} is not on screen`);
+    if (markerAt !== -1 && !(view.outputs[markerAt] || "").includes(marker)) {
+      failures.push(
+        `recorded output ${marker} belongs to turn ${markerAt}, on screen: ${JSON.stringify(view.outputs)}`,
+      );
     }
 
     // A command finishing while read mode is showing appends a turn. The swap
     // resized the terminal, so let tmux finish repainting before typing into
     // it.
+    const heldCount = await holdRenderedTurns(page);
+    if (heldCount !== 4) {
+      failures.push(`expected to hold 4 rendered turns, held ${heldCount}`);
+    }
     await page.waitForTimeout(600);
     tmux(`send-keys -t ${session} 'echo ${laterMarker}' Enter`);
     await entriesAtLeast(5);
-    const laterRecorded = (await recordedCommands(page, session)).some((e) =>
+    const laterAt = (await recordedCommands(page, session)).findIndex((e) =>
       e.output.includes(laterMarker),
     );
 
@@ -610,12 +716,20 @@ async function attemptReadModeE2E(
       failures.push(`duplicated data-seq: ${JSON.stringify(after.seqs)}`);
     }
     if (after.seqs.slice(0, 4).join("|") !== view.seqs.join("|")) {
+      failures.push("the turns already on screen changed seq");
+    }
+    if (!(await heldTurnsSurvived(page))) {
       failures.push("the turns already on screen were rebuilt, not kept");
     }
-    if (laterRecorded && !after.outputs.some((t) => t.includes(laterMarker))) {
-      failures.push(`recorded output ${laterMarker} is not on screen`);
+    if (
+      laterAt !== -1 &&
+      !(after.outputs[laterAt] || "").includes(laterMarker)
+    ) {
+      failures.push(
+        `recorded output ${laterMarker} belongs to turn ${laterAt}, on screen: ${JSON.stringify(after.outputs)}`,
+      );
     }
-    if (!markerRecorded && !laterRecorded) {
+    if (markerAt === -1 && laterAt === -1) {
       failures.push("the recording caught neither echo, so nothing was proven");
     }
 
