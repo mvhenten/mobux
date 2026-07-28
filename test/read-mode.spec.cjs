@@ -83,6 +83,22 @@ async function installHarness(page) {
           script: script.slice(),
           fallback,
           hangReleases: [],
+          timers: new Set(),
+        };
+
+        // Read mode's own interval, tracked by its period so nothing else on
+        // the page is counted. A poll that stops issuing requests but leaves
+        // its timer behind is still a leak, and only this sees it.
+        const realSetInterval = window.setInterval.bind(window);
+        const realClearInterval = window.clearInterval.bind(window);
+        window.setInterval = (fn, ms) => {
+          const id = realSetInterval(fn, ms);
+          if (ms === pollIntervalMs) state.timers.add(id);
+          return id;
+        };
+        window.clearInterval = (id) => {
+          state.timers.delete(id);
+          return realClearInterval(id);
         };
 
         const fetchPage = (path) => {
@@ -130,6 +146,9 @@ async function installHarness(page) {
       },
       requestCount() {
         return window.__rmState.requests.length;
+      },
+      liveTimers() {
+        return window.__rmState.timers.size;
       },
       release(payload) {
         for (const resolve of window.__rmState.hangReleases.splice(0)) {
@@ -295,11 +314,13 @@ test("read mode: no request goes out while the tab is hidden, and the timer rest
     fallback: { kind: "ok", entries: [], nextCursor: "CUR" },
   });
 
-  // Hidden before the mount, so nothing — not even the first fetch — goes out.
+  // Hidden before the mount, so nothing — not even the first fetch — goes out,
+  // and no timer is left ticking to produce one.
   await page.evaluate(() => window.__rm.setVisibility("hidden"));
   await page.evaluate(() => window.__rm.mount());
   await page.waitForTimeout(500);
   expect(await page.evaluate(() => window.__rm.requestCount())).toBe(0);
+  expect(await page.evaluate(() => window.__rm.liveTimers())).toBe(0);
 
   await page.evaluate(() => window.__rm.setVisibility("visible"));
   await expect
@@ -385,6 +406,7 @@ test("read mode: unmounting stops the poll", async ({ page }) => {
       message: "waiting for the poll to run before unmounting",
     })
     .toBeGreaterThanOrEqual(3);
+  expect(await page.evaluate(() => window.__rm.liveTimers())).toBe(1);
 
   const atUnmount = await page.evaluate(() => {
     window.__rm.unmount();
@@ -392,6 +414,8 @@ test("read mode: unmounting stops the poll", async ({ page }) => {
   });
   await page.waitForTimeout(500);
   expect(await page.evaluate(() => window.__rm.requestCount())).toBe(atUnmount);
+  // Nothing is left ticking either: a timer that only no-ops is still a leak.
+  expect(await page.evaluate(() => window.__rm.liveTimers())).toBe(0);
 });
 
 // ── e2e level ──────────────────────────────────────────────────────
