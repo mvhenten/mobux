@@ -739,14 +739,22 @@ impl SessionHistoryStore {
         let path = self.file_path(session);
         let floor = cursor.map(|c| c.seq).unwrap_or(0);
 
+        // An empty or absent file gives the zero cursor whatever the caller
+        // supplied, matching `read_tail`. Echoing a `seq` the file cannot
+        // account for would strand a client on a floor no entry ever
+        // reaches, were the record to start over.
+        let zero = Page {
+            entries: Vec::new(),
+            next_seq: 0,
+            next_offset: 0,
+        };
         let Ok(file) = File::open(&path) else {
-            return Ok(Page {
-                entries: Vec::new(),
-                next_seq: floor,
-                next_offset: 0,
-            });
+            return Ok(zero);
         };
         let file_len = file.metadata()?.len();
+        if file_len == 0 {
+            return Ok(zero);
+        }
         let mut reader = BufReader::new(file);
 
         let from_offset = match cursor.and_then(|c| c.offset) {
@@ -1925,6 +1933,30 @@ mod tests {
         assert!(page.entries.len() < 64);
         assert_eq!(page.entries.last().unwrap()["seq"], 64);
         assert_eq!(page.next_seq, 64);
+    }
+
+    #[test]
+    fn a_cursor_against_a_session_with_no_history_gets_the_zero_cursor_back() {
+        let (_dir, store) = temp_store();
+        for cursor in [
+            PageCursor {
+                seq: 7,
+                offset: None,
+            },
+            PageCursor {
+                seq: 7,
+                offset: Some(0),
+            },
+            PageCursor {
+                seq: 7,
+                offset: Some(400),
+            },
+        ] {
+            let page = store.read_page("never-written", Some(cursor), 50).unwrap();
+            assert!(page.entries.is_empty());
+            assert_eq!(page.next_seq, 0, "cursor {cursor:?}");
+            assert_eq!(page.next_offset, 0, "cursor {cursor:?}");
+        }
     }
 
     #[test]

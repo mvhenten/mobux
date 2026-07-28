@@ -1055,12 +1055,24 @@ test.describe("conversation endpoint: paging contract", () => {
   test("conversation endpoint: a well-formed name with no history is an empty page with the zero cursor", async ({
     page,
   }) => {
-    const { status, body } = await fetchConversation(
-      page,
-      `nohistory-${process.pid}-${Date.now()}`,
-    );
+    const session = `nohistory-${process.pid}-${Date.now()}`;
+    const { status, body } = await fetchConversation(page, session);
     expect(status).toBe(200);
     expect(body.entries).toEqual([]);
     expect(decodeCursor(body.nextCursor)).toBe("v2:0:0");
+
+    // A supplied cursor does not change that: a file with no content
+    // cannot account for a seq, and echoing one would strand the client on
+    // a floor no entry reaches if the record later starts over.
+    for (const cursor of ["v1:7", "v2:7:0", "v2:7:400"]) {
+      const carried = await fetchConversation(
+        page,
+        session,
+        `?cursor=${encodeURIComponent(makeCursor(cursor))}`,
+      );
+      expect(carried.status, cursor).toBe(200);
+      expect(carried.body.entries, cursor).toEqual([]);
+      expect(decodeCursor(carried.body.nextCursor), cursor).toBe("v2:0:0");
+    }
   });
 });
