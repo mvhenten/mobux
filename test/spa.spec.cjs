@@ -1764,6 +1764,92 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     expect(url.searchParams.get("body")).toContain("Fault kind: denied");
   });
 
+  // Regression: mic-overlay.js wired its OWN click listener on this anchor
+  // in addition to the app-wide delegated capture listener
+  // (external-link.js's installExternalLinkHandler) that already handles
+  // every external anchor click. The capture listener runs first and calls
+  // openExternal() before mic-overlay's own (target/bubble-phase) listener
+  // even fires — a bubble-phase stopPropagation() there is too late to
+  // retract that — so one click opened the report URL twice, in two tabs.
+  // Same technique as the recursion regression (external-link.js): patch
+  // the real synthetic-anchor .click() openExternal() makes and count it.
+  test("the report link opens exactly once — no double-handling between the overlay and the delegated capture listener", async ({
+    page,
+  }) => {
+    await page.route(/\/api\/stt\/status$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          kind: "local",
+          reachable: true,
+          installed: true,
+          local_process_running: true,
+        }),
+      }),
+    );
+    // The report link's real target is github.com — block that specific
+    // navigation so a click doesn't make a real outbound request; the
+    // click-count instrumentation below runs entirely before any network
+    // activity, so this doesn't affect what's being measured.
+    await page.route(/github\.com/, (route) => route.abort());
+    await page.addInitScript(() => {
+      const denyGetUserMedia = () =>
+        Promise.reject(
+          new DOMException("Permission denied", "NotAllowedError"),
+        );
+      if (navigator.mediaDevices) {
+        navigator.mediaDevices.getUserMedia = denyGetUserMedia;
+      } else {
+        Object.defineProperty(navigator, "mediaDevices", {
+          value: { getUserMedia: denyGetUserMedia },
+          configurable: true,
+        });
+      }
+    });
+
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    await page.evaluate(() => {
+      const bar = document.getElementById("inputBar");
+      if (bar) bar.classList.remove("hidden");
+    });
+    await page.locator("#micBtn").click();
+
+    const overlay = page.locator("#mobux-mic-overlay.fault");
+    await expect(overlay).toBeVisible({ timeout: 10000 });
+    const reportLink = page.locator("#mobux-mic-overlay .mo-report-link");
+    await expect(reportLink).toBeVisible();
+
+    await page.evaluate(() => {
+      window.__mobuxTestSyntheticClickCount = 0;
+      const origClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function (...args) {
+        window.__mobuxTestSyntheticClickCount++;
+        return origClick.apply(this, args);
+      };
+    });
+
+    // A real (trusted) click on the report link — Playwright dispatches
+    // this via the OS/CDP input path, not the JS .click() method, so it is
+    // NOT itself counted; only openExternal's own synthetic anchor(s) are.
+    await reportLink.click();
+    await page.waitForTimeout(200);
+
+    const clickCount = await page.evaluate(
+      () => window.__mobuxTestSyntheticClickCount,
+    );
+    expect(clickCount).toBe(1);
+  });
+
   // ── regression: a getUserMedia that never settles must still fault loud ──
   //
   // In a TWA/WebView missing the Android RECORD_AUDIO permission,

@@ -66,8 +66,14 @@ export function openExternal(url) {
   // again on the anchor it just made — which creates another untagged
   // anchor, which the listener intercepts again, forever: unbounded
   // recursion until the call stack overflows. Reachable from any external
-  // anchor click anywhere in the app (this module's own callers included —
-  // e.g. mic-overlay.js's report-issue link).
+  // anchor click anywhere in the app, since the delegated listener runs in
+  // the capture phase, ahead of the anchor's own listeners — which is also
+  // why a target/bubble-phase click handler on a real external anchor
+  // (e.g. one that calls openExternal itself, wanting the TWA-safe path)
+  // is redundant: the delegated listener has already called openExternal
+  // once by the time that handler runs, and a second independent call
+  // double-opens the link. Callers should let the delegated listener do
+  // the routing rather than wiring their own.
   const a = document.createElement('a');
   a.href = url;
   a.target = '_blank';
