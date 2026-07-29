@@ -65,6 +65,78 @@ pub fn tmux_command(target: Option<&str>, tmux_args: &[&str]) -> Command {
     }
 }
 
+/// FIFO path pipe-pane's own `cat` writer and our reader rendezvous on for
+/// `session`'s conversation-history tap (see [`spawn_pipe_pane_feed`]).
+/// `/tmp` rather than the app's data dir: this is a transient, self-
+/// cleaning OS pipe, not persisted state — the same convention the app
+/// already uses for other short-lived scratch files (upload staging).
+fn pipe_pane_fifo_path(session: &str) -> String {
+    format!("/tmp/mobux-histpipe-{session}.fifo")
+}
+
+/// Starts a long-lived local child that taps `session`'s pane via `tmux
+/// pipe-pane` and streams the raw bytes back on its own stdout.
+///
+/// The conversation-history segmenter (`session_history.rs`) needs bytes in
+/// the exact order the shell inside the pane produced them. The live WS
+/// attach relay (`handle_ws`'s other PTY, running `tmux attach`) does not
+/// give that: an attached client only ever receives tmux's own on-demand
+/// screen redraws, computed from tmux's internal cell buffer and flushed on
+/// tmux's own schedule — never a strict echo of the pane's original byte
+/// stream. An OSC 133 passthrough marker can therefore land on the wire out
+/// of order relative to nearby screen content (measured against a live
+/// instance: a freshly drawn, still-empty prompt line winning the
+/// segmenter's "most recently written row" over the actual typed-command
+/// echo, which hadn't been redrawn to this client yet — see the PR
+/// description for the captured trace). `pipe-pane` taps the pane's own pty
+/// output before any client-redraw processing, so it isn't exposed to this.
+///
+/// The wrapper script removes any stale fifo left by a crashed previous
+/// run, creates a fresh one, tells tmux to start piping the pane into it,
+/// then `exec cat`s it — replacing the wrapper so our side is just "read
+/// this child's stdout", the same shape as every other PTY reader in this
+/// codebase. `exec cat` blocks until tmux's own pipe-pane target (a
+/// separate `cat >> fifo` tmux itself spawns) opens the write end, so there
+/// is no open-order race to manage on our side.
+///
+/// Local sessions only. A remote node's pipe-pane target would need to
+/// stream back over its own connection rather than write to a local path,
+/// which this doesn't build — remote sessions keep segmenting off the
+/// attach-relay stream, same as before this existed.
+pub fn spawn_pipe_pane_feed(
+    tmux_bin: &str,
+    session: &str,
+) -> std::io::Result<tokio::process::Child> {
+    let fifo = pipe_pane_fifo_path(session);
+    let script = format!(
+        "rm -f {fifo}; mkfifo {fifo} && {tmux_bin} pipe-pane -t {session} 'cat >> {fifo}' && exec cat {fifo}"
+    );
+    tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+}
+
+/// Stops the pipe-pane target [`spawn_pipe_pane_feed`] started — tmux keeps
+/// writing to the fifo until told to stop, independent of whether our own
+/// reader is still attached — and removes the fifo. Best-effort: the
+/// session may already be gone by the time a connection tears down.
+pub async fn stop_pipe_pane_feed(tmux_bin: &str, session: &str) {
+    let parts: Vec<&str> = tmux_bin.split_whitespace().collect();
+    if let Some((program, args)) = parts.split_first() {
+        let _ = Command::new(program)
+            .args(args)
+            .args(["pipe-pane", "-t", session])
+            .status()
+            .await;
+    }
+    let _ = tokio::fs::remove_file(pipe_pane_fifo_path(session)).await;
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
