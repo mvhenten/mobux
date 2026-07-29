@@ -19,7 +19,7 @@ jobs:
           # the build-script download and the linker can't find -lonnxruntime.
           cache-directories: ~/.cache/sherpa-rs
       - run: cargo check
-      - run: cargo test --no-run
+      - run: cargo test
       - run: cargo clippy -- -D warnings
 
   e2e:
@@ -61,3 +61,25 @@ jobs:
         env:
           CI: true
           MOBUX_URL: http://localhost:8281
+
+  fleet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # sherpa-rs downloads the prebuilt onnxruntime/sherpa-onnx libs
+          # here; without caching it, a warm target/ cache makes cargo skip
+          # the build-script download and the linker can't find -lonnxruntime.
+          cache-directories: ~/.cache/sherpa-rs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: sudo apt-get install -y tmux
+      - name: Run fleet tests
+        run: make test-fleet
+        env:
+          CI: true
