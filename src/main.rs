@@ -2032,18 +2032,19 @@ async fn handle_ws(
         (None, Ok(s)) if !s.is_empty() => format!("tmux -L {}", s),
         _ => "tmux".to_string(),
     };
-    // Local sessions feed the segmenter off a dedicated `tmux pipe-pane` tap
-    // (`tmux::spawn_pipe_pane_feed`) rather than this connection's own
-    // attach-relay bytes below — see that function's doc comment for why
-    // the attach-relay stream can reorder an OSC 133 marker relative to the
-    // screen content around it. Remote (node) sessions have no such tap yet
-    // and keep segmenting off the attach relay, same as before this existed.
-    let (mut history_child, mut history_rx) = start_history_feed(
+    // Local sessions prefer a dedicated `tmux pipe-pane` tap over this
+    // connection's own attach-relay bytes below — see `tmux::PanePipeTap`'s
+    // doc comment. `history_rx.is_none()` (checked at every use below) is
+    // what actually gates the attach-relay fallback, so a tap that never
+    // started, or dies mid-session, degrades to the old behavior instead of
+    // going dark.
+    let (mut history_tap, mut history_rx) = start_history_feed(
         &ssh_target,
         &tmux_bin,
         &session_name,
         feeder_guard.is_some(),
-    );
+    )
+    .await;
     // Force a real terminfo entry on the spawned PTY. The host's TERM
     // can be unset, "dumb" (non-interactive shells), or something tmux
     // doesn't have terminfo for — in any of those cases tmux's first
@@ -2093,12 +2094,9 @@ async fn handle_ws(
 
     loop {
         tokio::select! {
-            // Local sessions only (`start_history_feed` never arms this
-            // receiver for a remote one) — feeds the segmenter from the
-            // pipe-pane tap. `feeder_guard`/`segmenter` are already Some by
-            // construction: this receiver only ever exists because
-            // acquiring the feeder slot just created them (see
-            // `start_history_feed`'s two call sites above).
+            // Only armed while a local pipe-pane tap is live — disarmed
+            // (`if history_rx.is_some()`) the instant it isn't, which is
+            // also what un-gates the attach-relay branch's own feed below.
             maybe_hist = async { history_rx.as_mut().unwrap().recv().await }, if history_rx.is_some() => {
                 match maybe_hist {
                     Some(chunk) => {
@@ -2116,7 +2114,10 @@ async fn handle_ws(
                             }
                         }
                     }
-                    None => history_rx = None,
+                    None => {
+                        history_rx = None;
+                        history_tap = None;
+                    }
                 }
             }
             maybe_out = rx.recv() => {
@@ -2129,49 +2130,29 @@ async fn handle_ws(
                         // chunks here are just rendering, never events.
                         //
                         // A connection that lost the feeder race keeps
-                        // trying: the holder's departure frees the slot but
-                        // nothing else re-acquires it, so without this a
-                        // still-attached client relays forever and records
-                        // nothing. Retried before the chunk is fed, and on
-                        // every chunk rather than on a timer — the window
-                        // between the slot freeing and the new segmenter
-                        // existing is a window in which a whole command
-                        // goes unrecorded, and one uncontended mutex is
-                        // nothing next to the copy, the lossy decode and
-                        // the awaited send this branch already does.
+                        // retrying here every chunk (see `FeederGuard`'s
+                        // doc comment) — this is also where a live pipe-pane
+                        // tap gets (re)started once the slot is acquired.
                         if feeder_guard.is_none() {
                             feeder_guard = session_history.try_acquire_feeder(&session_name);
                             if feeder_guard.is_some() {
                                 segmenter = Some(session_history::Segmenter::new());
-                                let (child, rx) = start_history_feed(
-                                    &ssh_target,
-                                    &tmux_bin,
-                                    &session_name,
-                                    true,
-                                );
-                                history_child = child;
+                                let (tap, rx) =
+                                    start_history_feed(&ssh_target, &tmux_bin, &session_name, true)
+                                        .await;
+                                history_tap = tap;
                                 history_rx = rx;
                             }
                         }
-                        // A local session's segmenter is fed exclusively by
-                        // the pipe-pane tap above (`history_rx`'s branch
-                        // below) — feeding it from this relay's bytes too
-                        // would double-segment. Remote sessions have no tap
-                        // (see `start_history_feed`'s doc comment) and fall
-                        // back to this stream, same as before that existed.
-                        if ssh_target.is_some() {
+                        // The pipe-pane branch above feeds the segmenter
+                        // whenever it's live; feeding it here too would
+                        // double-segment.
+                        if history_rx.is_none() {
                             if let Some(seg) = segmenter.as_mut() {
                                 let produced = seg.feed(&chunk, session_history::now_ms());
                                 if !produced.is_empty() {
                                     let history = session_history.clone();
                                     let name = session_name.clone();
-                                    // File I/O off the async task, same
-                                    // pattern as `resolve_node_target`'s db
-                                    // lookup below. A write failure is
-                                    // swallowed (`let _`), same as every
-                                    // other best-effort side channel in this
-                                    // loop (bell hook, etc.) — it must never
-                                    // interrupt the live relay.
                                     let _ = tokio::task::spawn_blocking(move || {
                                         for entry in produced {
                                             let _ = history.append(&name, entry);
@@ -2231,15 +2212,10 @@ async fn handle_ws(
         }
     }
 
-    // Killing our own reader (`kill_on_drop` on the child `start_history_feed`
-    // spawned) only stops OUR side of the fifo — tmux's own pipe-pane target
-    // (a separate `cat >> fifo` tmux itself spawned) keeps writing until
-    // explicitly told to stop, so it must be turned off here rather than
-    // left to drop.
-    if let Some(mut hc) = history_child.take() {
-        let _ = hc.kill().await;
-        tmux::stop_pipe_pane_feed(&tmux_bin, &session_name).await;
-    }
+    // `PanePipeTap::drop` stops its tmux-side target and removes its fifo —
+    // dropping it here is belt-and-suspenders (every earlier return in this
+    // function drops it too, since it's a plain local variable).
+    drop(history_tap);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -2247,48 +2223,28 @@ async fn handle_ws(
 }
 
 /// Starts (or, on re-acquire, restarts) the `tmux pipe-pane`-backed history
-/// feed for a session that just became this connection's responsibility to
+/// tap for a session that just became this connection's responsibility to
 /// segment — `active` mirrors `feeder_guard.is_some()` at the call site. A
 /// no-op (returns `(None, None)`) when `active` is false, when the session
-/// lives on a remote node, or when the tap fails to start (e.g. no `mkfifo`
-/// on PATH) — the caller treats all three the same way: no local history
-/// tap, so remote sessions (and, best-effort, a broken local one) fall back
-/// to the caller's own attach-relay feed. See `tmux::spawn_pipe_pane_feed`'s
-/// doc comment for why local sessions use this instead of that relay.
-fn start_history_feed(
+/// lives on a remote node (unbuilt — see `tmux::PanePipeTap`'s doc comment),
+/// or when the tap fails to start; the caller falls back to its own
+/// attach-relay feed in all three cases, gating on `history_rx.is_none()`.
+async fn start_history_feed(
     ssh_target: &Option<String>,
     tmux_bin: &str,
     session_name: &str,
     active: bool,
 ) -> (
-    Option<tokio::process::Child>,
+    Option<tmux::PanePipeTap>,
     Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>,
 ) {
     if !active || ssh_target.is_some() {
         return (None, None);
     }
-    let Ok(mut child) = tmux::spawn_pipe_pane_feed(tmux_bin, session_name) else {
-        return (None, None);
-    };
-    let Some(mut stdout) = child.stdout.take() else {
-        return (None, None);
-    };
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
-        loop {
-            match tokio::io::AsyncReadExt::read(&mut stdout, &mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-    (Some(child), Some(rx))
+    match tmux::PanePipeTap::start(tmux_bin, session_name).await {
+        Some((tap, rx)) => (Some(tap), Some(rx)),
+        None => (None, None),
+    }
 }
 
 fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
