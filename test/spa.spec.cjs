@@ -1160,10 +1160,22 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     await page.waitForFunction(
       () => {
         const t = document.getElementById("terminal");
-        return t && t.childElementCount > 0;
+        return (
+          t &&
+          t.childElementCount > 0 &&
+          window.__mobuxView?.test?.wsReady?.() === true
+        );
       },
       { timeout: 15000 },
     );
+    // The PTY websocket opens ~50-80ms before tmux's own attach subprocess
+    // registers the client (see waitForClientAttached in lib/tmux.cjs). The
+    // fast-submit path sends the transcript straight through with no
+    // preview step, so it can race that window and land on zero attached
+    // clients — lost forever, since tmux only replays pane content on
+    // attach, never events. Every test in this block that later sends into
+    // the terminal must gate on the server-side attach, not just the socket.
+    await waitForClientAttached(tmux, SEED);
     await page.evaluate(() => {
       const bar = document.getElementById("inputBar");
       if (bar) bar.classList.remove("hidden");
