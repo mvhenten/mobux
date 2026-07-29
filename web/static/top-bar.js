@@ -28,16 +28,20 @@ function ensureStyles() {
 #mobux-top-bar {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
+  flex-direction: column;
   background: #14161a;
   border-bottom: 1px solid #262a30;
   font-family: -apple-system, system-ui, sans-serif;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
 }
-#mobux-top-bar button {
+#mobux-top-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+}
+#mobux-top-bar-row button {
   flex-shrink: 0;
   min-width: 32px;
   height: 28px;
@@ -50,12 +54,12 @@ function ensureStyles() {
   padding: 0 8px;
   cursor: pointer;
 }
-#mobux-top-bar button:hover { background: #262b32; color: #c8ccc9; }
-#mobux-top-bar button:active { background: #2e333b; }
+#mobux-top-bar-row button:hover { background: #262b32; color: #c8ccc9; }
+#mobux-top-bar-row button:active { background: #2e333b; }
 /* Recording state — muted clay, matches the mic-overlay palette (not the
    bright red the mobile ribbon uses). The shared action toggles
    .mic-recording on this button. */
-#mobux-top-bar button.mic-recording {
+#mobux-top-bar-row button.mic-recording {
   background: #5a3a3a;
   color: #e3cccc;
   border-color: #7a5050;
@@ -64,6 +68,22 @@ function ensureStyles() {
 @keyframes mobuxTopMicPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(176, 106, 106, 0.45); }
   50%      { box-shadow: 0 0 0 4px rgba(176, 106, 106, 0); }
+}
+/* Brief button tint on a failed attach — the persistent message itself
+   lives in the shared inline error surface (input-actions.js), appended
+   below this row. Without even this tint the desktop attach button was a
+   dead button: the server can now fail a remote upload (ssh down, remote
+   mkdir denied, disk full) where the old local-only write effectively
+   never did. */
+#mobux-top-bar-row button.rec-error {
+  border-color: #ff6b6b;
+  background: #5a1f1f;
+  color: #ffd2d2;
+  animation: mobuxTopRecErrorFlash 0.5s ease-in-out 2;
+}
+@keyframes mobuxTopRecErrorFlash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 80, 80, 0.0); }
+  50%      { box-shadow: 0 0 0 3px rgba(255, 80, 80, 0.55); }
 }`;
   const el = document.createElement('style');
   el.id = STYLE_ID;
@@ -71,7 +91,7 @@ function ensureStyles() {
   document.head.appendChild(el);
 }
 
-// createTopBar({ send, toggleReader, isReader, toggleRead, isRead })
+// createTopBar({ send, toggleReader, isReader, toggleRead, isRead, node })
 //   → { destroy(), sync() }
 //   send(str)        inject text/path into the terminal.
 //   toggleReader()   flip the view — the SPA owns view state (#206 D3). When
@@ -79,6 +99,8 @@ function ensureStyles() {
 //   isReader()       current view is reader → reflect the toggle icon.
 //   toggleRead()     the same pair for read mode (#235); null ⇒ no button.
 //   isRead()         current view is read mode → reflect the toggle icon.
+//   node             current remote node name ("" ⇒ local host) — passed
+//                     through to the shared attach action.
 //   sync()           re-read isReader()/isRead() and update the toggle icons;
 //                    the owner calls it after a view change (there is no
 //                    `mobux:viewchange` event anymore — the SPA drives the
@@ -89,11 +111,15 @@ export function createTopBar({
   isReader,
   toggleRead,
   isRead,
+  node,
 } = {}) {
   ensureStyles();
 
   const bar = document.createElement('div');
   bar.id = 'mobux-top-bar';
+
+  const row = document.createElement('div');
+  row.id = 'mobux-top-bar-row';
 
   const attachBtn = document.createElement('button');
   attachBtn.type = 'button';
@@ -128,9 +154,24 @@ export function createTopBar({
   settingsBtn.title = 'Settings';
   settingsBtn.textContent = '⚙';
 
-  bar.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn);
+  // Persistent inline error surface — never a toast/auto-dismissing banner
+  // (standing rule: it vanishes before it can be read). Sits below the
+  // button row, inside the bar itself, and stays until dismissed or the
+  // next attempt succeeds (see createAttachErrorSurface, which owns the
+  // role/live-region attributes so both bars agree). The mic action
+  // already routes its own faults through mic-overlay.js, so this is
+  // attach-only.
+  const errorContainer = document.createElement('div');
 
-  const attach = createAttachAction({ send });
+  row.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn);
+  bar.append(row, errorContainer);
+
+  const attach = createAttachAction({
+    send,
+    node,
+    button: attachBtn,
+    errorContainer,
+  });
   const dictate = createDictateAction({ send, button: micBtn });
 
   attachBtn.addEventListener('click', (e) => { e.preventDefault(); attach.trigger(); });

@@ -10,7 +10,7 @@
 import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
 
-export function createInputBar(engine, send) {
+export function createInputBar(engine, send, node = '') {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
   const input = document.getElementById('inputText');
@@ -158,32 +158,20 @@ export function createInputBar(engine, send) {
     }
   });
 
-  // ── Visible failure feedback ──────────────────────────────────────
-  // The old `.rec-error` tint was near-invisible and the attach path gave
-  // no UI feedback at all. Show a brief, clearly visible state on the
-  // relevant button plus a short, accessible message in the input bar.
-  const toast = document.getElementById('inputToast');
-  let toastTimer = null;
-  function showError(msg, btn) {
-    if (toast) {
-      toast.textContent = msg;
-      toast.classList.remove('hidden');
-      if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toast.classList.add('hidden'), 4000);
-    }
-    if (btn) {
-      btn.classList.add('rec-error');
-      setTimeout(() => btn.classList.remove('rec-error'), 1500);
-    }
-  }
-
   // ── File attach (any file type) ───────────────────────────────────
   // Shared with the desktop top bar (input-actions.js). The button just
-  // triggers the action; the action owns the hidden file input + upload.
+  // triggers the action; the action owns the hidden file input + upload +
+  // the persistent inline error surface. `#inputToast` is the JSX-rendered
+  // status slot already reserved for exactly this (`role="status"
+  // aria-live="polite"` in TerminalIsland.jsx) — createAttachAction
+  // populates it instead of this file building its own DOM.
   const uploadBtn = document.getElementById('uploadBtn');
+  const errorContainer = document.getElementById('inputToast');
   const attach = createAttachAction({
     send,
-    onError: (msg) => showError(msg, uploadBtn),
+    node,
+    button: uploadBtn,
+    errorContainer,
   });
   if (uploadBtn) {
     uploadBtn.addEventListener('click', (e) => { e.preventDefault(); attach.trigger(); });

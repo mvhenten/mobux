@@ -1006,14 +1006,50 @@ async fn api_telemetry(body: String) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// Strip a client-supplied filename down to Unicode alphanumerics plus
+/// `.`, `-`, `_`, replacing everything else with `_` — unchanged from the
+/// pre-existing local-only behavior (e.g. `naïve—file.txt` keeps its
+/// letters: `naïve_file.txt`). No shell metacharacter, quote, or control
+/// character survives, which is what actually matters here: it keeps the
+/// upload path safe to interpolate into the remote-write shell command
+/// (`tmux::write_remote_file`) as well as the local one — no character
+/// survives that could break out of the single-quoted word ssh sends to
+/// the remote shell.
+fn sanitize_upload_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// POST /api/upload?node=<name> — save an attached file where the terminal
+/// the user is looking at can actually reach it. `?node=` follows the same
+/// contract as every other node-aware route (`resolve_node_target`): absent
+/// means the hub's local `/tmp/mobux-uploads`, unchanged from before; a
+/// configured node streams the bytes over the same `ssh -o BatchMode=yes`
+/// pipe the rest of the node-aware handlers use and returns the path on
+/// THAT host, so the pasted path resolves in the remote shell instead of
+/// naming a file that only exists on the hub.
 async fn api_upload(
+    State(state): State<AppState>,
+    Query(q): Query<NodeQuery>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     use std::fs;
     use std::path::PathBuf;
 
+    let target = resolve_node_target(&state, q.node.as_deref()).await?;
     let upload_dir = PathBuf::from("/tmp/mobux-uploads");
-    fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
+
+    if target.is_none() {
+        fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
+    }
 
     if let Some(field) = multipart
         .next_field()
@@ -1021,34 +1057,42 @@ async fn api_upload(
         .map_err(|e| AppError::bad_request(e.into()))?
     {
         let filename = field.file_name().unwrap_or("upload").to_string();
-
-        // Sanitize filename
-        let safe_name = filename
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+        let safe_name = sanitize_upload_filename(&filename);
 
         // Add timestamp to avoid collisions
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let dest = upload_dir.join(format!("{ts}-{safe_name}"));
+        let dest_filename = format!("{ts}-{safe_name}");
 
         let data = field
             .bytes()
             .await
             .map_err(|e| AppError::bad_request(e.into()))?;
-        fs::write(&dest, &data).map_err(|e| AppError::bad_request(e.into()))?;
+
+        let dest_display = match target.as_deref() {
+            None => {
+                let dest = upload_dir.join(&dest_filename);
+                fs::write(&dest, &data).map_err(|e| AppError::bad_request(e.into()))?;
+                dest.to_string_lossy().into_owned()
+            }
+            Some(ssh_target) => {
+                let upload_dir_str = upload_dir
+                    .to_str()
+                    .ok_or_else(|| AppError::internal(anyhow::anyhow!("upload dir not utf-8")))?;
+                // A failure here is the remote host/network/ssh, not a bad
+                // request — the one client-facing 400 for a bad `?node=`
+                // (unknown node name) is already handled upstream by
+                // `resolve_node_target`.
+                tmux::write_remote_file(ssh_target, upload_dir_str, &dest_filename, &data)
+                    .await
+                    .map_err(AppError::internal)?
+            }
+        };
 
         return Ok(Json(json!({
-            "path": dest.to_string_lossy(),
+            "path": dest_display,
             "size": data.len(),
             "name": safe_name,
         })));
@@ -1852,11 +1896,23 @@ async fn resolve_node_target(
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
-    found.map(|n| Some(n.target)).ok_or_else(|| {
+    let target = found.map(|n| n.target).ok_or_else(|| {
         AppError::bad_request(anyhow::anyhow!(
             "unknown node {name:?} — check Settings › Nodes"
         ))
-    })
+    })?;
+    // A target starting with `-` would be read by ssh's own getopt as an
+    // option rather than a host argument (e.g. `-oProxyCommand=...`),
+    // running on the HUB instead of failing to connect. `ssh_exec_command`
+    // (tmux.rs) always passes the target as a bare argv element before
+    // `--`, so this is the one choke point every node-aware route already
+    // goes through to reject it.
+    if target.starts_with('-') {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "node {name:?} has an invalid target {target:?} — check Settings › Nodes"
+        )));
+    }
+    Ok(Some(target))
 }
 
 /// The terminal WS query: the shared `?node=<name>` (see `resolve_node_target`)
@@ -3428,6 +3484,67 @@ mod tests {
         std::fs::File::create(stt_dir.join(".installed")).unwrap();
         let resp2 = api_stt_status(State(state)).await.unwrap();
         assert_eq!(resp2.0["installed"], true);
+    }
+
+    // Regression: a node's stored ssh target starting with `-` (e.g.
+    // `-oProxyCommand=...`) would be read by ssh's own getopt as an option
+    // rather than a host argument once handed to `ssh_exec_command`
+    // (tmux.rs) — executing on the HUB instead of failing to reach the
+    // node. `resolve_node_target` is the one choke point every node-aware
+    // route goes through, so rejecting it there covers all of them,
+    // including the upload path this PR added.
+    #[tokio::test]
+    async fn resolve_node_target_rejects_a_target_starting_with_a_dash() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .replace_nodes(vec![("evil".to_string(), "-oProxyCommand=pwn".to_string())])
+            .expect("seed node");
+
+        let err = resolve_node_target(&state, Some("evil"))
+            .await
+            .expect_err("a leading-dash target must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("invalid target"),
+            "error names the problem: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_node_target_accepts_a_normal_target() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .replace_nodes(vec![("devbox".to_string(), "user@devbox".to_string())])
+            .expect("seed node");
+
+        let target = resolve_node_target(&state, Some("devbox"))
+            .await
+            .expect("a well-formed target resolves");
+        assert_eq!(target.as_deref(), Some("user@devbox"));
+    }
+
+    // sanitize_upload_filename's contract (main.rs, used by api_upload) is
+    // what actually matters for the ssh path in tmux.rs::write_remote_file:
+    // no shell metacharacter, quote, or control character survives, even
+    // though it keeps Unicode letters (it is NOT ASCII-only [A-Za-z0-9._-]).
+    #[test]
+    fn sanitize_upload_filename_keeps_unicode_letters_strips_shell_metacharacters() {
+        assert_eq!(sanitize_upload_filename("naïve—file.txt"), "naïve_file.txt");
+
+        let adversarial = "$(touch PWNED);`x`\n'.txt";
+        let safe = sanitize_upload_filename(adversarial);
+        for dangerous in ['$', '(', ')', ';', '`', '\n', '\''] {
+            assert!(
+                !safe.contains(dangerous),
+                "{safe:?} must not contain {dangerous:?}"
+            );
+        }
+        assert!(safe.ends_with(".txt"));
+        assert!(safe.contains("touch"));
+        assert!(safe.contains("PWNED"));
     }
 
     #[tokio::test]

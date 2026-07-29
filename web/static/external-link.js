@@ -58,12 +58,28 @@ export function openExternal(url) {
     return;
   }
 
-  // Non-TWA or non-http(s) URLs: use anchor-click fallback
+  // Non-TWA or non-http(s) URLs: use anchor-click fallback. Tagged so
+  // `installExternalLinkHandler`'s delegated capture listener recognizes
+  // this as its OWN synthetic anchor and lets the click through, instead of
+  // treating it as a fresh external link to intercept. Without the tag,
+  // that listener would preventDefault() this click and call openExternal()
+  // again on the anchor it just made — which creates another untagged
+  // anchor, which the listener intercepts again, forever: unbounded
+  // recursion until the call stack overflows. Reachable from any external
+  // anchor click anywhere in the app, since the delegated listener runs in
+  // the capture phase, ahead of the anchor's own listeners — which is also
+  // why a target/bubble-phase click handler on a real external anchor
+  // (e.g. one that calls openExternal itself, wanting the TWA-safe path)
+  // is redundant: the delegated listener has already called openExternal
+  // once by the time that handler runs, and a second independent call
+  // double-opens the link. Callers should let the delegated listener do
+  // the routing rather than wiring their own.
   const a = document.createElement('a');
   a.href = url;
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
   a.style.display = 'none';
+  a.dataset.mobuxExternal = '1';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -99,6 +115,12 @@ export function installExternalLinkHandler(target) {
         return;
       const anchor = e.target.closest && e.target.closest('a[href]');
       if (!anchor) return;
+      // openExternal's own synthetic anchor, clicking itself — let it
+      // through untouched. Re-intercepting it (this handler runs in the
+      // capture phase, ahead of the anchor's own click-to-navigate) would
+      // call openExternal() again on the anchor it just made, recursing
+      // without bound.
+      if (anchor.dataset.mobuxExternal) return;
       if (anchor.hasAttribute('download')) return;
       const href = anchor.getAttribute('href');
       if (!href || !isExternalUrl(href)) return;

@@ -164,6 +164,45 @@ test("session and pane listings cross ssh intact", async () => {
   expect(panes[0].id).toMatch(/^@/);
 });
 
+// Regression: an upload while attached to a remote node used to hardcode
+// the HUB's local /tmp/mobux-uploads and hand back that hub-local path —
+// pasting it into the remote shell named a file that only ever existed on
+// the hub. The hub process in this harness runs directly on the test host
+// (not containerized), so /tmp/mobux-uploads here IS the hub's real local
+// upload dir; the node's copy lives inside its own container, reachable
+// only over node.ssh(). A correct fix writes the bytes on the NODE and
+// returns a path that resolves there — nothing should appear under the
+// hub's local dir at all.
+test("an upload while attached to a remote node lands on the node, not the hub", async () => {
+  const fs = require("fs");
+  const path = require("path");
+  const content = `fleet-upload-${Math.floor(Math.random() * 1e9)}`;
+  const form = new FormData();
+  form.append("file", new Blob([content], { type: "text/plain" }), "note.txt");
+
+  const res = await fetch(`${hub.base}/api/upload?node=${node.name}`, {
+    method: "POST",
+    headers: { Authorization: HUB_AUTH },
+    body: form,
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+
+  expect(body.path).toMatch(/^\/tmp\/mobux-uploads\/\d+-note\.txt$/);
+  expect(node.ssh(`cat ${body.path}`)).toBe(content);
+
+  const hubLocalPath = path.join(
+    "/tmp/mobux-uploads",
+    path.basename(body.path),
+  );
+  try {
+    expect(fs.existsSync(hubLocalPath)).toBe(false);
+  } finally {
+    node.ssh(`rm -f ${body.path}`);
+    fs.rmSync(hubLocalPath, { force: true });
+  }
+});
+
 // Regression, issue #185: the route must pin the node even when the stored
 // selected-node preference points elsewhere. A stale/foreign `selected_node`
 // used to silently re-target the attach — here it names no configured node at
