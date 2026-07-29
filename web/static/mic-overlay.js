@@ -607,23 +607,22 @@ export function createMicOverlay(handlers) {
     root.querySelector('.mo-fault-btn-row').appendChild(retryBtn);
 
     // Report-issue link — present for every fault kind, including
-    // transcribe errors, so a dead mic always has a way out. Defaults to a
-    // real target=_blank anchor (works even without JS handling); when the
-    // caller threaded in openExternal (TWA-safe system-browser launch), the
-    // click routes through that instead so the TWA doesn't trap it in a
-    // Custom Tab.
+    // transcribe errors, so a dead mic always has a way out. A plain real
+    // target=_blank anchor, no click handler of its own: the app-wide
+    // delegated capture listener (external-link.js's
+    // installExternalLinkHandler, installed once at engine boot) already
+    // catches every off-origin anchor click and routes it through
+    // openExternal (system browser in the TWA, new tab elsewhere) before
+    // this element's own listeners would even run — a second listener here
+    // would double-handle the same click (two openExternal calls, two
+    // tabs). The outer overlay's tap-to-dismiss handler already skips
+    // A/BUTTON targets, so no stopPropagation() is needed either.
     const reportLink = document.createElement('a');
     reportLink.className = 'mo-btn mo-report-link';
     reportLink.textContent = '⚑ Report issue';
     reportLink.target = '_blank';
     reportLink.rel = 'noopener noreferrer';
     reportLink.href = buildReportUrl(kind, extra, null);
-    reportLink.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (typeof handlers.openExternal !== 'function') return;
-      e.preventDefault();
-      handlers.openExternal(reportLink.href);
-    });
     root.querySelector('.mo-fault-btn-row').appendChild(reportLink);
     fetchBuildInfo().then((buildInfo) => {
       if (!root) return;
