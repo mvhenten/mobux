@@ -28,23 +28,177 @@ function withNode(path, node) {
   return `${path}${path.includes('?') ? '&' : '?'}node=${encodeURIComponent(node)}`;
 }
 
+// ── Inline attach-error surface ──────────────────────────────────────
+// Standing rule: never a toast/snackbar/auto-dismissing banner anywhere —
+// it vanishes before it can be read or acted on, which is barely better
+// than the dead button it replaces. This is a PERSISTENT element: it stays
+// until the user dismisses it or the next attempt succeeds, states the
+// server's real error plus a likely fix where one can be inferred, and
+// always carries a prefilled "report an issue" link. Shared by both bars
+// (mobile input-bar.js and desktop top-bar.js) — one implementation, since
+// the upload action itself is already shared.
+const ATTACH_ERROR_STYLE_ID = 'mobux-attach-error-style';
+const ATTACH_REPORT_REPO = 'mvhenten/mobux';
+
+function ensureAttachErrorStyles() {
+  if (document.getElementById(ATTACH_ERROR_STYLE_ID)) return;
+  const css = `
+.mobux-attach-error {
+  display: none;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: monospace;
+  line-height: 1.4;
+  background: #5a1f1f;
+  color: #ffd2d2;
+  border: 1px solid #ff6b6b;
+}
+.mobux-attach-error.mobux-attach-error-visible { display: flex; }
+.mobux-attach-error .mobux-attach-error-text { flex: 1; word-break: break-word; }
+.mobux-attach-error .mobux-attach-error-link {
+  flex-shrink: 0;
+  color: #ffb3b3;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+.mobux-attach-error .mobux-attach-error-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #ffd2d2;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}`;
+  const el = document.createElement('style');
+  el.id = ATTACH_ERROR_STYLE_ID;
+  el.textContent = css;
+  document.head.appendChild(el);
+}
+
+// A short, actionable hint appended to the server's message where the text
+// itself gives a clear enough signal — the "unknown node" / bad-target
+// messages already tell the user where to fix it (Settings › Nodes), so
+// those get no extra hint.
+function inferAttachFix(message) {
+  const m = message.toLowerCase();
+  if (m.includes('permission denied')) {
+    return "check permissions on the destination directory (or the node's ssh key)";
+  }
+  if (m.includes('no space left') || m.includes('disk full')) {
+    return 'the destination disk is full';
+  }
+  if (
+    m.includes('connection refused') ||
+    m.includes('connection timed out') ||
+    m.includes('no route to host') ||
+    m.includes('name or service not known')
+  ) {
+    return 'the node may be unreachable — check it is online';
+  }
+  return null;
+}
+
+function buildAttachReportUrl(message, node) {
+  const title = `[attach] upload failed — ${String(message).slice(0, 80)}`;
+  const body = [
+    `Upload target: ${node ? `node ${node}` : 'local (hub)'}`,
+    `Error: ${message}`,
+    `User agent: ${navigator.userAgent}`,
+    `URL: ${location.href}`,
+  ].join('\n');
+  const params = new URLSearchParams({ title, body });
+  return `https://github.com/${ATTACH_REPORT_REPO}/issues/new?${params.toString()}`;
+}
+
+// createAttachErrorSurface(container, node) → { show(message), hide() }
+//   container  an existing, already-positioned element the surface renders
+//              its content into (mobile: the JSX-rendered #inputToast slot;
+//              desktop: a div top-bar.js places next to the attach button).
+//              Populated once on first show(), then reused.
+export function createAttachErrorSurface(container, node) {
+  ensureAttachErrorStyles();
+  // `container` may be the mobile bar's pre-existing `#inputToast` slot,
+  // carrying the old toast's `input-toast`/`hidden` classes (and their
+  // style.css rules) from the JSX markup. Strip them so this component's
+  // own visibility class is the only thing controlling `display` — mixing
+  // the two risks a stylesheet cascade/specificity tie deciding it instead.
+  container.classList.remove('input-toast', 'hidden');
+  container.classList.add('mobux-attach-error');
+
+  let text = null;
+  let reportLink = null;
+
+  function hide() {
+    container.classList.remove('mobux-attach-error-visible');
+  }
+
+  function build() {
+    text = document.createElement('span');
+    text.className = 'mobux-attach-error-text';
+
+    reportLink = document.createElement('a');
+    reportLink.className = 'mobux-attach-error-link';
+    reportLink.textContent = '⚑ Report issue';
+    reportLink.target = '_blank';
+    reportLink.rel = 'noopener noreferrer';
+    reportLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      openExternal(reportLink.href);
+    });
+
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'mobux-attach-error-dismiss';
+    dismissBtn.textContent = '✕';
+    dismissBtn.setAttribute('aria-label', 'Dismiss error');
+    dismissBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      hide();
+    });
+
+    container.append(text, reportLink, dismissBtn);
+  }
+
+  function show(message) {
+    if (!text) build();
+    const hint = inferAttachFix(message);
+    text.textContent = hint ? `${message} — ${hint}` : message;
+    reportLink.href = buildAttachReportUrl(message, node);
+    container.classList.add('mobux-attach-error-visible');
+  }
+
+  return { show, hide };
+}
+
 // ── File attach (any file type) ─────────────────────────────────────
 // Owns a hidden <input type=file>, POSTs the picked file to /api/upload, and
 // drops the returned path into the terminal via send().
 //
-//   createAttachAction({ send, onError, node }) → { trigger(), destroy() }
-//     onError(message)  optional — surface an upload failure in the UI.
-//     node              current remote node name ("" ⇒ local host). Rides
-//                        along as ?node=<name> so the file lands (and the
-//                        returned path resolves) on whichever host the
-//                        terminal is actually attached to (#issue upload
-//                        follows attached node).
-export function createAttachAction({ send, onError, node } = {}) {
+//   createAttachAction({ send, node, button, errorContainer })
+//     → { trigger(), destroy() }
+//     node            current remote node name ("" ⇒ local host). Rides
+//                      along as ?node=<name> so the file lands (and the
+//                      returned path resolves) on whichever host the
+//                      terminal is actually attached to.
+//     button          the 📎 button — gets the brief `.rec-error` tint on
+//                      failure (unchanged from before).
+//     errorContainer   element the persistent inline error surface renders
+//                      into (see createAttachErrorSurface). Required — a
+//                      failure with nowhere to show is a dead button.
+export function createAttachAction({ send, node, button, errorContainer } = {}) {
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
   fileInput.accept = '*/*';
   fileInput.style.display = 'none';
   document.body.appendChild(fileInput);
+
+  const errorSurface = errorContainer ? createAttachErrorSurface(errorContainer, node) : null;
 
   async function uploadFile(file) {
     const form = new FormData();
@@ -52,6 +206,8 @@ export function createAttachAction({ send, onError, node } = {}) {
     const res = await fetch(withNode('/api/upload', node), { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
+    // A prior failure's surface must not linger once an attempt succeeds.
+    errorSurface?.hide();
     // Send path directly to terminal, ready to use.
     send(path);
   }
@@ -66,7 +222,12 @@ export function createAttachAction({ send, onError, node } = {}) {
       // The server's error text is specific and actionable (unknown node,
       // a remote mkdir/ssh failure and why) — surface it verbatim rather
       // than a generic constant that throws that detail away.
-      onError?.('Attach failed: ' + (err?.message || 'upload error'));
+      const message = 'Attach failed: ' + (err?.message || 'upload error');
+      errorSurface?.show(message);
+      if (button) {
+        button.classList.add('rec-error');
+        setTimeout(() => button.classList.remove('rec-error'), 1500);
+      }
     }
     // Reset so the same file can be re-selected.
     fileInput.value = '';

@@ -463,37 +463,163 @@ test("terminal island mounts and the PTY websocket connects", async ({
 // essentially never fails. This drives the real desktop code path (forces
 // non-touch so the top bar mounts instead of the mobile input bar) and
 // asserts the server's actual error text reaches the user, not silence.
-test.describe("desktop top bar: attach failure surfaces a real error", () => {
+// Standing rule: no toast/snackbar/auto-dismissing banner, anywhere — it
+// vanishes before it can be read or acted on. The attach failure surface
+// (input-actions.js's createAttachErrorSurface, shared by both bars) is a
+// PERSISTENT inline element instead: it stays until dismissed or the next
+// attempt succeeds. These specs assert against computed visibility
+// (`toBeVisible()`/`not.toBeVisible()`), never `el.hidden` or a `.hidden`
+// class check alone — an author `display` rule can beat the `[hidden]`
+// attribute, so only the rendered result proves the element is actually
+// shown or hidden.
+const ATTACH_SERVER_ERROR =
+  "remote upload to gpubox failed: mkdir: cannot create directory: Permission denied";
+
+function mockUploadFailure(page) {
+  return page.route(/\/api\/upload(\?.*)?$/, (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "text/plain",
+      body: ATTACH_SERVER_ERROR,
+    }),
+  );
+}
+
+function mockUploadSuccess(page) {
+  return page.route(/\/api\/upload(\?.*)?$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        path: "/tmp/mobux-uploads/1-note.txt",
+        size: 5,
+        name: "note.txt",
+      }),
+    }),
+  );
+}
+
+async function attachFile(page) {
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "note.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello"),
+  });
+}
+
+test.describe("desktop top bar: attach failure surfaces a real, persistent error", () => {
   test.use({ viewport: { width: 1280, height: 800 }, hasTouch: false });
 
-  test("a failed upload shows the server's error text, not a dead button", async ({
+  test("a failed upload shows the server's error text and never auto-dismisses", async ({
     page,
   }) => {
-    const serverError =
-      'remote upload to gpubox failed: mkdir: cannot create directory: Permission denied';
-    await page.route(/\/api\/upload(\?.*)?$/, (route) =>
-      route.fulfill({ status: 500, contentType: "text/plain", body: serverError }),
-    );
+    await mockUploadFailure(page);
 
     await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
       waitUntil: "networkidle",
     });
 
-    const topBar = page.locator("#mobux-top-bar");
-    await expect(topBar).toHaveCount(1);
-    const toast = page.locator("#mobux-top-bar-toast");
-    await expect(toast).toHaveClass(/hidden/);
+    await expect(page.locator("#mobux-top-bar")).toHaveCount(1);
+    const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+    await expect(surface).not.toBeVisible();
 
-    await page
-      .locator('input[type="file"]')
-      .setInputFiles({
-        name: "note.txt",
-        mimeType: "text/plain",
-        buffer: Buffer.from("hello"),
-      });
+    await attachFile(page);
 
-    await expect(toast).not.toHaveClass(/hidden/);
-    await expect(toast).toHaveText(`Attach failed: ${serverError}`);
+    await expect(surface).toBeVisible();
+    await expect(surface).toContainText(
+      `Attach failed: ${ATTACH_SERVER_ERROR}`,
+    );
+    // The old toast auto-hid after 4s — wait well past that and confirm it
+    // is still rendered, proving there is no timer making it disappear.
+    await page.waitForTimeout(4500);
+    await expect(surface).toBeVisible();
+    await expect(surface).toContainText(
+      `Attach failed: ${ATTACH_SERVER_ERROR}`,
+    );
+  });
+
+  test("dismissing the error hides it; a later successful attempt also clears it", async ({
+    page,
+  }) => {
+    await mockUploadFailure(page);
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+
+    await attachFile(page);
+    await expect(surface).toBeVisible();
+
+    await surface.locator(".mobux-attach-error-dismiss").click();
+    await expect(surface).not.toBeVisible();
+
+    // Re-show it, then prove a SUCCESSFUL attempt clears it too (not just
+    // manual dismissal).
+    await attachFile(page);
+    await expect(surface).toBeVisible();
+
+    await mockUploadSuccess(page);
+    await attachFile(page);
+    await expect(surface).not.toBeVisible();
+  });
+
+  test("the failure surface carries a prefilled report-issue link", async ({
+    page,
+  }) => {
+    await mockUploadFailure(page);
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+
+    await attachFile(page);
+    await expect(surface).toBeVisible();
+
+    const reportLink = surface.locator(".mobux-attach-error-link");
+    await expect(reportLink).toBeVisible();
+    const href = await reportLink.getAttribute("href");
+    const url = new URL(href);
+    expect(url.origin + url.pathname).toBe(
+      "https://github.com/mvhenten/mobux/issues/new",
+    );
+    // URLSearchParams (not raw decodeURIComponent) correctly turns the
+    // `+`-for-space form-encoding back into spaces.
+    expect(url.searchParams.get("body")).toContain(ATTACH_SERVER_ERROR);
+  });
+});
+
+test.describe("mobile input bar: attach failure surfaces a real, persistent error", () => {
+  test("a failed upload shows the server's error text in #inputToast and never auto-dismisses", async ({
+    page,
+  }) => {
+    await mockUploadFailure(page);
+
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => document.getElementById("terminal")?.childElementCount > 0,
+      { timeout: 15000 },
+    );
+
+    const surface = page.locator("#inputToast");
+    // Engage first, exactly like a phone user tapping to type — the bar
+    // (and #inputToast inside it) starts hidden, same as every other
+    // mobile input-bar affordance (#201).
+    await doubleTapOverlay(page);
+    await expect(surface).not.toBeVisible();
+
+    await attachFile(page);
+
+    await expect(surface).toBeVisible();
+    await expect(surface).toContainText(
+      `Attach failed: ${ATTACH_SERVER_ERROR}`,
+    );
+    await page.waitForTimeout(4500);
+    await expect(surface).toBeVisible();
+
+    await surface.locator(".mobux-attach-error-dismiss").click();
+    await expect(surface).not.toBeVisible();
   });
 });
 
