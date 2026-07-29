@@ -65,6 +65,269 @@ pub fn tmux_command(target: Option<&str>, tmux_args: &[&str]) -> Command {
     }
 }
 
+/// FIFO path pipe-pane's own `cat` writer and our reader rendezvous on for
+/// a session-history tap (see [`PanePipeTap`]). Scoped by both the tmux
+/// socket (`tmux_bin` encodes `MOBUX_TMUX_SOCKET` when set — see
+/// `handle_ws`) and the session name: two tmux servers, or two runs on the
+/// same host, must never share a fifo. `/tmp` rather than the app's data
+/// dir: transient, self-cleaning OS state, matching the app's existing use
+/// of `/tmp` for other short-lived scratch files (upload staging).
+fn pipe_pane_fifo_path(tmux_bin: &str, session: &str) -> String {
+    let socket_tag: String = tmux_bin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("/tmp/mobux-histpipe-{socket_tag}-{session}.fifo")
+}
+
+/// Splits a `tmux_bin` string (`"tmux"` or `"tmux -L <socket>"` — see
+/// `handle_ws`) into a program + prefix-args pair a `Command` can run
+/// directly, for the local-only calls here that issue their own tmux
+/// invocation rather than embedding one in a shell string.
+fn tmux_program_and_args(tmux_bin: &str) -> Option<(&str, Vec<&str>)> {
+    let mut parts = tmux_bin.split_whitespace();
+    let program = parts.next()?;
+    Some((program, parts.collect()))
+}
+
+fn parse_pane_id(stdout: &[u8]) -> Option<String> {
+    let id = String::from_utf8_lossy(stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// The pane id tmux currently considers active in `session`'s current
+/// window. `None` on any failure (no such session, tmux unreachable, bad
+/// `tmux_bin`). A bare session name re-resolves to "whichever pane is
+/// active right now" on every tmux invocation — fine for a one-shot
+/// command, wrong for a tap that must keep targeting the SAME pane across
+/// its own start and stop (see [`PanePipeTap`]).
+pub async fn active_pane_id(tmux_bin: &str, session: &str) -> Option<String> {
+    let (program, args) = tmux_program_and_args(tmux_bin)?;
+    let output = Command::new(program)
+        .args(&args)
+        .args(["display-message", "-p", "-t", session, "#{pane_id}"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_pane_id(&output.stdout)
+}
+
+/// True while `tapped_pane` is still the pane a just-refreshed
+/// [`active_pane_id`] query names. A failed query (`current: None`) is
+/// inconclusive rather than a mismatch, so a transient tmux error never
+/// tears down a healthy tap — only a confirmed different pane does.
+fn pane_still_current(tapped_pane: &str, current: Option<&str>) -> bool {
+    match current {
+        Some(id) => id == tapped_pane,
+        None => true,
+    }
+}
+
+/// How often a running tap re-checks whether its pane is still the active
+/// one (see [`drain_pipe_pane`]).
+const PANE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Reads `child`'s stdout to completion, forwarding each chunk on `tx`,
+/// while also polling [`active_pane_id`] every [`PANE_CHECK_INTERVAL`] and
+/// stopping (without an error) the moment `session`'s active pane is no
+/// longer `tapped_pane`. Every stop path — clean EOF, a read error, or a
+/// confirmed pane switch — logs which one fired, then kills and reaps
+/// `child`: a broken or superseded tap must never be silent, and must never
+/// leave its own reader process behind.
+///
+/// A dedicated function (rather than inline in [`PanePipeTap::start`]) so
+/// it can be driven against a stand-in child in a test, without a real tmux
+/// server — `check_interval` is a parameter (production always passes
+/// [`PANE_CHECK_INTERVAL`]) for exactly that: a test drives it in
+/// milliseconds instead of waiting out the real interval.
+async fn drain_pipe_pane(
+    mut child: tokio::process::Child,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tmux_bin: String,
+    session: String,
+    tapped_pane: String,
+    check_interval: std::time::Duration,
+) {
+    let Some(mut stdout) = child.stdout.take() else {
+        eprintln!("history: pipe-pane tap for '{session}' has no stdout handle");
+        return;
+    };
+    let mut stderr = child.stderr.take();
+    let mut buf = [0u8; 8192];
+    let mut interval = tokio::time::interval(check_interval);
+    interval.tick().await; // first tick fires immediately
+
+    loop {
+        tokio::select! {
+            result = tokio::io::AsyncReadExt::read(&mut stdout, &mut buf) => {
+                match result {
+                    Ok(0) => {
+                        eprintln!("history: pipe-pane tap for '{session}' ended (reader saw EOF)");
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("history: pipe-pane tap for '{session}' read error: {e}");
+                        break;
+                    }
+                }
+            }
+            _ = interval.tick() => {
+                let current = active_pane_id(&tmux_bin, &session).await;
+                if !pane_still_current(&tapped_pane, current.as_deref()) {
+                    eprintln!(
+                        "history: pipe-pane tap for '{session}' stopped — active pane changed from {tapped_pane} to {current:?}"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    // Kill (a pane-switch or a read error may leave `child` still very much
+    // alive — e.g. still blocked reading the fifo) and reap BEFORE draining
+    // stderr: reading a live child's stderr to EOF blocks until it exits,
+    // and on this path we're the one ending it, so reading first would hang
+    // this task forever instead of tearing it down.
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    if let Some(stderr) = stderr.as_mut() {
+        let mut err_buf = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(stderr, &mut err_buf).await;
+        if !err_buf.is_empty() {
+            eprintln!(
+                "history: pipe-pane tap for '{session}' stderr: {}",
+                String::from_utf8_lossy(&err_buf).trim()
+            );
+        }
+    }
+}
+
+/// A running `tmux pipe-pane` tap on one concrete pane of a local session,
+/// feeding the conversation-history segmenter (`session_history.rs`) bytes
+/// in the exact order the shell inside the pane produced them — unlike the
+/// live WS attach relay (`handle_ws`'s other PTY, running `tmux attach`),
+/// which only ever delivers tmux's own on-demand screen redraws and can
+/// land an OSC 133 marker out of order relative to nearby screen content
+/// (see the PR description for a captured trace).
+///
+/// Pinned to the pane id [`active_pane_id`] resolves at [`PanePipeTap::start`],
+/// not the bare session name, so start and stop always agree on which pane.
+/// Splitting or switching panes ends this tap (`drain_pipe_pane` notices
+/// and the channel closes) rather than following the new one — multiplexing
+/// two panes' bytes into one segmenter would corrupt its single-command-at-
+/// a-time model worse than not recording the second pane at all. The
+/// caller falls back to the attach-relay feed, same as for a tap that
+/// failed outright (`start` returning `None`).
+///
+/// `Drop` (not straight-line cleanup at the end of `handle_ws`) stops the
+/// tmux-side target and removes the fifo, so an early return or panic
+/// anywhere after `start` still tears it down.
+pub struct PanePipeTap {
+    tmux_bin: String,
+    pane_id: String,
+    fifo_path: String,
+}
+
+impl PanePipeTap {
+    pub async fn start(
+        tmux_bin: &str,
+        session: &str,
+    ) -> Option<(Self, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>)> {
+        let pane_id = match active_pane_id(tmux_bin, session).await {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "history: pipe-pane tap for '{session}' not started — could not resolve an active pane"
+                );
+                return None;
+            }
+        };
+        let fifo_path = pipe_pane_fifo_path(tmux_bin, session);
+        let _ = tokio::fs::remove_file(&fifo_path).await;
+        match tokio::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => {}
+            other => {
+                eprintln!(
+                    "history: pipe-pane tap for '{session}' not started — mkfifo {fifo_path} failed: {other:?}"
+                );
+                return None;
+            }
+        }
+
+        let script = format!(
+            "{tmux_bin} pipe-pane -t {pane} {cmd} && exec cat {fifo}",
+            pane = shell_quote(&pane_id),
+            cmd = shell_quote(&format!("cat >> {fifo_path}")),
+            fifo = shell_quote(&fifo_path),
+        );
+        let child = match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                eprintln!("history: pipe-pane tap for '{session}' failed to spawn: {e}");
+                let _ = tokio::fs::remove_file(&fifo_path).await;
+                return None;
+            }
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(drain_pipe_pane(
+            child,
+            tx,
+            tmux_bin.to_string(),
+            session.to_string(),
+            pane_id.clone(),
+            PANE_CHECK_INTERVAL,
+        ));
+
+        Some((
+            Self {
+                tmux_bin: tmux_bin.to_string(),
+                pane_id,
+                fifo_path,
+            },
+            rx,
+        ))
+    }
+}
+
+impl Drop for PanePipeTap {
+    fn drop(&mut self) {
+        // Best-effort: the pane (or its whole session) may already be gone
+        // by the time a connection tears down, so a "can't find pane"
+        // stderr here is the expected case, not a failure worth logging —
+        // discard it rather than let it read as a real error.
+        if let Some((program, args)) = tmux_program_and_args(&self.tmux_bin) {
+            let _ = std::process::Command::new(program)
+                .args(&args)
+                .args(["pipe-pane", "-t", &self.pane_id])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = std::fs::remove_file(&self.fifo_path);
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -659,5 +922,151 @@ mod tests {
     fn shell_quote_escapes_embedded_single_quotes() {
         assert_eq!(shell_quote("plain"), "'plain'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn pipe_pane_fifo_path_scoped_by_socket_and_session() {
+        let default_a = pipe_pane_fifo_path("tmux", "work");
+        let default_b = pipe_pane_fifo_path("tmux", "other");
+        let socketed = pipe_pane_fifo_path("tmux -L histflake-test", "work");
+        assert_ne!(
+            default_a, default_b,
+            "different sessions must not share a fifo"
+        );
+        assert_ne!(
+            default_a, socketed,
+            "different tmux sockets must not share a fifo, same session name"
+        );
+        assert_eq!(
+            pipe_pane_fifo_path("tmux -L histflake-test", "work"),
+            socketed,
+            "same socket + session is deterministic"
+        );
+    }
+
+    #[test]
+    fn tmux_program_and_args_splits_the_socket_flag() {
+        assert_eq!(
+            tmux_program_and_args("tmux -L histflake-test"),
+            Some(("tmux", vec!["-L", "histflake-test"]))
+        );
+        assert_eq!(tmux_program_and_args("tmux"), Some(("tmux", vec![])));
+        assert_eq!(tmux_program_and_args(""), None);
+    }
+
+    #[test]
+    fn parse_pane_id_trims_and_rejects_empty() {
+        assert_eq!(parse_pane_id(b"%3\n"), Some("%3".to_string()));
+        assert_eq!(parse_pane_id(b"   \n"), None);
+        assert_eq!(parse_pane_id(b""), None);
+    }
+
+    #[test]
+    fn pane_still_current_matches_only_the_tapped_pane() {
+        assert!(
+            pane_still_current("%0", Some("%0")),
+            "same pane => still current"
+        );
+        assert!(
+            !pane_still_current("%0", Some("%1")),
+            "a confirmed different pane => not current"
+        );
+        assert!(
+            pane_still_current("%0", None),
+            "a failed query is inconclusive, not a mismatch"
+        );
+    }
+
+    // Regression coverage for review issue #249: `pipe-pane -t <session>`
+    // resolves to whatever pane is active at invocation time, which drifted
+    // between a tap's own start and stop once the user split or switched
+    // panes. `PanePipeTap` pins to one `pane_id` instead — these three
+    // tests exercise that without a real tmux server: a bogus `tmux_bin`
+    // stands in for "tmux unreachable" (tap fails to start), and a tiny
+    // stub script standing in for `tmux_bin` proves the mid-session
+    // pane-switch detection in `drain_pipe_pane` actually stops the tap
+    // rather than silently continuing to record the wrong pane.
+
+    #[tokio::test]
+    async fn pipe_pane_tap_does_not_start_when_tmux_is_unreachable() {
+        let started = PanePipeTap::start("definitely-not-a-real-tmux-xyz", "irrelevant").await;
+        assert!(
+            started.is_none(),
+            "a tmux_bin that can't even resolve the active pane must not start a tap"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pipe_pane_forwards_bytes_then_closes_on_child_exit() {
+        let child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf hello")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stand-in child");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            drain_pipe_pane(
+                child,
+                tx,
+                "definitely-not-a-real-tmux-xyz".to_string(),
+                "irrelevant".to_string(),
+                "%0".to_string(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("drain must return once the child's stdout hits EOF, not hang");
+
+        let mut received = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            received.extend(chunk);
+        }
+        assert_eq!(received, b"hello");
+        assert!(
+            rx.recv().await.is_none(),
+            "the channel closes once the child exits — a dead feed must be visible \
+             to the caller, not silently starved"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pipe_pane_stops_when_the_active_pane_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("fake-tmux");
+        std::fs::write(&stub, "#!/bin/sh\necho %99\n").expect("write stub");
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&stub, perms).expect("chmod stub");
+
+        // A long-running, silent child with its stderr piped too: nothing
+        // about its own stdout/stderr ends this drain — only the pane-
+        // mismatch check can. A still-alive child with a piped stderr is
+        // also the regression case for killing before (not after) draining
+        // stderr — reading a live child's stderr to EOF blocks until it
+        // exits, and this drain is the one that has to end it.
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stand-in child");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            drain_pipe_pane(
+                child,
+                tx,
+                stub.to_string_lossy().into_owned(),
+                "irrelevant".to_string(),
+                "%0".to_string(),
+                std::time::Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("drain must return once the pane mismatch is detected, not hang forever");
+
+        assert!(rx.recv().await.is_none());
     }
 }
