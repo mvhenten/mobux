@@ -561,6 +561,15 @@ test.describe("desktop top bar: attach failure surfaces a real, persistent error
     await mockUploadSuccess(page);
     await attachFile(page);
     await expect(surface).not.toBeVisible();
+
+    // The successful attach just dropped an uploaded path onto SEED's shell
+    // prompt, uncommitted (createAttachAction's send(path) never follows
+    // with Enter — the path is meant for the user to review/extend). SEED
+    // is a real, persistent shell shared by every other test in this file;
+    // left as-is, that dangling text sits on the prompt and corrupts
+    // whatever the next test sends into the same session. Clear it back to
+    // a bare prompt (Ctrl-U discards the uncommitted line).
+    tmux(`send-keys -t ${SEED} C-u`);
   });
 
   test("the failure surface carries a prefilled report-issue link", async ({
