@@ -621,6 +621,65 @@ test("external links: delegated handler escapes off-origin anchors, leaves in-ap
   expect(result.downloadAnchor.navigatedToUrl).toBeNull();
 });
 
+// Regression: openExternal's non-TWA fallback appends a real anchor and
+// calls .click() on it — but the delegated capture handler above is
+// installed on `document` and sees that synthetic click too, before the
+// anchor's own default action runs. Without tagging the synthetic anchor,
+// the handler couldn't tell it apart from a fresh external link: it
+// preventDefault()s the click and calls openExternal() AGAIN on the anchor
+// it just made, which creates another (untagged, pre-fix) anchor and clicks
+// it, forever — unbounded recursion until the call stack overflows. Every
+// external anchor click in the app could trigger this (mic-overlay.js's
+// report-issue link included), not just this module's own callers.
+test("openExternal's synthetic anchor click doesn't recurse through the delegated handler", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  // Both the SPA shell (main.jsx, at app boot) and the engine (terminal.js,
+  // once it mounts) install the delegated handler — it's idempotent, so
+  // either landing first is fine. `__mobuxOpenExternal` is set only by the
+  // engine, so waiting on it also proves the engine (and its handler
+  // install) has actually run, not just the SPA shell's earlier one.
+  await page.waitForFunction(
+    () => typeof window.__mobuxOpenExternal === "function",
+    { timeout: 5000 },
+  );
+  await page.waitForFunction(
+    () => window.__mobuxExternalLinkHandlerInstalled === true,
+    { timeout: 5000 },
+  );
+
+  const result = await page.evaluate(() => {
+    let clickCount = 0;
+    const origClick = HTMLAnchorElement.prototype.click;
+    // A listener that throws doesn't propagate out through .click() /
+    // dispatchEvent() to this scope — the browser catches and reports it
+    // at the listener boundary and unwinds normally — so a thrown circuit
+    // breaker wouldn't surface here as a catchable exception. Stop the
+    // chain by simply no longer forwarding to the real click() past the
+    // threshold instead; clickCount alone proves whether recursion happened.
+    HTMLAnchorElement.prototype.click = function (...args) {
+      clickCount++;
+      if (clickCount > 10) return;
+      return origClick.apply(this, args);
+    };
+
+    try {
+      window.__mobuxOpenExternal("https://example.com/report-issue-test");
+    } finally {
+      HTMLAnchorElement.prototype.click = origClick;
+    }
+
+    return { clickCount };
+  });
+
+  // Exactly one real click: openExternal's own anchor. The delegated
+  // handler must recognize it as its own synthetic anchor (the
+  // `dataset.mobuxExternal` tag) and let it through rather than calling
+  // openExternal() again. Pre-fix this hit the 10-click circuit breaker.
+  expect(result.clickCount).toBe(1);
+});
+
 test("reader view renders buffer text", async ({ page }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
 

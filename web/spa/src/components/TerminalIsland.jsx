@@ -384,12 +384,7 @@ export function TerminalIsland({ node, session }) {
           <button data-key="/clear\r">/clear</button>
           <button data-key="/quit\r">/quit</button>
         </div>
-        <div
-          id="inputToast"
-          class="input-toast hidden"
-          role="status"
-          aria-live="polite"
-        />
+        <div id="inputToast" class="mobux-attach-error" />
         <div class="input-row">
           <input
             id="inputText"

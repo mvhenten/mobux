@@ -586,6 +586,121 @@ test.describe("desktop top bar: attach failure surfaces a real, persistent error
     // `+`-for-space form-encoding back into spaces.
     expect(url.searchParams.get("body")).toContain(ATTACH_SERVER_ERROR);
   });
+
+  // Regression: `#mobux-top-bar button` (id + type selector, specificity
+  // 1,0,1) beat `.mobux-attach-error .mobux-attach-error-dismiss` (two
+  // classes, specificity 0,2,0) — every declaration on the dismiss button
+  // lost the cascade and it rendered as a full grey bordered top-bar
+  // button (min-width 32px, height 28px, the same chrome as 📎/🎤/⚙).
+  // Scoping the top-bar rule to `#mobux-top-bar-row button` fixes it. This
+  // asserts the actual COMPUTED style, not just that some CSS text exists.
+  test("the dismiss button keeps its own compact styling, not the top-bar button chrome", async ({
+    page,
+  }) => {
+    await mockUploadFailure(page);
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+
+    await attachFile(page);
+    await expect(surface).toBeVisible();
+
+    const dismiss = surface.locator(".mobux-attach-error-dismiss");
+    const style = await dismiss.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        minWidth: cs.minWidth,
+        height: cs.height,
+        background: cs.backgroundColor,
+        border: cs.borderStyle,
+      };
+    });
+    // The top-bar toolbar button chrome this must NOT have.
+    expect(style.minWidth).not.toBe("32px");
+    expect(style.height).not.toBe("28px");
+    expect(style.background).not.toBe("rgb(29, 33, 39)");
+    expect(style.border).not.toBe("solid");
+    // input-actions.js's own rule: transparent background, no border.
+    expect(style.background).toBe("rgba(0, 0, 0, 0)");
+    expect(style.border).toBe("none");
+  });
+
+  // A persistent, dismissible error demanding action is role="alert", not
+  // role="status"/aria-live="polite" — and scoped to the text that actually
+  // changes, not the whole surface (so re-showing an error doesn't also
+  // re-announce the report-issue link and dismiss button's labels).
+  test("the error text carries role=alert, scoped to the text itself", async ({
+    page,
+  }) => {
+    await mockUploadFailure(page);
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+    await attachFile(page);
+    await expect(surface).toBeVisible();
+
+    await expect(surface.locator(".mobux-attach-error-text")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    // The link/dismiss button must not be inside their own separate live
+    // region, and the container itself carries no role of its own.
+    await expect(surface).not.toHaveAttribute("role", /.+/);
+  });
+
+  // A proxy's HTML error page or a runaway stack trace must not grow the
+  // bar without bound, and the full unbounded text must not leak into the
+  // report URL either (only the title was clipped before).
+  test("an unbounded server error is clamped in both the display and the report link", async ({
+    page,
+  }) => {
+    const hugeError = "x".repeat(5000);
+    await page.route(/\/api\/upload(\?.*)?$/, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "text/plain",
+        body: hugeError,
+      }),
+    );
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+    await attachFile(page);
+    await expect(surface).toBeVisible();
+
+    const text = await surface.locator(".mobux-attach-error-text").innerText();
+    expect(text.length).toBeLessThan(600);
+
+    const href = await surface
+      .locator(".mobux-attach-error-link")
+      .getAttribute("href");
+    expect(href.length).toBeLessThan(1500);
+  });
+});
+
+// Regression: createAttachAction's own JSDoc always said errorContainer was
+// "Required — a failure with nowhere to show is a dead button", but the
+// code silently no-opped via `errorContainer ? … : null`. A missing
+// container (a future markup regression, a bad wiring change) would
+// reproduce the exact dead button this PR exists to fix, with no signal
+// that anything was wrong. It must fail loud at construction instead.
+test("createAttachAction throws immediately when errorContainer is missing", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "domcontentloaded" });
+  const message = await page.evaluate(async () => {
+    const { createAttachAction } = await import("/static/input-actions.js");
+    try {
+      createAttachAction({ send: () => {}, node: "" });
+      return null;
+    } catch (err) {
+      return err.message;
+    }
+  });
+  expect(message).toContain("errorContainer");
 });
 
 test.describe("mobile input bar: attach failure surfaces a real, persistent error", () => {
@@ -620,6 +735,83 @@ test.describe("mobile input bar: attach failure surfaces a real, persistent erro
 
     await surface.locator(".mobux-attach-error-dismiss").click();
     await expect(surface).not.toBeVisible();
+  });
+
+  // Regression: a container CAN outlive the createAttachAction instance
+  // that renders into it — the mobile bar's #inputToast is JSX-owned, and
+  // more generally nothing stops a future caller from reusing one. Before
+  // destroy() cleared it, a second instance's build() just appended a
+  // SECOND set of text/link/dismiss nodes alongside the first's (controls
+  // accumulate every remount), and an error still showing at teardown time
+  // stayed visible — concatenated with whatever the new instance showed
+  // next. Exercised directly against the real module (not through SPA
+  // routing) so this holds regardless of how any particular call site
+  // happens to key its remounts today.
+  test("destroying an attach action clears its error surface so a reused container starts clean", async ({
+    page,
+  }) => {
+    await page.goto(`${APP}#/`, { waitUntil: "domcontentloaded" });
+
+    const result = await page.evaluate(async () => {
+      const { createAttachAction } = await import("/static/input-actions.js");
+
+      async function attachAndFail(container, node) {
+        const button = document.createElement("button");
+        const origFetch = window.fetch;
+        window.fetch = async () =>
+          new Response(`upload failed on ${node}`, { status: 500 });
+        const action = createAttachAction({
+          send: () => {},
+          node,
+          button,
+          errorContainer: container,
+        });
+        const fileInputs = document.body.querySelectorAll("input[type=file]");
+        const fileInput = fileInputs[fileInputs.length - 1];
+        const dt = new DataTransfer();
+        dt.items.add(new File(["x"], "x.txt"));
+        fileInput.files = dt.files;
+        fileInput.dispatchEvent(new Event("change"));
+        // Let the async change handler (fetch → throw → show()) settle.
+        await new Promise((r) => setTimeout(r, 50));
+        window.fetch = origFetch;
+        return action;
+      }
+
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+
+      const first = await attachAndFail(container, "node-a");
+      const afterFirst = {
+        children: container.children.length,
+        visible: container.classList.contains("mobux-attach-error-visible"),
+      };
+
+      first.destroy();
+      const afterDestroy = {
+        children: container.children.length,
+        visible: container.classList.contains("mobux-attach-error-visible"),
+      };
+
+      // A fresh instance on the SAME (now-cleared) container, exactly as a
+      // remount would create — it must start clean, then behave normally.
+      const second = await attachAndFail(container, "node-b");
+      const afterSecond = {
+        children: container.children.length,
+        text: container.textContent,
+      };
+      second.destroy();
+
+      return { afterFirst, afterDestroy, afterSecond };
+    });
+
+    expect(result.afterFirst).toEqual({ children: 3, visible: true });
+    expect(result.afterDestroy).toEqual({ children: 0, visible: false });
+    // Exactly one instance's worth of nodes — no leftovers from the first,
+    // and the message names the CURRENT node, not a concatenation of both.
+    expect(result.afterSecond.children).toBe(3);
+    expect(result.afterSecond.text).toContain("node-b");
+    expect(result.afterSecond.text).not.toContain("node-a");
   });
 });
 

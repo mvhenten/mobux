@@ -41,7 +41,7 @@ function ensureStyles() {
   gap: 4px;
   padding: 4px 8px;
 }
-#mobux-top-bar button {
+#mobux-top-bar-row button {
   flex-shrink: 0;
   min-width: 32px;
   height: 28px;
@@ -54,12 +54,12 @@ function ensureStyles() {
   padding: 0 8px;
   cursor: pointer;
 }
-#mobux-top-bar button:hover { background: #262b32; color: #c8ccc9; }
-#mobux-top-bar button:active { background: #2e333b; }
+#mobux-top-bar-row button:hover { background: #262b32; color: #c8ccc9; }
+#mobux-top-bar-row button:active { background: #2e333b; }
 /* Recording state — muted clay, matches the mic-overlay palette (not the
    bright red the mobile ribbon uses). The shared action toggles
    .mic-recording on this button. */
-#mobux-top-bar button.mic-recording {
+#mobux-top-bar-row button.mic-recording {
   background: #5a3a3a;
   color: #e3cccc;
   border-color: #7a5050;
@@ -75,7 +75,7 @@ function ensureStyles() {
    dead button: the server can now fail a remote upload (ssh down, remote
    mkdir denied, disk full) where the old local-only write effectively
    never did. */
-#mobux-top-bar button.rec-error {
+#mobux-top-bar-row button.rec-error {
   border-color: #ff6b6b;
   background: #5a1f1f;
   color: #ffd2d2;
@@ -157,12 +157,11 @@ export function createTopBar({
   // Persistent inline error surface — never a toast/auto-dismissing banner
   // (standing rule: it vanishes before it can be read). Sits below the
   // button row, inside the bar itself, and stays until dismissed or the
-  // next attempt succeeds (see createAttachErrorSurface). The mic action
+  // next attempt succeeds (see createAttachErrorSurface, which owns the
+  // role/live-region attributes so both bars agree). The mic action
   // already routes its own faults through mic-overlay.js, so this is
   // attach-only.
   const errorContainer = document.createElement('div');
-  errorContainer.setAttribute('role', 'status');
-  errorContainer.setAttribute('aria-live', 'polite');
 
   row.append(attachBtn, micBtn, readerBtn, readBtn, settingsBtn);
   bar.append(row, errorContainer);
