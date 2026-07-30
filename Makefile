@@ -102,6 +102,48 @@ _dev-bounce:
 	@sleep 2 && lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1 \
 		&& echo "dev :$(MOBUX_DEV_PORT) rebuilt + restarted" || echo "FAILED to restart :$(MOBUX_DEV_PORT)"
 
+# Vite dev server for the SPA (web/spa), with HMR. Proxies every backend route
+# to the `make dev-watch` instance on MOBUX_DEV_PORT and attaches Basic auth
+# server-side, so the browser needs no credentials. Bound to 0.0.0.0 so a phone
+# on the tailnet can reach it. Start `make dev-watch` first.
+spa-dev:
+	@cd web/spa && env MOBUX_BACKEND=https://127.0.0.1:$(MOBUX_DEV_PORT) \
+		MOBUX_DEV_AUTH='$(MOBUX_USER):$(MOBUX_PIN)' \
+		npm run dev -- --host 0.0.0.0
+
+# dev-up/dev-down: the :5152 backend + the :5173 SPA dev server, both fully
+# detached (setsid) so neither dies with the shell that launched them. Logs
+# under $(DEV_LOG_DIR). Never touches the :5151 instance.
+DEV_LOG_DIR ?= $(HOME)/development/.tmp/mobux-dev
+
+dev-up: build
+	@mkdir -p $(DEV_LOG_DIR)
+	@if lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1; then echo "backend :$(MOBUX_DEV_PORT) already up"; else \
+		setsid nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 \
+			PORT=$(MOBUX_DEV_PORT) ./target/debug/mobux \
+			> $(DEV_LOG_DIR)/backend.log 2>&1 < /dev/null & \
+	fi
+	@if lsof -i :5173 >/dev/null 2>&1; then echo "spa :5173 already up"; else \
+		cd web/spa && setsid nohup env MOBUX_BACKEND=https://127.0.0.1:$(MOBUX_DEV_PORT) \
+			MOBUX_DEV_AUTH='$(MOBUX_USER):$(MOBUX_PIN)' \
+			npm run dev -- --host 0.0.0.0 \
+			> $(DEV_LOG_DIR)/spa.log 2>&1 < /dev/null & \
+	fi
+	@sleep 6
+	@$(MAKE) --no-print-directory dev-status
+
+dev-down:
+	-@kill $$(lsof -ti :$(MOBUX_DEV_PORT)) 2>/dev/null || true
+	-@kill $$(lsof -ti :5173) 2>/dev/null || true
+	@echo "dev servers stopped"
+
+dev-status:
+	@lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1 && echo "backend  :$(MOBUX_DEV_PORT) up" || echo "backend  :$(MOBUX_DEV_PORT) DOWN"
+	@lsof -i :5173 >/dev/null 2>&1 && echo "spa      :5173 up  -> https://$(shell hostname):5173/static/spa/" || echo "spa      :5173 DOWN"
+
+dev-logs:
+	@tail -f $(DEV_LOG_DIR)/backend.log $(DEV_LOG_DIR)/spa.log
+
 start: build
 	@if [ -n "$(PID)" ]; then echo "already running (pid $(PID))"; exit 1; fi
 	nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) PORT=$(MOBUX_PORT) \
