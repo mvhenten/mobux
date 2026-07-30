@@ -7,6 +7,7 @@ import preact from '@preact/preset-vite';
 // Mobile browsers force HTTPS, so the dev server needs TLS. Reuse the leaf
 // cert mobux already issued from its own CA (~/.config/mobux) — a phone that
 // trusts that CA gets no warning. MOBUX_DEV_CERT/MOBUX_DEV_KEY override.
+// Serve-only: `vite build` has no cert and must not need one.
 function devHttps() {
   const dir = join(homedir(), '.config', 'mobux');
   const cert = process.env.MOBUX_DEV_CERT || join(dir, 'leaf.crt');
@@ -14,10 +15,10 @@ function devHttps() {
   try {
     return { cert: readFileSync(cert), key: readFileSync(key) };
   } catch (err) {
-    throw new Error(
-      `dev TLS cert unreadable (${cert}). Start mobux once to issue it, or set ` +
-        `MOBUX_DEV_CERT/MOBUX_DEV_KEY. Cause: ${err.message}`,
+    console.warn(
+      `[vite] serving over plain HTTP — dev TLS cert unreadable (${cert}): ${err.message}`,
     );
+    return undefined;
   }
 }
 
@@ -60,14 +61,14 @@ const target = (ws = false) => ({
   configure: withAuth,
 });
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [preact()],
   server: {
     port: 5173,
     strictPort: true,
     // Reached over the tailnet from a phone, not just localhost.
     allowedHosts: ['.ts.net', '.local', 'sandbox'],
-    https: devHttps(),
+    https: command === 'serve' ? devHttps() : undefined,
     proxy: {
       // PTY WebSocket. ws:true so the upgrade is forwarded.
       '/ws': target(true),
@@ -81,17 +82,17 @@ export default defineConfig({
       // served straight from the Rust backend so the terminal island can
       // load the real engine bundle unchanged.
       '/sw.js': target(),
-      // The SPA's own assets live under /static/spa/ (its base). Everything
-      // else under /static/ (vendor bundles, terminal.js, style.css, …) is
-      // the backend's — proxy it, but let Vite serve its own base. `bypass`
-      // returning the path tells the proxy to skip forwarding.
       // Vite's dev HTML transform prefixes absolute asset hrefs with the base,
-      // so index.html's /static/style.css arrives as /static/spa/static/...
-      // and would otherwise hit the SPA fallback and come back as HTML.
+      // so index.html's /static/style.css arrives as /static/spa/static/... and
+      // would otherwise hit the SPA fallback and come back as HTML.
       '/static/spa/static': {
         ...target(),
         rewrite: (path) => path.replace('/static/spa/static', '/static'),
       },
+      // The SPA's own assets live under /static/spa/ (its base). Everything
+      // else under /static/ (vendor bundles, terminal.js, style.css, …) is
+      // the backend's — proxy it, but let Vite serve its own base. `bypass`
+      // returning the path tells the proxy to skip forwarding.
       '/static': {
         ...target(),
         bypass(req) {
@@ -108,4 +109,4 @@ export default defineConfig({
     outDir: '../static/spa',
     emptyOutDir: true,
   },
-});
+}));
