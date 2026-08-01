@@ -38,15 +38,40 @@ test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
 });
 
+// The whole file drives ONE tmux session, so tmux — not the browser — is the
+// shared mutable state here: a test that splits a pane or opens a window
+// hands the next test a different active shell, a different pane geometry and
+// a different prompt. Every test therefore starts from the same session
+// shape: one window, one pane, no half-typed command line, a known prompt and
+// a cleared screen.
+function resetSession() {
+  const firstWindow = tmux(`list-windows -t ${SESSION} -F '#{window_id}'`)
+    .toString()
+    .trim()
+    .split("\n")[0];
+  tmux(`kill-window -a -t ${firstWindow}`);
+  const firstPane = tmux(`list-panes -t ${firstWindow} -F '#{pane_id}'`)
+    .toString()
+    .trim()
+    .split("\n")[0];
+  tmux(`kill-pane -a -t ${firstPane}`);
+  tmux(`select-pane -t ${firstPane}`);
+  tmux(`send-keys -t ${firstPane} C-c`);
+  tmux(`send-keys -t ${firstPane} "PS1='\\$ '" Enter`);
+  tmux(`send-keys -t ${firstPane} "clear" Enter`);
+  execSync("sleep 0.3");
+}
+
 test.beforeAll(() => {
   try {
     tmux(`kill-session -t ${SESSION}`);
   } catch (_) {}
   // bash --norc --noprofile gives us a clean, predictable prompt.
   tmux(`new-session -d -s ${SESSION} ${SHELL_ENV} "bash --norc --noprofile"`);
-  tmux(`send-keys -t ${SESSION} "PS1='\\$ '" Enter`);
-  tmux(`send-keys -t ${SESSION} "clear" Enter`);
-  execSync("sleep 0.3");
+});
+
+test.beforeEach(() => {
+  resetSession();
 });
 
 test.afterAll(() => {
@@ -206,9 +231,6 @@ test("PTY roundtrip: tmux split-window produces a second pane", async ({
   expect(after, "tmux pane count should increase after split").toBeGreaterThan(
     before,
   );
-  // Send Ctrl-B x then y to close the new pane so we don't leave litter.
-  await page.evaluate(() => window.__mobuxView.send("\x02xy"));
-  await page.waitForTimeout(400);
   assertNoFailures(captured);
 });
 
@@ -234,10 +256,6 @@ test("PTY roundtrip: tmux new-window appears in the /panes API and is selectable
   expect(winsAfter, "tmux window count should increase").toBeGreaterThan(
     winsBefore,
   );
-
-  // Clean up — Ctrl-B & then y to confirm kill-window.
-  await page.evaluate(() => window.__mobuxView.send("\x02&y"));
-  await page.waitForTimeout(400);
   assertNoFailures(captured);
 });
 
