@@ -35,6 +35,11 @@ test.use({
 });
 
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
+
+// Seeded into the rcfile AND used to build the exact command line each
+// entry must carry, so the two can never drift apart.
+const BASH_PROMPT = "sessionhisttest: ";
+const ZSH_PROMPT = "mobuxtest: ";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
 const tmux = createTmuxRunner("mobux-test");
 
@@ -102,23 +107,67 @@ function findNoiseInCommands(commands) {
   return failures;
 }
 
+// What the segmenter guarantees about `command`, asserted as such.
+//
+// `command` is the text of ONE screen row, taken from the cursor model at
+// the moment `C` fires (`terminal_cursor.rs`'s `take_command_line`: the row
+// most recently completed by a `\n`, else the row most recently written to,
+// else nothing — never a row left over from an earlier cycle, which
+// `mark_output_boundary` clears at `D`). That row is the shell's echo of
+// the typed line, so a settled entry reads exactly `<prompt><typed
+// command>`. Under tmux's redraw-burst reordering (session_history.rs's
+// module doc) `C` can arrive while that row is still being drawn, so what
+// lands is a leading slice of it: nothing yet, the prompt alone, or the
+// prompt plus part of the command.
+//
+// So: every entry's text is a PREFIX of its own command's line. Empty and
+// prompt-only are the honest "hasn't reached the wire yet" shapes; anything
+// that is not a prefix means text arrived from somewhere it cannot come
+// from — a neighbouring entry's line, a status-bar redraw, a garbled row —
+// which is the regression this test exists to catch. Position matters: each
+// entry is checked against ITS OWN command, so one command's text showing
+// up under another is a failure, not a pass.
+//
+// `commands` excludes the warm-up entry; `promptText` is the seeded prompt.
+function findCommandTextFailures(commands, knownCommands, promptText) {
+  const failures = [];
+  const expectedLines = knownCommands.map((k) => `${promptText}${k.text}`);
+  let settled = 0;
+  for (let i = 0; i < Math.min(commands.length, expectedLines.length); i++) {
+    const actual = commands[i].command;
+    if (actual === expectedLines[i]) {
+      settled++;
+      continue;
+    }
+    if (!expectedLines[i].startsWith(actual)) {
+      failures.push(
+        `command ${i}: text is neither ${JSON.stringify(expectedLines[i])} nor a prefix of it: ${JSON.stringify(actual)}`,
+      );
+    }
+  }
+  // A partly-drawn row is a measured timing gap, so one entry may sit in it.
+  // Wholesale prefixes — a derivation that stopped producing command text at
+  // all — is a regression, and fails here.
+  if (settled < expectedLines.length - 1) {
+    failures.push(
+      `only ${settled}/${expectedLines.length} command entries carry their full text: ${JSON.stringify(commands.map((c) => c.command))}`,
+    );
+  }
+  return failures;
+}
+
 // One attempt: real shell + real tmux + real WS attach, a warm-up plus
 // several known commands, then the endpoint. Returns `{ ok, detail }`
 // rather than asserting directly — same reason as spa.spec.cjs's
-// attemptOscPromptClassification: tmux's own redraw-burst reordering
-// (documented in session_history.rs's module doc, and independently
-// confirmed against a live instance for this endpoint under both bash and
-// zsh — see the PR description) can still leave a rare `command` entry
-// empty (the real echo hadn't reached the wire yet when `C` fired) — a
-// measured, low-rate timing gap, not a structural bug, and never anything
-// OTHER than empty: `findNoiseInCommands` above is asserted on every
-// attempt, with no tolerance, because noise/misattribution is exactly the
-// regression this test exists to catch. `output` and `exitCode` are
-// unaffected by the timing gap (raw bytes between two markers, no line-
-// splitting heuristic involved) and are asserted exactly, every attempt.
+// attemptOscPromptClassification: tmux's own redraw-burst reordering can
+// leave one entry's `command` mid-draw (see `findCommandTextFailures`),
+// and this test's own barriers can race the last entry in. `output` and
+// `exitCode` are unaffected by that gap (raw bytes between two markers, no
+// line-splitting heuristic involved) and are asserted exactly, every
+// attempt, as is `findNoiseInCommands`.
 async function attemptConversationHistory(
   page,
-  { shell, rcPath, seedRc, shellCommand, knownCommands, promptSuffixRe },
+  { shell, rcPath, seedRc, shellCommand, knownCommands, promptText },
 ) {
   const SESSION = `histtest-${shell}-${process.pid}-${Date.now()}`;
 
@@ -201,44 +250,12 @@ async function attemptConversationHistory(
       });
     }
 
-    // Every non-warm-up command entry either exactly ends with the real
-    // typed text (prompt prefix + the command, never partial/garbled — a
-    // strict suffix match, not `.includes()`) or is empty (the honest
-    // "didn't arrive yet" case — see this function's doc comment). Never
-    // anything in between: a command entry with SOME text that doesn't
-    // exactly match what was typed would mean either noise leaked in
-    // (already covered by `findNoiseInCommands`) or a different entry's
-    // text got misattributed here, which this test must catch.
-    const nonWarmup = commands.slice(1);
-    for (const c of nonWarmup) {
-      if (c.command === "") continue;
-      const matchesKnown = knownCommands.some((k) =>
-        c.command.endsWith(k.text),
-      );
-      if (!matchesKnown) {
-        failures.push(
-          `command text doesn't exactly match any known typed command: ${JSON.stringify(c.command)}`,
-        );
-      }
-      if (promptSuffixRe && !promptSuffixRe.test(c.command)) {
-        failures.push(
-          `command text doesn't look like <prompt> <typed command>: ${JSON.stringify(c.command)}`,
-        );
-      }
-    }
-
-    // At least all but one of the known commands must show up with exact,
-    // clean text somewhere — tolerates tmux's own measured redraw-burst
-    // timing gap (never noise: see `findNoiseInCommands` above, asserted
-    // unconditionally).
-    const matchedKnown = knownCommands.filter((k) =>
-      commands.some((c) => c.command.endsWith(k.text)),
+    // The warm-up's own text is never asserted on (its prompt drew before
+    // the browser attached, so the row it lands on is the shell's, not
+    // mobux's — see the warm-up comment above).
+    failures.push(
+      ...findCommandTextFailures(commands.slice(1), knownCommands, promptText),
     );
-    if (matchedKnown.length < knownCommands.length - 1) {
-      failures.push(
-        `only matched ${matchedKnown.length}/${knownCommands.length} known commands exactly: ${JSON.stringify(matchedKnown.map((k) => k.text))}`,
-      );
-    }
 
     const anyOutputText = commands.some((c) =>
       knownCommands.some(
@@ -308,6 +325,45 @@ async function verifyConversationHistory(page, opts, attempts = 3) {
   ).toBe(true);
 }
 
+// The command-text gate itself, run against the shapes a real session
+// produces and the ones it must never produce. Pure — no browser, no tmux —
+// so what the gate does and does not let through is pinned exactly, instead
+// of resting on whichever shapes a given run happens to hit.
+test("command text gate: a partly-drawn echo row passes, text that cannot come from that row fails", () => {
+  const known = [
+    { text: "echo one" },
+    { text: "false" },
+    { text: "echo two-$?" },
+    { text: "echo three" },
+  ];
+  const settled = known.map((k) => ({ command: `${ZSH_PROMPT}${k.text}` }));
+  const gate = (commands) =>
+    findCommandTextFailures(commands, known, ZSH_PROMPT);
+  const withEntry = (i, command) =>
+    settled.map((c, j) => (j === i ? { command } : c));
+
+  expect(gate(settled)).toEqual([]);
+
+  // Every leading slice of the row is the honest "hasn't reached the wire
+  // yet" shape — including the prompt alone, which is issue #242.
+  for (const drawn of ["", "mobuxtest:", ZSH_PROMPT, `${ZSH_PROMPT}echo tw`]) {
+    expect(gate(withEntry(2, drawn)), drawn).toEqual([]);
+  }
+
+  for (const bad of [
+    `${ZSH_PROMPT}echo three`,
+    `${ZSH_PROMPT}echo tw0-$?`,
+    `0:zsh* ${ZSH_PROMPT}echo two-$?`,
+    "echo two-$?",
+  ]) {
+    expect(gate(withEntry(2, bad)), bad).not.toEqual([]);
+  }
+
+  // One mid-draw row is the measured timing gap; command text vanishing
+  // across the board is a regression, and the gate says so.
+  expect(gate(settled.map(() => ({ command: ZSH_PROMPT })))).not.toEqual([]);
+});
+
 test("conversation history: real tmux+bash session produces clean, correctly-attributed command entries with correct output/exitCode, paginates stably", async ({
   page,
 }) => {
@@ -322,7 +378,7 @@ test("conversation history: real tmux+bash session produces clean, correctly-att
     // be sitting in `.bashrc` here. Seeding overwrites the whole file, so
     // this test's prompt shape is never dependent on run order.
     rcPath: `${SANDBOX_HOME}/.bashrc`,
-    seedRc: "PS1='sessionhisttest: '\n",
+    seedRc: `PS1='${BASH_PROMPT}'\n`,
     shellCommand: "bash",
     knownCommands: [
       { text: "echo one", exitCode: 0, outputContains: "one" },
@@ -330,7 +386,7 @@ test("conversation history: real tmux+bash session produces clean, correctly-att
       { text: "echo two-$?", exitCode: 0, outputContains: "two-1" },
       { text: "echo three", exitCode: 0, outputContains: "three" },
     ],
-    promptSuffixRe: /^sessionhisttest: \S/,
+    promptText: BASH_PROMPT,
   });
 });
 
@@ -338,8 +394,8 @@ test("conversation history: real tmux+bash session produces clean, correctly-att
 // the CI runner (see test/lib/zsh.cjs), so it's resolved once for this
 // group instead of at file load, to avoid slowing down every other test in
 // this file with an unconditional download. A known, sigil-free PROMPT
-// (same seed spa.spec.cjs's own zsh coverage uses) keeps the exact-suffix
-// assertions independent of whatever zsh ships as its own default prompt.
+// (same seed spa.spec.cjs's own zsh coverage uses) keeps the expected
+// command line independent of whatever zsh ships as its own default prompt.
 test.describe("conversation history: zsh", () => {
   let zshBin;
 
@@ -353,7 +409,7 @@ test.describe("conversation history: zsh", () => {
     await verifyConversationHistory(page, {
       shell: "zsh",
       rcPath: `${SANDBOX_HOME}/.zshrc`,
-      seedRc: "PROMPT='mobuxtest: '\n",
+      seedRc: `PROMPT='${ZSH_PROMPT}'\n`,
       shellCommand: zshBin,
       knownCommands: [
         { text: "echo one", exitCode: 0, outputContains: "one" },
@@ -361,7 +417,7 @@ test.describe("conversation history: zsh", () => {
         { text: "echo two-$?", exitCode: 0, outputContains: "two-1" },
         { text: "echo three", exitCode: 0, outputContains: "three" },
       ],
-      promptSuffixRe: /^mobuxtest: \S/,
+      promptText: ZSH_PROMPT,
     });
   });
 });
