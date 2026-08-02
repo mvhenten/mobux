@@ -1656,8 +1656,8 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, session_name: String) -
     // doesn't have terminfo for — in any of those cases tmux's first
     // act on attach is `open terminal failed: terminal does not support
     // clear`, the bash subprocess exits 1, and the WS gets nothing past
-    // the 57-byte init handshake. The browser-side renderer (aceterm /
-    // libterm) is xterm-256color compatible, so use that unconditionally.
+    // the 57-byte init handshake. The browser-side renderer (sterk /
+    // xterm) is xterm-256color compatible, so use that unconditionally.
     cmd.env("TERM", "xterm-256color");
     // `allow-passthrough on` is required for the OSC 133 shell-integration
     // snippet's tmux DCS-passthrough wrap (\ePtmux;\e<seq>\e\\) to reach

@@ -1,7 +1,7 @@
 // Critical-path tests for mobux. These exercise the *real* pipe
 // (browser → WS → PTY → tmux → render) instead of the synthetic
 // `inject*` helpers, and they're written renderer-agnostic so they
-// don't break when we swap aceterm ↔ sterk.
+// don't break when we swap the terminal renderer (xterm ↔ sterk).
 //
 // Every test starts with `seedErrorCapture(page)` which fails the test
 // on any uncaught JS error, console.error, or failed critical

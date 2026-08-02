@@ -10,7 +10,7 @@
 
 ## Features
 
-- **Full terminal** — xterm.js v6 with scrollback, colors, and links
+- **Full terminal** — xterm.js v6 or the clean-room MIT renderer @kattebak/sterk (switchable), with scrollback, colors, and links
 - **Touch-native input** — bottom input bar with control key ribbon (^C, arrows, backspace, etc.) and native text field with autocomplete/voice support
 - **Two send modes** — keyboard Enter executes; ▶ button injects text without Enter for readline editing
 - **Attach any file** — 📎 button uploads anything (gallery photo, video, audio, PDF, logs…) and injects the saved path into the terminal
@@ -221,11 +221,10 @@ entirely; the install page won't even render that section.
 
 mobux includes vendored code from third parties. Full attribution and license texts are in [`THIRD_PARTY-LICENSES.md`](./THIRD_PARTY-LICENSES.md).
 
-**⚠️ License Compliance Notice**: The current terminal emulator stack (`web/static/vendor/aceterm/`) is vendored from the now-discontinued AWS Cloud9 SDK (c9/core). This code is licensed under the **Cloud9 SDK Non-Commercial License Agreement**, which is **incompatible with mobux's MIT license**. These files are scheduled for replacement by [@kattebak/sterk](https://github.com/kattebak/sterk), a clean-room MIT-licensed terminal emulator. See the tracking issue for migration progress: [#68](https://github.com/mvhenten/mobux/issues/68)
-
-Other vendored components:
-- **Ace Editor** (`web/static/vendor/ace.js`) — BSD-3-Clause ✅
-- **wc.js** (`web/static/vendor/aceterm/wc.js`) — Permissive (Markus Kuhn's public-domain-like license) ✅
+Vendored components (all MIT-compatible):
+- **xterm.js** (`web/static/vendor/xterm.bundle.js`) — MIT
+- **@kattebak/sterk** (`web/static/vendor/sterk.bundle.js`) — MIT (bundles the BSD-3-Clause Ace editor)
+- **Monospace fonts** (`web/static/vendor/fonts/*.woff2`) — OFL-1.1 / Bitstream Vera
 
 ## License
 

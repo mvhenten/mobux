@@ -11,7 +11,7 @@
 //
 // All palettes are deliberately muted/low-contrast — a phone screen at
 // night doesn't tolerate saturated bgs (see PR #57). The luminance
-// contrast pick in aceterm/aceterm.js works against any palette by
+// contrast pick in the renderer works against any palette by
 // design (#60), so we don't need per-theme threshold tuning.
 
 const STORAGE_KEY = 'mobux:theme';
