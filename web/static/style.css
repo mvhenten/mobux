@@ -1378,6 +1378,20 @@ h1, h2, h3 { margin: 0; }
   font-size: 14px;
   line-height: 1.6;
 }
+.install-apk-missing {
+  background: #2a1515;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.install-apk-missing-title {
+  color: #ffd0d0;
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+.install-apk-missing .install-hint {
+  margin: 0;
+}
 
 .listen-value {
   min-width: 32px;

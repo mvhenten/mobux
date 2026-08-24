@@ -28,10 +28,37 @@ function origin() {
   return window.location.origin;
 }
 
+// APK build is optional (`make twa`) and the file is gitignored, so
+// /install/mobux.apk regularly 404s with a plain-text body. Without this
+// probe the download button would hand the browser that 404 body, which
+// Chrome saves as a garbage file (see the `download` attribute fix above —
+// this covers the case where the attribute is correct but the file is
+// simply missing). null = still checking, true/false = probed result.
+function useApkAvailable() {
+  const [available, setAvailable] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/install/mobux.apk", { method: "HEAD" })
+      .then((res) => {
+        if (!cancelled) setAvailable(res.ok);
+      })
+      .catch(() => {
+        if (!cancelled) setAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return available;
+}
+
 export function InstallPage() {
   const base = origin();
   const apkUrl = base + "/install/mobux.apk";
   const caUrl = base + "/install/mobux-ca.crt";
+  const apkAvailable = useApkAvailable();
 
   return (
     <main class="install-page">
@@ -43,7 +70,11 @@ export function InstallPage() {
           won't connect.
         </p>
         <div class="install-grid">
-          <a class="install-btn" href="/install/mobux-ca.crt" download>
+          <a
+            class="install-btn"
+            href="/install/mobux-ca.crt"
+            download="mobux-ca.crt"
+          >
             Download CA certificate
           </a>
           <QrCode url={caUrl} />
@@ -71,15 +102,27 @@ export function InstallPage() {
         <p class="install-lede">
           Download the Android APK, or scan the QR with your phone.
         </p>
-        <div class="install-grid">
-          <a class="install-btn" href="/install/mobux.apk" download>
-            Download APK
-          </a>
-          <QrCode url={apkUrl} />
-        </div>
-        <p class="install-hint">
-          If the APK isn't built yet, run <code>make twa</code> on the server.
-        </p>
+        {apkAvailable === null && <p class="install-hint">Checking…</p>}
+        {apkAvailable === false && (
+          <div class="install-apk-missing" role="alert">
+            <p class="install-apk-missing-title">The APK isn't built yet.</p>
+            <p class="install-hint">
+              Run <code>make twa</code> on the server to build it.
+            </p>
+          </div>
+        )}
+        {apkAvailable === true && (
+          <div class="install-grid">
+            <a
+              class="install-btn"
+              href="/install/mobux.apk"
+              download="mobux.apk"
+            >
+              Download APK
+            </a>
+            <QrCode url={apkUrl} />
+          </div>
+        )}
       </section>
     </main>
   );
