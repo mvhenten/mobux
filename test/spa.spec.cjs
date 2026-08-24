@@ -18,6 +18,7 @@
 const { test, expect } = require("./fixtures.cjs");
 const { execSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 const { resolveZshBin } = require("./lib/zsh.cjs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
@@ -3331,16 +3332,66 @@ test("host suggestion sheet: no detections still allows manual typing", async ({
   await expect(card.locator("#nodeTarget")).toHaveValue("manual@host");
 });
 
-// ── install page: QR codes ──────────────────────────────────────────────────
+// ── install page: QR codes + APK availability (#262) ────────────────────────
+//
+// The APK is gitignored and only exists after `make twa` (needs the Android
+// SDK), so the smoke instance never has it. That "missing" branch is the
+// default/real case here, not a synthetic one; the "built" branch is proven
+// by staging a stub file the availability probe (Install.jsx) reads via a
+// HEAD /install/mobux.apk.
 
-test("install page renders QR codes for CA and APK", async ({ page }) => {
+const APK_PATH = path.join(__dirname, "..", "web/static/install/mobux.apk");
+
+test("install page renders the CA QR code with a real download filename", async ({
+  page,
+}) => {
   await page.goto(`${APP}#/install`, { waitUntil: "networkidle" });
   const qrs = page.locator(".install-qr");
-  await expect(qrs).toHaveCount(2);
   await expect(qrs.first().locator("svg")).toBeVisible();
-  await expect(qrs.nth(1).locator("svg")).toBeVisible();
-  await expect(page.locator('a[href="/install/mobux-ca.crt"]')).toBeVisible();
-  await expect(page.locator('a[href="/install/mobux.apk"]')).toBeVisible();
+
+  // Regression: a bare `download` attribute in JSX becomes the literal
+  // string "true" under Preact (setAttribute("download", true)), which
+  // Chrome then uses as the saved filename instead of the real one.
+  const caLink = page.locator('a[href="/install/mobux-ca.crt"]');
+  await expect(caLink).toBeVisible();
+  await expect(caLink).toHaveAttribute("download", "mobux-ca.crt");
+});
+
+test("install page shows an error state instead of a dead download when the APK is missing", async ({
+  page,
+}) => {
+  test.skip(fs.existsSync(APK_PATH), "a built APK is present on this server");
+
+  await page.goto(`${APP}#/install`, { waitUntil: "networkidle" });
+  await expect(page.locator('a[href="/install/mobux.apk"]')).toHaveCount(0);
+
+  const missing = page.locator(".install-apk-missing");
+  await expect(missing).toBeVisible();
+  await expect(missing).toContainText("isn't built");
+  await expect(missing).toContainText("make twa");
+});
+
+test("install page renders a real APK download filename once the APK is built", async ({
+  page,
+}) => {
+  const alreadyPresent = fs.existsSync(APK_PATH);
+  if (!alreadyPresent) {
+    fs.mkdirSync(path.dirname(APK_PATH), { recursive: true });
+    fs.writeFileSync(APK_PATH, "stub apk for spa.spec.cjs");
+  }
+
+  try {
+    await page.goto(`${APP}#/install`, { waitUntil: "networkidle" });
+    const apkLink = page.locator('a[href="/install/mobux.apk"]');
+    await expect(apkLink).toBeVisible();
+    await expect(apkLink).toHaveAttribute("download", "mobux.apk");
+    await expect(page.locator(".install-apk-missing")).toHaveCount(0);
+    await expect(
+      page.locator(".install-qr").nth(1).locator("svg"),
+    ).toBeVisible();
+  } finally {
+    if (!alreadyPresent) fs.rmSync(APK_PATH);
+  }
 });
 
 // ── fail-hard error page + ribbon bug report (#190, #191) ───────────────────

@@ -9,9 +9,19 @@
 // Run against a binary started on :5183 with basic auth mvhenten:30879:
 //   npx playwright test verify.prod.spec.mjs --config=playwright.prod.cjs
 import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const BASE = process.env.MOBUX_VERIFY_BASE || 'https://localhost:5183';
 const APP = `${BASE}/app`;
+
+// The verify.prod harness runs this test file and the server binary on the
+// same checkout (see web/SPA.md), so we can stage/remove the gitignored APK
+// file the /install page's availability probe (Install.jsx) reads from disk.
+const APK_PATH = fileURLToPath(
+  new URL('../static/install/mobux.apk', import.meta.url),
+);
 
 test('app route serves the SPA and Home lists sessions', async ({ page }) => {
   await page.goto(`${APP}#/`, { waitUntil: 'networkidle' });
@@ -159,17 +169,51 @@ test('build-info card shows version, server hash, and frontend hash', async ({ p
   expect(fe.trim()).toMatch(/^[\w-]+$/);
 });
 
-test('install page renders QR codes for CA and APK', async ({ page }) => {
+test('install page renders the CA QR code with a real download filename', async ({ page }) => {
   await page.goto(`${APP}#/install`, { waitUntil: 'networkidle' });
-  // Two install-qr divs (CA + APK).
   const qrs = page.locator('.install-qr');
-  await expect(qrs).toHaveCount(2);
-  // Each contains an inline SVG.
   await expect(qrs.first().locator('svg')).toBeVisible();
-  await expect(qrs.nth(1).locator('svg')).toBeVisible();
-  // Download buttons still present.
-  await expect(page.locator('a[href="/install/mobux-ca.crt"]')).toBeVisible();
-  await expect(page.locator('a[href="/install/mobux.apk"]')).toBeVisible();
+
+  // Regression: a bare `download` attribute in JSX becomes the literal
+  // string "true" under Preact (setAttribute('download', true)), which
+  // Chrome then uses as the saved filename instead of the real one.
+  const caLink = page.locator('a[href="/install/mobux-ca.crt"]');
+  await expect(caLink).toBeVisible();
+  await expect(caLink).toHaveAttribute('download', 'mobux-ca.crt');
+});
+
+test('install page shows an error state instead of a dead download when the APK is missing', async ({ page }) => {
+  // This checkout's APK is gitignored and unbuilt by default (`make twa`
+  // requires the Android SDK) — the missing-APK branch is the real, common
+  // case, not a synthetic one.
+  test.skip(fs.existsSync(APK_PATH), 'a built APK is present on this server');
+
+  await page.goto(`${APP}#/install`, { waitUntil: 'networkidle' });
+  await expect(page.locator('a[href="/install/mobux.apk"]')).toHaveCount(0);
+
+  const missing = page.locator('.install-apk-missing');
+  await expect(missing).toBeVisible();
+  await expect(missing).toContainText("isn't built");
+  await expect(missing).toContainText('make twa');
+});
+
+test('install page renders a real APK download filename once the APK is built', async ({ page }) => {
+  const alreadyPresent = fs.existsSync(APK_PATH);
+  if (!alreadyPresent) {
+    fs.mkdirSync(path.dirname(APK_PATH), { recursive: true });
+    fs.writeFileSync(APK_PATH, 'stub apk for verify.prod.spec.mjs');
+  }
+
+  try {
+    await page.goto(`${APP}#/install`, { waitUntil: 'networkidle' });
+    const apkLink = page.locator('a[href="/install/mobux.apk"]');
+    await expect(apkLink).toBeVisible();
+    await expect(apkLink).toHaveAttribute('download', 'mobux.apk');
+    await expect(page.locator('.install-apk-missing')).toHaveCount(0);
+    await expect(page.locator('.install-qr').nth(1).locator('svg')).toBeVisible();
+  } finally {
+    if (!alreadyPresent) fs.rmSync(APK_PATH);
+  }
 });
 
 test('terminal island mounts and the PTY websocket connects', async ({ page }) => {
