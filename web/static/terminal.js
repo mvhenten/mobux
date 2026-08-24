@@ -235,18 +235,15 @@ export function createTerminal({
     if (e.detail?.key === "theme") onThemeChange();
   });
 
-  // ── Renderer events (R13 links, R14 bell) ───────────────────────────
-  // The renderer detects URL activations and terminal bells; the UI owns the
-  // response. A clicked link leaves the app shell (system browser in the TWA);
-  // a terminal BEL rings mobux's chime. Neither adapter decides policy.
+  // ── Renderer events (R13 links) ──────────────────────────────────────
+  // The renderer detects URL activations; the UI owns the response — a
+  // clicked link leaves the app shell (system browser in the TWA). The
+  // renderer also detects terminal bells (R14, `core.onBell`), but the UI
+  // must not react to them here: a raw client-side BEL ignores notification
+  // prefs entirely. The chime is driven only by the server's gated push path
+  // (`prefs.bell` in src/main.rs → `chime.js`'s service-worker listener).
   const linkSub = core.onLink((uri) => openExternal(uri));
   cleanups.push(() => linkSub?.dispose?.());
-  const bellSub = core.onBell(() => {
-    try {
-      window.__mobuxChime?.();
-    } catch (_) {}
-  });
-  cleanups.push(() => bellSub?.dispose?.());
 
   // Enable overlay for touch devices
   if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {

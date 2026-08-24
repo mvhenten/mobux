@@ -218,7 +218,8 @@ export function createXtermRenderer(host, options = {}) {
       };
     },
 
-    // R14 — bell. The UI decides what to do (mobux's chime).
+    // R14 — bell. Reports the raw terminal BEL; the chime is driven only by
+    // the server-gated push path, never this event (conformance probe only).
     onBell(cb) {
       return term.onBell(cb);
     },
