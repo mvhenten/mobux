@@ -566,3 +566,33 @@ test("R14: terminal BEL is reported through onBell", async ({ page }) => {
   );
   expect(observed).toBe(true);
 });
+
+// Regression: a raw client-side BEL must never trigger the chime, regardless
+// of notification prefs — only the server-gated push path may (src/main.rs
+// only fires the push when prefs.bell is true; see chime.js's service-worker
+// listener). The renderer still reports the BEL through onBell (R14, above)
+// — the UI simply must not react to it by chiming.
+test("bell: a raw client-side BEL never triggers the chime", async ({
+  page,
+}) => {
+  await boot(page);
+  await page.waitForFunction(() => typeof window.__mobuxChime === "function", {
+    timeout: 8000,
+  });
+  const chimed = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        let called = false;
+        const original = window.__mobuxChime;
+        window.__mobuxChime = (...args) => {
+          called = true;
+          return original(...args);
+        };
+        window.__mobuxView.test.awaitBell().then(() => {
+          setTimeout(() => resolve(called), 200);
+        });
+        window.__mobuxView.test.writeData("\x07");
+      }),
+  );
+  expect(chimed).toBe(false);
+});
