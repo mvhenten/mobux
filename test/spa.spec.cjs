@@ -3334,11 +3334,12 @@ test("host suggestion sheet: no detections still allows manual typing", async ({
 
 // ── install page: QR codes + APK availability (#262) ────────────────────────
 //
-// The APK is gitignored and only exists after `make twa` (needs the Android
-// SDK), so the smoke instance never has it. That "missing" branch is the
+// The APK is gitignored and only exists after a build (needs the Android SDK),
+// so the smoke instance never has it. That "missing" branch is the
 // default/real case here, not a synthetic one; the "built" branch is proven
-// by staging a stub file the availability probe (Install.jsx) reads via a
-// HEAD /install/mobux.apk.
+// by staging a stub file that GET /api/install/apk/status reports as
+// available. The missing branch must offer a build the user can start from
+// the page — never an instruction to open a terminal.
 
 const APK_PATH = path.join(__dirname, "..", "web/static/install/mobux.apk");
 
@@ -3357,7 +3358,7 @@ test("install page renders the CA QR code with a real download filename", async 
   await expect(caLink).toHaveAttribute("download", "mobux-ca.crt");
 });
 
-test("install page shows an error state instead of a dead download when the APK is missing", async ({
+test("install page offers an in-app build instead of a dead download when the APK is missing", async ({
   page,
 }) => {
   test.skip(fs.existsSync(APK_PATH), "a built APK is present on this server");
@@ -3367,8 +3368,15 @@ test("install page shows an error state instead of a dead download when the APK 
 
   const missing = page.locator(".install-apk-missing");
   await expect(missing).toBeVisible();
-  await expect(missing).toContainText("isn't built");
-  await expect(missing).toContainText("make twa");
+  await expect(missing).toContainText("No package has been built");
+
+  await expect(
+    page.getByRole("button", { name: "Generate package" }),
+  ).toBeEnabled();
+  // The whole point of the button: no terminal instruction survives here.
+  await expect(page.locator(".install-card").nth(1)).not.toContainText(
+    "make twa",
+  );
 });
 
 test("install page renders a real APK download filename once the APK is built", async ({
@@ -3389,6 +3397,9 @@ test("install page renders a real APK download filename once the APK is built", 
     await expect(
       page.locator(".install-qr").nth(1).locator("svg"),
     ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Rebuild package" }),
+    ).toBeEnabled();
   } finally {
     if (!alreadyPresent) fs.rmSync(APK_PATH);
   }

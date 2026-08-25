@@ -61,7 +61,7 @@ make test         # Playwright smoke tests (mobile Chrome)
 make twa MOBUX_DOMAIN=mobux.example.com:5151   # build the signed Android app
 ```
 
-Deploying to a phone (CA cert install, APK download, QR handoff) is self-service from the `/install` page. The full production runbook — systemd service, releasing, isolated dev instances — is in **[DEPLOY.md](DEPLOY.md)**.
+Deploying to a phone (building the Android package, CA cert install, APK download, QR handoff) is self-service from the `/install` page — `make twa` is the same build for anyone who prefers a terminal. The full production runbook — systemd service, releasing, isolated dev instances — is in **[DEPLOY.md](DEPLOY.md)**.
 
 ## Architecture at a glance
 
@@ -104,6 +104,8 @@ A short product overview for the curious is in **[OVERVIEW.md](OVERVIEW.md)**.
 | `/api/push/devices` | GET | List subscribed devices |
 | `/api/push/notify` | POST | Send a push notification |
 | `/ws/:name` | WS | Terminal WebSocket |
+| `/api/install/apk/build` | POST | Start the Android package build (one at a time) |
+| `/api/install/apk/status` | GET | Build phase, output tail, and whether an APK exists |
 | `/install` | GET | Self-service install page (CA cert, APK, QR codes) — no auth |
 | `/install/mobux.apk` | GET | Built APK download — no auth |
 | `/install/mobux-ca.crt` | GET | Local CA cert for Android trust store — no auth |

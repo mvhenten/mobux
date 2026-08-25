@@ -53,13 +53,6 @@ it starts on boot (no login needed) and restarts on crash — no root required.
 cargo install mobux --locked                 # → ~/.cargo/bin/mobux
 loginctl enable-linger "$USER"                # start the user service at boot
 
-# Deploy dir: holds ONLY the two files mobux reads from disk relative to its
-# working dir — the TWA APK and the Digital Asset Links file, both for the
-# /install flow. Everything else (the whole UI) is embedded in the binary.
-mkdir -p ~/apps/mobux/web/static/install ~/apps/mobux/web/static/.well-known
-cp /path/to/mobux.apk        ~/apps/mobux/web/static/install/mobux.apk
-cp /path/to/assetlinks.json  ~/apps/mobux/web/static/.well-known/assetlinks.json
-
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/mobux.service <<'EOF'
 [Unit]
@@ -69,7 +62,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/apps/mobux
 ExecStart=%h/.cargo/bin/mobux
 Environment=PORT=5151
 Environment=MOBUX_AUTH_USER=changeme
@@ -91,8 +83,15 @@ systemctl --user enable --now mobux
 ```
 
 The TLS cert is auto-generated (and reused across restarts) at
-`~/.config/mobux/leaf.crt`; the data dir (sessions, push subscriptions) is
-`~/.local/share/mobux`. Neither depends on the working directory.
+`~/.config/mobux/leaf.crt`; the data dir (sessions, push subscriptions, and
+the Android package once built) is `~/.local/share/mobux`. Nothing depends on
+the working directory.
+
+The Android APK is built from the `/install` page's **Generate package**
+button, which signs it for the address the request arrived on (override with
+`Environment=MOBUX_DOMAIN=...`). The build needs the toolchain `./bin/setup-twa`
+installs; the signing keystore stays at `~/.config/mobux/twa-signing.keystore`,
+so fingerprints survive rebuilds and reinstalls.
 
 Verify the embed + service:
 
@@ -248,21 +247,20 @@ staging dir `twa/dist-dev/`, reusing the **same signing keystore** as prod
 it has a different package id, it **coexists** with the prod Mobux app on the
 same device — both install side by side.
 
-Deploy it to the `:5152` instance (the dir is *that* instance's
-`WorkingDirectory`, e.g. `~/apps/mobux-dev/`):
+Deploy it to the `:5152` instance by copying both files into that instance's
+data dir (`$MOBUX_DATA_DIR`):
 
 ```bash
 make twa-dev
-cp twa/dist-dev/install/mobux.apk \
-   ~/apps/mobux-dev/web/static/install/mobux.apk
-cp twa/dist-dev/.well-known/assetlinks.json \
-   ~/apps/mobux-dev/web/static/.well-known/assetlinks.json
+mkdir -p "$MOBUX_DATA_DIR/install" "$MOBUX_DATA_DIR/.well-known"
+cp twa/dist-dev/install/mobux.apk         "$MOBUX_DATA_DIR/install/mobux.apk"
+cp twa/dist-dev/.well-known/assetlinks.json "$MOBUX_DATA_DIR/.well-known/assetlinks.json"
 ```
 
 Then install it from `https://sandbox:5152/install`.
 
-Prod `make twa` is unchanged: it still writes `web/static/install/mobux.apk`
-and an assetlinks with `package_name` `io.github.mvhenten.mobux`.
+Prod builds are unchanged in what they produce: an APK plus an assetlinks with
+`package_name` `io.github.mvhenten.mobux`.
 
 ## Reboot behaviour
 
