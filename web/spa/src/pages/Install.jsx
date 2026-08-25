@@ -24,6 +24,9 @@ const POLL_MS = 2000;
 const IDLE_MS = 10000;
 const TAIL_LINES = 12;
 
+// Phases with a process behind them: both stream output, so both poll fast.
+const WORKING_PHASES = ["running", "installing_tools"];
+
 function QrCode({ url }) {
   const svg = renderSVG(url, {
     pixelSize: 4,
@@ -103,7 +106,10 @@ function ApkSection({ apkUrl }) {
         setRequestError(null);
         setStatus(next);
       }
-      timer = setTimeout(tick, next?.phase === "running" ? POLL_MS : IDLE_MS);
+      timer = setTimeout(
+        tick,
+        WORKING_PHASES.includes(next?.phase) ? POLL_MS : IDLE_MS,
+      );
     };
 
     // Called right after a build is started so the running state appears at
@@ -212,17 +218,12 @@ function ApkSection({ apkUrl }) {
 
       {missingPackages.length > 0 && (
         <div class="install-error" role="alert">
-          <strong>This host is missing {missingPackages.join(", ")}.</strong>
-          <p>
-            The build tools unpack their downloads with{" "}
-            {missingPackages.length === 1 ? "it" : "them"}, and only your system
-            package manager can install{" "}
-            {missingPackages.length === 1 ? "it" : "them"}. Run this, then press
-            the button again.
-          </p>
+          <strong>Missing system packages</strong>
+          <p>{status?.error}</p>
           {status?.install_command && (
             <CopyCommand command={status.install_command} />
           )}
+          <p class="install-hint">Then press the button again.</p>
         </div>
       )}
 

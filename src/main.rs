@@ -76,10 +76,11 @@ impl InstallPhase {
 }
 
 /// The OS packages a job stopped on, and the one command that installs them.
+/// The command is absent on a host with no package manager we recognise.
 #[derive(Clone)]
 struct MissingHostPackages {
     packages: Vec<String>,
-    install_command: String,
+    install_command: Option<String>,
 }
 
 /// A long-running shell job the UI polls: current phase plus the tail of what
@@ -111,6 +112,42 @@ fn phase_parts(phase: &InstallPhase) -> (&'static str, Option<String>) {
         InstallPhase::Success => ("success", None),
         InstallPhase::Failed(e) => ("failed", Some(e.clone())),
     }
+}
+
+/// Drop terminal control sequences from a line of job output. The install and
+/// build scripts colour their logs, and the page renders the tail as text, so
+/// the escapes would otherwise show up as literal `[1;34m` in the log pane and
+/// inside the error a failure is reported with.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI (`ESC [ … final`) and OSC (`ESC ] … BEL`) cover what the scripts
+        // and the Android toolchain emit; any other escape drops its next
+        // character, which is what an unknown two-byte sequence is.
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || c == '\u{1b}' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Run `command` to completion, streaming both its streams into the job's
@@ -145,7 +182,7 @@ async fn stream_into_job(
             if guard.output_tail.len() >= JOB_OUTPUT_TAIL_LINES {
                 guard.output_tail.remove(0);
             }
-            guard.output_tail.push(line);
+            guard.output_tail.push(strip_ansi(&line));
         }
     });
 
@@ -153,6 +190,7 @@ async fn stream_into_job(
         let mut last_line = String::new();
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
+            let line = strip_ansi(&line);
             let mut guard = job_for_stderr.lock().await;
             if guard.output_tail.len() >= JOB_OUTPUT_TAIL_LINES {
                 guard.output_tail.remove(0);
@@ -189,6 +227,20 @@ async fn run_streaming_job(
         Ok(()) => InstallPhase::Success,
         Err(e) => InstallPhase::Failed(e),
     };
+}
+
+/// Stop the build on a gap only the host's package manager can close, keeping
+/// the packages and the fixing command as fields the install page can render.
+async fn record_host_package_gap(
+    job: &Arc<tokio::sync::Mutex<BackgroundJobState>>,
+    gap: twa::HostPackageGap,
+) {
+    let mut guard = job.lock().await;
+    guard.phase = InstallPhase::Failed(gap.message);
+    guard.missing_host_packages = Some(MissingHostPackages {
+        packages: gap.packages,
+        install_command: gap.install_command,
+    });
 }
 
 async fn push_job_line(job: &Arc<tokio::sync::Mutex<BackgroundJobState>>, line: String) {
@@ -2941,65 +2993,55 @@ async fn api_install_apk_build(
         guard.missing_host_packages = None;
     }
 
-    let work_dir = twa::work_dir(&state.data_dir);
-    let scripts = match twa::materialize(&state.data_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            // The job is already claimed, so an early return has to hand it
-            // back — otherwise it stays Running with nothing running.
-            let mut guard = state.twa_build.lock().await;
-            guard.phase = InstallPhase::Failed(format!("{e:#}"));
-            return Err(AppError::internal(e));
-        }
-    };
-
-    let toolchain_present = {
-        let build = scripts.build.clone();
-        tokio::task::spawn_blocking(move || twa::toolchain_present(&build))
-            .await
-            .unwrap_or(false)
-    };
-
-    if !toolchain_present {
-        let missing = twa::missing_host_packages_on_path();
-        if !missing.is_empty() {
-            let install_command = twa::host_package_install_command(&missing);
-            let error = twa::missing_host_packages_error(&missing, &install_command);
-            let packages: Vec<String> = missing.iter().map(|p| (*p).to_string()).collect();
-            let mut guard = state.twa_build.lock().await;
-            guard.phase = InstallPhase::Failed(error.clone());
-            guard.missing_host_packages = Some(MissingHostPackages {
-                packages: packages.clone(),
-                install_command: install_command.clone(),
-            });
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "status": "missing_host_packages",
-                    "error": error,
-                    "missing_host_packages": packages,
-                    "install_command": install_command,
-                    "domain": domain,
-                })),
-            )
-                .into_response());
-        }
-    }
-
+    // Nothing may await between the claim above and this spawn: axum drops a
+    // handler future when the client disconnects, and a drop mid-await would
+    // strand the claim on a job that never started. Everything the build needs
+    // to work out — materialising the scripts, detecting the toolchain — the
+    // job does for itself and reports through the status endpoint.
     let job = state.twa_build.clone();
+    let work_dir = twa::work_dir(&state.data_dir);
+    let data_dir = state.data_dir.clone();
     let install_dir = state.data_dir.join("install");
     let wellknown_dir = state.data_dir.join(".well-known");
     let build_domain = domain.clone();
     tokio::spawn(async move {
+        let scripts = match twa::materialize(&data_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut guard = job.lock().await;
+                guard.phase = InstallPhase::Failed(format!("{e:#}"));
+                return;
+            }
+        };
+
+        let toolchain_present = {
+            let build = scripts.build.clone();
+            tokio::task::spawn_blocking(move || twa::toolchain_present(&build))
+                .await
+                .unwrap_or(false)
+        };
+
+        if !toolchain_present {
+            let missing = twa::missing_host_packages_on_path();
+            if !missing.is_empty() {
+                record_host_package_gap(&job, twa::host_package_gap(&missing)).await;
+                return;
+            }
+        }
+
         let setup = (!toolchain_present).then(|| {
             let mut command = tokio::process::Command::new("bash");
-            command.arg(&scripts.setup).current_dir(&work_dir);
+            command
+                .arg(&scripts.setup)
+                .current_dir(&work_dir)
+                .stdin(std::process::Stdio::null());
             command
         });
         let mut build = tokio::process::Command::new("bash");
         build
             .arg(&scripts.build)
             .current_dir(&work_dir)
+            .stdin(std::process::Stdio::null())
             .env("MOBUX_DOMAIN", &build_domain)
             .env("TWA_WORK_DIR", &work_dir)
             .env("TWA_INSTALL_DIR", &install_dir)
@@ -3009,11 +3051,7 @@ async fn api_install_apk_build(
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({
-            "status": "started",
-            "domain": domain,
-            "installing_tools": !toolchain_present,
-        })),
+        Json(json!({"status": "started", "domain": domain})),
     )
         .into_response())
 }
@@ -4151,6 +4189,74 @@ mod tests {
                 .any(|l| l.contains("Installing the Android build tools")),
             "nothing to install, so nothing to announce: {:?}",
             guard.output_tail
+        );
+    }
+
+    #[test]
+    fn job_output_drops_the_colour_the_scripts_log_with() {
+        assert_eq!(
+            strip_ansi("\u{1b}[1;34m[setup-twa]\u{1b}[0m Installing SDKMAN"),
+            "[setup-twa] Installing SDKMAN"
+        );
+        assert_eq!(
+            strip_ansi("\u{1b}]0;a title\u{7}plain"),
+            "plain",
+            "window-title sequences must not leak into the log pane"
+        );
+        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
+    }
+
+    /// The install page reads the packages and the command off the status
+    /// endpoint, so a stopped build has to carry both.
+    #[tokio::test]
+    async fn a_host_package_gap_is_reported_through_the_status_endpoint() {
+        let (state, _dir) = test_state(false);
+        record_host_package_gap(
+            &state.twa_build,
+            twa::host_package_gap_with(Some(twa::PackageManager::Apt), &["unzip", "zip"]),
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            "box.example.com".parse().expect("host header"),
+        );
+        let Json(body) = api_install_apk_status(State(state), headers)
+            .await
+            .expect("status");
+
+        assert_eq!(body["phase"], "failed");
+        assert_eq!(body["missing_host_packages"], json!(["unzip", "zip"]));
+        assert_eq!(body["install_command"], "sudo apt-get install -y unzip zip");
+        assert!(body["error"]
+            .as_str()
+            .expect("an error message")
+            .contains("unzip and zip"));
+    }
+
+    /// One build at a time, and the toolchain pre-phase holds the claim too —
+    /// a second press during a ten-minute SDK download must not start a
+    /// second install over the same directories.
+    #[tokio::test]
+    async fn a_press_during_the_toolchain_install_gets_the_running_state() {
+        let (state, _dir) = test_state(false);
+        state.twa_build.lock().await.phase = InstallPhase::InstallingTools;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            "box.example.com".parse().expect("host header"),
+        );
+        let response = api_install_apk_build(State(state.clone()), headers)
+            .await
+            .expect("build response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state.twa_build.lock().await.phase,
+            InstallPhase::InstallingTools,
+            "the refused press must not disturb the running job"
         );
     }
 

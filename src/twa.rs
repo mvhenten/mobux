@@ -140,23 +140,23 @@ pub enum PackageManager {
     Dnf,
     Pacman,
     Zypper,
+    Apk,
 }
 
 impl PackageManager {
-    /// Apt is the fallback rather than an error: naming one concrete command
-    /// the user can paste beats making them work out their own.
-    pub fn detect(present: impl Fn(&str) -> bool) -> Self {
-        for (tool, manager) in [
+    /// `None` on a host none of these matches. Guessing a command that the
+    /// host has no way to run would be worse than saying so plainly.
+    pub fn detect(present: impl Fn(&str) -> bool) -> Option<Self> {
+        [
             ("apt-get", Self::Apt),
             ("dnf", Self::Dnf),
             ("pacman", Self::Pacman),
             ("zypper", Self::Zypper),
-        ] {
-            if present(tool) {
-                return manager;
-            }
-        }
-        Self::Apt
+            ("apk", Self::Apk),
+        ]
+        .into_iter()
+        .find(|(tool, _)| present(tool))
+        .map(|(_, manager)| manager)
     }
 
     pub fn install_command(self, packages: &[&str]) -> String {
@@ -166,20 +166,41 @@ impl PackageManager {
             Self::Dnf => format!("sudo dnf install -y {list}"),
             Self::Pacman => format!("sudo pacman -S --noconfirm {list}"),
             Self::Zypper => format!("sudo zypper install -y {list}"),
+            Self::Apk => format!("sudo apk add {list}"),
         }
     }
 }
 
-pub fn host_package_install_command(packages: &[&str]) -> String {
-    PackageManager::detect(on_path).install_command(packages)
+/// What the build stopped on and how the user clears it. The command is the
+/// page's copy-paste affordance, so it is never folded into the message.
+pub struct HostPackageGap {
+    pub packages: Vec<String>,
+    pub install_command: Option<String>,
+    pub message: String,
 }
 
-pub fn missing_host_packages_error(packages: &[&str], install_command: &str) -> String {
-    format!(
-        "The build tools need {} on this host, and only the system package manager can install {}. Run: {install_command}",
-        packages.join(", "),
-        if packages.len() == 1 { "it" } else { "them" },
-    )
+fn english_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+pub fn host_package_gap_with(manager: Option<PackageManager>, missing: &[&str]) -> HostPackageGap {
+    let them = if missing.len() == 1 { "it" } else { "them" };
+    HostPackageGap {
+        packages: missing.iter().map(|p| (*p).to_string()).collect(),
+        install_command: manager.map(|m| m.install_command(missing)),
+        message: format!(
+            "This host is missing {}. The Android build tools unpack their downloads with {them}, and only your system package manager can install {them}.",
+            english_list(missing),
+        ),
+    }
+}
+
+pub fn host_package_gap(missing: &[&str]) -> HostPackageGap {
+    host_package_gap_with(PackageManager::detect(on_path), missing)
 }
 
 /// Operator override for the domain the package is pinned to.
@@ -321,26 +342,72 @@ mod tests {
     #[test]
     fn the_install_command_matches_the_hosts_package_manager() {
         let missing = ["unzip", "zip"];
-        assert_eq!(
-            PackageManager::detect(|t| t == "apt-get").install_command(&missing),
-            "sudo apt-get install -y unzip zip"
+        for (tool, want) in [
+            ("apt-get", "sudo apt-get install -y unzip zip"),
+            ("dnf", "sudo dnf install -y unzip zip"),
+            ("pacman", "sudo pacman -S --noconfirm unzip zip"),
+            ("zypper", "sudo zypper install -y unzip zip"),
+            ("apk", "sudo apk add unzip zip"),
+        ] {
+            let manager = PackageManager::detect(|t| t == tool).expect("a known manager");
+            assert_eq!(manager.install_command(&missing), want);
+        }
+    }
+
+    /// A host with no manager we know gets told what it needs, not a command
+    /// for a package manager it does not have.
+    #[test]
+    fn an_unknown_package_manager_yields_no_command_rather_than_a_guess() {
+        assert_eq!(PackageManager::detect(|_| false), None);
+
+        let gap = host_package_gap_with(None, &["curl", "unzip", "zip"]);
+        assert_eq!(gap.install_command, None);
+        assert!(
+            gap.message.contains("curl, unzip and zip"),
+            "{}",
+            gap.message
         );
-        assert_eq!(
-            PackageManager::detect(|t| t == "dnf").install_command(&missing),
-            "sudo dnf install -y unzip zip"
-        );
-        assert_eq!(
-            PackageManager::detect(|_| false),
-            PackageManager::Apt,
-            "an unrecognised host still gets a command it can paste"
+        assert!(
+            gap.message.contains("system package manager"),
+            "{}",
+            gap.message
         );
     }
 
+    /// The command is the page's copy-paste affordance, so it is carried as a
+    /// field rather than buried in the prose.
     #[test]
-    fn the_preflight_error_carries_the_command_that_fixes_it() {
-        let error = missing_host_packages_error(&["zip"], "sudo apt-get install -y zip");
-        assert!(error.contains("zip"), "{error}");
-        assert!(error.contains("sudo apt-get install -y zip"), "{error}");
+    fn the_preflight_reports_the_packages_and_the_command_separately() {
+        let gap = host_package_gap_with(Some(PackageManager::Apt), &["zip"]);
+        assert_eq!(gap.packages, vec!["zip".to_string()]);
+        assert_eq!(
+            gap.install_command.as_deref(),
+            Some("sudo apt-get install -y zip")
+        );
+        assert!(gap.message.contains("missing zip"), "{}", gap.message);
+        assert!(
+            !gap.message.contains("apt-get"),
+            "the command must not be duplicated into the prose: {}",
+            gap.message
+        );
+    }
+
+    /// The preflight exists to catch what the setup script would die on, so
+    /// its list and the script's must stay the same list.
+    #[test]
+    fn the_preflight_covers_every_host_tool_the_setup_script_requires() {
+        let required: Vec<&str> = SETUP_SCRIPT
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix("require_host_tool "))
+            .map(str::trim)
+            .collect();
+        assert!(!required.is_empty(), "setup-twa must require host tools");
+        let mut sorted = required.clone();
+        sorted.sort_unstable();
+        let mut known = HOST_PACKAGES.to_vec();
+        known.sort_unstable();
+        assert_eq!(sorted, known);
     }
 
     /// The toolchain pre-phase decides by asking the build script itself, so
