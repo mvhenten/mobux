@@ -10,6 +10,11 @@
 // exists — so the download button is never handed a 404 body to save. The
 // build takes minutes, so the running state shows the tail of the build
 // output rather than a spinner.
+//
+// The first build on a host also installs the JDK, Node and Android SDK it
+// needs; that runs as its own phase so the wait is named. The only thing the
+// server cannot install for itself is a couple of OS packages, and it reports
+// those as the single command that fixes them.
 
 import { useEffect, useRef, useState } from "preact/hooks";
 import { renderSVG } from "uqr";
@@ -43,6 +48,36 @@ function BuildLog({ output }) {
   const lines = output.slice(-TAIL_LINES);
   if (lines.length === 0) return null;
   return <pre class="install-log">{lines.join("\n")}</pre>;
+}
+
+// A command the user runs in a terminal, with a tap-to-copy affordance. The
+// clipboard API is missing on an insecure origin, so a failure says so and
+// leaves the text selectable rather than doing nothing.
+function CopyCommand({ command }) {
+  const [copyState, setCopyState] = useState("idle");
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopyState("copied");
+      setTimeout(() => setCopyState("idle"), 2000);
+    } catch (_) {
+      setCopyState("failed");
+    }
+  };
+
+  return (
+    <div class="install-command">
+      <code>{command}</code>
+      <button type="button" class="install-copy" onClick={onCopy}>
+        {copyState === "copied"
+          ? "Copied"
+          : copyState === "failed"
+            ? "Select it to copy"
+            : "Copy"}
+      </button>
+    </div>
+  );
 }
 
 function ApkSection({ apkUrl }) {
@@ -97,8 +132,10 @@ function ApkSection({ apkUrl }) {
     });
     setStarting(false);
     if (!res) return;
-    // 409 means a build was already running — the poll below picks it up.
-    if (!res.ok && res.status !== 409) {
+    // 409 means a build was already running, 400 that the server recorded why
+    // it refused (missing OS packages, unusable domain) — the poll below picks
+    // either up and renders it.
+    if (!res.ok && res.status !== 409 && res.status !== 400) {
       const body = await res.text().catch(() => "");
       setRequestError(
         `Couldn't start the build (HTTP ${res.status}). ${body}`.trim(),
@@ -109,11 +146,15 @@ function ApkSection({ apkUrl }) {
   };
 
   const phase = status?.phase;
-  const running = phase === "running";
-  const failed = phase === "failed";
+  const installingTools = phase === "installing_tools";
+  const running = phase === "running" || installingTools;
   const available = !!status?.apk_available;
   const output = Array.isArray(status?.output) ? status.output : [];
   const domain = status?.domain;
+  const missingPackages = Array.isArray(status?.missing_host_packages)
+    ? status.missing_host_packages
+    : [];
+  const failed = phase === "failed" && missingPackages.length === 0;
 
   return (
     <section class="install-card">
@@ -148,16 +189,41 @@ function ApkSection({ apkUrl }) {
           </p>
           <p class="install-hint">
             Building one takes a few minutes and signs it for{" "}
-            <code>{domain || "this server"}</code>.
+            <code>{domain || "this server"}</code>. The first build installs the
+            Android build tools too.
           </p>
         </div>
       )}
 
-      {running && (
+      {installingTools && (
+        <p class="install-lede">
+          Installing the Android build tools — a JDK, Node and the Android SDK.
+          This happens once and takes several minutes; the package build starts
+          straight after. You can leave this page open.
+        </p>
+      )}
+
+      {running && !installingTools && (
         <p class="install-lede">
           Building the package for <code>{domain || "this server"}</code>. This
           takes a few minutes — you can leave this page open.
         </p>
+      )}
+
+      {missingPackages.length > 0 && (
+        <div class="install-error" role="alert">
+          <strong>This host is missing {missingPackages.join(", ")}.</strong>
+          <p>
+            The build tools unpack their downloads with{" "}
+            {missingPackages.length === 1 ? "it" : "them"}, and only your system
+            package manager can install{" "}
+            {missingPackages.length === 1 ? "it" : "them"}. Run this, then press
+            the button again.
+          </p>
+          {status?.install_command && (
+            <CopyCommand command={status.install_command} />
+          )}
+        </div>
       )}
 
       {failed && (
@@ -189,11 +255,13 @@ function ApkSection({ apkUrl }) {
             onClick={onBuild}
             disabled={running || starting || !!status?.domain_error}
           >
-            {running
-              ? "Building…"
-              : available
-                ? "Rebuild package"
-                : "Generate package"}
+            {installingTools
+              ? "Installing build tools…"
+              : running
+                ? "Building…"
+                : available
+                  ? "Rebuild package"
+                  : "Generate package"}
           </button>
           {available && !running && (
             <span class="install-hint">

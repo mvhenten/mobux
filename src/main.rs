@@ -59,9 +59,27 @@ mod update;
 #[derive(Clone, Debug, PartialEq)]
 enum InstallPhase {
     Idle,
+    /// The TWA build's pre-phase: the toolchain is missing and is being
+    /// installed before the package build starts. Minutes of downloads, so
+    /// the UI says what it is waiting for rather than "building".
+    InstallingTools,
     Running,
     Success,
     Failed(String),
+}
+
+impl InstallPhase {
+    /// Whether a job holds the single-flight claim. Both working phases do.
+    fn is_active(&self) -> bool {
+        matches!(self, Self::InstallingTools | Self::Running)
+    }
+}
+
+/// The OS packages a job stopped on, and the one command that installs them.
+#[derive(Clone)]
+struct MissingHostPackages {
+    packages: Vec<String>,
+    install_command: String,
 }
 
 /// A long-running shell job the UI polls: current phase plus the tail of what
@@ -70,6 +88,7 @@ enum InstallPhase {
 struct BackgroundJobState {
     phase: InstallPhase,
     output_tail: Vec<String>,
+    missing_host_packages: Option<MissingHostPackages>,
 }
 
 impl BackgroundJobState {
@@ -77,6 +96,7 @@ impl BackgroundJobState {
         Arc::new(tokio::sync::Mutex::new(Self {
             phase: InstallPhase::Idle,
             output_tail: vec![],
+            missing_host_packages: None,
         }))
     }
 }
@@ -86,6 +106,7 @@ const JOB_OUTPUT_TAIL_LINES: usize = 200;
 fn phase_parts(phase: &InstallPhase) -> (&'static str, Option<String>) {
     match phase {
         InstallPhase::Idle => ("idle", None),
+        InstallPhase::InstallingTools => ("installing_tools", None),
         InstallPhase::Running => ("running", None),
         InstallPhase::Success => ("success", None),
         InstallPhase::Failed(e) => ("failed", Some(e.clone())),
@@ -93,11 +114,12 @@ fn phase_parts(phase: &InstallPhase) -> (&'static str, Option<String>) {
 }
 
 /// Run `command` to completion, streaming both its streams into the job's
-/// rolling output tail, then record success or the failure that ended it.
-async fn run_streaming_job(
-    job: Arc<tokio::sync::Mutex<BackgroundJobState>>,
+/// rolling output tail. Returns the failure that ended it, if any, leaving the
+/// phase alone so a caller can run another command after this one.
+async fn stream_into_job(
+    job: &Arc<tokio::sync::Mutex<BackgroundJobState>>,
     mut command: tokio::process::Command,
-) {
+) -> Result<(), String> {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -107,11 +129,7 @@ async fn run_streaming_job(
         .spawn()
     {
         Ok(c) => c,
-        Err(e) => {
-            let mut guard = job.lock().await;
-            guard.phase = InstallPhase::Failed(format!("spawn error: {e}"));
-            return;
-        }
+        Err(e) => return Err(format!("spawn error: {e}")),
     };
 
     let stdout = child.stdout.take().expect("stdout piped");
@@ -149,17 +167,68 @@ async fn run_streaming_job(
     let _ = stdout_task.await;
     let stderr_summary = stderr_task.await.unwrap_or_default();
 
-    let exit_status = child.wait().await;
-    let mut guard = job.lock().await;
-    guard.phase = match exit_status {
-        Ok(s) if s.success() => InstallPhase::Success,
-        Ok(s) => InstallPhase::Failed(format!(
+    match child.wait().await {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!(
             "exit {}: {}",
             s.code().unwrap_or(-1),
             stderr_summary
         )),
-        Err(e) => InstallPhase::Failed(format!("wait error: {e}")),
+        Err(e) => Err(format!("wait error: {e}")),
+    }
+}
+
+/// A single-command job: stream it, then record success or the failure.
+async fn run_streaming_job(
+    job: Arc<tokio::sync::Mutex<BackgroundJobState>>,
+    command: tokio::process::Command,
+) {
+    let outcome = stream_into_job(&job, command).await;
+    let mut guard = job.lock().await;
+    guard.phase = match outcome {
+        Ok(()) => InstallPhase::Success,
+        Err(e) => InstallPhase::Failed(e),
     };
+}
+
+async fn push_job_line(job: &Arc<tokio::sync::Mutex<BackgroundJobState>>, line: String) {
+    let mut guard = job.lock().await;
+    if guard.output_tail.len() >= JOB_OUTPUT_TAIL_LINES {
+        guard.output_tail.remove(0);
+    }
+    guard.output_tail.push(line);
+}
+
+/// The TWA build, optionally preceded by the toolchain install. `setup` is
+/// `Some` only when the toolchain is missing, and it gets its own phase so the
+/// page can say "installing build tools" through the minutes it spends
+/// downloading a JDK and an Android SDK.
+async fn run_twa_build_job(
+    job: Arc<tokio::sync::Mutex<BackgroundJobState>>,
+    setup: Option<tokio::process::Command>,
+    build: tokio::process::Command,
+) {
+    if let Some(setup) = setup {
+        {
+            let mut guard = job.lock().await;
+            guard.phase = InstallPhase::InstallingTools;
+        }
+        push_job_line(
+            &job,
+            "Installing the Android build tools. This takes a few minutes.".to_string(),
+        )
+        .await;
+        if let Err(e) = stream_into_job(&job, setup).await {
+            let mut guard = job.lock().await;
+            guard.phase = InstallPhase::Failed(format!("installing the build tools failed: {e}"));
+            return;
+        }
+        let mut guard = job.lock().await;
+        guard.phase = InstallPhase::Running;
+    }
+
+    push_job_line(&job, "Building the Android package.".to_string()).await;
+    run_streaming_job(job, build).await;
 }
 
 #[derive(Clone)]
@@ -2762,7 +2831,7 @@ async fn api_stt_status(
 async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     {
         let mut guard = state.stt_install.lock().await;
-        if guard.phase == InstallPhase::Running {
+        if guard.phase.is_active() {
             return Ok((
                 StatusCode::CONFLICT,
                 Json(json!({"status": "already_running"})),
@@ -2830,6 +2899,12 @@ async fn api_stt_install_status(
 // with the user's home as its working directory, so the install page can't
 // send anyone to a terminal. These two endpoints mirror the STT install pair:
 // one build at a time, phase plus rolling output tail polled by the SPA.
+//
+// The toolchain the build needs is installed by the build itself when it is
+// absent, as a pre-phase with its own phase name. The exception is the handful
+// of OS packages that pre-phase shells out to: nothing user-local can supply
+// those, so the button checks for them up front and hands back the one command
+// that installs them rather than dying minutes into a download.
 
 async fn api_install_apk_build(
     State(state): State<AppState>,
@@ -2854,7 +2929,7 @@ async fn api_install_apk_build(
     // the check and start a build over the same working directory.
     {
         let mut guard = state.twa_build.lock().await;
-        if guard.phase == InstallPhase::Running {
+        if guard.phase.is_active() {
             return Ok((
                 StatusCode::CONFLICT,
                 Json(json!({"status": "already_running", "domain": domain})),
@@ -2862,11 +2937,12 @@ async fn api_install_apk_build(
                 .into_response());
         }
         guard.phase = InstallPhase::Running;
-        guard.output_tail = vec![format!("Building the Android package for {domain}")];
+        guard.output_tail = vec![format!("Preparing the Android package for {domain}")];
+        guard.missing_host_packages = None;
     }
 
     let work_dir = twa::work_dir(&state.data_dir);
-    let script = match twa::materialize(&state.data_dir) {
+    let scripts = match twa::materialize(&state.data_dir) {
         Ok(s) => s,
         Err(e) => {
             // The job is already claimed, so an early return has to hand it
@@ -2877,25 +2953,67 @@ async fn api_install_apk_build(
         }
     };
 
+    let toolchain_present = {
+        let build = scripts.build.clone();
+        tokio::task::spawn_blocking(move || twa::toolchain_present(&build))
+            .await
+            .unwrap_or(false)
+    };
+
+    if !toolchain_present {
+        let missing = twa::missing_host_packages_on_path();
+        if !missing.is_empty() {
+            let install_command = twa::host_package_install_command(&missing);
+            let error = twa::missing_host_packages_error(&missing, &install_command);
+            let packages: Vec<String> = missing.iter().map(|p| (*p).to_string()).collect();
+            let mut guard = state.twa_build.lock().await;
+            guard.phase = InstallPhase::Failed(error.clone());
+            guard.missing_host_packages = Some(MissingHostPackages {
+                packages: packages.clone(),
+                install_command: install_command.clone(),
+            });
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "missing_host_packages",
+                    "error": error,
+                    "missing_host_packages": packages,
+                    "install_command": install_command,
+                    "domain": domain,
+                })),
+            )
+                .into_response());
+        }
+    }
+
     let job = state.twa_build.clone();
     let install_dir = state.data_dir.join("install");
     let wellknown_dir = state.data_dir.join(".well-known");
     let build_domain = domain.clone();
     tokio::spawn(async move {
-        let mut command = tokio::process::Command::new("bash");
-        command
-            .arg(&script)
+        let setup = (!toolchain_present).then(|| {
+            let mut command = tokio::process::Command::new("bash");
+            command.arg(&scripts.setup).current_dir(&work_dir);
+            command
+        });
+        let mut build = tokio::process::Command::new("bash");
+        build
+            .arg(&scripts.build)
             .current_dir(&work_dir)
             .env("MOBUX_DOMAIN", &build_domain)
             .env("TWA_WORK_DIR", &work_dir)
             .env("TWA_INSTALL_DIR", &install_dir)
             .env("TWA_WELLKNOWN_DIR", &wellknown_dir);
-        run_streaming_job(job, command).await;
+        run_twa_build_job(job, setup, build).await;
     });
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({"status": "started", "domain": domain})),
+        Json(json!({
+            "status": "started",
+            "domain": domain,
+            "installing_tools": !toolchain_present,
+        })),
     )
         .into_response())
 }
@@ -2911,10 +3029,13 @@ async fn api_install_apk_status(
 
     let guard = state.twa_build.lock().await;
     let (phase_str, error) = phase_parts(&guard.phase);
+    let gap = guard.missing_host_packages.as_ref();
     Ok(Json(json!({
         "phase": phase_str,
         "output": guard.output_tail,
         "error": error,
+        "missing_host_packages": gap.map(|g| g.packages.clone()),
+        "install_command": gap.map(|g| g.install_command.clone()),
         "apk_available": twa::resolve_artifact(
             twa::apk_path(&state.data_dir),
             twa::CHECKOUT_APK_PATH,
@@ -3922,5 +4043,141 @@ mod tests {
         let (state, _dir) = test_state(false);
         let Json(val) = api_build_info(State(state)).await;
         assert_eq!(val["dev_mode"], false);
+    }
+
+    // ── TWA build: the toolchain pre-phase ────────────────────────────────
+    //
+    // The install page's button has to work on a host that never had the
+    // Android toolchain, so the build runs the toolchain install first and
+    // continues into the package build without a second press. These drive
+    // the sequencing with stub scripts — no SDK, no downloads.
+
+    #[cfg(unix)]
+    fn stub_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/bash\nset -eu\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn stub_command(script: &std::path::Path, log: &std::path::Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("bash");
+        command.arg(script).env("STUB_LOG", log);
+        command
+    }
+
+    #[cfg(unix)]
+    async fn await_phase(job: &Arc<tokio::sync::Mutex<BackgroundJobState>>, want: &InstallPhase) {
+        for _ in 0..500 {
+            if job.lock().await.phase == *want {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("job never reached {want:?}");
+    }
+
+    #[cfg(unix)]
+    fn stub_log(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_toolchain_is_installed_before_the_build_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let release = dir.path().join("release");
+        let setup = stub_script(
+            dir.path(),
+            "setup",
+            &format!(
+                "echo setup >> \"$STUB_LOG\"\nwhile [ ! -f '{}' ]; do sleep 0.01; done",
+                release.display()
+            ),
+        );
+        let build = stub_script(dir.path(), "build", "echo build >> \"$STUB_LOG\"");
+
+        let job = BackgroundJobState::idle();
+        let handle = tokio::spawn(run_twa_build_job(
+            job.clone(),
+            Some(stub_command(&setup, &log)),
+            stub_command(&build, &log),
+        ));
+
+        await_phase(&job, &InstallPhase::InstallingTools).await;
+        assert_eq!(stub_log(&log), "setup\n", "the build must wait for setup");
+        assert!(InstallPhase::InstallingTools.is_active());
+        assert_eq!(
+            phase_parts(&InstallPhase::InstallingTools).0,
+            "installing_tools"
+        );
+
+        std::fs::write(&release, b"go").unwrap();
+        handle.await.unwrap();
+
+        let guard = job.lock().await;
+        assert_eq!(guard.phase, InstallPhase::Success);
+        assert_eq!(stub_log(&log), "setup\nbuild\n");
+        assert!(
+            guard
+                .output_tail
+                .iter()
+                .any(|l| l.contains("Installing the Android build tools")),
+            "the tail must name the wait: {:?}",
+            guard.output_tail
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_installed_toolchain_skips_the_install_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let build = stub_script(dir.path(), "build", "echo build >> \"$STUB_LOG\"");
+
+        let job = BackgroundJobState::idle();
+        run_twa_build_job(job.clone(), None, stub_command(&build, &log)).await;
+
+        let guard = job.lock().await;
+        assert_eq!(guard.phase, InstallPhase::Success);
+        assert_eq!(stub_log(&log), "build\n");
+        assert!(
+            !guard
+                .output_tail
+                .iter()
+                .any(|l| l.contains("Installing the Android build tools")),
+            "nothing to install, so nothing to announce: {:?}",
+            guard.output_tail
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_toolchain_install_stops_before_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let setup = stub_script(dir.path(), "setup", "echo 'no unzip' >&2\nexit 3");
+        let build = stub_script(dir.path(), "build", "echo build >> \"$STUB_LOG\"");
+
+        let job = BackgroundJobState::idle();
+        run_twa_build_job(
+            job.clone(),
+            Some(stub_command(&setup, &log)),
+            stub_command(&build, &log),
+        )
+        .await;
+
+        let guard = job.lock().await;
+        match &guard.phase {
+            InstallPhase::Failed(e) => {
+                assert!(e.contains("installing the build tools failed"), "{e}");
+                assert!(e.contains("no unzip"), "{e}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert_eq!(stub_log(&log), "", "the build must not run");
     }
 }

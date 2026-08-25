@@ -1423,6 +1423,38 @@ button.install-btn:disabled {
   margin: 6px 0 0;
   word-break: break-word;
 }
+.install-command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+.install-command code {
+  flex: 1 1 240px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  word-break: break-all;
+  user-select: all;
+}
+.install-copy {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.install-copy:active {
+  opacity: 0.8;
+}
 .install-apk-missing {
   background: #2a1515;
   border-radius: 8px;

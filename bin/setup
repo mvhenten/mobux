@@ -92,7 +92,7 @@ verify_cargo_build_tools() {
 check_node() {
   if ! command -v node >/dev/null 2>&1; then
     warn "node not found. The web build (node web/build.js) will not work."
-    warn "Run bin/setup-twa to install Node LTS via nvm, or install Node yourself."
+    warn "Install Node LTS (nvm, or your OS package manager) and re-run."
     return 1
   fi
   log "node: $(node --version)"
@@ -146,6 +146,6 @@ log "  node web/build.js   (or: make build)"
 
 if ! command -v node >/dev/null 2>&1; then
   log ""
-  log "Note: node is not on PATH. Run bin/setup-twa to install it (and the"
-  log "      Android/JDK toolchain needed to build the TWA APK)."
+  log "Note: node is not on PATH. Install Node LTS (nvm, or your OS package"
+  log "      manager) before running the web build."
 fi

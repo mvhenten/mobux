@@ -5,6 +5,10 @@
 # Idempotent. User-local installs only — no sudo. Each tool: detect, skip if
 # present at adequate version, otherwise install.
 #
+# The server embeds this script and runs it as the first phase of the install
+# page's "Generate package" build whenever the toolchain is missing, so it is
+# the shared implementation rather than a step anyone performs by hand.
+#
 # Installs/ensures:
 #   - SDKMAN at ~/.sdkman
 #   - JDK 17 (Temurin) via SDKMAN
