@@ -53,6 +53,7 @@ mod stt_scripts;
 mod terminal_cursor;
 mod tmux;
 mod transcribe;
+mod twa;
 mod update;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,9 +64,102 @@ enum InstallPhase {
     Failed(String),
 }
 
-struct SttInstallState {
+/// A long-running shell job the UI polls: current phase plus the tail of what
+/// it printed, so a build that takes minutes shows progress rather than a
+/// spinner.
+struct BackgroundJobState {
     phase: InstallPhase,
     output_tail: Vec<String>,
+}
+
+impl BackgroundJobState {
+    fn idle() -> Arc<tokio::sync::Mutex<Self>> {
+        Arc::new(tokio::sync::Mutex::new(Self {
+            phase: InstallPhase::Idle,
+            output_tail: vec![],
+        }))
+    }
+}
+
+const JOB_OUTPUT_TAIL_LINES: usize = 200;
+
+fn phase_parts(phase: &InstallPhase) -> (&'static str, Option<String>) {
+    match phase {
+        InstallPhase::Idle => ("idle", None),
+        InstallPhase::Running => ("running", None),
+        InstallPhase::Success => ("success", None),
+        InstallPhase::Failed(e) => ("failed", Some(e.clone())),
+    }
+}
+
+/// Run `command` to completion, streaming both its streams into the job's
+/// rolling output tail, then record success or the failure that ended it.
+async fn run_streaming_job(
+    job: Arc<tokio::sync::Mutex<BackgroundJobState>>,
+    mut command: tokio::process::Command,
+) {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = match command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let mut guard = job.lock().await;
+            guard.phase = InstallPhase::Failed(format!("spawn error: {e}"));
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+
+    let job_for_stdout = job.clone();
+    let job_for_stderr = job.clone();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let mut guard = job_for_stdout.lock().await;
+            if guard.output_tail.len() >= JOB_OUTPUT_TAIL_LINES {
+                guard.output_tail.remove(0);
+            }
+            guard.output_tail.push(line);
+        }
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut last_line = String::new();
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let mut guard = job_for_stderr.lock().await;
+            if guard.output_tail.len() >= JOB_OUTPUT_TAIL_LINES {
+                guard.output_tail.remove(0);
+            }
+            guard.output_tail.push(line.clone());
+            drop(guard);
+            last_line = line;
+        }
+        last_line
+    });
+
+    let _ = stdout_task.await;
+    let stderr_summary = stderr_task.await.unwrap_or_default();
+
+    let exit_status = child.wait().await;
+    let mut guard = job.lock().await;
+    guard.phase = match exit_status {
+        Ok(s) if s.success() => InstallPhase::Success,
+        Ok(s) => InstallPhase::Failed(format!(
+            "exit {}: {}",
+            s.code().unwrap_or(-1),
+            stderr_summary
+        )),
+        Err(e) => InstallPhase::Failed(format!("wait error: {e}")),
+    };
 }
 
 #[derive(Clone)]
@@ -99,7 +193,10 @@ struct AppState {
     /// verify whether the bundle matches what the browser has loaded.
     build_hash: String,
     /// Tracks background STT install state (phase + rolling output tail).
-    stt_install: Arc<tokio::sync::Mutex<SttInstallState>>,
+    stt_install: Arc<tokio::sync::Mutex<BackgroundJobState>>,
+    /// Tracks the background TWA/APK build behind the install page's
+    /// "Generate package" button. One build at a time.
+    twa_build: Arc<tokio::sync::Mutex<BackgroundJobState>>,
     /// Per-session OSC 133-segmented conversation record (issue #220):
     /// JSONL under `<data_dir>/history/<session>.jsonl`, fed from the PTY
     /// relay in `handle_ws`, served paginated by `api_session_conversation`.
@@ -195,10 +292,8 @@ async fn main() -> Result<()> {
         update: update_state,
         dev_mode,
         build_hash,
-        stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
-            phase: InstallPhase::Idle,
-            output_tail: vec![],
-        })),
+        stt_install: BackgroundJobState::idle(),
+        twa_build: BackgroundJobState::idle(),
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
     };
 
@@ -294,6 +389,8 @@ async fn main() -> Result<()> {
             post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
         )
         .route("/api/stt/install/status", get(api_stt_install_status))
+        .route("/api/install/apk/build", post(api_install_apk_build))
+        .route("/api/install/apk/status", get(api_install_apk_status))
         .route("/api/stt/start", post(api_stt_start))
         .route("/api/stt/stop", post(api_stt_stop))
         .route(
@@ -1800,9 +1897,6 @@ async fn serve_spa_index() -> Response {
 // APK and CA downloads (/install/mobux.apk, /install/mobux-ca.crt) are
 // preserved as-is. The install UI itself lives in the SPA at /app#/install.
 
-const INSTALL_APK_PATH: &str = "web/static/install/mobux.apk";
-const INSTALL_ASSETLINKS_PATH: &str = "web/static/.well-known/assetlinks.json";
-
 async fn install_page() -> impl IntoResponse {
     (
         axum::http::StatusCode::TEMPORARY_REDIRECT,
@@ -1813,9 +1907,10 @@ async fn install_page() -> impl IntoResponse {
     )
 }
 
-async fn serve_install_apk() -> Response {
+async fn serve_install_apk(State(state): State<AppState>) -> Response {
+    let path = twa::resolve_artifact(twa::apk_path(&state.data_dir), twa::CHECKOUT_APK_PATH);
     serve_file_or_404(
-        INSTALL_APK_PATH,
+        path.to_string_lossy().as_ref(),
         "application/vnd.android.package-archive",
         Some("mobux.apk"),
     )
@@ -1835,8 +1930,12 @@ async fn serve_install_ca() -> Response {
     .await
 }
 
-async fn serve_assetlinks() -> Response {
-    serve_file_or_404(INSTALL_ASSETLINKS_PATH, "application/json", None).await
+async fn serve_assetlinks(State(state): State<AppState>) -> Response {
+    let path = twa::resolve_artifact(
+        twa::assetlinks_path(&state.data_dir),
+        twa::CHECKOUT_ASSETLINKS_PATH,
+    );
+    serve_file_or_404(path.to_string_lossy().as_ref(), "application/json", None).await
 }
 
 /// Read a file from disk and return it as a Response with the given
@@ -2640,12 +2739,7 @@ async fn api_stt_status(
 
     let (install_phase, install_error, install_output) = {
         let guard = state.stt_install.lock().await;
-        let (phase_str, error) = match &guard.phase {
-            InstallPhase::Idle => ("idle", None),
-            InstallPhase::Running => ("running", None),
-            InstallPhase::Success => ("success", None),
-            InstallPhase::Failed(e) => ("failed", Some(e.clone())),
-        };
+        let (phase_str, error) = phase_parts(&guard.phase);
         (phase_str, error, guard.output_tail.clone())
     };
 
@@ -2710,76 +2804,9 @@ async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoRespo
             }
         };
 
-        use std::process::Stdio;
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        let mut child = match tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd_str)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let mut guard = install_state.lock().await;
-                guard.phase = InstallPhase::Failed(format!("spawn error: {e}"));
-                return;
-            }
-        };
-
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-
-        let state_for_stdout = install_state.clone();
-        let state_for_stderr = install_state.clone();
-
-        let stdout_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut guard = state_for_stdout.lock().await;
-                if guard.output_tail.len() >= 200 {
-                    guard.output_tail.remove(0);
-                }
-                guard.output_tail.push(line);
-            }
-        });
-
-        let stderr_task = tokio::spawn(async move {
-            let mut last_line = String::new();
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut guard = state_for_stderr.lock().await;
-                if guard.output_tail.len() >= 200 {
-                    guard.output_tail.remove(0);
-                }
-                guard.output_tail.push(line.clone());
-                drop(guard);
-                last_line = line;
-            }
-            last_line
-        });
-
-        let _ = stdout_task.await;
-        let stderr_summary = stderr_task.await.unwrap_or_default();
-
-        let exit_status = child.wait().await;
-        let mut guard = install_state.lock().await;
-        match exit_status {
-            Ok(s) if s.success() => {
-                guard.phase = InstallPhase::Success;
-            }
-            Ok(s) => {
-                guard.phase = InstallPhase::Failed(format!(
-                    "exit {}: {}",
-                    s.code().unwrap_or(-1),
-                    stderr_summary
-                ));
-            }
-            Err(e) => {
-                guard.phase = InstallPhase::Failed(format!("wait error: {e}"));
-            }
-        }
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(&cmd_str);
+        run_streaming_job(install_state, command).await;
     });
 
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "started"}))))
@@ -2789,16 +2816,104 @@ async fn api_stt_install_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let guard = state.stt_install.lock().await;
-    let (phase_str, error) = match &guard.phase {
-        InstallPhase::Idle => ("idle", None),
-        InstallPhase::Running => ("running", None),
-        InstallPhase::Success => ("success", None),
-        InstallPhase::Failed(e) => ("failed", Some(e.clone())),
-    };
+    let (phase_str, error) = phase_parts(&guard.phase);
     Ok(Json(json!({
         "phase": phase_str,
         "output": guard.output_tail,
         "error": error,
+    })))
+}
+
+// ── /api/install/apk: build the Android package from the UI ───────────
+//
+// `make twa` only exists in a source checkout, and the installed binary runs
+// with the user's home as its working directory, so the install page can't
+// send anyone to a terminal. These two endpoints mirror the STT install pair:
+// one build at a time, phase plus rolling output tail polled by the SPA.
+
+async fn api_install_apk_build(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok());
+    let domain = match twa::resolve_domain(twa::configured_domain().as_deref(), host) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"status": "invalid_domain", "error": e})),
+            )
+                .into_response())
+        }
+    };
+
+    {
+        let guard = state.twa_build.lock().await;
+        if guard.phase == InstallPhase::Running {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(json!({"status": "already_running", "domain": domain})),
+            )
+                .into_response());
+        }
+    }
+
+    let script = twa::materialize(&state.data_dir).map_err(AppError::internal)?;
+    let work_dir = twa::work_dir(&state.data_dir);
+
+    {
+        let mut guard = state.twa_build.lock().await;
+        guard.phase = InstallPhase::Running;
+        guard.output_tail = vec![format!("Building the Android package for {domain}")];
+    }
+
+    let job = state.twa_build.clone();
+    let install_dir = state.data_dir.join("install");
+    let wellknown_dir = state.data_dir.join(".well-known");
+    let build_domain = domain.clone();
+    tokio::spawn(async move {
+        let mut command = tokio::process::Command::new("bash");
+        command
+            .arg(&script)
+            .current_dir(&work_dir)
+            .env("MOBUX_DOMAIN", &build_domain)
+            .env("TWA_WORK_DIR", &work_dir)
+            .env("TWA_INSTALL_DIR", &install_dir)
+            .env("TWA_WELLKNOWN_DIR", &wellknown_dir);
+        run_streaming_job(job, command).await;
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "started", "domain": domain})),
+    )
+        .into_response())
+}
+
+async fn api_install_apk_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok());
+    let domain = twa::resolve_domain(twa::configured_domain().as_deref(), host);
+
+    let guard = state.twa_build.lock().await;
+    let (phase_str, error) = phase_parts(&guard.phase);
+    Ok(Json(json!({
+        "phase": phase_str,
+        "output": guard.output_tail,
+        "error": error,
+        "apk_available": twa::resolve_artifact(
+            twa::apk_path(&state.data_dir),
+            twa::CHECKOUT_APK_PATH,
+        )
+        .is_file(),
+        "domain": domain.as_deref().ok(),
+        "domain_error": domain.err(),
     })))
 }
 
@@ -3402,10 +3517,8 @@ mod tests {
             update: update::UpdateState::new(),
             dev_mode,
             build_hash: "test".to_string(),
-            stt_install: Arc::new(tokio::sync::Mutex::new(SttInstallState {
-                phase: InstallPhase::Idle,
-                output_tail: vec![],
-            })),
+            stt_install: BackgroundJobState::idle(),
+            twa_build: BackgroundJobState::idle(),
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
         };
         (state, dir)
@@ -3471,6 +3584,87 @@ mod tests {
             }
             Err(_) => panic!("expected Ok with 409"),
         }
+    }
+
+    // ── /api/install/apk state machine ───────────────────────────────────
+    //
+    // The install page used to tell the user to run `make twa` in a terminal,
+    // which is unreachable on the deployed instance. These cover the contract
+    // the SPA drives: a start that is idempotent while a build runs, a status
+    // shape it can render a phase, an output tail and a failure from, and a
+    // refusal to guess a domain it can't derive.
+
+    fn apk_build_request(host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_str(host).unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn apk_build_returns_409_while_a_build_is_running() {
+        let (state, _dir) = test_state(false);
+        {
+            let mut guard = state.twa_build.lock().await;
+            guard.phase = InstallPhase::Running;
+            guard.output_tail = vec!["Building the Android package".to_string()];
+        }
+        let resp =
+            api_install_apk_build(State(state.clone()), apk_build_request("box.example.com"))
+                .await
+                .expect("handler must not error");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // The running job is left alone — its tail must survive the rejection.
+        let guard = state.twa_build.lock().await;
+        assert_eq!(guard.phase, InstallPhase::Running);
+        assert_eq!(guard.output_tail.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apk_build_rejects_a_host_it_cannot_turn_into_a_domain() {
+        let (state, _dir) = test_state(false);
+        let resp = api_install_apk_build(State(state.clone()), HeaderMap::new())
+            .await
+            .expect("handler must not error");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.twa_build.lock().await.phase,
+            InstallPhase::Idle,
+            "a rejected request must not move the job out of idle"
+        );
+    }
+
+    #[tokio::test]
+    async fn apk_status_reports_phase_output_and_availability() {
+        let (state, dir) = test_state(false);
+        let resp = api_install_apk_status(State(state.clone()), apk_build_request("box:5151"))
+            .await
+            .unwrap();
+        assert_eq!(resp.0["phase"], "idle");
+        assert_eq!(resp.0["output"], json!([]));
+        assert_eq!(resp.0["error"], serde_json::Value::Null);
+        assert_eq!(resp.0["apk_available"], false);
+        assert_eq!(resp.0["domain"], "box:5151");
+
+        {
+            let mut guard = state.twa_build.lock().await;
+            guard.phase = InstallPhase::Failed("exit 1: bubblewrap not found".to_string());
+            guard.output_tail = vec!["Building signed APK".to_string()];
+        }
+        let apk = twa::apk_path(dir.path());
+        std::fs::create_dir_all(apk.parent().unwrap()).unwrap();
+        std::fs::write(&apk, b"apk").unwrap();
+
+        let resp = api_install_apk_status(State(state), apk_build_request("box:5151"))
+            .await
+            .unwrap();
+        assert_eq!(resp.0["phase"], "failed");
+        assert_eq!(resp.0["error"], "exit 1: bubblewrap not found");
+        assert_eq!(resp.0["output"], json!(["Building signed APK"]));
+        assert_eq!(resp.0["apk_available"], true);
     }
 
     #[tokio::test]

@@ -4,9 +4,20 @@
 //
 // QR codes encode the absolute download URL derived from window.location,
 // matching what the server does from the request Host header.
+//
+// The APK is built by the server on demand (POST /api/install/apk/build,
+// polled via GET /api/install/apk/status), which also reports whether one
+// exists — so the download button is never handed a 404 body to save. The
+// build takes minutes, so the running state shows the tail of the build
+// output rather than a spinner.
 
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { renderSVG } from "uqr";
+import { localFetch, localGet } from "../lib/api.js";
+
+const POLL_MS = 2000;
+const IDLE_MS = 10000;
+const TAIL_LINES = 12;
 
 function QrCode({ url }) {
   const svg = renderSVG(url, {
@@ -28,37 +39,179 @@ function origin() {
   return window.location.origin;
 }
 
-// APK build is optional (`make twa`) and the file is gitignored, so
-// /install/mobux.apk regularly 404s with a plain-text body. Without this
-// probe the download button would hand the browser that 404 body, which
-// Chrome saves as a garbage file (see the `download` attribute fix above —
-// this covers the case where the attribute is correct but the file is
-// simply missing). null = still checking, true/false = probed result.
-function useApkAvailable() {
-  const [available, setAvailable] = useState(null);
+function BuildLog({ output }) {
+  const lines = output.slice(-TAIL_LINES);
+  if (lines.length === 0) return null;
+  return <pre class="install-log">{lines.join("\n")}</pre>;
+}
+
+function ApkSection({ apkUrl }) {
+  const [status, setStatus] = useState(null);
+  const [requestError, setRequestError] = useState(null);
+  const [starting, setStarting] = useState(false);
+  const poll = useRef(null);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch("/install/mobux.apk", { method: "HEAD" })
-      .then((res) => {
-        if (!cancelled) setAvailable(res.ok);
-      })
-      .catch(() => {
-        if (!cancelled) setAvailable(false);
+    let live = true;
+    let timer = null;
+
+    const tick = async () => {
+      const next = await localGet("/api/install/apk/status").catch((e) => {
+        if (live)
+          setRequestError(
+            `Can't reach the server for build status: ${e.message}`,
+          );
+        return null;
       });
+      if (!live) return;
+      if (next) {
+        setRequestError(null);
+        setStatus(next);
+      }
+      timer = setTimeout(tick, next?.phase === "running" ? POLL_MS : IDLE_MS);
+    };
+
+    // Called right after a build is started so the running state appears at
+    // once instead of at the end of the current idle interval.
+    poll.current = () => {
+      clearTimeout(timer);
+      tick();
+    };
+    tick();
+
     return () => {
-      cancelled = true;
+      live = false;
+      poll.current = null;
+      clearTimeout(timer);
     };
   }, []);
 
-  return available;
+  const onBuild = async () => {
+    setStarting(true);
+    setRequestError(null);
+    const res = await localFetch("/api/install/apk/build", {
+      method: "POST",
+    }).catch((e) => {
+      setRequestError(`Couldn't start the build: ${e.message}`);
+      return null;
+    });
+    setStarting(false);
+    if (!res) return;
+    // 409 means a build was already running — the poll below picks it up.
+    if (!res.ok && res.status !== 409) {
+      const body = await res.text().catch(() => "");
+      setRequestError(
+        `Couldn't start the build (HTTP ${res.status}). ${body}`.trim(),
+      );
+      return;
+    }
+    poll.current?.();
+  };
+
+  const phase = status?.phase;
+  const running = phase === "running";
+  const failed = phase === "failed";
+  const available = !!status?.apk_available;
+  const output = Array.isArray(status?.output) ? status.output : [];
+  const domain = status?.domain;
+
+  return (
+    <section class="install-card">
+      <h2>2. Install the app</h2>
+
+      {status === null && !requestError && (
+        <p class="install-hint">Checking…</p>
+      )}
+
+      {available && (
+        <>
+          <p class="install-lede">
+            Download the Android APK, or scan the QR with your phone.
+          </p>
+          <div class="install-grid">
+            <a
+              class="install-btn"
+              href="/install/mobux.apk"
+              download="mobux.apk"
+            >
+              Download APK
+            </a>
+            <QrCode url={apkUrl} />
+          </div>
+        </>
+      )}
+
+      {status !== null && !available && !running && (
+        <div class="install-apk-missing" role="alert">
+          <p class="install-apk-missing-title">
+            No package has been built for this server yet.
+          </p>
+          <p class="install-hint">
+            Building one takes a few minutes and signs it for{" "}
+            <code>{domain || "this server"}</code>.
+          </p>
+        </div>
+      )}
+
+      {running && (
+        <p class="install-lede">
+          Building the package for <code>{domain || "this server"}</code>. This
+          takes a few minutes — you can leave this page open.
+        </p>
+      )}
+
+      {failed && (
+        <div class="install-error" role="alert">
+          <strong>The package build failed.</strong>
+          <p>{status?.error || "The build exited without an error message."}</p>
+          <BuildLog output={output} />
+        </div>
+      )}
+
+      {requestError && (
+        <div class="install-error" role="alert">
+          <strong>{requestError}</strong>
+        </div>
+      )}
+
+      {status?.domain_error && (
+        <p class="install-hint">
+          The server can't work out which address to sign the package for:{" "}
+          {status.domain_error}. Set <code>MOBUX_DOMAIN</code> on the service.
+        </p>
+      )}
+
+      {status !== null && (
+        <div class="install-grid install-build-row">
+          <button
+            type="button"
+            class="install-btn"
+            onClick={onBuild}
+            disabled={running || starting || !!status?.domain_error}
+          >
+            {running
+              ? "Building…"
+              : available
+                ? "Rebuild package"
+                : "Generate package"}
+          </button>
+          {available && !running && (
+            <span class="install-hint">
+              Rebuild if you reach this server on a different address.
+            </span>
+          )}
+        </div>
+      )}
+
+      {running && <BuildLog output={output} />}
+    </section>
+  );
 }
 
 export function InstallPage() {
   const base = origin();
   const apkUrl = base + "/install/mobux.apk";
   const caUrl = base + "/install/mobux-ca.crt";
-  const apkAvailable = useApkAvailable();
 
   return (
     <main class="install-page">
@@ -97,33 +250,7 @@ export function InstallPage() {
         </p>
       </section>
 
-      <section class="install-card">
-        <h2>2. Install the app</h2>
-        <p class="install-lede">
-          Download the Android APK, or scan the QR with your phone.
-        </p>
-        {apkAvailable === null && <p class="install-hint">Checking…</p>}
-        {apkAvailable === false && (
-          <div class="install-apk-missing" role="alert">
-            <p class="install-apk-missing-title">The APK isn't built yet.</p>
-            <p class="install-hint">
-              Run <code>make twa</code> on the server to build it.
-            </p>
-          </div>
-        )}
-        {apkAvailable === true && (
-          <div class="install-grid">
-            <a
-              class="install-btn"
-              href="/install/mobux.apk"
-              download="mobux.apk"
-            >
-              Download APK
-            </a>
-            <QrCode url={apkUrl} />
-          </div>
-        )}
-      </section>
+      <ApkSection apkUrl={apkUrl} />
     </main>
   );
 }

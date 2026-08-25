@@ -1378,6 +1378,51 @@ h1, h2, h3 { margin: 0; }
   font-size: 14px;
   line-height: 1.6;
 }
+button.install-btn {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+button.install-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.install-build-row {
+  margin-top: 16px;
+}
+.install-build-row .install-hint {
+  flex: 1 1 200px;
+}
+.install-log {
+  margin: 16px 0 0;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.install-error {
+  margin: 16px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #c87e7e;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+.install-error strong {
+  color: #c87e7e;
+}
+.install-error p {
+  margin: 6px 0 0;
+  word-break: break-word;
+}
 .install-apk-missing {
   background: #2a1515;
   border-radius: 8px;
