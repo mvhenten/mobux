@@ -23,7 +23,7 @@ const CORE_PATH = path.join(
 if (!fs.existsSync(CORE_PATH)) {
   console.error(
     `[twa-init] @bubblewrap/core not found at ${CORE_PATH}.\n` +
-    `Run bin/setup-twa first.`,
+    `The Android build toolchain is not installed.`,
   );
   process.exit(1);
 }

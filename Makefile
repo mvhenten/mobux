@@ -401,8 +401,10 @@ podman-test: podman-build
 # twa: build the signed TWA APK + matching assetlinks.json for MOBUX_DOMAIN.
 #
 # The build itself lives in ./bin/twa-build, which the server also runs behind
-# the install page's "Generate package" button. Prereqs: ./bin/setup-twa has
-# been run. The signing keystore lives at ~/.config/mobux/twa-signing.keystore
+# the install page's "Generate package" button — that button installs the
+# toolchain itself, so it needs no preparation. From a checkout the toolchain
+# comes from `make setup-twa`, the same script.
+# The signing keystore lives at ~/.config/mobux/twa-signing.keystore
 # (override with MOBUX_CONFIG_DIR). Lose the keystore and existing installs
 # can no longer upgrade — only fresh-install. BACK IT UP.
 # ---------------------------------------------------------------------------

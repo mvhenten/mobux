@@ -89,8 +89,10 @@ the working directory.
 
 The Android APK is built from the `/install` page's **Generate package**
 button, which signs it for the address the request arrived on (override with
-`Environment=MOBUX_DOMAIN=...`). The build needs the toolchain `./bin/setup-twa`
-installs; the signing keystore stays at `~/.config/mobux/twa-signing.keystore`,
+`Environment=MOBUX_DOMAIN=...`). The button installs the JDK, Node and Android
+SDK it needs on first use, so there is no terminal step; only `zip`, `unzip` and
+`curl` come from the OS package manager, and the page names them if they are
+missing. The signing keystore stays at `~/.config/mobux/twa-signing.keystore`,
 so fingerprints survive rebuilds and reinstalls.
 
 Verify the embed + service:

@@ -3374,9 +3374,10 @@ test("install page offers an in-app build instead of a dead download when the AP
     page.getByRole("button", { name: "Generate package" }),
   ).toBeEnabled();
   // The whole point of the button: no terminal instruction survives here.
-  await expect(page.locator(".install-card").nth(1)).not.toContainText(
-    "make twa",
-  );
+  // The toolchain install is a phase of the build, never a step to perform.
+  const card = page.locator(".install-card").nth(1);
+  await expect(card).not.toContainText("make twa");
+  await expect(card).not.toContainText("setup-twa");
 });
 
 test("install page renders a real APK download filename once the APK is built", async ({

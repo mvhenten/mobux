@@ -4,10 +4,15 @@
 #
 # Single implementation behind two callers: `make twa` (repo checkout) and the
 # server's "Generate package" button, which materialises this script plus
-# twa/init.js and twa/twa-manifest.json.template into its data dir and runs it
-# there. Prereqs are ./bin/setup-twa's user-local installs; the toolchain
-# bootstrap below sources them so a systemd service with a bare PATH finds
-# node, java and bubblewrap the same way an interactive shell does.
+# bin/setup-twa, twa/init.js and twa/twa-manifest.json.template into its data
+# dir and runs them there. The toolchain bootstrap below sources the user-local
+# installs so a systemd service with a bare PATH finds node, java and bubblewrap
+# the same way an interactive shell does; when they are absent the server runs
+# the setup script first and builds after it, so nobody has to open a terminal.
+#
+# `--check-toolchain` runs the bootstrap and the tool detection only, printing
+# the missing tools and exiting non-zero when any are. That is what the server
+# asks before every build, so the check and the build can never drift apart.
 #
 # The signing keystore lives at $MOBUX_CONFIG_DIR/twa-signing.keystore
 # (default ~/.config/mobux). Lose the keystore and existing installs can no
@@ -26,6 +31,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+CHECK_TOOLCHAIN_ONLY=0
+if [ "${1:-}" = "--check-toolchain" ]; then
+  CHECK_TOOLCHAIN_ONLY=1
+fi
+
 MOBUX_PACKAGE_ID="${MOBUX_PACKAGE_ID:-io.github.mvhenten.mobux}"
 MOBUX_APP_NAME="${MOBUX_APP_NAME:-Mobux}"
 TWA_WORK_DIR="${TWA_WORK_DIR:-${SCRIPT_DIR}/../twa}"
@@ -33,7 +43,7 @@ TWA_INSTALL_DIR="${TWA_INSTALL_DIR:-${SCRIPT_DIR}/../web/static/install}"
 TWA_WELLKNOWN_DIR="${TWA_WELLKNOWN_DIR:-${SCRIPT_DIR}/../web/static/.well-known}"
 CONFIG_DIR="${MOBUX_CONFIG_DIR:-${HOME}/.config/mobux}"
 
-if [ -z "${MOBUX_DOMAIN:-}" ]; then
+if [ -z "${MOBUX_DOMAIN:-}" ] && [ "${CHECK_TOOLCHAIN_ONLY}" = "0" ]; then
   echo "MOBUX_DOMAIN is required, e.g. make twa MOBUX_DOMAIN=mine.example.com" >&2
   exit 1
 fi
@@ -67,12 +77,23 @@ export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
 export ANDROID_SDK_ROOT
 export PATH="${NPM_PREFIX}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
+MISSING_TOOLS=()
 for tool in node java keytool bubblewrap; do
-  command -v "${tool}" >/dev/null 2>&1 || {
-    echo "${tool} is required but not on PATH. Run ./bin/setup-twa first." >&2
-    exit 1
-  }
+  command -v "${tool}" >/dev/null 2>&1 || MISSING_TOOLS+=("${tool}")
 done
+
+if [ "${CHECK_TOOLCHAIN_ONLY}" = "1" ]; then
+  if [ ${#MISSING_TOOLS[@]} -eq 0 ]; then
+    exit 0
+  fi
+  printf '%s\n' "${MISSING_TOOLS[@]}"
+  exit 1
+fi
+
+if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
+  echo "The Android build toolchain is not installed (missing: ${MISSING_TOOLS[*]})." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Signing keystore

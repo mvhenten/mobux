@@ -12,8 +12,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub const BUILD_SCRIPT: &str = include_str!("../bin/twa-build");
+pub const SETUP_SCRIPT: &str = include_str!("../bin/setup-twa");
 pub const INIT_JS: &str = include_str!("../twa/init.js");
 pub const MANIFEST_TEMPLATE: &str = include_str!("../twa/twa-manifest.json.template");
+
+/// OS packages the toolchain install shells out to and cannot supply itself:
+/// SDKMAN and the Android SDK manager unpack their downloads with them. Every
+/// other prerequisite is installed user-locally by the setup script.
+pub const HOST_PACKAGES: [&str; 3] = ["curl", "unzip", "zip"];
 
 /// Where a repo checkout's `make twa` writes its artifacts. Still honoured so
 /// a dev instance started from the checkout serves what `make twa` produced.
@@ -41,16 +47,24 @@ pub fn resolve_artifact(built: PathBuf, checkout: &str) -> PathBuf {
     PathBuf::from(checkout)
 }
 
+/// The two scripts the build runs: the toolchain install, and the build that
+/// follows it.
+pub struct Scripts {
+    pub setup: PathBuf,
+    pub build: PathBuf,
+}
+
 /// Write the embedded build inputs into the data dir and return the script
-/// path. Rewritten on every build so an upgraded binary replaces a stale copy.
-pub fn materialize(data_dir: &Path) -> Result<PathBuf> {
+/// paths. Rewritten on every build so an upgraded binary replaces a stale copy.
+pub fn materialize(data_dir: &Path) -> Result<Scripts> {
     let dir = work_dir(data_dir);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating twa work dir: {}", dir.display()))?;
 
-    let script = dir.join("twa-build");
-    std::fs::write(&script, BUILD_SCRIPT)
-        .with_context(|| format!("writing {}", script.display()))?;
+    let build = dir.join("twa-build");
+    std::fs::write(&build, BUILD_SCRIPT).with_context(|| format!("writing {}", build.display()))?;
+    let setup = dir.join("setup-twa");
+    std::fs::write(&setup, SETUP_SCRIPT).with_context(|| format!("writing {}", setup.display()))?;
     std::fs::write(dir.join("init.js"), INIT_JS).context("writing twa init.js")?;
     std::fs::write(dir.join("twa-manifest.json.template"), MANIFEST_TEMPLATE)
         .context("writing twa manifest template")?;
@@ -58,11 +72,135 @@ pub fn materialize(data_dir: &Path) -> Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("chmod {}", script.display()))?;
+        for script in [&build, &setup] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("chmod {}", script.display()))?;
+        }
     }
 
-    Ok(script)
+    Ok(Scripts { setup, build })
+}
+
+/// Ask the build script whether it can build. It runs the same toolchain
+/// bootstrap and looks for the same tools the build does, so the pre-phase's
+/// notion of "missing" cannot drift from what the build actually needs.
+pub fn toolchain_check(build_script: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg(build_script)
+        .arg("--check-toolchain")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+pub fn toolchain_present(build_script: &Path) -> bool {
+    toolchain_check(build_script)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn on_path(tool: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| is_executable(&dir.join(tool)))
+}
+
+/// The host packages that are needed and absent, in a stable order.
+pub fn missing_host_packages(present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    HOST_PACKAGES
+        .into_iter()
+        .filter(|tool| !present(tool))
+        .collect()
+}
+
+pub fn missing_host_packages_on_path() -> Vec<&'static str> {
+    missing_host_packages(on_path)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PackageManager {
+    Apt,
+    Dnf,
+    Pacman,
+    Zypper,
+    Apk,
+}
+
+impl PackageManager {
+    /// `None` on a host none of these matches. Guessing a command that the
+    /// host has no way to run would be worse than saying so plainly.
+    pub fn detect(present: impl Fn(&str) -> bool) -> Option<Self> {
+        [
+            ("apt-get", Self::Apt),
+            ("dnf", Self::Dnf),
+            ("pacman", Self::Pacman),
+            ("zypper", Self::Zypper),
+            ("apk", Self::Apk),
+        ]
+        .into_iter()
+        .find(|(tool, _)| present(tool))
+        .map(|(_, manager)| manager)
+    }
+
+    pub fn install_command(self, packages: &[&str]) -> String {
+        let list = packages.join(" ");
+        match self {
+            Self::Apt => format!("sudo apt-get install -y {list}"),
+            Self::Dnf => format!("sudo dnf install -y {list}"),
+            Self::Pacman => format!("sudo pacman -S --noconfirm {list}"),
+            Self::Zypper => format!("sudo zypper install -y {list}"),
+            Self::Apk => format!("sudo apk add {list}"),
+        }
+    }
+}
+
+/// What the build stopped on and how the user clears it. The command is the
+/// page's copy-paste affordance, so it is never folded into the message.
+pub struct HostPackageGap {
+    pub packages: Vec<String>,
+    pub install_command: Option<String>,
+    pub message: String,
+}
+
+fn english_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+pub fn host_package_gap_with(manager: Option<PackageManager>, missing: &[&str]) -> HostPackageGap {
+    let them = if missing.len() == 1 { "it" } else { "them" };
+    HostPackageGap {
+        packages: missing.iter().map(|p| (*p).to_string()).collect(),
+        install_command: manager.map(|m| m.install_command(missing)),
+        message: format!(
+            "This host is missing {}. The Android build tools unpack their downloads with {them}, and only your system package manager can install {them}.",
+            english_list(missing),
+        ),
+    }
+}
+
+pub fn host_package_gap(missing: &[&str]) -> HostPackageGap {
+    host_package_gap_with(PackageManager::detect(on_path), missing)
 }
 
 /// Operator override for the domain the package is pinned to.
@@ -174,8 +312,9 @@ mod tests {
     #[test]
     fn materialize_writes_an_executable_script_and_its_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let script = materialize(dir.path()).unwrap();
-        assert!(script.is_file());
+        let scripts = materialize(dir.path()).unwrap();
+        assert!(scripts.build.is_file());
+        assert!(scripts.setup.is_file());
         assert!(work_dir(dir.path()).join("init.js").is_file());
         assert!(work_dir(dir.path())
             .join("twa-manifest.json.template")
@@ -183,9 +322,153 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&script).unwrap().permissions().mode();
-            assert_eq!(mode & 0o100, 0o100, "script must be owner-executable");
+            for script in [&scripts.build, &scripts.setup] {
+                let mode = std::fs::metadata(script).unwrap().permissions().mode();
+                assert_eq!(mode & 0o100, 0o100, "script must be owner-executable");
+            }
         }
+    }
+
+    #[test]
+    fn the_preflight_names_only_the_packages_that_are_absent() {
+        assert!(missing_host_packages(|_| true).is_empty());
+        assert_eq!(missing_host_packages(|tool| tool != "zip"), vec!["zip"]);
+        assert_eq!(
+            missing_host_packages(|tool| tool == "curl"),
+            vec!["unzip", "zip"]
+        );
+    }
+
+    #[test]
+    fn the_install_command_matches_the_hosts_package_manager() {
+        let missing = ["unzip", "zip"];
+        for (tool, want) in [
+            ("apt-get", "sudo apt-get install -y unzip zip"),
+            ("dnf", "sudo dnf install -y unzip zip"),
+            ("pacman", "sudo pacman -S --noconfirm unzip zip"),
+            ("zypper", "sudo zypper install -y unzip zip"),
+            ("apk", "sudo apk add unzip zip"),
+        ] {
+            let manager = PackageManager::detect(|t| t == tool).expect("a known manager");
+            assert_eq!(manager.install_command(&missing), want);
+        }
+    }
+
+    /// A host with no manager we know gets told what it needs, not a command
+    /// for a package manager it does not have.
+    #[test]
+    fn an_unknown_package_manager_yields_no_command_rather_than_a_guess() {
+        assert_eq!(PackageManager::detect(|_| false), None);
+
+        let gap = host_package_gap_with(None, &["curl", "unzip", "zip"]);
+        assert_eq!(gap.install_command, None);
+        assert!(
+            gap.message.contains("curl, unzip and zip"),
+            "{}",
+            gap.message
+        );
+        assert!(
+            gap.message.contains("system package manager"),
+            "{}",
+            gap.message
+        );
+    }
+
+    /// The command is the page's copy-paste affordance, so it is carried as a
+    /// field rather than buried in the prose.
+    #[test]
+    fn the_preflight_reports_the_packages_and_the_command_separately() {
+        let gap = host_package_gap_with(Some(PackageManager::Apt), &["zip"]);
+        assert_eq!(gap.packages, vec!["zip".to_string()]);
+        assert_eq!(
+            gap.install_command.as_deref(),
+            Some("sudo apt-get install -y zip")
+        );
+        assert!(gap.message.contains("missing zip"), "{}", gap.message);
+        assert!(
+            !gap.message.contains("apt-get"),
+            "the command must not be duplicated into the prose: {}",
+            gap.message
+        );
+    }
+
+    /// The preflight exists to catch what the setup script would die on, so
+    /// its list and the script's must stay the same list.
+    #[test]
+    fn the_preflight_covers_every_host_tool_the_setup_script_requires() {
+        let required: Vec<&str> = SETUP_SCRIPT
+            .lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix("require_host_tool "))
+            .map(str::trim)
+            .collect();
+        assert!(!required.is_empty(), "setup-twa must require host tools");
+        let mut sorted = required.clone();
+        sorted.sort_unstable();
+        let mut known = HOST_PACKAGES.to_vec();
+        known.sort_unstable();
+        assert_eq!(sorted, known);
+    }
+
+    /// The toolchain pre-phase decides by asking the build script itself, so
+    /// these two cases are the real detection, not a copy of it. `HOME` points
+    /// at an empty dir so no SDKMAN or nvm install on the host can leak in.
+    #[cfg(unix)]
+    fn toolchain_check_with(tools: &[&str]) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        for tool in ["bash", "dirname"] {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {tool}"))
+                .output()
+                .expect("resolving a host tool");
+            let target = String::from_utf8(out.stdout).unwrap().trim().to_string();
+            assert!(!target.is_empty(), "{tool} must exist to run this test");
+            std::os::unix::fs::symlink(target, bin.path().join(tool)).unwrap();
+        }
+        for tool in tools {
+            let stub = bin.path().join(tool);
+            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let scripts = materialize(data_dir.path()).unwrap();
+        toolchain_check(&scripts.build)
+            .env("PATH", bin.path())
+            .env("HOME", home.path())
+            .env_remove("SDKMAN_DIR")
+            .env_remove("NVM_DIR")
+            .env_remove("ANDROID_SDK_ROOT")
+            .env_remove("ANDROID_HOME")
+            .env_remove("NPM_PREFIX")
+            .status()
+            .expect("running the toolchain check")
+            .success()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_without_the_toolchain_reports_it_missing() {
+        assert!(!toolchain_check_with(&[]));
+        assert!(
+            !toolchain_check_with(&["node", "java", "keytool"]),
+            "a partial toolchain is still missing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_with_the_toolchain_reports_it_present() {
+        assert!(toolchain_check_with(&[
+            "node",
+            "java",
+            "keytool",
+            "bubblewrap"
+        ]));
     }
 
     /// The build script runs under `set -euo pipefail`, so a password pipeline

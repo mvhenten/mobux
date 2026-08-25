@@ -5,6 +5,10 @@
 # Idempotent. User-local installs only — no sudo. Each tool: detect, skip if
 # present at adequate version, otherwise install.
 #
+# The server embeds this script and runs it as the first phase of the install
+# page's "Generate package" build whenever the toolchain is missing, so it is
+# the shared implementation rather than a step anyone performs by hand.
+#
 # Installs/ensures:
 #   - SDKMAN at ~/.sdkman
 #   - JDK 17 (Temurin) via SDKMAN
@@ -15,7 +19,8 @@
 #   - SDK licenses accepted non-interactively
 #   - @bubblewrap/cli installed via npm with prefix ~/.local
 #
-# At the end, prints PATH/env hints for any user-local installs.
+# At the end, prints PATH/env hints for any user-local installs — only when
+# stdout is a terminal, so the server's log pane never shows shell-rc advice.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -57,7 +62,7 @@ ensure_sdkman() {
   log "Installing SDKMAN to ${SDKMAN_DIR}"
   # SDKMAN install script honors $SDKMAN_DIR if exported.
   export SDKMAN_DIR
-  curl -s "https://get.sdkman.io?rcupdate=false" | bash
+  curl -fsSL --max-time 300 "https://get.sdkman.io?rcupdate=false" | bash
 
   if [ ! -s "${SDKMAN_DIR}/bin/sdkman-init.sh" ]; then
     fail "SDKMAN install reported success but ${SDKMAN_DIR}/bin/sdkman-init.sh is missing."
@@ -139,7 +144,7 @@ ensure_nvm() {
   log "Installing nvm to ${NVM_DIR}"
   export NVM_DIR
   # Pin a known-good nvm release; update infrequently.
-  PROFILE=/dev/null curl -o- \
+  PROFILE=/dev/null curl -fsSL --max-time 300 -o- \
     https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 
   if [ ! -s "${NVM_DIR}/nvm.sh" ]; then
@@ -198,7 +203,7 @@ ensure_android_cmdline_tools() {
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "${tmpdir}"' RETURN
 
-  curl -fsSL -o "${tmpdir}/cmdline-tools.zip" "${CMDLINE_TOOLS_URL}"
+  curl -fsSL --max-time 900 -o "${tmpdir}/cmdline-tools.zip" "${CMDLINE_TOOLS_URL}"
   unzip -q "${tmpdir}/cmdline-tools.zip" -d "${tmpdir}"
 
   # The zip extracts to a directory named "cmdline-tools/"; sdkmanager expects
@@ -300,7 +305,7 @@ ensure_android_sdk_packages() {
 # 4. @bubblewrap/cli — npm install -g with prefix ~/.local
 # ---------------------------------------------------------------------------
 
-NPM_PREFIX="${HOME}/.local"
+NPM_PREFIX="${NPM_PREFIX:-${HOME}/.local}"
 
 ensure_bubblewrap() {
   # Make sure node/npm are on PATH (sourced from nvm in this script).
@@ -361,8 +366,16 @@ ensure_android_sdk_packages
 ensure_bubblewrap
 
 # ---------------------------------------------------------------------------
-# Final PATH / env hints
+# Final PATH / env hints — for a human at a terminal only. The server streams
+# this script's output into the install page, where telling the reader to edit
+# a shell rc and open a new shell is exactly the instruction the button exists
+# to remove.
 # ---------------------------------------------------------------------------
+
+if [ ! -t 1 ]; then
+  log "TWA toolchain setup complete."
+  exit 0
+fi
 
 cat <<EOF
 
