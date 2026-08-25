@@ -228,6 +228,122 @@ mod tests {
         }
     }
 
+    /// The launcher Google ships for every cmdline-tools binary: it walks `$0`
+    /// through `while [ -h ]` — file symlinks only — and derives the classpath
+    /// root from where that lands.
+    #[cfg(unix)]
+    const FAKE_SDKMANAGER: &str = r#"#!/usr/bin/env bash
+PRG="$0"
+while [ -h "$PRG" ]; do
+    ls=$(ls -ld "$PRG")
+    link=${ls#*' -> '}
+    case $link in
+    /*) PRG="$link" ;;
+    *) PRG="$(dirname "$PRG")/$link" ;;
+    esac
+done
+APP_HOME=$(cd "$(dirname "$PRG")/.." && pwd -P)
+if [ ! -f "$APP_HOME/lib/sdkmanager-classpath.jar" ]; then
+    echo "Error: Could not find or load main class com.android.sdklib.tool.sdkmanager.SdkManagerCli" >&2
+    exit 1
+fi
+echo "12.0"
+"#;
+
+    #[cfg(unix)]
+    fn fake_android_sdk() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sdk = tempfile::tempdir().unwrap();
+        let tools = sdk.path().join("cmdline-tools").join("latest");
+        std::fs::create_dir_all(tools.join("bin")).unwrap();
+        std::fs::create_dir_all(tools.join("lib")).unwrap();
+        std::fs::write(tools.join("lib").join("sdkmanager-classpath.jar"), b"jar").unwrap();
+
+        let launcher = tools.join("bin").join("sdkmanager");
+        std::fs::write(&launcher, FAKE_SDKMANAGER).unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        sdk
+    }
+
+    #[cfg(unix)]
+    fn bash(program: &str) -> std::process::Output {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(program)
+            .output()
+            .expect("running bash")
+    }
+
+    /// Run the setup script's link step against a fake SDK. The script returns
+    /// early when sourced, so nothing gets installed.
+    #[cfg(unix)]
+    fn link_android_bin(sdk: &Path) -> std::process::Output {
+        bash(&format!(
+            "set -euo pipefail\nexport ANDROID_SDK_ROOT='{}'\n. '{}'\nensure_android_bin_links\n",
+            sdk.display(),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/bin/setup-twa"),
+        ))
+    }
+
+    #[cfg(unix)]
+    fn sdkmanager_version(sdk: &Path) -> std::process::Output {
+        bash(&format!("'{}/bin/sdkmanager' --version", sdk.display()))
+    }
+
+    /// Bubblewrap only accepts an SDK with a `<SDK>/bin`, so setup makes one.
+    /// As a symlinked directory it satisfies bubblewrap and breaks every tool
+    /// behind it, which is what a real APK build hits the moment bubblewrap
+    /// shells out to sdkmanager.
+    #[cfg(unix)]
+    #[test]
+    fn the_sdk_bin_dir_keeps_the_launchers_working() {
+        let sdk = fake_android_sdk();
+
+        let broken = bash(&format!(
+            "ln -s cmdline-tools/latest/bin '{}/bin'",
+            sdk.path().display()
+        ));
+        assert!(broken.status.success());
+        let out = sdkmanager_version(sdk.path());
+        assert!(
+            !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("SdkManagerCli"),
+            "a directory symlink must break the launcher, or this test proves nothing"
+        );
+
+        let linked = link_android_bin(sdk.path());
+        assert!(
+            linked.status.success(),
+            "link step failed: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(!sdk.path().join("bin").is_symlink());
+
+        let out = sdkmanager_version(sdk.path());
+        assert!(
+            out.status.success(),
+            "sdkmanager failed through {}/bin: {}",
+            sdk.path().display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "12.0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn re_running_setup_repairs_a_stale_link() {
+        let sdk = fake_android_sdk();
+        assert!(link_android_bin(sdk.path()).status.success());
+
+        let link = sdk.path().join("bin").join("sdkmanager");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("cmdline-tools/latest/bin/sdkmanager", &link).unwrap();
+        assert!(!sdkmanager_version(sdk.path()).status.success());
+
+        assert!(link_android_bin(sdk.path()).status.success());
+        assert!(sdkmanager_version(sdk.path()).status.success());
+    }
+
     #[test]
     fn artifact_resolution_prefers_the_built_copy() {
         let dir = tempfile::tempdir().unwrap();

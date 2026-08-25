@@ -29,18 +29,12 @@ fail() { printf '\033[1;31m[setup-twa] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
 SCRIPT_PATH="${BASH_SOURCE[0]}"
 chmod +x "${SCRIPT_PATH}" 2>/dev/null || true
 
-# Required CLI tools that must be present on the host. None of these can
-# be installed without sudo, so fail loudly if missing.
 require_host_tool() {
   local tool="$1"
   if ! command -v "${tool}" >/dev/null 2>&1; then
     fail "${tool} is required but not installed. Install it via your OS package manager and re-run."
   fi
 }
-
-require_host_tool curl
-require_host_tool unzip
-require_host_tool zip
 
 # JDK 17 download for Android SDK licenses needs Java; we install JDK via
 # SDKMAN below. The Android SDK manager itself needs zip/unzip.
@@ -217,13 +211,48 @@ ensure_android_cmdline_tools() {
   if [ ! -x "${CMDLINE_TOOLS_DIR}/bin/sdkmanager" ]; then
     fail "sdkmanager not found at ${CMDLINE_TOOLS_DIR}/bin/sdkmanager after install."
   fi
+}
 
-  # Bubblewrap's AndroidSdkTools.validatePath() insists on either <SDK>/tools
-  # or <SDK>/bin existing. Modern Android SDK installs only have
-  # <SDK>/cmdline-tools/latest/bin. Symlink so the validation passes.
-  if [ ! -e "${ANDROID_SDK_ROOT}/bin" ]; then
-    ln -s cmdline-tools/latest/bin "${ANDROID_SDK_ROOT}/bin"
-    log "Created ${ANDROID_SDK_ROOT}/bin -> cmdline-tools/latest/bin (for bubblewrap)"
+# Bubblewrap's AndroidSdkTools.validatePath() insists on either <SDK>/tools or
+# <SDK>/bin existing, while a modern SDK only ships
+# <SDK>/cmdline-tools/latest/bin. <SDK>/bin must be a real directory of
+# per-file symlinks: the SDK launchers are gradle-style and resolve $0 through
+# `while [ -h "$PRG" ]`, which follows file symlinks only. Behind a symlinked
+# directory $0 is not itself a link, so APP_HOME lands on <SDK>, the classpath
+# misses <SDK>/cmdline-tools/latest/lib, and every tool dies with
+# ClassNotFoundException.
+ensure_android_bin_links() {
+  local bin_dir="${ANDROID_SDK_ROOT}/bin"
+  local src_dir="${CMDLINE_TOOLS_DIR}/bin"
+
+  if [ ! -d "${src_dir}" ]; then
+    fail "Android cmdline-tools are missing at ${src_dir}; cannot link ${bin_dir}."
+  fi
+
+  if [ -L "${bin_dir}" ]; then
+    rm -f "${bin_dir}"
+    log "Replaced the directory symlink at ${bin_dir}; it breaks the SDK launchers"
+  fi
+  mkdir -p "${bin_dir}"
+
+  local target name link rel
+  for target in "${src_dir}"/*; do
+    [ -f "${target}" ] || continue
+    name="$(basename "${target}")"
+    link="${bin_dir}/${name}"
+    rel="../cmdline-tools/latest/bin/${name}"
+    if [ "$(readlink "${link}" 2>/dev/null || true)" != "${rel}" ]; then
+      rm -f "${link}"
+      ln -s "${rel}" "${link}"
+    fi
+  done
+  log "Linked ${bin_dir}/* -> cmdline-tools/latest/bin/* (for bubblewrap)"
+
+  if [ -x "${bin_dir}/sdkmanager" ]; then
+    if ! "${bin_dir}/sdkmanager" --version >/dev/null 2>&1; then
+      fail "${bin_dir}/sdkmanager does not run; the SDK launchers cannot find their lib dir."
+    fi
+    log "sdkmanager runs through ${bin_dir}"
   fi
 }
 
@@ -308,6 +337,18 @@ ensure_bubblewrap() {
 # main
 # ---------------------------------------------------------------------------
 
+# Sourced instead of executed: the caller wants the functions above, nothing
+# installed. The regression test in src/twa.rs takes this route.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+  return 0
+fi
+
+# Required CLI tools that must be present on the host. None of these can
+# be installed without sudo, so fail loudly if missing.
+require_host_tool curl
+require_host_tool unzip
+require_host_tool zip
+
 log "mobux TWA toolchain setup starting"
 
 ensure_sdkman
@@ -315,6 +356,7 @@ ensure_jdk17
 ensure_nvm
 ensure_node_lts
 ensure_android_cmdline_tools
+ensure_android_bin_links
 ensure_android_sdk_packages
 ensure_bubblewrap
 
