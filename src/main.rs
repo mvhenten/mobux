@@ -2849,8 +2849,11 @@ async fn api_install_apk_build(
         }
     };
 
+    // Claiming the job and rejecting a concurrent start happen under one lock
+    // hold: releasing it between the two lets two simultaneous POSTs both pass
+    // the check and start a build over the same working directory.
     {
-        let guard = state.twa_build.lock().await;
+        let mut guard = state.twa_build.lock().await;
         if guard.phase == InstallPhase::Running {
             return Ok((
                 StatusCode::CONFLICT,
@@ -2858,16 +2861,21 @@ async fn api_install_apk_build(
             )
                 .into_response());
         }
-    }
-
-    let script = twa::materialize(&state.data_dir).map_err(AppError::internal)?;
-    let work_dir = twa::work_dir(&state.data_dir);
-
-    {
-        let mut guard = state.twa_build.lock().await;
         guard.phase = InstallPhase::Running;
         guard.output_tail = vec![format!("Building the Android package for {domain}")];
     }
+
+    let work_dir = twa::work_dir(&state.data_dir);
+    let script = match twa::materialize(&state.data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            // The job is already claimed, so an early return has to hand it
+            // back — otherwise it stays Running with nothing running.
+            let mut guard = state.twa_build.lock().await;
+            guard.phase = InstallPhase::Failed(format!("{e:#}"));
+            return Err(AppError::internal(e));
+        }
+    };
 
     let job = state.twa_build.clone();
     let install_dir = state.data_dir.join("install");
