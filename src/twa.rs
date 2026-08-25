@@ -188,6 +188,46 @@ mod tests {
         }
     }
 
+    /// The build script runs under `set -euo pipefail`, so a password pipeline
+    /// whose producer is killed by SIGPIPE aborts the whole build with a bare
+    /// exit 141 before the keystore is ever generated.
+    #[test]
+    fn the_generated_keystore_password_survives_pipefail() {
+        let marker = "generate_keystore_password() {";
+        let body = BUILD_SCRIPT
+            .split_once(marker)
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("twa-build must define generate_keystore_password()");
+
+        let program = format!(
+            "set -euo pipefail\n{marker}{body}\n}}\nfor _ in $(seq 20); do generate_keystore_password; echo; done\n"
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&program)
+            .output()
+            .expect("running bash");
+
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "password generation exited {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("password must be ascii");
+        let passwords: Vec<&str> = stdout.lines().collect();
+        assert_eq!(passwords.len(), 20);
+        for password in passwords {
+            assert_eq!(password.len(), 32, "wrong length: {password:?}");
+            assert!(
+                password.chars().all(|c| c.is_ascii_alphanumeric()),
+                "not alphanumeric: {password:?}"
+            );
+        }
+    }
+
     #[test]
     fn artifact_resolution_prefers_the_built_copy() {
         let dir = tempfile::tempdir().unwrap();

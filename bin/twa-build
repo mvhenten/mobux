@@ -78,6 +78,19 @@ done
 # Signing keystore
 # ---------------------------------------------------------------------------
 
+# Bounded input, and every stage reads it to the end: nothing here can be
+# killed by SIGPIPE, which under `pipefail` aborts the script with a bare
+# exit 141 on the fresh-keystore path — the first build on any host.
+generate_keystore_password() {
+  local password
+  password="$(head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-32)"
+  if [ "${#password}" -ne 32 ]; then
+    echo "Could not generate a 32-character keystore password." >&2
+    return 1
+  fi
+  printf '%s' "${password}"
+}
+
 KEYSTORE="${CONFIG_DIR}/twa-signing.keystore"
 PASSFILE="${CONFIG_DIR}/twa-signing.password"
 mkdir -p "${CONFIG_DIR}"
@@ -89,7 +102,7 @@ if [ ! -f "${KEYSTORE}" ]; then
   if [ -n "${MOBUX_TWA_KEYSTORE_PASSWORD:-}" ]; then
     KEYSTORE_PASSWORD="${MOBUX_TWA_KEYSTORE_PASSWORD}"
   else
-    KEYSTORE_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+    KEYSTORE_PASSWORD="$(generate_keystore_password)"
     (umask 077; printf '%s' "${KEYSTORE_PASSWORD}" > "${PASSFILE}")
     chmod 600 "${PASSFILE}"
   fi
@@ -179,7 +192,7 @@ FINGERPRINT="$(keytool -list -v \
   -keystore "${KEYSTORE}" \
   -alias mobux \
   -storepass "${KEYSTORE_PASSWORD}" 2>/dev/null \
-  | awk '/SHA256:/ {print $2; exit}')"
+  | awk '/SHA256:/ && !seen { print $2; seen = 1 }')"
 if [ -z "${FINGERPRINT}" ]; then
   echo "Could not extract SHA-256 fingerprint from keystore." >&2
   exit 1
