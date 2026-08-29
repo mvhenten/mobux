@@ -41,6 +41,7 @@ use serde_json::json;
 #[exclude = ".well-known/*"]
 struct StaticAssets;
 
+mod cli;
 mod db;
 mod host_suggestions;
 mod nodes;
@@ -334,6 +335,23 @@ struct AuthConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let overrides = match cli::parse(env::args().skip(1)) {
+        cli::Parsed::Run(overrides) => overrides,
+        cli::Parsed::Help => {
+            print!("{}", cli::help_text(PKG_VERSION));
+            return Ok(());
+        }
+        cli::Parsed::Version => {
+            println!("mobux {PKG_VERSION}");
+            return Ok(());
+        }
+        cli::Parsed::Invalid(message) => {
+            eprintln!("mobux: {message}\n");
+            eprint!("{}", cli::help_text(PKG_VERSION));
+            std::process::exit(2);
+        }
+    };
+
     // Multiple deps now pull rustls (axum-server tls, instant-acme, reqwest);
     // each enables its own crypto backend feature, so rustls cannot pick one
     // automatically. Install aws-lc-rs explicitly to match axum-server's
@@ -342,7 +360,7 @@ async fn main() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
-    let auth = load_auth_config();
+    let auth = load_auth_config(&overrides);
     let data_dir = resolve_data_dir()?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
@@ -359,10 +377,14 @@ async fn main() -> Result<()> {
         .map(char::from)
         .collect();
 
-    let port = env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8080);
+    let mobux_port_env = env::var("MOBUX_PORT").ok();
+    let port_env = env::var("PORT").ok();
+    let port = cli::resolve_port(overrides.port, mobux_port_env.clone(), port_env.clone());
+    if cli::port_is_deprecated_source(overrides.port, mobux_port_env, port_env) {
+        eprintln!(
+            "[config] PORT is deprecated; rename it to MOBUX_PORT (still listening on {port})"
+        );
+    }
 
     let use_tls = env::var("MOBUX_TLS")
         .map(|v| v != "0" && v.to_lowercase() != "false")
@@ -571,7 +593,9 @@ async fn main() -> Result<()> {
     if state.auth.is_some() {
         println!("auth: enabled (HTTP Basic)");
     } else {
-        println!("auth: disabled (set MOBUX_AUTH_USER/MOBUX_AUTH_PASS or MOBUX_PIN)");
+        println!(
+            "auth: disabled (pass --pin, or set MOBUX_PIN or MOBUX_AUTH_USER/MOBUX_AUTH_PASS)"
+        );
     }
 
     println!("telemetry: /api/telemetry active, logs to stderr");
@@ -725,7 +749,7 @@ fn ensure_session_cookie_value() -> String {
     value
 }
 
-fn load_auth_config() -> Option<AuthConfig> {
+fn load_auth_config(overrides: &cli::CliOverrides) -> Option<AuthConfig> {
     let user_env = env::var("MOBUX_AUTH_USER")
         .ok()
         .map(|v| v.trim().to_string());
@@ -734,26 +758,20 @@ fn load_auth_config() -> Option<AuthConfig> {
         .map(|v| v.trim().to_string());
     let pin_env = env::var("MOBUX_PIN").ok().map(|v| v.trim().to_string());
 
-    let session_cookie_name = "mobux_session".to_string();
-    let session_cookie_value = ensure_session_cookie_value();
+    let credentials = cli::resolve_credentials(
+        overrides.user.clone(),
+        overrides.pin.clone(),
+        user_env,
+        pass_env,
+        pin_env,
+    )?;
 
-    match (user_env, pass_env, pin_env) {
-        (Some(user), Some(pass), _) if !user.is_empty() && !pass.is_empty() => Some(AuthConfig {
-            user,
-            pass,
-            session_cookie_name,
-            session_cookie_value,
-        }),
-        (user_opt, None, Some(pin)) if !pin.is_empty() => Some(AuthConfig {
-            user: user_opt
-                .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| "mobux".to_string()),
-            pass: pin,
-            session_cookie_name,
-            session_cookie_value,
-        }),
-        _ => None,
-    }
+    Some(AuthConfig {
+        user: credentials.user,
+        pass: credentials.pass,
+        session_cookie_name: "mobux_session".to_string(),
+        session_cookie_value: ensure_session_cookie_value(),
+    })
 }
 
 /// Routes that bypass auth so first-contact device enrollment works:
