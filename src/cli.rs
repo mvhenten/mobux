@@ -11,8 +11,16 @@ pub struct CliOverrides {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceCommand {
+    Install(CliOverrides),
+    Uninstall,
+    Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     Run(CliOverrides),
+    Service(ServiceCommand),
     Help,
     Version,
     Invalid(String),
@@ -23,6 +31,62 @@ pub enum Parsed {
 /// Returns an outcome rather than a `Result` so `--help` and `--version` are
 /// ordinary results the caller prints, not errors.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|arg| arg == "service") {
+        args.next();
+        return parse_service(args);
+    }
+
+    match parse_flags(args) {
+        Flags::Overrides(overrides) => Parsed::Run(overrides),
+        Flags::Help => Parsed::Help,
+        Flags::Version => Parsed::Version,
+        Flags::Invalid(message) => Parsed::Invalid(message),
+    }
+}
+
+fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
+    let Some(subcommand) = args.next() else {
+        return Parsed::Invalid(
+            "service needs a subcommand: install, uninstall or status".to_string(),
+        );
+    };
+
+    match subcommand.as_str() {
+        "--help" | "-h" => Parsed::Help,
+        "install" => match parse_flags(args) {
+            Flags::Overrides(overrides) => Parsed::Service(ServiceCommand::Install(overrides)),
+            Flags::Help => Parsed::Help,
+            Flags::Version => Parsed::Version,
+            Flags::Invalid(message) => Parsed::Invalid(message),
+        },
+        "uninstall" | "status" => {
+            let command = match subcommand.as_str() {
+                "uninstall" => ServiceCommand::Uninstall,
+                _ => ServiceCommand::Status,
+            };
+            match args.next() {
+                None => Parsed::Service(command),
+                Some(extra) if extra == "--help" || extra == "-h" => Parsed::Help,
+                Some(extra) => Parsed::Invalid(format!(
+                    "service {subcommand} takes no arguments, got {extra:?}"
+                )),
+            }
+        }
+        _ => Parsed::Invalid(format!(
+            "unknown service subcommand {subcommand:?} — expected install, uninstall or status"
+        )),
+    }
+}
+
+enum Flags {
+    Overrides(CliOverrides),
+    Help,
+    Version,
+    Invalid(String),
+}
+
+fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Flags {
     let mut overrides = CliOverrides::default();
     let mut args = args.into_iter().peekable();
 
@@ -33,18 +97,18 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
         };
 
         match name.as_str() {
-            "--help" | "-h" => return Parsed::Help,
-            "--version" | "-V" => return Parsed::Version,
+            "--help" | "-h" => return Flags::Help,
+            "--version" | "-V" => return Flags::Version,
             "--port" | "--pin" | "--user" => {
                 let value = match inline_value.or_else(|| args.next()) {
                     Some(value) => value,
-                    None => return Parsed::Invalid(format!("{name} needs a value")),
+                    None => return Flags::Invalid(format!("{name} needs a value")),
                 };
                 match name.as_str() {
                     "--port" => match value.trim().parse::<u16>() {
                         Ok(port) => overrides.port = Some(port),
                         Err(_) => {
-                            return Parsed::Invalid(format!(
+                            return Flags::Invalid(format!(
                                 "--port needs a number between 0 and 65535, got {value:?}"
                             ))
                         }
@@ -53,11 +117,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
                     _ => overrides.user = Some(value.trim().to_string()),
                 }
             }
-            _ => return Parsed::Invalid(format!("unknown argument {arg:?}")),
+            _ => return Flags::Invalid(format!("unknown argument {arg:?}")),
         }
     }
 
-    Parsed::Run(overrides)
+    Flags::Overrides(overrides)
 }
 
 pub fn help_text(version: &str) -> String {
@@ -67,6 +131,14 @@ pub fn help_text(version: &str) -> String {
         "mobux {version} — touch-friendly tmux web UI
 
 Usage: mobux [OPTIONS]
+       mobux service <install|uninstall|status> [OPTIONS]
+
+Commands:
+  service install     Install and start a systemd --user service that survives
+                      a reboot. Takes the same --port/--user/--pin flags; a
+                      username and PIN are required.
+  service uninstall   Stop, disable and remove that service
+  service status      Show the service's systemd status
 
 Options:
       --port <PORT>   Port to listen on (default {DEFAULT_PORT})
@@ -221,9 +293,72 @@ mod tests {
     }
 
     #[test]
+    fn service_subcommands_parse() {
+        assert_eq!(
+            parse(args(&["service", "install"])),
+            Parsed::Service(ServiceCommand::Install(CliOverrides::default()))
+        );
+        assert_eq!(
+            parse(args(&["service", "uninstall"])),
+            Parsed::Service(ServiceCommand::Uninstall)
+        );
+        assert_eq!(
+            parse(args(&["service", "status"])),
+            Parsed::Service(ServiceCommand::Status)
+        );
+    }
+
+    #[test]
+    fn service_install_takes_the_run_flags() {
+        assert_eq!(
+            parse(args(&[
+                "service", "install", "--port", "5151", "--user", "walker", "--pin", "99999"
+            ])),
+            Parsed::Service(ServiceCommand::Install(CliOverrides {
+                port: Some(5151),
+                pin: some("99999"),
+                user: some("walker"),
+            }))
+        );
+        assert!(matches!(
+            parse(args(&["service", "install", "--nope"])),
+            Parsed::Invalid(_)
+        ));
+        assert!(matches!(
+            parse(args(&["service", "install", "--port"])),
+            Parsed::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_or_missing_service_subcommand_is_rejected() {
+        let Parsed::Invalid(message) = parse(args(&["service", "reinstall"])) else {
+            panic!("an unknown subcommand should not parse");
+        };
+        assert!(message.contains("reinstall"), "{message}");
+        assert!(matches!(parse(args(&["service"])), Parsed::Invalid(_)));
+    }
+
+    #[test]
+    fn uninstall_and_status_take_no_flags() {
+        assert!(matches!(
+            parse(args(&["service", "status", "--port", "5151"])),
+            Parsed::Invalid(_)
+        ));
+        assert_eq!(
+            parse(args(&["service", "uninstall", "--help"])),
+            Parsed::Help
+        );
+        assert_eq!(parse(args(&["service", "--help"])), Parsed::Help);
+    }
+
+    #[test]
     fn help_lists_the_flags_and_the_main_env_vars() {
         let help = help_text("1.2.3");
         for expected in [
+            "service install",
+            "service uninstall",
+            "service status",
             "--port",
             "--pin",
             "--user",

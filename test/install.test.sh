@@ -81,6 +81,9 @@ contains "happy: printed the quick start" "$OUT1" "export MOBUX_AUTH_USER"
 # listens on 8080, so the quick start only holds together with --port.
 contains "happy: quick start runs on the port it links" "$OUT1" "mobux --port 5151"
 contains "happy: quick start links that port" "$OUT1" ":5151"
+# Boot persistence is the next thing anyone wants; the quick start names the
+# subcommand that does it (README's quick start carries the same line).
+contains "happy: quick start points at the boot service" "$OUT1" "mobux service install --port 5151"
 
 # ── Test 2: a tampered asset is refused and nothing is installed ────────────
 A2="$WORK/assets-bad"; D2="$WORK/dest2"
