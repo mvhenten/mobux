@@ -37,6 +37,7 @@ const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
 // host's default tmux server.
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
+const OSC_CWD = `${SANDBOX_HOME}/osc133-cwd`;
 const tmux = createTmuxRunner("mobux-test");
 
 // Unique session names per run so the create/rename/kill lifecycle never
@@ -2259,7 +2260,17 @@ async function attemptOscPromptClassification(
   // never set the prompt via send-keys after boot, which clobbers the
   // OSC-wrapped prompt the snippet built (a known trap: send-keys races the
   // shell's own rcfile sourcing).
-  tmux(`new-session -d -s ${MARK_SESSION} ${SHELL_ENV} ${shellCommand}`);
+  // Fixed cwd: the `ls` below runs in a dir with a known, tiny listing, so
+  // its output can never grow past the screen and scroll the marked prompt
+  // rows away. Inheriting the repo root made the result depend on how many
+  // files happen to sit there — adding one file to the repo broke this test.
+  fs.mkdirSync(OSC_CWD, { recursive: true });
+  for (const name of ["alpha", "beta", "gamma"]) {
+    fs.writeFileSync(`${OSC_CWD}/${name}`, "");
+  }
+  tmux(
+    `new-session -d -s ${MARK_SESSION} -c ${OSC_CWD} ${SHELL_ENV} ${shellCommand}`,
+  );
 
   try {
     await page.goto(`${APP}#/s/${MARK_SESSION}`, {
