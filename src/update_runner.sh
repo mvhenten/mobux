@@ -34,15 +34,21 @@
 #                          what scripts/build-release-asset.sh uploads)
 #
 # Flags:
-#   --no-systemd   skip all systemctl calls (test mode); steps 1,2,4,5 only,
-#                  and the "restart" is a no-op the test harness stands in for.
+#   --no-systemd    skip all systemctl calls (test mode); steps 1,2,4,5 only,
+#                   and the "restart" is a no-op the test harness stands in for.
+#   --install-only  stop after step 2. `mobux update` drives this: the CLI owns
+#                   the restart (there may be no service at all) and there is no
+#                   server to health-check, so the script only snapshots and
+#                   installs. Exit 0 installed, 1 failed, 4 lock held.
 
 set -uo pipefail
 
 NO_SYSTEMD=0
+INSTALL_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --no-systemd) NO_SYSTEMD=1 ;;
+    --install-only) INSTALL_ONLY=1 ;;
   esac
 done
 
@@ -203,6 +209,11 @@ main() {
       cp -f "$PREV" "$BIN" 2>/dev/null || true
       exit 1
     fi
+  fi
+
+  if [ "$INSTALL_ONLY" = "1" ]; then
+    log "install-only: ${VERSION} is in place at ${BIN} (previous binary kept at ${PREV})"
+    exit 0
   fi
 
   restart_service

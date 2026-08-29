@@ -282,7 +282,7 @@ fn status() -> Result<i32, String> {
     Ok(status.code().unwrap_or(1))
 }
 
-fn config_dir() -> Result<PathBuf, String> {
+pub fn config_dir() -> Result<PathBuf, String> {
     directories::BaseDirs::new()
         .map(|dirs| dirs.config_dir().to_path_buf())
         .ok_or_else(|| "could not resolve your home directory (is $HOME set?)".to_string())
