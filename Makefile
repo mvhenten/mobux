@@ -24,7 +24,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-update-runner test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
+        test-smoke test-critical-path test-update-runner test-install test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
@@ -227,6 +227,14 @@ test-critical-path:
 test-update-runner:
 	@command -v shellcheck >/dev/null 2>&1 && shellcheck src/update_runner.sh test/update-runner.test.sh || echo "shellcheck not installed; skipping lint"
 	@bash test/update-runner.test.sh
+
+# curl|bash installer: OS/arch guard, checksum failure, upgrade and cleanup
+# paths against a file:// asset dir and a throwaway install dir (no network,
+# no real install). Also runs from `cargo test` via tests/install_sh.rs.
+.PHONY: test-install
+test-install:
+	@command -v shellcheck >/dev/null 2>&1 && shellcheck install.sh test/install.test.sh || echo "shellcheck not installed; skipping lint"
+	@bash test/install.test.sh
 
 # STT settings UX: run stt-ux.spec.cjs against the smoke instance.
 # Uses MOBUX_STT_URL so the spec's openSettings() hits the smoke server.
