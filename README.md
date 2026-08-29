@@ -38,6 +38,20 @@ mobux is meant to live on your private network, not the open internet.
 
 ## Quick start
 
+Install the prebuilt binary (Linux x86_64, needs `tmux`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | bash
+
+export MOBUX_AUTH_USER=me
+export MOBUX_PIN=12345
+mobux                       # serves on https://0.0.0.0:5151
+```
+
+It verifies the release checksum and installs to `~/.local/bin/mobux`. On any other platform, `cargo install mobux`.
+
+From source:
+
 ```bash
 # Prerequisites: Rust, Node.js, tmux  (run `make setup` to install the toolchain)
 git clone https://github.com/mvhenten/mobux.git
