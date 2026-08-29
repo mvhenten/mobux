@@ -75,7 +75,7 @@ build: web
 	$(CARGO) build
 
 run: build
-	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) PORT=$(MOBUX_PORT) \
+	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_PORT=$(MOBUX_PORT) \
 		$(CARGO) run
 
 # Foreground dev instance with the client telemetry channel live (MOBUX_DEV=1).
@@ -83,7 +83,7 @@ run: build
 # lifeline. Hit it at http(s)://<host>:5152/?telemetry=1 for the on-screen log
 # overlay; telemetry lines also print to this terminal (stderr). Ctrl-C to stop.
 dev: build
-	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 PORT=$(MOBUX_DEV_PORT) \
+	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 MOBUX_PORT=$(MOBUX_DEV_PORT) \
 		$(CARGO) run
 
 # Auto-rebuild loop for the dev box. Watches src/ (Rust) and on every change
@@ -97,7 +97,7 @@ dev-watch: build
 _dev-bounce:
 	-@kill $$(lsof -ti :$(MOBUX_DEV_PORT)) 2>/dev/null || true
 	@sleep 1
-	@nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 PORT=$(MOBUX_DEV_PORT) \
+	@nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 MOBUX_PORT=$(MOBUX_DEV_PORT) \
 		./target/debug/mobux > /tmp/mobux-dev.log 2>&1 &
 	@sleep 2 && lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1 \
 		&& echo "dev :$(MOBUX_DEV_PORT) rebuilt + restarted" || echo "FAILED to restart :$(MOBUX_DEV_PORT)"
@@ -120,7 +120,7 @@ dev-up: build
 	@mkdir -p $(DEV_LOG_DIR)
 	@if lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1; then echo "backend :$(MOBUX_DEV_PORT) already up"; else \
 		setsid nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 \
-			PORT=$(MOBUX_DEV_PORT) ./target/debug/mobux \
+			MOBUX_PORT=$(MOBUX_DEV_PORT) ./target/debug/mobux \
 			> $(DEV_LOG_DIR)/backend.log 2>&1 < /dev/null & \
 	fi
 	@if lsof -i :5173 >/dev/null 2>&1; then echo "spa :5173 already up"; else \
@@ -146,7 +146,7 @@ dev-logs:
 
 start: build
 	@if [ -n "$(PID)" ]; then echo "already running (pid $(PID))"; exit 1; fi
-	nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) PORT=$(MOBUX_PORT) \
+	nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_PORT=$(MOBUX_PORT) \
 		./target/debug/mobux > /tmp/mobux.log 2>&1 &
 	@sleep 2 && lsof -i :$(MOBUX_PORT) >/dev/null 2>&1 && echo "mobux running on port $(MOBUX_PORT)" || echo "FAILED to start"
 
@@ -180,7 +180,7 @@ smoke-start: build
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
-		PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
+		MOBUX_PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
 		&& echo "smoke mobux running on port $(MOBUX_SMOKE_PORT) (data /tmp/mobux-smoke)" \

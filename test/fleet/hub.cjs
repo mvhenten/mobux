@@ -115,7 +115,7 @@ async function startHub({ nodes = [] } = {}) {
       MOBUX_TLS: "0",
       MOBUX_TMUX_SOCKET: tmuxSocket,
       MOBUX_UPDATE_DISABLE_RUN: "1",
-      PORT: String(port),
+      MOBUX_PORT: String(port),
       MOBUX_AUTH_USER: HUB_USER,
       MOBUX_PIN: HUB_PIN,
     },

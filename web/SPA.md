@@ -165,7 +165,7 @@ Verify the prod-served SPA without Vite (binary on a throwaway port, never
 
 ```sh
 make build
-env MOBUX_AUTH_USER=mvhenten MOBUX_PIN=30879 MOBUX_DEV=1 PORT=5183 \
+env MOBUX_AUTH_USER=mvhenten MOBUX_PIN=30879 MOBUX_DEV=1 MOBUX_PORT=5183 \
   ./target/debug/mobux &
 cd web/spa && npx playwright test --config=playwright.prod.cjs
 kill $(lsof -ti :5183)

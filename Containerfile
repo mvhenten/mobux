@@ -58,7 +58,7 @@ WORKDIR /opt/mobux
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     MOBUX_TLS=0 \
-    PORT=8080 \
+    MOBUX_PORT=8080 \
     MOBUX_DATA_DIR=/data \
     LD_LIBRARY_PATH=/opt/mobux/lib
 RUN mkdir -p /data

@@ -44,6 +44,17 @@ cargo install --git https://github.com/mvhenten/mobux --locked
 `cargo install` always builds the release profile, so the result is the
 self-contained binary at `~/.cargo/bin/mobux`. It runs from any directory.
 
+## Configuration
+
+`mobux --help` lists the flags (`--port`, `--pin`, `--user`) and the main
+environment variables. A flag wins over the variable next to it; a PIN on the
+command line is visible in the process list, so a service unit should keep
+using `MOBUX_PIN`.
+
+The listen port resolves as `--port` → `MOBUX_PORT` → `PORT` → 8080. Bare
+`PORT` is deprecated: it still works, and the server warns at startup until it
+is renamed to `MOBUX_PORT`.
+
 ## Run as a boot-persistent service (`:5151`)
 
 The host runs mobux as a **systemd `--user`** service with linger enabled, so
@@ -63,7 +74,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=%h/.cargo/bin/mobux
-Environment=PORT=5151
+Environment=MOBUX_PORT=5151
 Environment=MOBUX_AUTH_USER=changeme
 Environment=MOBUX_PIN=changeme
 # The self-updater runs `cargo install`; the default unit PATH lacks ~/.cargo/bin.
@@ -223,7 +234,7 @@ sessions/push state separate from prod). The TLS cert under
 `~/.config/mobux/` is shared (same host), which is fine:
 
 ```bash
-PORT=5152 \
+MOBUX_PORT=5152 \
 MOBUX_DATA_DIR=~/.local/share/mobux-dev \
 MOBUX_AUTH_USER=me MOBUX_PIN=changeme \
 ~/.local/mobux-dev/bin/mobux
@@ -231,7 +242,7 @@ MOBUX_AUTH_USER=me MOBUX_PIN=changeme \
 
 For a persistent dev instance you can reach from the phone, mirror the prod
 unit as `~/.config/systemd/user/mobux-dev.service` with
-`ExecStart=%h/.local/mobux-dev/bin/mobux`, `Environment=PORT=5152`,
+`ExecStart=%h/.local/mobux-dev/bin/mobux`, `Environment=MOBUX_PORT=5152`,
 `Environment=MOBUX_DATA_DIR=%h/.local/share/mobux-dev`, and its own
 `WorkingDirectory`. Enable it alongside `mobux.service`; the two run
 independently on `:5151` and `:5152`. Update it with
