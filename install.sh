@@ -78,7 +78,7 @@ Quick start:
 
   export MOBUX_AUTH_USER=me
   export MOBUX_PIN=12345
-  ${CRATE}
+  ${CRATE} --port 5151
 
 Then open https://${host}:5151 from a phone on the same network.
 EOF

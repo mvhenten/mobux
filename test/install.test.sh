@@ -77,6 +77,10 @@ check "happy: binary installed" test "$(installed_body "$D1")" = "MOBUX-BINARY-V
 check "happy: binary is executable" test -x "$D1/mobux"
 contains "happy: verified the checksum" "$OUT1" "sha256 verified"
 contains "happy: printed the quick start" "$OUT1" "export MOBUX_AUTH_USER"
+# The run line must name the port the follow-up URL points at: a bare `mobux`
+# listens on 8080, so the quick start only holds together with --port.
+contains "happy: quick start runs on the port it links" "$OUT1" "mobux --port 5151"
+contains "happy: quick start links that port" "$OUT1" ":5151"
 
 # ── Test 2: a tampered asset is refused and nothing is installed ────────────
 A2="$WORK/assets-bad"; D2="$WORK/dest2"
