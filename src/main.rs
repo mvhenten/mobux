@@ -46,6 +46,7 @@ mod db;
 mod host_suggestions;
 mod nodes;
 mod push;
+mod service;
 mod session_history;
 mod shell_integration;
 mod ssl;
@@ -337,6 +338,7 @@ struct AuthConfig {
 async fn main() -> Result<()> {
     let overrides = match cli::parse(env::args().skip(1)) {
         cli::Parsed::Run(overrides) => overrides,
+        cli::Parsed::Service(command) => std::process::exit(service::run(&command)),
         cli::Parsed::Help => {
             print!("{}", cli::help_text(PKG_VERSION));
             return Ok(());

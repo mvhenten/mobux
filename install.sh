@@ -79,6 +79,7 @@ Quick start:
   export MOBUX_AUTH_USER=me
   export MOBUX_PIN=12345
   ${CRATE} --port 5151
+  ${CRATE} service install --port 5151   # or keep it running across reboots
 
 Then open https://${host}:5151 from a phone on the same network.
 EOF
