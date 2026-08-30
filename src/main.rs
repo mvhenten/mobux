@@ -305,6 +305,9 @@ struct AppState {
     /// Resolved from `paths.data_dir`, falling back to the platform data
     /// directory, so it is a path rather than the raw setting.
     data_dir: PathBuf,
+    /// Where `config.json` and the generated TLS material live, resolved once
+    /// at startup so no handler re-derives it.
+    config_dir: PathBuf,
     /// In-memory cache of the latest crates.io version (self-update, #130).
     update: update::UpdateState,
     /// SHA-256 prefix of the vendored JS bundles, computed by `web/build.js`
@@ -364,7 +367,8 @@ async fn main() -> Result<()> {
 
     let settings = Arc::new(resolve_config(&options)?);
 
-    let auth = load_auth_config(&settings);
+    let config_dir = config::config_dir();
+    let auth = load_auth_config(&config_dir, &settings);
     let data_dir = resolve_data_dir(&settings)?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
@@ -394,7 +398,7 @@ async fn main() -> Result<()> {
         .and_then(|v| v["hash"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_string());
 
-    let update_state = update::UpdateState::new();
+    let update_state = update::UpdateState::new(settings.update.check_url.clone());
     // Kick off the background crates.io poller (polls now, then every ~6h).
     update::spawn_checker(update_state.clone());
 
@@ -417,6 +421,7 @@ async fn main() -> Result<()> {
         internal_token: Arc::new(internal_token),
         config: settings.clone(),
         data_dir: data_dir.clone(),
+        config_dir: config_dir.clone(),
         update: update_state,
         build_hash,
         stt_install: BackgroundJobState::idle(),
@@ -589,8 +594,6 @@ async fn main() -> Result<()> {
     }
 
     if use_tls {
-        let extra_hosts = settings.tls.hosts.clone();
-
         let cert_file = settings.tls.cert_file.trim();
         let key_file = settings.tls.key_file.trim();
         let (cert_path, key_path) = if !cert_file.is_empty() && !key_file.is_empty() {
@@ -600,14 +603,14 @@ async fn main() -> Result<()> {
             // ACME mode needs the HTTP-01 route reachable BEFORE the order
             // runs, so spin up a tiny HTTP-only server first. Same server
             // stays up for renewals.
-            let challenges = if ssl::acme_mode_enabled() {
+            let challenges = if ssl::acme_mode_enabled(&settings.tls) {
                 let c = ssl::new_acme_challenges();
                 spawn_acme_http_server(c.clone(), settings.tls.acme_http_port).await?;
                 Some(c)
             } else {
                 None
             };
-            let paths = ssl::ensure_certs(&extra_hosts, challenges).await?;
+            let paths = ssl::ensure_certs(&config_dir, &settings.tls, challenges).await?;
             (paths.cert, paths.key)
         };
         let tls_config = ssl::load_rustls_config(&cert_path, &key_path)?;
@@ -717,8 +720,8 @@ async fn serve_acme_challenge(
 /// Load (or generate-and-persist) the session cookie value. Persisting it
 /// across restarts means restarting mobux doesn't invalidate every connected
 /// client's session and re-prompt them for the basic-auth password.
-fn ensure_session_cookie_value() -> String {
-    let path = ssl::config_dir().join("session-cookie");
+fn ensure_session_cookie_value(config_dir: &std::path::Path) -> String {
+    let path = config_dir.join("session-cookie");
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
         if trimmed.len() >= 32 {
@@ -751,14 +754,14 @@ fn ensure_session_cookie_value() -> String {
     value
 }
 
-fn load_auth_config(settings: &config::Config) -> Option<AuthConfig> {
+fn load_auth_config(config_dir: &std::path::Path, settings: &config::Config) -> Option<AuthConfig> {
     let credentials = settings.credentials()?;
 
     Some(AuthConfig {
         user: credentials.user,
         pass: credentials.pass,
         session_cookie_name: "mobux_session".to_string(),
-        session_cookie_value: ensure_session_cookie_value(),
+        session_cookie_value: ensure_session_cookie_value(config_dir),
     })
 }
 
@@ -969,6 +972,7 @@ async fn api_update_run(State(state): State<AppState>) -> Response {
     match update::spawn_updater(
         &state.update,
         &state.data_dir,
+        &state.config.app.service_name,
         &latest,
         state.config.server.port,
         state.config.tls.enabled,
@@ -1024,9 +1028,14 @@ async fn api_create_session(
     let name = payload.name.trim();
     validate_session_name(&state, name)?;
     let target = resolve_node_target(&state, q.node.as_deref()).await?;
-    tmux::new_session(name, target.as_deref())
-        .await
-        .map_err(AppError::bad_request)?;
+    tmux::new_session(
+        name,
+        target.as_deref(),
+        &state.config.session.shell,
+        &state.data_dir,
+    )
+    .await
+    .map_err(AppError::bad_request)?;
     Ok(Json(json!({"ok": true, "name": name})))
 }
 
@@ -1556,7 +1565,11 @@ async fn api_push_notify(
     };
     // Spawn so this returns immediately — push delivery to N devices can take
     // hundreds of ms each, and the caller doesn't need to wait.
-    tokio::spawn(push::notify(state.db.clone(), payload));
+    tokio::spawn(push::notify(
+        state.db.clone(),
+        state.config.push.vapid_contact.clone(),
+        payload,
+    ));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1598,7 +1611,12 @@ async fn api_internal_trigger(
         "bell" => {
             let prefs = state.db.notification_prefs().unwrap_or_default();
             if prefs.bell {
-                push::fire_bell(state.db.clone(), &q.session, q.window.as_deref());
+                push::fire_bell(
+                    state.db.clone(),
+                    state.config.push.vapid_contact.clone(),
+                    &q.session,
+                    q.window.as_deref(),
+                );
             }
         }
         _ => return StatusCode::BAD_REQUEST,
@@ -2044,11 +2062,11 @@ async fn serve_install_apk(State(state): State<AppState>) -> Response {
     .await
 }
 
-async fn serve_install_ca() -> Response {
-    if ssl::acme_mode_enabled() {
+async fn serve_install_ca(State(state): State<AppState>) -> Response {
+    if ssl::acme_mode_enabled(&state.config.tls) {
         return (StatusCode::NOT_FOUND, "ACME mode: no local CA to install").into_response();
     }
-    let path = ssl::ca_cert_path();
+    let path = ssl::ca_cert_path(&state.config_dir);
     serve_file_or_404(
         path.to_string_lossy().as_ref(),
         "application/x-x509-ca-cert",
@@ -2971,7 +2989,7 @@ async fn api_install_apk_build(
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok());
-    let domain = match twa::resolve_domain(twa::configured_domain().as_deref(), host) {
+    let domain = match twa::resolve_domain(Some(state.config.app.domain.as_str()), host) {
         Ok(d) => d,
         Err(e) => {
             return Ok((
@@ -3069,7 +3087,7 @@ async fn api_install_apk_status(
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok());
-    let domain = twa::resolve_domain(twa::configured_domain().as_deref(), host);
+    let domain = twa::resolve_domain(Some(state.config.app.domain.as_str()), host);
 
     let guard = state.twa_build.lock().await;
     let (phase_str, error) = phase_parts(&guard.phase);
@@ -3689,7 +3707,8 @@ mod tests {
             internal_token: Arc::new("test-token".to_string()),
             config: Arc::new(settings),
             data_dir: dir.path().to_path_buf(),
-            update: update::UpdateState::new(),
+            config_dir: dir.path().to_path_buf(),
+            update: update::UpdateState::new(String::new()),
             build_hash: "test".to_string(),
             stt_install: BackgroundJobState::idle(),
             twa_build: BackgroundJobState::idle(),

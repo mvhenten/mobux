@@ -15,15 +15,11 @@ pub fn rcfile_snippet(shell: Shell) -> &'static str {
     shell.snippet()
 }
 
-/// Detect which shell to use for new sessions.
-/// Honors $SHELL from environment, falls back to /bin/bash,
-/// and allows override via MOBUX_SESSION_SHELL.
-pub fn detect_session_shell() -> (Shell, String) {
-    // Allow override for testing
-    if let Ok(override_shell) = env::var("MOBUX_SESSION_SHELL") {
-        if !override_shell.is_empty() {
-            return parse_shell_path(&override_shell);
-        }
+/// Detect which shell to use for new sessions. The configured `session.shell`
+/// wins; an empty one falls through to `$SHELL`, and then to `/bin/bash`.
+pub fn detect_session_shell(configured: &str) -> (Shell, String) {
+    if !configured.is_empty() {
+        return parse_shell_path(configured);
     }
 
     // Honor $SHELL
@@ -395,6 +391,33 @@ mod tests {
 
     fn tmp_home() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    #[test]
+    fn a_configured_session_shell_wins_and_names_its_type() {
+        assert_eq!(
+            detect_session_shell("/usr/bin/zsh"),
+            (Shell::Zsh, "/usr/bin/zsh".to_string())
+        );
+        assert_eq!(
+            detect_session_shell("/usr/bin/fish"),
+            (Shell::Fish, "/usr/bin/fish".to_string())
+        );
+        // Anything else is treated as bash-compatible.
+        assert_eq!(
+            detect_session_shell("/bin/dash"),
+            (Shell::Bash, "/bin/dash".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_setting_falls_through_to_the_environment() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // SAFETY: single-threaded under ENV_LOCK; restored before returning.
+        unsafe { env::set_var("SHELL", "/usr/bin/zsh") };
+        let detected = detect_session_shell("");
+        unsafe { env::remove_var("SHELL") };
+        assert_eq!(detected, (Shell::Zsh, "/usr/bin/zsh".to_string()));
     }
 
     fn read(p: &Path) -> String {

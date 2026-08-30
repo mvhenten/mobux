@@ -203,12 +203,7 @@ pub fn host_package_gap(missing: &[&str]) -> HostPackageGap {
     host_package_gap_with(PackageManager::detect(on_path), missing)
 }
 
-/// Operator override for the domain the package is pinned to.
-pub fn configured_domain() -> Option<String> {
-    std::env::var("MOBUX_DOMAIN").ok()
-}
-
-/// The authority the APK will be pinned to. An explicit `MOBUX_DOMAIN` wins;
+/// The authority the APK will be pinned to. A configured `app.domain` wins;
 /// otherwise it comes off the request's `Host` header, so the package points
 /// at whatever address the user actually reaches this server on and nobody has
 /// to type it. A default TLS port is dropped — `example.com:443` and
@@ -224,7 +219,7 @@ pub fn resolve_domain(
     };
     let raw = usable(&configured)
         .or_else(|| usable(&host_header))
-        .ok_or_else(|| "no Host header on the request and MOBUX_DOMAIN is not set".to_string())?;
+        .ok_or_else(|| "no Host header on the request and app.domain is not set".to_string())?;
 
     let domain = raw.strip_suffix(":443").unwrap_or(&raw);
     validate_domain(domain).map(|_| domain.to_string())

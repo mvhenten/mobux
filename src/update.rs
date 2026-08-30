@@ -6,8 +6,8 @@
 //!     index for the latest published `mobux` version every ~6h, caches the
 //!     result in memory with a timestamp, and exposes it to the API handlers.
 //!     Version comparison is real semver, not string compare.
-//!   * **Detached updater** — an embedded bash script is written to
-//!     `MOBUX_DATA_DIR` and spawned fully detached (setsid + stdio to a log
+//!   * **Detached updater** — an embedded bash script is written to the
+//!     resolved data dir and spawned fully detached (setsid + stdio to a log
 //!     file). It snapshots the current binary, installs the new version
 //!     (prebuilt GitHub release asset with sha256 verification, falling back
 //!     to `cargo install` for releases without one), restarts the systemd
@@ -20,8 +20,8 @@
 //!     5-10 min release compile); `cargo install` remains the fallback.
 //!   * Rollback runs in a process that outlives the server, since the restart
 //!     kills the server mid-update.
-//!   * The crates.io URL is overridable via `MOBUX_UPDATE_CHECK_URL` so CI /
-//!     tests stay hermetic (no live network).
+//!   * The crates.io URL is the resolved `update.check_url` setting, so CI /
+//!     tests stay hermetic (no live network) by pointing it somewhere local.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,9 +36,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Timeout for a single crates.io fetch. Kept short; a failed poll just leaves
 /// the previous cache value in place and retries on the next tick.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The crate this binary builds as — the name we query crates.io for.
-const CRATE_NAME: &str = "mobux";
 
 /// User-Agent sent to crates.io. Their crawler policy
 /// (<https://crates.io/data-access>) requires a UA that identifies the client
@@ -57,6 +54,10 @@ pub struct UpdateState {
     /// `POST /api/update/run` is rejected instead of racing the snapshot. Belt
     /// to the script's flock braces.
     running: Arc<std::sync::atomic::AtomicBool>,
+    /// The resolved `update.check_url`: where the version list is fetched
+    /// from. Handed in at startup so tests and CI can point it at a local
+    /// server instead of the live crates.io index.
+    check_url: Arc<String>,
 }
 
 #[derive(Default)]
@@ -88,10 +89,11 @@ pub struct UpdateStatus {
 }
 
 impl UpdateState {
-    pub fn new() -> Self {
+    pub fn new(check_url: String) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Cache::default())),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            check_url: Arc::new(check_url),
         }
     }
 
@@ -145,7 +147,7 @@ impl UpdateState {
     /// failure the cache keeps any previously-known latest version but records
     /// the error.
     pub async fn refresh(&self) -> UpdateStatus {
-        match fetch_latest_version().await {
+        match fetch_latest_version_from(&self.check_url).await {
             Ok(latest) => {
                 let mut c = self.inner.write().await;
                 c.latest = Some(latest);
@@ -158,12 +160,6 @@ impl UpdateState {
             }
         }
         self.status().await
-    }
-}
-
-impl Default for UpdateState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -185,42 +181,9 @@ fn now_rfc3339() -> String {
 
 // ── crates.io fetching + parsing ──────────────────────────────────────────
 
-/// Where to fetch the version list. Defaults to the crates.io **sparse index**
-/// (crawler-friendly, no rate-limit headache, official). The path layout is
-/// documented at <https://doc.rust-lang.org/cargo/reference/registry-index.html>.
-/// Overridable via `MOBUX_UPDATE_CHECK_URL` (full URL) so tests/CI never hit
-/// the live network.
-fn check_url() -> String {
-    if let Ok(u) = std::env::var("MOBUX_UPDATE_CHECK_URL") {
-        if !u.trim().is_empty() {
-            return u;
-        }
-    }
-    sparse_index_url(CRATE_NAME)
-}
-
-/// Build the sparse-index path for a crate name per cargo's index layout:
-/// 1-char → `1/{name}`, 2 → `2/{name}`, 3 → `3/{first}/{name}`, else
-/// `{c1}{c2}/{c3}{c4}/{name}`. mobux is 5 chars → `mo/bu/mobux`.
-fn sparse_index_url(name: &str) -> String {
-    let lower = name.to_lowercase();
-    let path = match lower.len() {
-        0 => lower.clone(),
-        1 => format!("1/{lower}"),
-        2 => format!("2/{lower}"),
-        3 => format!("3/{}/{}", &lower[0..1], lower),
-        _ => format!("{}/{}/{}", &lower[0..2], &lower[2..4], lower),
-    };
-    format!("https://index.crates.io/{path}")
-}
-
-/// Fetch and parse the latest non-yanked version from the configured URL.
-pub async fn fetch_latest_version() -> Result<String, String> {
-    fetch_latest_version_from(&check_url()).await
-}
-
-/// The fetch with the URL handed in, so `mobux update` and the background
-/// poller share one code path and tests can point it at a local server.
+/// Fetch and parse the latest non-yanked version from `url`, the resolved
+/// `update.check_url`. `mobux update` and the background poller share this one
+/// code path, and a test can point it at a local server.
 pub async fn fetch_latest_version_from(url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -419,16 +382,15 @@ impl std::fmt::Display for RunError {
 /// Resolve the systemd `--user` unit name to restart, or `None` when we're
 /// clearly not running under systemd. `INVOCATION_ID` is set by systemd for
 /// every unit it starts; its absence means "not launched by systemd", so a
-/// `systemctl restart` would be meaningless. `MOBUX_SERVICE_NAME` overrides the
-/// unit name (default "mobux").
-pub fn resolve_service_name() -> Option<String> {
+/// `systemctl restart` would be meaningless. `configured` is the resolved
+/// `app.service_name`; a blank one falls back to "mobux".
+pub fn resolve_service_name(configured: &str) -> Option<String> {
     std::env::var_os("INVOCATION_ID")?;
-    let name = std::env::var("MOBUX_SERVICE_NAME")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "mobux".to_string());
-    Some(name)
+    let name = configured.trim();
+    if name.is_empty() {
+        return Some("mobux".to_string());
+    }
+    Some(name.to_string())
 }
 
 /// Path to the currently-running binary (`std::env::current_exe`), used to
@@ -472,7 +434,8 @@ fn resolve_cargo() -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
-/// Write the updater script into `data_dir` (mode 0700) and return its path.
+/// Write the updater script into the resolved data dir (mode 0700) and return
+/// its path.
 pub fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
     let path = data_dir.join("mobux-update.sh");
     std::fs::write(&path, UPDATER_SCRIPT).map_err(|e| RunError::SpawnFailed {
@@ -499,6 +462,7 @@ pub fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
 pub fn spawn_updater(
     state: &UpdateState,
     data_dir: &Path,
+    service_name: &str,
     version: &str,
     port: u16,
     use_tls: bool,
@@ -514,7 +478,7 @@ pub fn spawn_updater(
         });
     }
 
-    let Some(service) = resolve_service_name() else {
+    let Some(service) = resolve_service_name(service_name) else {
         return Err(RunError::NotSystemd {
             message: "not running under systemd (no INVOCATION_ID); in-app update \
                       is only available for the systemd --user service"
@@ -612,18 +576,18 @@ pub async fn serve_once(status_line: &str, body: &str) -> String {
 mod tests {
     use super::*;
 
+    /// No test here reaches the network, so the check URL is never read.
+    fn state() -> UpdateState {
+        UpdateState::new(String::new())
+    }
+
+    /// The crates.io sparse-index layout the default `update.check_url`
+    /// encodes: 5-char `mobux` lives under `mo/bu/`.
     #[test]
-    fn sparse_index_path_layout() {
+    fn the_default_check_url_is_the_sparse_index_path_for_mobux() {
         assert_eq!(
-            sparse_index_url("mobux"),
+            crate::config::Config::default().update.check_url,
             "https://index.crates.io/mo/bu/mobux"
-        );
-        assert_eq!(sparse_index_url("a"), "https://index.crates.io/1/a");
-        assert_eq!(sparse_index_url("ab"), "https://index.crates.io/2/ab");
-        assert_eq!(sparse_index_url("abc"), "https://index.crates.io/3/a/abc");
-        assert_eq!(
-            sparse_index_url("serde"),
-            "https://index.crates.io/se/rd/serde"
         );
     }
 
@@ -645,8 +609,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         // SAFETY: single-threaded test; we set+remove the env around the call.
         unsafe { std::env::set_var("MOBUX_UPDATE_DISABLE_RUN", "1") };
-        let st = UpdateState::new();
-        let res = spawn_updater(&st, &tmp, "999.0.0", 8281, false);
+        let st = state();
+        let res = spawn_updater(&st, &tmp, "mobux", "999.0.0", 8281, false);
         unsafe { std::env::remove_var("MOBUX_UPDATE_DISABLE_RUN") };
         assert!(matches!(res, Err(RunError::NotSystemd { .. })));
         // No updater script should have been written (guard runs first).
@@ -660,7 +624,7 @@ mod tests {
     // isn't stuck returning 409 forever.
     #[test]
     fn supervisor_releases_lock_when_detached_updater_exits() {
-        let st = UpdateState::new();
+        let st = state();
         assert!(st.try_begin_run(), "claim the lock as api_update_run does");
         // `true` stands in for a detached updater that exits immediately
         // without restarting this process.
@@ -684,7 +648,7 @@ mod tests {
 
     #[test]
     fn run_guard_admits_one_and_rejects_concurrent() {
-        let st = UpdateState::new();
+        let st = state();
         // First claim wins.
         assert!(st.try_begin_run(), "first run must claim the lock");
         // A second concurrent claim is rejected while the first holds it.
@@ -699,7 +663,7 @@ mod tests {
     fn run_guard_shared_across_clones() {
         // The flag lives behind an Arc, so a cloned handle (as axum hands to
         // each request via AppState) sees the same lock.
-        let st = UpdateState::new();
+        let st = state();
         let clone = st.clone();
         assert!(st.try_begin_run());
         assert!(!clone.try_begin_run(), "clone shares the running flag");
@@ -809,7 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_reports_available_when_cache_newer() {
-        let st = UpdateState::new();
+        let st = state();
         {
             let mut c = st.inner.write().await;
             // current is CARGO_PKG_VERSION; fabricate a clearly-newer latest.
@@ -825,7 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_not_available_when_cache_equals_current() {
-        let st = UpdateState::new();
+        let st = state();
         {
             let mut c = st.inner.write().await;
             c.latest = Some(UpdateState::current_version().to_string());
@@ -836,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_empty_cache_not_available() {
-        let st = UpdateState::new();
+        let st = state();
         let s = st.status().await;
         assert!(!s.available);
         assert_eq!(s.latest, None);
