@@ -2,7 +2,7 @@
 # tmux server, so playwright tests can create/kill sessions without
 # touching the host's tmux. See `make podman-test`.
 #
-# Not a production image: TLS is off, basic-auth uses static creds
+# Not a production image: TLS stays off (the default), basic-auth uses static creds
 # passed via `make podman-test`. For a real deployment use `make start`
 # / `make twa` against the host.
 

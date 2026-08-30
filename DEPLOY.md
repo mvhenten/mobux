@@ -75,7 +75,7 @@ loginctl enable-linger "$USER"                # start the user service at boot
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/mobux.service <<'EOF'
 [Unit]
-Description=mobux — mobile tmux web frontend (HTTPS on :5151)
+Description=mobux — mobile tmux web frontend (:5151)
 After=network-online.target
 Wants=network-online.target
 
@@ -85,6 +85,9 @@ ExecStart=%h/.cargo/bin/mobux
 Environment=MOBUX_PORT=5151
 Environment=MOBUX_AUTH_USER=changeme
 Environment=MOBUX_PIN=changeme
+# mobux serves plain HTTP by default. Drop this line when a reverse proxy
+# terminates TLS in front of it.
+Environment=MOBUX_TLS=1
 # The self-updater runs `cargo install`; the default unit PATH lacks ~/.cargo/bin.
 Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
@@ -101,7 +104,9 @@ systemctl --user daemon-reload
 systemctl --user enable --now mobux
 ```
 
-The TLS cert is auto-generated (and reused across restarts) at
+`mobux service install` writes the unit without `MOBUX_TLS`, so the service
+serves plain HTTP; add `Environment=MOBUX_TLS=1` and restart it to serve HTTPS.
+With TLS on, the cert is auto-generated (and reused across restarts) at
 `~/.config/mobux/leaf.crt`; the data dir (sessions, push subscriptions, and
 the Android package once built) is `~/.local/share/mobux`. Nothing depends on
 the working directory.
@@ -244,14 +249,14 @@ sessions/push state separate from prod). The TLS cert under
 ```bash
 MOBUX_PORT=5152 \
 MOBUX_DATA_DIR=~/.local/share/mobux-dev \
-MOBUX_AUTH_USER=me MOBUX_PIN=changeme \
+MOBUX_AUTH_USER=me MOBUX_PIN=changeme MOBUX_TLS=1 \
 ~/.local/mobux-dev/bin/mobux
 ```
 
 For a persistent dev instance you can reach from the phone, mirror the prod
 unit as `~/.config/systemd/user/mobux-dev.service` with
 `ExecStart=%h/.local/mobux-dev/bin/mobux`, `Environment=MOBUX_PORT=5152`,
-`Environment=MOBUX_DATA_DIR=%h/.local/share/mobux-dev`, and its own
+`Environment=MOBUX_DATA_DIR=%h/.local/share/mobux-dev`, `Environment=MOBUX_TLS=1`, and its own
 `WorkingDirectory`. Enable it alongside `mobux.service`; the two run
 independently on `:5151` and `:5152`. Update it with
 `cargo install --git … --root ~/.local/mobux-dev && systemctl --user restart mobux-dev`.

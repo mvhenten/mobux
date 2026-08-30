@@ -401,7 +401,7 @@ mod tests {
     fn the_current_value_is_shown_in_brackets() {
         let (_, prompts) = drive(&answers(&[]), Config::default());
         assert!(prompts.contains("server.port [8080]:"), "{prompts}");
-        assert!(prompts.contains("tls.enabled [true]:"), "{prompts}");
+        assert!(prompts.contains("tls.enabled [false]:"), "{prompts}");
         assert!(prompts.contains("app.service_name [mobux]:"), "{prompts}");
     }
 

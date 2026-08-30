@@ -131,8 +131,8 @@
           "type": "string"
         },
         "enabled": {
-          "default": true,
-          "description": "Serve HTTPS. Env: `MOBUX_TLS`.",
+          "default": false,
+          "description": "Serve HTTPS. Off by default; plain HTTP is the safe assumption behind a\nproxy and the only one that works without a trusted certificate.\nEnv: `MOBUX_TLS`.",
           "type": "boolean"
         },
         "hosts": {
@@ -216,7 +216,7 @@
         "acme_email": "",
         "acme_http_port": 80,
         "cert_file": "",
-        "enabled": true,
+        "enabled": false,
         "hosts": [],
         "key_file": ""
       }

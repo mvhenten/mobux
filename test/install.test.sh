@@ -84,6 +84,9 @@ contains "happy: quick start links that port" "$OUT1" ":5151"
 # Boot persistence is the next thing anyone wants; the quick start names the
 # subcommand that does it (README's quick start carries the same line).
 contains "happy: quick start points at the boot service" "$OUT1" "mobux service install --port 5151"
+# TLS is off by default, so the URL is http:// and the opt-in is named.
+contains "happy: quick start links a plain-HTTP URL" "$OUT1" "http://"
+contains "happy: quick start names the TLS opt-in" "$OUT1" "--tls"
 
 # ── Test 2: a tampered asset is refused and nothing is installed ────────────
 A2="$WORK/assets-bad"; D2="$WORK/dest2"
