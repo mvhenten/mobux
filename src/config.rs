@@ -780,12 +780,13 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// Read, merge and validate the config file. A missing file is the default
-/// config — mobux runs without one.
-pub fn load_from(path: &Path) -> Result<Config, LoadError> {
+/// Read and validate the config file as the layer it states, ready to hand to
+/// [`resolve`]. `None` means no file at `path` — mobux runs without one, so
+/// the caller decides whether its absence is an error.
+pub fn load_partial_from(path: &Path) -> Result<Option<PartialConfig>, LoadError> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(LoadError::Read {
                 path: path.to_path_buf(),
@@ -793,7 +794,15 @@ pub fn load_from(path: &Path) -> Result<Config, LoadError> {
             })
         }
     };
-    parse(path, &raw)
+    let partial = parse_partial(path, &raw)?;
+    validate(path, &Config::default().merged(partial.clone()))?;
+    Ok(Some(partial))
+}
+
+/// Read, merge and validate the config file. A missing file is the default
+/// config — mobux runs without one.
+pub fn load_from(path: &Path) -> Result<Config, LoadError> {
+    Ok(Config::default().merged(load_partial_from(path)?.unwrap_or_default()))
 }
 
 pub fn load() -> Result<Config, LoadError> {
@@ -1486,6 +1495,44 @@ mod tests {
         let path = dir.path().join(CONFIG_FILE_NAME);
         std::fs::write(&path, r#"{"session": {"shell": "/bin/zsh"}}"#).unwrap();
         assert_eq!(load_from(&path).unwrap().session.shell, "/bin/zsh");
+    }
+
+    #[test]
+    fn a_missing_file_states_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        assert_eq!(load_partial_from(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = load_partial_from(dir.path()).unwrap_err();
+        assert!(matches!(error, LoadError::Read { .. }), "{error}");
+    }
+
+    /// What startup does: read the file, then let the environment override it.
+    #[test]
+    fn startup_reads_the_file_and_lets_the_environment_override_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            r#"{"server": {"port": 5151}, "session": {"shell": "/bin/zsh"}}"#,
+        )
+        .unwrap();
+
+        let file = load_partial_from(&path).unwrap().expect("a file on disk");
+        let resolved = resolve(
+            Config::default(),
+            file,
+            &env(&[("MOBUX_PORT", "5152")]),
+            PartialConfig::default(),
+        );
+
+        assert_eq!(resolved.server.port, 5152);
+        assert_eq!(resolved.session.shell, "/bin/zsh");
+        assert!(resolved.tls.enabled);
     }
 
     #[test]
