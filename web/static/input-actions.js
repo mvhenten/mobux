@@ -300,14 +300,20 @@ export function createAttachAction({ send, node, button, errorContainer } = {}) 
 // /transcribe (same-origin, so the session cookie rides along), then inject
 // the returned text into the terminal exactly like the green send button.
 //
-//   createDictateAction({ send, button, onText }) → { trigger(), isRecording() }
+//   createDictateAction({ send, node, button, onText })
+//     → { trigger(), isRecording() }
+//     node     current remote node name ("" ⇒ local host) — same contract as
+//              createAttachAction's, and used for the same reason: the
+//              no-backend fallback uploads the raw recording through
+//              /api/upload, so it must land on the host the terminal is
+//              attached to or the pasted path names a file that isn't there.
 //     button   the 🎤 button element — gets `.mic-recording` + label updates.
 //     onText() optional — invoked after a successful injection (e.g. refocus
 //              the mobile text input). The injection itself always happens.
 const TARGET_RATE = 16000;
 const MAX_SECONDS = 60;
 
-export function createDictateAction({ send, button, onText } = {}) {
+export function createDictateAction({ send, node, button, onText } = {}) {
   const mic = {
     recording: false,
     busy: false,
@@ -687,7 +693,7 @@ export function createDictateAction({ send, button, onText } = {}) {
         const bodyText = await res.text().catch(() => '');
         telemetry.log('mic.transcribe.err', { stage: 'http', status: res.status, body: bodyText.slice(0, 200) });
         if (res.status === 503) {
-          micFault('model', '503 ' + bodyText.slice(0, 120));
+          micFault('model', '503 ' + bodyText.slice(0, 120), audioFallbackOpts());
         } else {
           micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText));
         }
@@ -704,6 +710,69 @@ export function createDictateAction({ send, button, onText } = {}) {
       micFault('mic', err?.message || 'encode/transcribe error');
       return null;
     }
+  }
+
+  // A "no speech backend" fault raised AFTER capture is not a dead end: the
+  // recording still exists, so offer to hand it over as a file. Before
+  // capture (the pre-record probe) there is nothing to submit and the fault
+  // keeps its "Record anyway" action instead.
+  function audioFallbackOpts() {
+    if (mic.pendingChunks === null) return undefined;
+    return { onSubmitAudio: () => submitPendingAudio() };
+  }
+
+  // Upload the captured recording to /api/upload — the same endpoint, and the
+  // same multipart `file` field, the 📎 attach button uses — and drop the
+  // returned path into the terminal like any other attachment, so whatever is
+  // reading the terminal can transcribe it out-of-band. Never a silent
+  // no-op: every failure lands back on a fault that states what broke and
+  // still offers the upload.
+  async function submitPendingAudio() {
+    if (mic.pendingChunks === null) return;
+
+    function audioFault(message) {
+      telemetry.log('mic.audio.upload.err', { message });
+      micFault('audio-upload', message, audioFallbackOpts());
+    }
+
+    let path;
+    try {
+      const wav = encodeWav(mic.pendingChunks, mic.pendingRate);
+      const form = new FormData();
+      form.append('file', wav, `dictation-${Date.now()}.wav`);
+      telemetry.log('mic.audio.upload.req', {
+        bytes: wav.size,
+        durationMs: mic.pendingDurationMs,
+      });
+      const res = await fetch(withNode(u('api/upload'), node), { method: 'POST', body: form });
+      if (destroyed) return;
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        audioFault(res.status + ' ' + (bodyText.slice(0, 120) || res.statusText));
+        return;
+      }
+      ({ path } = await res.json());
+    } catch (err) {
+      if (destroyed) return;
+      audioFault(err?.message || 'upload error');
+      return;
+    }
+    if (destroyed) return;
+    if (!path) {
+      audioFault('upload returned no path');
+      return;
+    }
+
+    telemetry.log('mic.audio.upload.ok');
+    mic.pendingChunks = null;
+    micOverlay.dismiss();
+    send(path);
+    send('\r');
+    onText?.();
+    mic.recording = false;
+    mic.busy = false;
+    mic.paused = false;
+    micLabel('🎤');
   }
 
   // Stop → preview: transcribe, then show REVIEW for the user to edit/confirm.

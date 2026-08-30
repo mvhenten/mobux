@@ -186,6 +186,7 @@ export function createInputBar(engine, send, node = '') {
   const micBtn = document.getElementById('micBtn');
   const dictate = createDictateAction({
     send,
+    node,
     button: micBtn,
     onText: () => input.focus(),
   });
