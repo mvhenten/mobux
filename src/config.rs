@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const SCHEMA_PATH: &str = "docs/mobux.schema.json";
 
+/// The committed schema, embedded so an installed binary can print it without
+/// the repository beside it. A test holds it equal to `schema()`.
+pub const SCHEMA_JSON: &str = include_str!("../docs/mobux.schema.json");
+
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_ACME_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/directory";
 const DEFAULT_ACME_HTTP_PORT: u16 = 80;
@@ -877,20 +881,31 @@ fn edit_distance(left: &str, right: &str) -> usize {
     previous[right_chars.len()]
 }
 
-fn validate(path: &Path, config: &Config) -> Result<(), LoadError> {
-    if let Err(report) = config.validate() {
-        return Err(LoadError::Invalid {
-            path: path.to_path_buf(),
-            message: report.to_string().trim().to_string(),
-        });
-    }
+/// The per-field rules on their own, reported the way the loader reports them.
+///
+/// `mobux configure` checks one answer at a time, so the cross-field rules stay
+/// out of here: a domain list typed before the contact beside it is a valid
+/// answer, not a rejection.
+pub fn check_fields(config: &Config) -> Result<(), String> {
+    config
+        .validate()
+        .map_err(|report| report.to_string().trim().to_string())
+}
+
+/// Every rule, per-field and cross-field, on an assembled tree.
+pub fn check(config: &Config) -> Result<(), String> {
+    check_fields(config)?;
     if !config.tls.acme_domains.is_empty() && config.tls.acme_email.trim().is_empty() {
-        return Err(LoadError::Invalid {
-            path: path.to_path_buf(),
-            message: "tls.acme_email: required when tls.acme_domains is set".to_string(),
-        });
+        return Err("tls.acme_email: required when tls.acme_domains is set".to_string());
     }
     Ok(())
+}
+
+fn validate(path: &Path, config: &Config) -> Result<(), LoadError> {
+    check(config).map_err(|message| LoadError::Invalid {
+        path: path.to_path_buf(),
+        message,
+    })
 }
 
 // ---------------------------------------------------------------------------

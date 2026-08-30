@@ -29,10 +29,21 @@ pub enum UpdateCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigureCommand {
+    /// Walk the prompts and write `config.json`.
+    Interactive { force: bool },
+    /// Print the JSON schema for `config.json`.
+    Schema,
+    /// Validate a config file: the named one, or the one in the config dir.
+    Check(Option<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     Run(CliOverrides),
     Service(ServiceCommand),
     Update(UpdateCommand),
+    Configure(ConfigureCommand),
     Help,
     Version,
     Invalid(String),
@@ -51,6 +62,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
     if args.peek().is_some_and(|arg| arg == "update") {
         args.next();
         return parse_update(args);
+    }
+    if args.peek().is_some_and(|arg| arg == "configure") {
+        args.next();
+        return parse_configure(args);
     }
 
     match parse_flags(args) {
@@ -105,6 +120,56 @@ fn parse_update<I: Iterator<Item = String>>(mut args: I) -> Parsed {
         }
     }
     Parsed::Update(command)
+}
+
+/// `configure` does one of three things, so the flag naming it may appear only
+/// once. `--force` is not one of them; it qualifies the walkthrough.
+fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
+    let mut mode: Option<ConfigureCommand> = None;
+    let mut force = false;
+    let mut args = args.peekable();
+
+    while let Some(arg) = args.next() {
+        let chosen = match arg.as_str() {
+            "--help" | "-h" => return Parsed::Help,
+            "--force" | "-f" => {
+                force = true;
+                continue;
+            }
+            "--interactive" | "-i" => ConfigureCommand::Interactive { force: false },
+            "--schema" => ConfigureCommand::Schema,
+            "--check" => {
+                let path = args.next_if(|next| !next.starts_with('-'));
+                ConfigureCommand::Check(path)
+            }
+            _ => {
+                return Parsed::Invalid(format!(
+                    "unknown argument {arg:?} — `mobux configure` takes --interactive, --schema, \
+                     --check [PATH] or --force"
+                ))
+            }
+        };
+        if mode.is_some() {
+            return Parsed::Invalid(
+                "configure takes one of --interactive, --schema or --check".to_string(),
+            );
+        }
+        mode = Some(chosen);
+    }
+
+    match mode.unwrap_or(ConfigureCommand::Interactive { force: false }) {
+        ConfigureCommand::Interactive { .. } => {
+            Parsed::Configure(ConfigureCommand::Interactive { force })
+        }
+        other if force => Parsed::Invalid(format!(
+            "--force applies to the walkthrough, not to {}",
+            match other {
+                ConfigureCommand::Schema => "--schema",
+                _ => "--check",
+            }
+        )),
+        other => Parsed::Configure(other),
+    }
 }
 
 /// Why the flag walk ended before it produced overrides.
@@ -204,7 +269,9 @@ fn option_for(name: &str) -> Option<(&'static FieldSpec, bool)> {
         .map(|spec| (spec, true))
 }
 
-fn toggle_value(raw: &str) -> Option<bool> {
+/// The spellings a toggle accepts, shared with the `configure` prompts so a
+/// flag and an answer read the same value the same way.
+pub fn toggle_value(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
@@ -221,6 +288,7 @@ pub fn help_text(version: &str) -> String {
 Usage: mobux [OPTIONS]
        mobux service <install|uninstall|status> [OPTIONS]
        mobux update [--check]
+       mobux configure [--force | --schema | --check [PATH]]
 
 Commands:
   service install     Install and start a systemd --user service that survives
@@ -231,6 +299,10 @@ Commands:
   update              Install the latest release over this binary, then restart
                       the systemd --user service when one is installed
   update --check      Report the current and latest version, install nothing
+  configure           Ask for every setting and write config.json, refusing to
+                      overwrite an existing one without --force
+  configure --schema  Print the JSON schema for config.json
+  configure --check   Validate a config file and report what is wrong with it
 
 Options:
 "
@@ -526,6 +598,47 @@ mod tests {
     }
 
     #[test]
+    fn configure_defaults_to_the_walkthrough() {
+        assert_eq!(
+            parse(args(&["configure"])),
+            Parsed::Configure(ConfigureCommand::Interactive { force: false })
+        );
+        assert_eq!(
+            parse(args(&["configure", "--interactive"])),
+            Parsed::Configure(ConfigureCommand::Interactive { force: false })
+        );
+        assert_eq!(
+            parse(args(&["configure", "--force"])),
+            Parsed::Configure(ConfigureCommand::Interactive { force: true })
+        );
+        assert_eq!(parse(args(&["configure", "--help"])), Parsed::Help);
+    }
+
+    #[test]
+    fn configure_schema_and_check_parse() {
+        assert_eq!(
+            parse(args(&["configure", "--schema"])),
+            Parsed::Configure(ConfigureCommand::Schema)
+        );
+        assert_eq!(
+            parse(args(&["configure", "--check"])),
+            Parsed::Configure(ConfigureCommand::Check(None))
+        );
+        assert_eq!(
+            parse(args(&["configure", "--check", "/etc/mobux.json"])),
+            Parsed::Configure(ConfigureCommand::Check(some("/etc/mobux.json")))
+        );
+    }
+
+    #[test]
+    fn configure_takes_one_mode_and_force_only_with_the_walkthrough() {
+        assert!(invalid(&["configure", "--schema", "--check"]).contains("one of"));
+        assert!(invalid(&["configure", "--schema", "--force"]).contains("--schema"));
+        assert!(invalid(&["configure", "--check", "--force"]).contains("--check"));
+        assert!(invalid(&["configure", "--pin", "12345"]).contains("--pin"));
+    }
+
+    #[test]
     fn help_lists_the_flags_and_the_main_env_vars() {
         let help = help_text("1.2.3");
         for expected in [
@@ -534,6 +647,9 @@ mod tests {
             "service status",
             "update",
             "update --check",
+            "configure",
+            "configure --schema",
+            "configure --check",
             "--port",
             "--pin",
             "--user",
