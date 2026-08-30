@@ -2070,6 +2070,106 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     expect(url.searchParams.get("body")).toContain("Fault kind: http");
   });
 
+  // ── regression #302: the first-run model download is not a dead backend ──
+  //
+  // The local speech server pulls its whisper model on the first
+  // transcription request, so a freshly installed and started server fails
+  // the probe for minutes. The overlay read that as "local backend
+  // unreachable" and offered the install button again — the one action that
+  // was never the problem. A running container with a failing probe is
+  // warm-up, and the overlay has to show it as progress and wait it out.
+  async function openModelFault(page, status) {
+    await page.route(/\/api\/stt\/status$/, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(status),
+      }),
+    );
+    await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "networkidle",
+    });
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    await page.evaluate(() => {
+      const bar = document.getElementById("inputBar");
+      if (bar) bar.classList.remove("hidden");
+    });
+    await page.locator("#micBtn").click();
+    await expect(page.locator("#mobux-mic-overlay.fault")).toBeVisible({
+      timeout: 10000,
+    });
+  }
+
+  test("a warming local backend renders as model-download progress, not as an install prompt", async ({
+    page,
+  }) => {
+    // The old 30 s ceiling is the thing under test, so this one has to
+    // outlive it.
+    test.setTimeout(75000);
+    await openModelFault(page, {
+      kind: "local",
+      state: "warming",
+      reachable: false,
+      installed: true,
+      local_process_running: true,
+      podman_missing: false,
+    });
+
+    const hint = page.locator("#mobux-mic-overlay .mo-install-hint");
+    await expect(hint).toBeVisible();
+    await expect(hint).toContainText("Downloading the speech model");
+
+    // The install/start buttons are the wrong answer here — nothing is
+    // missing and nothing is stopped. ("Record anyway", the fault escape
+    // hatch, shares their class and is fine to keep.)
+    expect(
+      await page
+        .locator("#mobux-mic-overlay .mo-install-btn", {
+          hasText: /Install local speech server|Start speech server/,
+        })
+        .count(),
+      "warm-up must not offer install or start",
+    ).toBe(0);
+
+    // And it must not give up on a 30 s clock: still counting well past it.
+    await page.waitForTimeout(35000);
+    await expect(hint).toContainText("Downloading the speech model");
+  });
+
+  test("a host without podman is told so, with the command that installs it", async ({
+    page,
+  }) => {
+    await openModelFault(page, {
+      kind: "local",
+      state: "podman_missing",
+      reachable: false,
+      installed: false,
+      local_process_running: false,
+      podman_missing: true,
+      podman_install_command: "sudo apt-get install -y podman",
+      podman_message:
+        "podman is not installed. The local speech server runs in a podman container — install it with `sudo apt-get install -y podman`, then try again.",
+    });
+
+    const actionArea = page.locator("#mobux-mic-overlay .mo-action-area");
+    await expect(actionArea).toContainText("podman is not installed");
+    await expect(actionArea).toContainText("sudo apt-get install -y podman");
+    expect(
+      await page
+        .locator("#mobux-mic-overlay .mo-install-btn", {
+          hasText: /Install local speech server|Start speech server/,
+        })
+        .count(),
+      "a button that cannot work is worse than the sentence that explains why",
+    ).toBe(0);
+  });
+
   // ── regression: a /transcribe that never responds must still fault loud ──
   //
   // The real bug (#170): a broken STT backend can accept the connection and
