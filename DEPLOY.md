@@ -46,15 +46,73 @@ self-contained binary at `~/.cargo/bin/mobux`. It runs from any directory.
 
 ## Configuration
 
-`mobux --help` lists the flags (`--port`, `--pin`, `--user`) and the main
-environment variables. A flag wins over the variable next to it, which wins
-over the config file at `~/.config/mobux/config.json` (`--config PATH` names
-another one). A PIN on the command line is visible in the process list, so a
-long-running instance should keep it in the config file or in `MOBUX_PIN`.
+`mobux --help` lists every flag and every environment variable. A flag wins over
+the variable next to it, which wins over the config file, which wins over the
+defaults. The file is `config.json` in the config directory: `MOBUX_CONFIG_DIR`,
+else `$XDG_CONFIG_HOME/mobux`, else `~/.config/mobux`. `--config PATH` names
+another file.
 
-The listen port resolves as `--port` → `MOBUX_PORT` → `PORT` → 8080. Bare
-`PORT` is deprecated: it still works, and the server warns at startup until it
-is renamed to `MOBUX_PORT`.
+Anything on the command line is visible to other users in the process list, so a
+long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
+
+### Config reference
+
+| Config key | Environment | Flag | Default | What it sets |
+|---|---|---|---|---|
+| `server.port` | `MOBUX_PORT` | `--port` | `8080` | TCP port to listen on |
+| `server.base_path` | `MOBUX_BASE_PATH` | `--base-path` | site root | Path prefix a reverse proxy publishes mobux under, e.g. `/mobux` |
+| `server.behind_tls_proxy` | `MOBUX_BEHIND_TLS_PROXY` | `--behind-tls-proxy` | `false` | Trust a reverse proxy to terminate TLS |
+| `auth.user` | `MOBUX_AUTH_USER` | `--user` | unset | Username that unlocks the web UI |
+| `auth.pass` | `MOBUX_AUTH_PASS` | `--pass` | unset | Password that unlocks the web UI |
+| `auth.pin` | `MOBUX_PIN` | `--pin` | unset | PIN that unlocks the web UI, 4 to 64 characters |
+| `tls.enabled` | `MOBUX_TLS` | `--tls` | `false` | Serve HTTPS with a generated certificate |
+| `tls.hosts` | `MOBUX_TLS_HOSTS` | `--tls-host` | empty | Extra hostnames on the generated certificate |
+| `tls.cert_file` | `MOBUX_CERT_FILE` | `--cert-file` | unset | Certificate PEM to serve instead of a generated one |
+| `tls.key_file` | `MOBUX_KEY_FILE` | `--key-file` | unset | Private key PEM matching the certificate |
+| `tls.acme_domains` | `MOBUX_ACME_DOMAINS` | `--acme-domain` | empty | Domains to obtain an ACME certificate for. A non-empty list switches TLS into ACME mode |
+| `tls.acme_email` | `MOBUX_ACME_EMAIL` | `--acme-email` | unset | Account contact for the ACME directory. Required in ACME mode |
+| `tls.acme_directory` | `MOBUX_ACME_DIRECTORY` | `--acme-directory` | `https://acme-v02.api.letsencrypt.org/directory` | ACME directory URL |
+| `tls.acme_http_port` | `MOBUX_ACME_HTTP_PORT` | `--acme-http-port` | `80` | Port the HTTP-01 challenge responder binds |
+| `paths.data_dir` | `MOBUX_DATA_DIR` | `--data-dir` | `~/.local/share/mobux` | Directory for the database and other state |
+| `session.shell` | `MOBUX_SESSION_SHELL` | `--shell` | `$SHELL`, else `/bin/bash` | Shell to launch inside tmux |
+| `app.domain` | `MOBUX_DOMAIN` | `--domain` | unset | Public `host` or `host:port` the Android app is pinned to |
+| `app.dev` | `MOBUX_DEV` | `--dev` | `false` | Dev mode, reported through `/api/build-info` |
+| `app.service_name` | `MOBUX_SERVICE_NAME` | `--service-name` | `mobux` | systemd unit the self-updater restarts |
+| `push.vapid_contact` | `MOBUX_VAPID_CONTACT` | `--vapid-contact` | `mailto:admin@example.com` | VAPID contact, a `mailto:` address or an `https://` URL |
+| `update.check_url` | `MOBUX_UPDATE_CHECK_URL` | `--update-check-url` | `https://index.crates.io/mo/bu/mobux` | Where the version list is fetched from |
+
+Config keys nest. `server.port` is `{"server": {"port": 5151}}`, and only the
+keys a file states override a default.
+
+Toggles take `--flag` to turn on and `--no-flag` to turn off. `--flag=` also
+takes `1`, `true`, `yes`, `on`, `0`, `false`, `no` and `off`. `MOBUX_TLS` reads
+any value other than `0` and `false` as on; every other toggle variable wants
+`1` or `true`.
+
+List flags repeat, or take one comma-separated value. Their environment
+variables are comma separated.
+
+### The schema
+
+`mobux configure --schema` prints the JSON schema for `config.json`. The same
+document is committed at [`docs/mobux.schema.json`](docs/mobux.schema.json); no
+route serves it. `mobux configure --check [PATH]` validates a file and reports
+what is wrong with it, naming the key and, for a near miss, the spelling it
+expected. The loader rejects any key it does not know, `$schema` included, so
+the file carries no schema pointer of its own.
+
+### Environment only
+
+These four have no config-file key.
+
+| Variable | What it does |
+|---|---|
+| `PORT` | Deprecated alias for `MOBUX_PORT`. The server warns at startup: `PORT is deprecated; rename it to MOBUX_PORT` |
+| `MOBUX_CONFIG_DIR` | Directory holding `config.json`, ahead of `$XDG_CONFIG_HOME/mobux` and `~/.config/mobux` |
+| `MOBUX_UPDATE_DISABLE_RUN` | Refuses the in-app update on this host |
+| `MOBUX_TMUX_SOCKET` | Names a dedicated tmux server socket, for test isolation |
+
+mobux resolves the listen port as `--port`, `MOBUX_PORT`, `PORT`, then `8080`.
 
 ## Run as a boot-persistent service (`:5151`)
 
@@ -126,7 +184,8 @@ so fingerprints survive rebuilds and reinstalls.
 Verify the embed + service:
 
 ```bash
-curl -sk -u "$MOBUX_AUTH_USER:$MOBUX_PIN" https://localhost:5151/static/style.css   # 200 → served from the binary
+curl -s -u "$MOBUX_AUTH_USER:$MOBUX_PIN" http://localhost:5151/static/style.css   # 200 → served from the binary
+# with TLS on: curl -sk … https://localhost:5151/static/style.css
 systemctl --user status mobux
 journalctl --user -u mobux -f
 ```
@@ -137,6 +196,62 @@ journalctl --user -u mobux -f
 cargo install mobux --locked        # or the --git form
 systemctl --user restart mobux      # sub-second swap; :5151 barely blinks
 ```
+
+## Behind a reverse proxy
+
+mobux builds every URL relative to the page it serves, so a proxy can publish it
+under any path prefix. Three settings cover what a relative URL cannot.
+
+```json
+{
+  "tls": { "enabled": false },
+  "server": { "behind_tls_proxy": true, "base_path": "/mobux" }
+}
+```
+
+`tls.enabled` false is the default: the proxy terminates TLS and mobux binds
+plain HTTP.
+
+`server.behind_tls_proxy` true keeps the `Secure` flag on the session cookie and
+silences the clear-text warning. Set it only when TLS really terminates in
+front. On a plain-HTTP deployment the browser refuses a `Secure` cookie, and
+every request then falls back to a fresh Basic-auth prompt.
+
+`server.base_path` is the prefix the browser is on. The proxy strips it before
+mobux sees the request, so routing never reads it. It scopes the session
+cookie's `Path`: without it the cookie is scoped to `/` and travels to every
+other app the same proxy fronts. The value must start with `/` and must not
+contain `..` or `;`. A trailing slash is normalised away.
+
+Nothing else needs configuring. Assets, redirects and API calls are all relative
+to the served page.
+
+### Limits behind a path prefix
+
+The Android app cannot be installed from a prefixed mount. Android fetches the
+Digital Asset Links file from `https://<host>/.well-known/assetlinks.json` at
+the origin root ([Android
+docs](https://developer.android.com/training/app-links/verify-android-applinks)).
+mobux serves that file under its own mount, so behind `/mobux` it answers at
+`/mobux/.well-known/assetlinks.json` and verification never finds it. Serve
+mobux at the origin root to install the app.
+
+Set `app.domain` to the public address. Left unset, the APK is pinned to the
+host on the request's `Host` header, which behind a proxy is whatever the proxy
+forwards rather than the address the phone uses.
+
+## Upgrade notes
+
+TLS is off by default. A deployment where mobux terminates HTTPS itself must ask
+for it: `tls.enabled` true, `MOBUX_TLS=1`, or `--tls`. With auth on, TLS off and
+no `server.behind_tls_proxy`, the server prints a clear-text warning at startup.
+
+`GET /` answers 307 with `Location: app`, resolved against the request URL, so
+the redirect lands inside a proxy's path prefix.
+
+An unmatched path answers 200 with the SPA shell, which routes it client-side.
+
+`GET /app/<rest>` answers 307 back to `app`, one `../` per segment of `<rest>`.
 
 ## Release & publish (crates.io)
 

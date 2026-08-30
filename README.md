@@ -34,7 +34,7 @@ mobux is meant to live on your private network, not the open internet.
 
 - **Private by network.** The intended deployment is behind [Tailscale](https://tailscale.com/): mobux is reachable only on your tailnet, never exposed publicly. The voice transcription recipe is the same — tailnet-only, no public surface.
 - **HTTPS on request.** mobux serves plain HTTP by default, which is what you want behind a reverse proxy or a tunnel that already terminates TLS. Pass `--tls` (or set `MOBUX_TLS=1`) and it generates and manages its own CA so phones can trust it — the `/install` page walks you through adding the cert — or obtains a real Let's Encrypt certificate via ACME if you give it a public domain. Turn it on when nothing else terminates TLS: on a bare tailnet the credentials would otherwise cross the wire in clear text, and mobux says so loudly at startup.
-- **PIN / Basic auth.** Access is gated by HTTP Basic auth with a user and PIN you set via environment variables.
+- **PIN / Basic auth.** Access is gated by HTTP Basic auth with a user and PIN you set in the config file, in an environment variable, or on the command line.
 
 ## Quick start
 
@@ -80,6 +80,8 @@ make twa MOBUX_DOMAIN=mobux.example.com:5151   # build the signed Android app
 ```
 
 Deploying to a phone (building the Android package, CA cert install, APK download, QR handoff) is self-service from the `/install` page — `make twa` is the same build for anyone who prefers a terminal. The full production runbook — systemd service, releasing, isolated dev instances — is in **[DEPLOY.md](DEPLOY.md)**.
+
+Every setting, with its config-file key, environment variable and flag, is in the [config reference](DEPLOY.md#config-reference). `mobux configure` writes the file for you and `mobux configure --schema` prints its JSON schema. Running mobux behind a TLS-terminating path-prefix proxy takes three settings: [behind a reverse proxy](DEPLOY.md#behind-a-reverse-proxy).
 
 ## Architecture at a glance
 
