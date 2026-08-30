@@ -381,6 +381,20 @@ pub struct PartialUpdateConfig {
     pub check_url: Option<String>,
 }
 
+impl PartialConfig {
+    pub fn server_port(&self) -> Option<u16> {
+        self.server.as_ref().and_then(|server| server.port)
+    }
+
+    pub fn auth_user(&self) -> Option<String> {
+        self.auth.as_ref().and_then(|auth| auth.user.clone())
+    }
+
+    pub fn auth_pin(&self) -> Option<String> {
+        self.auth.as_ref().and_then(|auth| auth.pin.clone())
+    }
+}
+
 impl Config {
     /// Overlay a partial onto this config. A stated leaf wins; anything absent
     /// keeps the value it already had.
@@ -434,6 +448,26 @@ fn overlay<T>(target: &mut T, value: Option<T>) {
 // Field metadata
 // ---------------------------------------------------------------------------
 
+/// What a field carries, and so how a command line spells it: a bare `--flag`
+/// and `--no-flag` pair for a toggle, a repeatable comma-separated value for a
+/// list, one value for the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Number,
+    Text,
+    Toggle,
+    List,
+}
+
+/// One field's value, already parsed out of whatever spelled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    Number(u16),
+    Text(String),
+    Toggle(bool),
+    List(Vec<String>),
+}
+
 /// A file key and the environment variable and flag that override it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldSpec {
@@ -441,6 +475,9 @@ pub struct FieldSpec {
     pub key: &'static str,
     pub env: &'static str,
     pub flag: Option<&'static str>,
+    pub kind: FieldKind,
+    /// One line, as it reads in `--help`.
+    pub help: &'static str,
 }
 
 /// Every settable field, with the environment variable and flag beside it.
@@ -449,98 +486,182 @@ pub const FIELDS: &[FieldSpec] = &[
         key: "server.port",
         env: "MOBUX_PORT",
         flag: Some("--port"),
+        kind: FieldKind::Number,
+        help: "Port to listen on (default 8080)",
     },
     FieldSpec {
         key: "auth.user",
         env: "MOBUX_AUTH_USER",
         flag: Some("--user"),
+        kind: FieldKind::Text,
+        help: "Username to unlock the web UI (default mobux)",
     },
     FieldSpec {
         key: "auth.pass",
         env: "MOBUX_AUTH_PASS",
-        flag: None,
+        flag: Some("--pass"),
+        kind: FieldKind::Text,
+        help: "Password to unlock the web UI",
     },
     FieldSpec {
         key: "auth.pin",
         env: "MOBUX_PIN",
         flag: Some("--pin"),
+        kind: FieldKind::Text,
+        help: "PIN to unlock the web UI",
     },
     FieldSpec {
         key: "tls.enabled",
         env: "MOBUX_TLS",
-        flag: None,
+        flag: Some("--tls"),
+        kind: FieldKind::Toggle,
+        help: "Serve HTTPS with a generated certificate (default on)",
     },
     FieldSpec {
         key: "tls.hosts",
         env: "MOBUX_TLS_HOSTS",
-        flag: None,
+        flag: Some("--tls-host"),
+        kind: FieldKind::List,
+        help: "Extra hostname on the generated certificate",
     },
     FieldSpec {
         key: "tls.cert_file",
         env: "MOBUX_CERT_FILE",
-        flag: None,
+        flag: Some("--cert-file"),
+        kind: FieldKind::Text,
+        help: "Certificate PEM to serve instead of a generated one",
     },
     FieldSpec {
         key: "tls.key_file",
         env: "MOBUX_KEY_FILE",
-        flag: None,
+        flag: Some("--key-file"),
+        kind: FieldKind::Text,
+        help: "Private key PEM matching the certificate",
     },
     FieldSpec {
         key: "tls.acme_domains",
         env: "MOBUX_ACME_DOMAINS",
-        flag: None,
+        flag: Some("--acme-domain"),
+        kind: FieldKind::List,
+        help: "Domain to obtain an ACME certificate for",
     },
     FieldSpec {
         key: "tls.acme_email",
         env: "MOBUX_ACME_EMAIL",
-        flag: None,
+        flag: Some("--acme-email"),
+        kind: FieldKind::Text,
+        help: "Account contact for the ACME directory",
     },
     FieldSpec {
         key: "tls.acme_directory",
         env: "MOBUX_ACME_DIRECTORY",
-        flag: None,
+        flag: Some("--acme-directory"),
+        kind: FieldKind::Text,
+        help: "ACME directory URL",
     },
     FieldSpec {
         key: "tls.acme_http_port",
         env: "MOBUX_ACME_HTTP_PORT",
-        flag: None,
+        flag: Some("--acme-http-port"),
+        kind: FieldKind::Number,
+        help: "Port the HTTP-01 challenge responder binds (default 80)",
     },
     FieldSpec {
         key: "paths.data_dir",
         env: "MOBUX_DATA_DIR",
-        flag: None,
+        flag: Some("--data-dir"),
+        kind: FieldKind::Text,
+        help: "Directory for the database and other state",
     },
     FieldSpec {
         key: "session.shell",
         env: "MOBUX_SESSION_SHELL",
-        flag: None,
+        flag: Some("--shell"),
+        kind: FieldKind::Text,
+        help: "Shell to launch inside tmux (default $SHELL)",
     },
     FieldSpec {
         key: "app.domain",
         env: "MOBUX_DOMAIN",
-        flag: None,
+        flag: Some("--domain"),
+        kind: FieldKind::Text,
+        help: "Public host:port the Android app is pinned to",
     },
     FieldSpec {
         key: "app.dev",
         env: "MOBUX_DEV",
-        flag: None,
+        flag: Some("--dev"),
+        kind: FieldKind::Toggle,
+        help: "Dev mode, reported through /api/build-info",
     },
     FieldSpec {
         key: "app.service_name",
         env: "MOBUX_SERVICE_NAME",
-        flag: None,
+        flag: Some("--service-name"),
+        kind: FieldKind::Text,
+        help: "systemd unit the self-updater restarts (default mobux)",
     },
     FieldSpec {
         key: "push.vapid_contact",
         env: "MOBUX_VAPID_CONTACT",
-        flag: None,
+        flag: Some("--vapid-contact"),
+        kind: FieldKind::Text,
+        help: "VAPID contact, a mailto: address or an https:// URL",
     },
     FieldSpec {
         key: "update.check_url",
         env: "MOBUX_UPDATE_CHECK_URL",
-        flag: None,
+        flag: Some("--update-check-url"),
+        kind: FieldKind::Text,
+        help: "Where the version list is fetched from",
     },
 ];
+
+/// Build a partial out of the fields a caller collected, keyed by
+/// `FieldSpec::key`. The document the file format already describes is the only
+/// definition of the tree, so the keys are routed through it rather than
+/// through a second copy of the structure. A list extends what is already
+/// there, so a repeated flag accumulates.
+pub fn partial_from_fields(fields: &[(&str, FieldValue)]) -> PartialConfig {
+    let mut root = serde_json::Map::new();
+    for (key, value) in fields {
+        insert_field(&mut root, key, value);
+    }
+    serde_json::from_value(serde_json::Value::Object(root))
+        .expect("every field key names a leaf of the partial tree")
+}
+
+fn insert_field(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &FieldValue,
+) {
+    let (section, leaf) = key.split_once('.').expect("a dotted field key");
+    let section = root
+        .entry(section)
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .expect("a section object");
+    match value {
+        FieldValue::Number(number) => {
+            section.insert(leaf.to_string(), serde_json::Value::from(*number));
+        }
+        FieldValue::Text(text) => {
+            section.insert(leaf.to_string(), serde_json::Value::from(text.clone()));
+        }
+        FieldValue::Toggle(on) => {
+            section.insert(leaf.to_string(), serde_json::Value::from(*on));
+        }
+        FieldValue::List(items) => {
+            let list = section
+                .entry(leaf)
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("a list");
+            list.extend(items.iter().cloned().map(serde_json::Value::from));
+        }
+    }
+}
 
 /// Environment variables that deliberately have no file key: they locate the
 /// file itself, name a deprecated alias, or exist only for tests and the
@@ -916,12 +1037,7 @@ pub fn flags_partial(
 /// `Some` when the resolved port came from the deprecated bare `PORT`, so the
 /// caller can warn once at startup.
 pub fn port_deprecation(env: &EnvSnapshot, flags: &PartialConfig) -> Option<&'static str> {
-    if flags
-        .server
-        .as_ref()
-        .and_then(|server| server.port)
-        .is_some()
-    {
+    if flags.server_port().is_some() {
         return None;
     }
     if env.get("MOBUX_PORT").and_then(parse_u16).is_some() {
@@ -966,7 +1082,9 @@ fn parse_u16(value: &str) -> Option<u16> {
     value.trim().parse::<u16>().ok()
 }
 
-fn split_list(value: &str) -> Vec<String> {
+/// A comma-separated list, the spelling both the environment and a list flag
+/// use.
+pub fn split_list(value: &str) -> Vec<String> {
     value
         .split(',')
         .map(|item| item.trim().to_string())
@@ -1839,6 +1957,61 @@ mod tests {
             PartialConfig::default(),
         );
         assert_eq!(config.credentials(), creds("me", "secret"));
+    }
+
+    fn sample_value(kind: FieldKind) -> FieldValue {
+        match kind {
+            FieldKind::Number => FieldValue::Number(8443),
+            FieldKind::Text => FieldValue::Text("sample".to_string()),
+            FieldKind::Toggle => FieldValue::Toggle(false),
+            FieldKind::List => FieldValue::List(vec!["sample.example".to_string()]),
+        }
+    }
+
+    #[test]
+    fn every_field_kind_matches_the_type_in_the_schema() {
+        let schema = schema();
+        for field in FIELDS {
+            let node = schema_node(&schema, field.key);
+            let expected = match field.kind {
+                FieldKind::Number => "integer",
+                FieldKind::Text => "string",
+                FieldKind::Toggle => "boolean",
+                FieldKind::List => "array",
+            };
+            assert_eq!(
+                node["type"],
+                serde_json::json!(expected),
+                "{} is a {:?} in the table",
+                field.key,
+                field.kind
+            );
+        }
+    }
+
+    #[test]
+    fn every_field_key_reaches_its_leaf_of_the_partial() {
+        for field in FIELDS {
+            let partial = partial_from_fields(&[(field.key, sample_value(field.kind))]);
+            assert_ne!(
+                partial,
+                PartialConfig::default(),
+                "{} set nothing",
+                field.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_list_field_accumulates() {
+        let partial = partial_from_fields(&[
+            ("tls.hosts", FieldValue::List(vec!["a.example".to_string()])),
+            ("tls.hosts", FieldValue::List(vec!["b.example".to_string()])),
+        ]);
+        assert_eq!(
+            partial.tls.and_then(|tls| tls.hosts),
+            Some(vec!["a.example".to_string(), "b.example".to_string()])
+        );
     }
 
     #[test]

@@ -1,15 +1,18 @@
 use std::fmt::Write as _;
 
+use crate::config::{self, FieldKind, FieldSpec, FieldValue, FIELDS};
+
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_USER: &str = "mobux";
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct CliOverrides {
-    pub port: Option<u16>,
-    pub pin: Option<String>,
-    pub user: Option<String>,
-}
+/// What the command line states, in the shape the config file states it. The
+/// flags are the same surface as the file and the environment, so they land in
+/// the same tree.
+pub type CliOverrides = config::PartialConfig;
 
+// `install` carries the whole config surface; boxing it to shrink a value that
+// is built once at startup would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceCommand {
     Install(CliOverrides),
@@ -51,10 +54,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
     }
 
     match parse_flags(args) {
-        Flags::Overrides(overrides) => Parsed::Run(overrides),
-        Flags::Help => Parsed::Help,
-        Flags::Version => Parsed::Version,
-        Flags::Invalid(message) => Parsed::Invalid(message),
+        Ok(overrides) => Parsed::Run(overrides),
+        Err(stop) => stop.parsed(),
     }
 }
 
@@ -68,10 +69,8 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
     match subcommand.as_str() {
         "--help" | "-h" => Parsed::Help,
         "install" => match parse_flags(args) {
-            Flags::Overrides(overrides) => Parsed::Service(ServiceCommand::Install(overrides)),
-            Flags::Help => Parsed::Help,
-            Flags::Version => Parsed::Version,
-            Flags::Invalid(message) => Parsed::Invalid(message),
+            Ok(overrides) => Parsed::Service(ServiceCommand::Install(overrides)),
+            Err(stop) => stop.parsed(),
         },
         "uninstall" | "status" => {
             let command = match subcommand.as_str() {
@@ -108,15 +107,25 @@ fn parse_update<I: Iterator<Item = String>>(mut args: I) -> Parsed {
     Parsed::Update(command)
 }
 
-enum Flags {
-    Overrides(CliOverrides),
+/// Why the flag walk ended before it produced overrides.
+enum Stop {
     Help,
     Version,
     Invalid(String),
 }
 
-fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Flags {
-    let mut overrides = CliOverrides::default();
+impl Stop {
+    fn parsed(self) -> Parsed {
+        match self {
+            Stop::Help => Parsed::Help,
+            Stop::Version => Parsed::Version,
+            Stop::Invalid(message) => Parsed::Invalid(message),
+        }
+    }
+}
+
+fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Result<CliOverrides, Stop> {
+    let mut fields: Vec<(&'static str, FieldValue)> = Vec::new();
     let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
@@ -125,32 +134,82 @@ fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Flags {
             None => (arg.clone(), None),
         };
 
-        match name.as_str() {
-            "--help" | "-h" => return Flags::Help,
-            "--version" | "-V" => return Flags::Version,
-            "--port" | "--pin" | "--user" => {
-                let value = match inline_value.or_else(|| args.next()) {
-                    Some(value) => value,
-                    None => return Flags::Invalid(format!("{name} needs a value")),
-                };
-                match name.as_str() {
-                    "--port" => match value.trim().parse::<u16>() {
-                        Ok(port) => overrides.port = Some(port),
-                        Err(_) => {
-                            return Flags::Invalid(format!(
-                                "--port needs a number between 0 and 65535, got {value:?}"
-                            ))
-                        }
-                    },
-                    "--pin" => overrides.pin = Some(value.trim().to_string()),
-                    _ => overrides.user = Some(value.trim().to_string()),
-                }
+        if name == "--help" || name == "-h" {
+            return Err(Stop::Help);
+        }
+        if name == "--version" || name == "-V" {
+            return Err(Stop::Version);
+        }
+
+        let Some((spec, negated)) = option_for(&name) else {
+            return Err(Stop::Invalid(format!("unknown argument {arg:?}")));
+        };
+
+        if negated {
+            if inline_value.is_some() {
+                return Err(Stop::Invalid(format!("{name} takes no value")));
             }
-            _ => return Flags::Invalid(format!("unknown argument {arg:?}")),
+            fields.push((spec.key, FieldValue::Toggle(false)));
+            continue;
+        }
+
+        if spec.kind == FieldKind::Toggle {
+            let on = match &inline_value {
+                None => true,
+                Some(raw) => match toggle_value(raw) {
+                    Some(on) => on,
+                    None => {
+                        return Err(Stop::Invalid(format!(
+                            "{name} needs true or false, got {raw:?}"
+                        )))
+                    }
+                },
+            };
+            fields.push((spec.key, FieldValue::Toggle(on)));
+            continue;
+        }
+
+        let Some(value) = inline_value.or_else(|| args.next()) else {
+            return Err(Stop::Invalid(format!("{name} needs a value")));
+        };
+
+        match spec.kind {
+            FieldKind::Number => match value.trim().parse::<u16>() {
+                Ok(number) => fields.push((spec.key, FieldValue::Number(number))),
+                Err(_) => {
+                    return Err(Stop::Invalid(format!(
+                        "{name} needs a number between 0 and 65535, got {value:?}"
+                    )))
+                }
+            },
+            FieldKind::List => {
+                fields.push((spec.key, FieldValue::List(config::split_list(&value))))
+            }
+            _ => fields.push((spec.key, FieldValue::Text(value.trim().to_string()))),
         }
     }
 
-    Flags::Overrides(overrides)
+    Ok(config::partial_from_fields(&fields))
+}
+
+/// The field a flag names, and whether it was the `--no-` half of a toggle.
+fn option_for(name: &str) -> Option<(&'static FieldSpec, bool)> {
+    if let Some(spec) = FIELDS.iter().find(|spec| spec.flag == Some(name)) {
+        return Some((spec, false));
+    }
+    let positive = format!("--{}", name.strip_prefix("--no-")?);
+    FIELDS
+        .iter()
+        .find(|spec| spec.flag == Some(positive.as_str()) && spec.kind == FieldKind::Toggle)
+        .map(|spec| (spec, true))
+}
+
+fn toggle_value(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 pub fn help_text(version: &str) -> String {
@@ -165,8 +224,8 @@ Usage: mobux [OPTIONS]
 
 Commands:
   service install     Install and start a systemd --user service that survives
-                      a reboot. Takes the same --port/--user/--pin flags; a
-                      username and PIN are required.
+                      a reboot. Takes the same options; a username and PIN are
+                      required.
   service uninstall   Stop, disable and remove that service
   service status      Show the service's systemd status
   update              Install the latest release over this binary, then restart
@@ -174,25 +233,54 @@ Commands:
   update --check      Report the current and latest version, install nothing
 
 Options:
-      --port <PORT>   Port to listen on (default {DEFAULT_PORT})
-      --pin <PIN>     PIN to unlock the web UI
-      --user <USER>   Username to unlock the web UI (default {DEFAULT_USER})
-  -h, --help          Print this help
-  -V, --version       Print the version
+"
+    );
 
-Environment:
-  MOBUX_PORT          Port to listen on (default {DEFAULT_PORT})
-  MOBUX_AUTH_USER     Username to unlock the web UI
-  MOBUX_PIN           PIN to unlock the web UI
-  MOBUX_TLS           HTTPS with a generated cert, on unless 0 or false
-  MOBUX_DOMAIN        Public host:port the Android app is pinned to
+    let mut options: Vec<(String, &str)> = FIELDS
+        .iter()
+        .filter_map(|spec| Some((option_column(spec.flag?, spec.kind), spec.help)))
+        .collect();
+    options.push(("  -h, --help".to_string(), "Print this help"));
+    options.push(("  -V, --version".to_string(), "Print the version"));
+    let width = column_width(options.iter().map(|(left, _)| left.as_str()));
+    for (left, help) in &options {
+        let _ = writeln!(out, "{left:width$}  {help}");
+    }
 
-A flag wins over the environment variable next to it. Anything on the command
-line is visible to other users in the process list, so prefer MOBUX_PIN on a
-shared host.
+    let _ = writeln!(out, "\nEnvironment:");
+    let width = column_width(FIELDS.iter().map(|spec| spec.env)) + 2;
+    for spec in FIELDS {
+        let _ = writeln!(out, "  {:width$}{}", spec.env, spec.help, width = width);
+    }
+
+    let _ = write!(
+        out,
+        "
+A flag wins over the environment variable next to it. A list flag may be
+repeated or take a comma-separated value. Anything on the command line is
+visible to other users in the process list, so prefer MOBUX_PIN on a shared
+host.
 "
     );
     out
+}
+
+fn option_column(flag: &str, kind: FieldKind) -> String {
+    if kind == FieldKind::Toggle {
+        return format!("      {flag}, --no-{}", flag.trim_start_matches("--"));
+    }
+    let placeholder = flag
+        .trim_start_matches("--")
+        .to_uppercase()
+        .replace('-', "_");
+    format!("      {flag} <{placeholder}>")
+}
+
+fn column_width<'a, I: Iterator<Item = &'a str>>(columns: I) -> usize {
+    columns
+        .map(|column| column.chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 /// `--port` wins over `MOBUX_PORT`, which wins over the deprecated bare `PORT`.
@@ -266,6 +354,20 @@ mod tests {
         Some(value.to_string())
     }
 
+    fn run(list: &[&str]) -> CliOverrides {
+        match parse(args(list)) {
+            Parsed::Run(overrides) => overrides,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    fn invalid(list: &[&str]) -> String {
+        match parse(args(list)) {
+            Parsed::Invalid(message) => message,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
     #[test]
     fn no_arguments_leaves_every_override_empty() {
         assert_eq!(parse(args(&[])), Parsed::Run(CliOverrides::default()));
@@ -274,9 +376,13 @@ mod tests {
     #[test]
     fn flags_take_a_separate_or_inline_value() {
         let expected = Parsed::Run(CliOverrides {
-            port: Some(5151),
-            pin: some("12345"),
-            user: some("dogwalker"),
+            server: Some(config::PartialServerConfig { port: Some(5151) }),
+            auth: Some(config::PartialAuthConfig {
+                pin: some("12345"),
+                user: some("dogwalker"),
+                ..Default::default()
+            }),
+            ..Default::default()
         });
         assert_eq!(
             parse(args(&[
@@ -348,9 +454,13 @@ mod tests {
                 "service", "install", "--port", "5151", "--user", "walker", "--pin", "99999"
             ])),
             Parsed::Service(ServiceCommand::Install(CliOverrides {
-                port: Some(5151),
-                pin: some("99999"),
-                user: some("walker"),
+                server: Some(config::PartialServerConfig { port: Some(5151) }),
+                auth: Some(config::PartialAuthConfig {
+                    pin: some("99999"),
+                    user: some("walker"),
+                    ..Default::default()
+                }),
+                ..Default::default()
             }))
         );
         assert!(matches!(
@@ -438,6 +548,199 @@ mod tests {
         ] {
             assert!(help.contains(expected), "help is missing {expected}");
         }
+    }
+
+    #[test]
+    fn every_schema_field_has_a_flag_the_parser_accepts() {
+        for spec in FIELDS {
+            let flag = spec
+                .flag
+                .unwrap_or_else(|| panic!("{} has no flag", spec.key));
+            let overrides = match spec.kind {
+                FieldKind::Toggle => run(&[flag]),
+                FieldKind::Number => run(&[flag, "8443"]),
+                _ => run(&[flag, "sample.example"]),
+            };
+            assert_ne!(
+                overrides,
+                CliOverrides::default(),
+                "{flag} set nothing on the tree"
+            );
+        }
+    }
+
+    #[test]
+    fn every_toggle_has_a_no_form_that_turns_it_off() {
+        let toggles = FIELDS.iter().filter(|spec| spec.kind == FieldKind::Toggle);
+        for spec in toggles {
+            let flag = spec.flag.expect("a toggle has a flag");
+            let negated = format!("--no-{}", flag.trim_start_matches("--"));
+            assert_ne!(run(&[flag]), run(&[&negated]), "{flag} and {negated} agree");
+            assert_eq!(run(&[flag]), run(&[&format!("{flag}=true")]));
+            assert_eq!(run(&[&negated]), run(&[&format!("{flag}=0")]));
+        }
+    }
+
+    #[test]
+    fn the_tls_flags_land_in_the_tls_section() {
+        let tls = run(&[
+            "--no-tls",
+            "--tls-host",
+            "a.example",
+            "--cert-file",
+            "/etc/cert.pem",
+            "--key-file",
+            "/etc/key.pem",
+            "--acme-domain",
+            "b.example,c.example",
+            "--acme-email",
+            "me@example.com",
+            "--acme-directory",
+            "https://acme.example/dir",
+            "--acme-http-port",
+            "8081",
+        ])
+        .tls
+        .expect("a tls section");
+
+        assert_eq!(tls.enabled, Some(false));
+        assert_eq!(tls.hosts, Some(vec!["a.example".to_string()]));
+        assert_eq!(tls.cert_file.as_deref(), Some("/etc/cert.pem"));
+        assert_eq!(tls.key_file.as_deref(), Some("/etc/key.pem"));
+        assert_eq!(
+            tls.acme_domains,
+            Some(vec!["b.example".to_string(), "c.example".to_string()])
+        );
+        assert_eq!(tls.acme_email.as_deref(), Some("me@example.com"));
+        assert_eq!(
+            tls.acme_directory.as_deref(),
+            Some("https://acme.example/dir")
+        );
+        assert_eq!(tls.acme_http_port, Some(8081));
+    }
+
+    #[test]
+    fn a_repeated_list_flag_accumulates() {
+        let hosts = run(&["--tls-host", "a.example", "--tls-host=b.example"])
+            .tls
+            .and_then(|tls| tls.hosts);
+        assert_eq!(
+            hosts,
+            Some(vec!["a.example".to_string(), "b.example".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_remaining_flags_land_in_their_own_sections() {
+        let overrides = run(&[
+            "--pass",
+            "secret",
+            "--data-dir",
+            "/srv/mobux",
+            "--shell",
+            "/bin/zsh",
+            "--domain",
+            "mobux.example:5151",
+            "--dev",
+            "--service-name",
+            "mobux-dev",
+            "--vapid-contact",
+            "mailto:me@example.com",
+            "--update-check-url",
+            "https://index.example/mobux",
+        ]);
+
+        assert_eq!(
+            overrides.auth.and_then(|auth| auth.pass).as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            overrides.paths.and_then(|paths| paths.data_dir).as_deref(),
+            Some("/srv/mobux")
+        );
+        assert_eq!(
+            overrides
+                .session
+                .and_then(|session| session.shell)
+                .as_deref(),
+            Some("/bin/zsh")
+        );
+        assert_eq!(
+            overrides
+                .push
+                .and_then(|push| push.vapid_contact)
+                .as_deref(),
+            Some("mailto:me@example.com")
+        );
+        assert_eq!(
+            overrides
+                .update
+                .and_then(|update| update.check_url)
+                .as_deref(),
+            Some("https://index.example/mobux")
+        );
+
+        let app = overrides.app.expect("an app section");
+        assert_eq!(app.domain.as_deref(), Some("mobux.example:5151"));
+        assert_eq!(app.dev, Some(true));
+        assert_eq!(app.service_name.as_deref(), Some("mobux-dev"));
+    }
+
+    #[test]
+    fn the_flags_merge_onto_the_config_tree() {
+        let config = config::Config::default().merged(run(&[
+            "--port",
+            "5151",
+            "--no-tls",
+            "--data-dir",
+            "/srv/mobux",
+        ]));
+        assert_eq!(config.server.port, 5151);
+        assert!(!config.tls.enabled);
+        assert_eq!(config.paths.data_dir, "/srv/mobux");
+        assert_eq!(config.app.service_name, "mobux");
+    }
+
+    #[test]
+    fn a_toggle_rejects_a_value_it_cannot_read() {
+        assert!(invalid(&["--tls=maybe"]).contains("--tls"), "message");
+        assert!(invalid(&["--no-tls=1"]).contains("takes no value"));
+    }
+
+    #[test]
+    fn every_new_flag_is_rejected_without_a_value() {
+        let valued = FIELDS
+            .iter()
+            .filter(|spec| !matches!(spec.kind, FieldKind::Toggle));
+        for spec in valued {
+            let flag = spec.flag.expect("a flag");
+            assert!(
+                invalid(&[flag]).contains(flag),
+                "{flag} was accepted without a value"
+            );
+        }
+    }
+
+    #[test]
+    fn service_install_takes_the_whole_option_surface() {
+        assert_eq!(
+            parse(args(&["service", "install", "--data-dir", "/srv/mobux"])),
+            Parsed::Service(ServiceCommand::Install(run(&["--data-dir", "/srv/mobux"])))
+        );
+    }
+
+    #[test]
+    fn help_lists_every_flag_and_environment_variable() {
+        let help = help_text("1.2.3");
+        for spec in FIELDS {
+            assert!(
+                help.contains(spec.flag.expect("a flag")),
+                "help is missing the flag for {}",
+                spec.key
+            );
+            assert!(help.contains(spec.env), "help is missing {}", spec.env);
+        }
+        assert!(help.contains("--no-tls"), "help is missing --no-tls");
     }
 
     #[test]
