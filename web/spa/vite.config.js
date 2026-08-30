@@ -101,12 +101,21 @@ export default defineConfig(({ command }) => ({
       },
     },
   },
-  // Build output lands in web/static/spa so the Rust backend can serve it from
-  // the existing /static handler in a later phase (NOT wired this phase). The
-  // SPA's own asset base is /static/spa/ to match that future mount point.
+  // Build output lands in web/static/spa, served by the Rust backend's /static
+  // handler. The dev server keeps the absolute base so the SPA is reachable at
+  // /static/spa/ on :5173 and lib/base.js finds its marker in dev too.
   base: '/static/spa/',
   build: {
     outDir: '../static/spa',
     emptyOutDir: true,
+  },
+  // The built document is served at <prefix>/app behind a path-prefixing proxy
+  // that strips its prefix before mobux sees the request, so a root-absolute
+  // asset URL walks the browser out of the mount. `./static/spa/…` resolves
+  // against the document's directory — <prefix>/ for /app — and lands inside it
+  // at every mount, the bare root included. Vite rejects a relative `base` that
+  // is not exactly `./`, so the relative form is applied here instead.
+  experimental: {
+    renderBuiltUrl: (filename) => `./static/spa/${filename}`,
   },
 }));

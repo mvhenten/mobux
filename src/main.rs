@@ -549,15 +549,19 @@ async fn main() -> Result<()> {
         .route("/install/mobux.apk", get(serve_install_apk))
         .route("/install/mobux-ca.crt", get(serve_install_ca))
         .route("/.well-known/assetlinks.json", get(serve_assetlinks))
-        // New client SPA (web/spa, built to web/static/spa/). Served at /app and
-        // /app/* with an SPA history fallback: every sub-path returns the SPA's
-        // index.html so client routing (hash router today, history-safe for the
-        // future) works when served straight from the binary. Built assets live
-        // under /static/spa/ and are handled by serve_static. The old
-        // Rust-rendered pages (/, /s/:name, /settings, /install) are untouched —
-        // both UIs coexist; the SPA is shadow-mounted at /app.
+        // New client SPA (web/spa, built to web/static/spa/). Its one document
+        // is /app; assets live under /static/spa/ and are handled by
+        // serve_static. The old Rust-rendered pages (/, /s/:name, /settings,
+        // /install) are untouched — both UIs coexist.
+        //
+        // /app/* used to serve the shell too (a history fallback for a router
+        // that never arrived — the SPA routes on the hash). The shell's asset
+        // URLs are relative, so they only resolve from /app's own directory;
+        // served a level deeper they would point at /app/static/spa/… and 404.
+        // Sending the browser back to /app is both the fix and the honest
+        // answer, since no /app/* deep link exists to preserve.
         .route("/app", get(serve_spa_index))
-        .route("/app/{*rest}", get(serve_spa_index))
+        .route("/app/{*rest}", get(spa_deep_link_redirect))
         .route("/static/{*path}", get(serve_static));
 
     // Test-only: serve a fixed sparse-index body so the update checker can be
@@ -2081,11 +2085,11 @@ async fn serve_static(Path(path): Path<String>) -> Response {
     }
 }
 
-/// Serve the client SPA's `index.html` for `/app` and any `/app/*` sub-path
-/// (SPA history fallback). The SPA's own assets (JS/CSS, referenced from
-/// index.html at `/static/spa/...`) are served by `serve_static`, so this
-/// handler only ever returns the entry document. Behind the global auth layer
-/// and `no-store`, exactly like the inline HTML pages.
+/// Serve the client SPA's `index.html` for `/app` and for any unmatched path.
+/// The SPA's own assets (JS/CSS, referenced from index.html at
+/// `./static/spa/...`) are served by `serve_static`, so this handler only ever
+/// returns the entry document. Behind the global auth layer and `no-store`,
+/// exactly like the inline HTML pages.
 ///
 /// `spa/index.html` is emitted by `web/spa`'s Vite build into `web/static/spa/`
 /// and embedded by RustEmbed. If the SPA wasn't built (asset missing), return a
@@ -2112,6 +2116,27 @@ async fn serve_spa_index() -> Response {
         )
             .into_response(),
     }
+}
+
+/// `GET /app/{*rest}` → 307 back to the single SPA document at `/app`.
+///
+/// The target is relative for the same reason every other redirect here is: a
+/// path-prefixing proxy strips its prefix before mobux sees the request, so
+/// only the browser can put it back. `/app/foo` is two segments deep and needs
+/// one `../`; each further segment needs another, and a trailing slash counts
+/// as one — `rest` has exactly as many segments as there are levels to climb.
+fn relative_app_target(rest: &str) -> String {
+    format!("{}app", "../".repeat(rest.split('/').count()))
+}
+
+async fn spa_deep_link_redirect(Path(rest): Path<String>) -> impl IntoResponse {
+    (
+        axum::http::StatusCode::TEMPORARY_REDIRECT,
+        [
+            (axum::http::header::LOCATION, relative_app_target(&rest)),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+    )
 }
 
 // ── /install: redirect to the SPA Install page ────────────────────────
@@ -3956,6 +3981,27 @@ mod tests {
         .expect("a redirect")
         .into_response();
         assert_eq!(location_of(response), "../app?w=3#/");
+    }
+
+    // `/app/{*rest}` used to serve the shell, whose asset URLs are relative to
+    // /app's own directory and so only resolve there. It now climbs back to
+    // /app, one `../` per segment of `rest` — a trailing slash included, since
+    // it puts the browser a level deeper too.
+    #[test]
+    fn an_app_deep_link_climbs_back_to_the_single_document() {
+        assert_eq!(relative_app_target("foo"), "../app");
+        assert_eq!(relative_app_target("foo/bar"), "../../app");
+        assert_eq!(relative_app_target("foo/"), "../../app");
+        assert_eq!(relative_app_target("a/b/c"), "../../../app");
+    }
+
+    #[tokio::test]
+    async fn an_app_deep_link_redirects_rather_than_serving_the_shell() {
+        let response = spa_deep_link_redirect(Path("settings".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location_of(response), "../app");
     }
 
     // The fallback used to 307 to `/`, the one target a prefixed deployment

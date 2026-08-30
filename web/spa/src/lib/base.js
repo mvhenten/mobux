@@ -10,7 +10,9 @@
 // is already correct before the first fetch goes out. Vite pins the SPA's asset
 // base to /static/spa/, so everything left of that marker is the prefix, in dev
 // (`…/static/spa/src/main.jsx`) as well as in prod
-// (`…/static/spa/assets/index-<hash>.js`).
+// (`…/static/spa/assets/index-<hash>.js`). The built document writes that src
+// relative (`./static/spa/…`) so it resolves inside the mount; `script.src`
+// still reads back the absolute URL the browser resolved it to, marker and all.
 const SPA_MOUNT = "/static/spa/";
 
 export function derivePrefix(entryUrl) {

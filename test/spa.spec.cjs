@@ -3558,8 +3558,8 @@ test("ribbon bug-report button opens a prefilled GitHub issue with the diagnosti
 //
 // The stub below is that proxy, minus TLS: it serves exactly the prefix and
 // 404s everything outside it, so a redirect that escapes the mount fails here
-// rather than only in production. The SPA's own assets are still root-absolute
-// (vite `base`), so these cases assert the served document, not a booted app.
+// rather than only in production. The SPA's asset URLs are relative too, so
+// these cases go all the way to a booted app under the mount.
 
 const http = require("http");
 const https = require("https");
@@ -3653,5 +3653,75 @@ test.describe("behind a prefix-adding proxy", () => {
     expect(response.status()).toBe(200);
     expect(page.url()).toBe(`${proxy.mount}/nothing-here`);
     await expect(page.locator("#app")).toHaveCount(1);
+  });
+
+  // /app/* used to serve the shell, whose relative asset URLs only resolve from
+  // /app's own directory. Two segments deep, so the target needs one `../`.
+  test("an /app deep link climbs back to the app inside the mount", async ({
+    page,
+  }) => {
+    await page.goto(`${proxy.mount}/app/settings`, {
+      waitUntil: "domcontentloaded",
+    });
+    expect(page.url()).toBe(`${proxy.mount}/app`);
+    await expect(page.locator("#app")).toHaveCount(1);
+  });
+
+  // The acceptance test for the whole relative-paths overhaul: not "the
+  // document came back" but "the app runs". Assets are fetched relative to
+  // /app, so every one of them has to land inside the mount, and the prefix the
+  // SPA derives for its own API calls has to be the mount it was served from.
+  test("the app boots and renders Home under the mount", async ({ page }) => {
+    const missed = [];
+    page.on("response", (res) => {
+      if (res.status() >= 400) missed.push(`${res.status()} ${res.url()}`);
+    });
+
+    await page.goto(`${proxy.mount}/app#/`, { waitUntil: "networkidle" });
+
+    // Every asset URL in the document resolved inside the mount.
+    const urls = await page.evaluate(() =>
+      [
+        ...document.querySelectorAll(
+          'script[type="module"], link[rel="stylesheet"]',
+        ),
+      ].map((el) => el.src || el.href),
+    );
+    expect(urls.length).toBeGreaterThan(1);
+    for (const url of urls) {
+      expect(new URL(url).pathname.startsWith(`${PREFIX}/`)).toBeTruthy();
+    }
+    expect(missed).toEqual([]);
+
+    // lib/base.js keys on the /static/spa/ marker in the entry script's URL.
+    // The attribute is relative now; the DOM property reads back absolute, so
+    // the marker still carries the mount in front of it.
+    const prefix = await page.evaluate(() => {
+      const script = document.querySelector(
+        'script[type="module"][src*="/static/spa/"]',
+      );
+      const { pathname } = new URL(script.src);
+      return pathname.slice(0, pathname.indexOf("/static/spa/"));
+    });
+    expect(prefix).toBe(PREFIX);
+
+    // The stylesheet actually applied — a 200 that returned the SPA shell
+    // instead of CSS would still count as loaded.
+    const styled = await page.evaluate(
+      () =>
+        getComputedStyle(document.body).backgroundColor !== "rgba(0, 0, 0, 0)",
+    );
+    expect(styled).toBeTruthy();
+
+    // Preact mounted and Home fetched its sessions through the derived prefix.
+    await expect(page.locator(".app-wordmark")).toBeVisible();
+    await expect(page.locator("#fabNew")).toBeVisible();
+    await expect(
+      page.locator("#sessionList .session-item").first(),
+    ).toBeVisible({ timeout: 8000 });
+    const names = await page
+      .locator("#sessionList .session-name")
+      .allTextContents();
+    expect(names.some((n) => n.trim() === SEED)).toBeTruthy();
   });
 });

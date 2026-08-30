@@ -14,14 +14,22 @@ const MODULE = pathToFileURL(
   path.join(__dirname, "..", "web", "spa", "src", "lib", "base.js"),
 ).href;
 
+// A selector matches the *attribute*, while `script.src` reads back the
+// browser-resolved absolute URL — a distinction that matters now that the built
+// document writes `./static/spa/…`. An element may therefore carry `attributes`
+// separately from its properties; without it the two are the same string.
+function attr(el, name) {
+  return el.attributes?.[name] ?? el[name];
+}
+
 function matches(el, selector) {
   const [, tag] = selector.match(/^([a-z]+)/) || [];
   if (tag && tag !== el.tag) return false;
   for (const [, name, value] of selector.matchAll(/\[(\w+)="([^"]*)"\]/g)) {
-    if (el[name] !== value) return false;
+    if (attr(el, name) !== value) return false;
   }
   for (const [, name, value] of selector.matchAll(/\[(\w+)\*="([^"]*)"\]/g)) {
-    if (!String(el[name] || "").includes(value)) return false;
+    if (!String(attr(el, name) || "").includes(value)) return false;
   }
   return true;
 }
@@ -125,6 +133,30 @@ test("u() follows the document it is asked about, not the first one it saw", asy
   });
   withDocument(entry(`https://host/b/c/static/spa/${PROD}`), () => {
     expect(u("/api/sessions")).toBe("/b/c/api/sessions");
+  });
+});
+
+// Vite writes the entry script relative (`./static/spa/assets/index-<hash>.js`)
+// so the document loads its assets from whatever mount it was served under. The
+// helper's selector still has to match that attribute, and the prefix still has
+// to come out of the absolute URL the browser resolves it to.
+test("the entry script is found and read through its relative attribute", async () => {
+  const { u } = await import(MODULE);
+
+  const relativeEntry = (mount) => [
+    {
+      tag: "script",
+      type: "module",
+      attributes: { src: `./static/spa/${PROD}` },
+      src: `https://host${mount}/static/spa/${PROD}`,
+    },
+  ];
+
+  withDocument(relativeEntry("/user/host/8080"), () => {
+    expect(u("/api/sessions")).toBe("/user/host/8080/api/sessions");
+  });
+  withDocument(relativeEntry(""), () => {
+    expect(u("/api/sessions")).toBe("/api/sessions");
   });
 });
 
