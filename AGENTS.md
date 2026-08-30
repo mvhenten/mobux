@@ -1,7 +1,8 @@
 # Mobux — Agent Notes
 
 Touch-friendly tmux web UI in Rust (axum). Access tmux sessions from a phone
-over Tailscale with HTTPS. The whole frontend is embedded in the binary
+over Tailscale, over HTTP by default or HTTPS with `MOBUX_TLS=1` — which the
+Makefile targets and the `:5151` unit set. The whole frontend is embedded in the binary
 (`rust-embed`), so it ships as a single self-contained executable
 (`cargo install mobux`).
 

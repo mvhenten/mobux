@@ -81,5 +81,9 @@ Quick start:
   ${CRATE} --port 5151
   ${CRATE} service install --port 5151   # or keep it running across reboots
 
-Then open https://${host}:5151 from a phone on the same network.
+Then open http://${host}:5151 from a phone on the same network.
+
+mobux serves plain HTTP. Add --tls (or MOBUX_TLS=1) to serve HTTPS with a
+generated certificate — recommended on any network you do not trust, and
+unnecessary behind a TLS proxy.
 EOF

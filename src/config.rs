@@ -103,7 +103,9 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
-    /// Serve HTTPS. Env: `MOBUX_TLS`.
+    /// Serve HTTPS. Off by default; plain HTTP is the safe assumption behind a
+    /// proxy and the only one that works without a trusted certificate.
+    /// Env: `MOBUX_TLS`.
     #[serde(default = "default_tls_enabled")]
     #[garde(skip)]
     pub enabled: bool,
@@ -207,7 +209,7 @@ fn default_port() -> u16 {
 }
 
 fn default_tls_enabled() -> bool {
-    true
+    false
 }
 
 fn default_acme_directory() -> String {
@@ -519,7 +521,7 @@ pub const FIELDS: &[FieldSpec] = &[
         env: "MOBUX_TLS",
         flag: Some("--tls"),
         kind: FieldKind::Toggle,
-        help: "Serve HTTPS with a generated certificate (default on)",
+        help: "Serve HTTPS with a generated certificate (default off)",
     },
     FieldSpec {
         key: "tls.hosts",
@@ -1344,7 +1346,7 @@ mod tests {
     fn defaults_mirror_the_values_the_server_uses_today() {
         let config = Config::default();
         assert_eq!(config.server.port, 8080);
-        assert!(config.tls.enabled);
+        assert!(!config.tls.enabled);
         assert_eq!(config.tls.acme_http_port, 80);
         assert_eq!(config.app.service_name, "mobux");
         assert_eq!(config.push.vapid_contact, "mailto:admin@example.com");
@@ -1355,7 +1357,7 @@ mod tests {
     fn a_stated_leaf_wins_and_the_rest_keeps_its_default() {
         let config = parse_str(r#"{"server": {"port": 5151}}"#).unwrap();
         assert_eq!(config.server.port, 5151);
-        assert!(config.tls.enabled);
+        assert!(!config.tls.enabled);
         assert_eq!(config.update.check_url, Config::default().update.check_url);
     }
 
@@ -1532,7 +1534,7 @@ mod tests {
 
         assert_eq!(resolved.server.port, 5152);
         assert_eq!(resolved.session.shell, "/bin/zsh");
-        assert!(resolved.tls.enabled);
+        assert!(!resolved.tls.enabled);
     }
 
     #[test]
@@ -1652,6 +1654,54 @@ mod tests {
                 PartialConfig::default()
             ),
             Config::default()
+        );
+    }
+
+    /// HTTPS is opt-in: nothing stated anywhere serves plain HTTP, and each of
+    /// the three layers turns it back on on its own.
+    #[test]
+    fn tls_is_off_until_a_layer_asks_for_it() {
+        assert!(
+            !resolved(
+                PartialConfig::default(),
+                &env(&[]),
+                PartialConfig::default()
+            )
+            .tls
+            .enabled
+        );
+
+        assert!(
+            resolved(
+                file(r#"{"tls": {"enabled": true}}"#),
+                &env(&[]),
+                PartialConfig::default()
+            )
+            .tls
+            .enabled
+        );
+
+        assert!(
+            resolved(
+                PartialConfig::default(),
+                &env(&[("MOBUX_TLS", "1")]),
+                PartialConfig::default()
+            )
+            .tls
+            .enabled
+        );
+
+        let flag_layer = PartialConfig {
+            tls: Some(PartialTlsConfig {
+                enabled: Some(true),
+                ..PartialTlsConfig::default()
+            }),
+            ..PartialConfig::default()
+        };
+        assert!(
+            resolved(PartialConfig::default(), &env(&[]), flag_layer)
+                .tls
+                .enabled
         );
     }
 

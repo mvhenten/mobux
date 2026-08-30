@@ -33,7 +33,7 @@ mobux closes that gap. It puts your tmux sessions on the phone in a form built f
 mobux is meant to live on your private network, not the open internet.
 
 - **Private by network.** The intended deployment is behind [Tailscale](https://tailscale.com/): mobux is reachable only on your tailnet, never exposed publicly. The voice transcription recipe is the same — tailnet-only, no public surface.
-- **HTTPS always.** mobux serves TLS by default. It generates and manages its own CA so phones can trust it (the `/install` page walks you through adding the cert), or it can obtain a real Let's Encrypt certificate via ACME if you give it a public domain.
+- **HTTPS on request.** mobux serves plain HTTP by default, which is what you want behind a reverse proxy or a tunnel that already terminates TLS. Pass `--tls` (or set `MOBUX_TLS=1`) and it generates and manages its own CA so phones can trust it — the `/install` page walks you through adding the cert — or obtains a real Let's Encrypt certificate via ACME if you give it a public domain. Turn it on when nothing else terminates TLS: on a bare tailnet the credentials would otherwise cross the wire in clear text, and mobux says so loudly at startup.
 - **PIN / Basic auth.** Access is gated by HTTP Basic auth with a user and PIN you set via environment variables.
 
 ## Quick start
@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | ba
 
 export MOBUX_AUTH_USER=me
 export MOBUX_PIN=12345
-mobux --port 5151           # serves on https://0.0.0.0:5151
+mobux --port 5151           # serves on http://0.0.0.0:5151; add --tls for HTTPS
 mobux service install --port 5151   # or keep it running across reboots
 mobux update                        # or `mobux update --check` to look first
 ```
@@ -62,10 +62,12 @@ npm install                 # installs deps and bundles the frontend
 
 export MOBUX_AUTH_USER=me
 export MOBUX_PIN=12345
-make run                    # builds and starts on https://0.0.0.0:5151
+make run                    # builds and starts on https://0.0.0.0:5151 (MOBUX_TLS=1)
 ```
 
-Then open `https://<your-host>:5151` from a phone on the same tailnet.
+Then open `https://<your-host>:5151` from a phone on the same tailnet. The
+Makefile targets set `MOBUX_TLS=1`; a plain `mobux` run serves HTTP on the same
+address unless you pass `--tls`.
 
 Common targets:
 

@@ -881,6 +881,18 @@ mod tests {
         assert_eq!(config.app.service_name, "mobux");
     }
 
+    /// HTTPS is off by default, so `--tls` has to turn it on.
+    #[test]
+    fn the_tls_flag_turns_https_on_over_the_default() {
+        assert!(!config::Config::default().tls.enabled);
+        assert!(
+            config::Config::default()
+                .merged(run(&["--tls"]))
+                .tls
+                .enabled
+        );
+    }
+
     #[test]
     fn a_toggle_rejects_a_value_it_cannot_read() {
         assert!(invalid(&["--tls=maybe"]).contains("--tls"), "message");

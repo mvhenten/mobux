@@ -587,6 +587,10 @@ async fn main() -> Result<()> {
         );
     }
 
+    if let Some(warning) = clear_text_auth_warning(state.auth.is_some(), use_tls) {
+        eprintln!("{warning}");
+    }
+
     println!("telemetry: /api/telemetry active, logs to stderr");
 
     if settings.app.dev {
@@ -788,6 +792,24 @@ fn is_public_path(path: &str) -> bool {
         || path.starts_with("/static/icon-")
         || path == "/static/manifest.json"
         || path == "/sw.js"
+}
+
+/// The startup warning for the one combination that leaks credentials: auth is
+/// on, TLS is off, so the password and the session cookie cross the network in
+/// clear text. Silence would let a plain-HTTP bind pass for a private one.
+fn clear_text_auth_warning(auth_enabled: bool, use_tls: bool) -> Option<String> {
+    if !auth_enabled || use_tls {
+        return None;
+    }
+    let rule = "─".repeat(68);
+    Some(format!(
+        "{rule}\n\
+         WARNING  auth is on and TLS is off. The password and the session\n\
+         cookie travel in clear text, and the cookie loses its Secure flag.\n\
+         Turn HTTPS on with --tls, MOBUX_TLS=1, or {{\"tls\": {{\"enabled\": true}}}}\n\
+         in mobux.json. Plain HTTP is only safe behind a TLS proxy.\n\
+         {rule}"
+    ))
 }
 
 /// Build the `Set-Cookie` header value for the session cookie.
@@ -3730,7 +3752,19 @@ mod tests {
     // Regression test for the recurring home-login prompt: on a plain-HTTP
     // bind, `Secure` cookies are never stored by the browser, so every
     // subsequent request fell back to Basic-auth. `Secure` must be omitted on
-    // HTTP and present only when TLS is actually serving.
+    // HTTP and present only when TLS is actually serving — which, with TLS off
+    // by default, is now the opt-in half.
+
+    #[test]
+    fn session_cookie_defaults_to_no_secure() {
+        let config = config::Config::default();
+        assert!(!config.tls.enabled, "TLS is off by default");
+        let cookie = build_session_cookie("mobux_session", "abc123", config.tls.enabled);
+        assert!(
+            !cookie.contains("Secure"),
+            "the default bind is plain HTTP, so no Secure: {cookie}"
+        );
+    }
 
     #[test]
     fn session_cookie_no_secure_on_plain_http() {
@@ -3760,6 +3794,30 @@ mod tests {
             cookie.contains("HttpOnly"),
             "HttpOnly must always be present: {cookie}"
         );
+    }
+
+    // ── clear-text credential warning ───────────────────────────────────────
+    //
+    // TLS is off by default, so the dangerous combination is now reachable
+    // without anyone choosing it: auth on, HTTPS off, credentials on the wire.
+
+    #[test]
+    fn clear_text_warning_fires_only_with_auth_on_and_tls_off() {
+        assert!(clear_text_auth_warning(true, false).is_some());
+        assert!(clear_text_auth_warning(true, true).is_none());
+        assert!(clear_text_auth_warning(false, false).is_none());
+        assert!(clear_text_auth_warning(false, true).is_none());
+    }
+
+    #[test]
+    fn clear_text_warning_says_how_to_turn_https_on() {
+        let warning = clear_text_auth_warning(true, false).expect("a warning");
+        for hint in ["--tls", "MOBUX_TLS=1", r#"{"tls": {"enabled": true}}"#] {
+            assert!(
+                warning.contains(hint),
+                "warning is missing {hint}: {warning}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -74,9 +74,11 @@ clean:
 build: web
 	$(CARGO) build
 
+# MOBUX_TLS=1 everywhere below: the binary serves plain HTTP by default, and
+# the local instances have always been reached over https from a phone.
 run: build
 	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_PORT=$(MOBUX_PORT) \
-		$(CARGO) run
+		MOBUX_TLS=1 $(CARGO) run
 
 # Foreground dev instance with the client telemetry channel live (MOBUX_DEV=1).
 # Runs on MOBUX_DEV_PORT (5152) so it never touches the long-running :5151
@@ -84,7 +86,7 @@ run: build
 # overlay; telemetry lines also print to this terminal (stderr). Ctrl-C to stop.
 dev: build
 	env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 MOBUX_PORT=$(MOBUX_DEV_PORT) \
-		$(CARGO) run
+		MOBUX_TLS=1 $(CARGO) run
 
 # Auto-rebuild loop for the dev box. Watches src/ (Rust) and on every change
 # rebuilds the binary and bounces the :5152 dev server in the background — so
@@ -98,7 +100,7 @@ _dev-bounce:
 	-@kill $$(lsof -ti :$(MOBUX_DEV_PORT)) 2>/dev/null || true
 	@sleep 1
 	@nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 MOBUX_PORT=$(MOBUX_DEV_PORT) \
-		./target/debug/mobux > /tmp/mobux-dev.log 2>&1 &
+		MOBUX_TLS=1 ./target/debug/mobux > /tmp/mobux-dev.log 2>&1 &
 	@sleep 2 && lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1 \
 		&& echo "dev :$(MOBUX_DEV_PORT) rebuilt + restarted" || echo "FAILED to restart :$(MOBUX_DEV_PORT)"
 
@@ -120,7 +122,7 @@ dev-up: build
 	@mkdir -p $(DEV_LOG_DIR)
 	@if lsof -i :$(MOBUX_DEV_PORT) >/dev/null 2>&1; then echo "backend :$(MOBUX_DEV_PORT) already up"; else \
 		setsid nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_DEV=1 \
-			MOBUX_PORT=$(MOBUX_DEV_PORT) ./target/debug/mobux \
+			MOBUX_PORT=$(MOBUX_DEV_PORT) MOBUX_TLS=1 ./target/debug/mobux \
 			> $(DEV_LOG_DIR)/backend.log 2>&1 < /dev/null & \
 	fi
 	@if lsof -i :5173 >/dev/null 2>&1; then echo "spa :5173 already up"; else \
@@ -147,7 +149,7 @@ dev-logs:
 start: build
 	@if [ -n "$(PID)" ]; then echo "already running (pid $(PID))"; exit 1; fi
 	nohup env MOBUX_AUTH_USER=$(MOBUX_USER) MOBUX_PIN=$(MOBUX_PIN) MOBUX_PORT=$(MOBUX_PORT) \
-		./target/debug/mobux > /tmp/mobux.log 2>&1 &
+		MOBUX_TLS=1 ./target/debug/mobux > /tmp/mobux.log 2>&1 &
 	@sleep 2 && lsof -i :$(MOBUX_PORT) >/dev/null 2>&1 && echo "mobux running on port $(MOBUX_PORT)" || echo "FAILED to start"
 
 stop:

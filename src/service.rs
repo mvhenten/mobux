@@ -130,7 +130,7 @@ pub fn render_unit(spec: &UnitSpec) -> String {
     let _ = write!(
         out,
         "[Unit]
-Description=mobux — mobile tmux web frontend (HTTPS on :{port})
+Description=mobux — mobile tmux web frontend (:{port})
 After=network-online.target
 Wants=network-online.target
 
@@ -238,9 +238,10 @@ fn install(overrides: &CliOverrides) -> Result<(), String> {
     enable_linger();
 
     println!(
-        "mobux listens on https://<this-host>:{} as user {:?}",
+        "mobux listens on http://<this-host>:{} as user {:?}",
         spec.port, spec.user
     );
+    println!("add Environment=MOBUX_TLS=1 to the unit to serve HTTPS instead");
     println!(
         "check it with: systemctl --user status {} --no-pager",
         spec.unit
