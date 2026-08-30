@@ -68,8 +68,8 @@ pub fn resolve_unit_spec(
     exec_start: &Path,
 ) -> Result<UnitSpec, String> {
     let credentials = cli::resolve_credentials(
-        overrides.user.clone(),
-        overrides.pin.clone(),
+        overrides.auth_user(),
+        overrides.auth_pin(),
         env.auth_user.clone(),
         env.auth_pass.clone(),
         env.pin.clone(),
@@ -84,7 +84,11 @@ pub fn resolve_unit_spec(
     let spec = UnitSpec {
         unit: unit_name(env.service_name.clone()),
         exec_start: exec_start.to_string_lossy().into_owned(),
-        port: cli::resolve_port(overrides.port, env.mobux_port.clone(), env.port.clone()),
+        port: cli::resolve_port(
+            overrides.server_port(),
+            env.mobux_port.clone(),
+            env.port.clone(),
+        ),
         user: credentials.user,
         pin: credentials.pass,
     };
@@ -403,9 +407,22 @@ fn whoami() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
 
     fn some(value: &str) -> Option<String> {
         Some(value.to_string())
+    }
+
+    fn overrides(port: Option<u16>, user: Option<&str>, pin: Option<&str>) -> CliOverrides {
+        CliOverrides {
+            server: port.map(|port| config::PartialServerConfig { port: Some(port) }),
+            auth: (user.is_some() || pin.is_some()).then(|| config::PartialAuthConfig {
+                user: user.map(str::to_string),
+                pin: pin.map(str::to_string),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
     }
 
     fn authed_env() -> EnvSnapshot {
@@ -424,11 +441,7 @@ mod tests {
     #[test]
     fn unit_carries_the_binary_path_the_port_and_the_credentials() {
         let unit = render_unit(&spec_from(
-            CliOverrides {
-                port: Some(5151),
-                pin: some("99999"),
-                user: some("walker"),
-            },
+            overrides(Some(5151), Some("walker"), Some("99999")),
             EnvSnapshot::default(),
         ));
 
@@ -459,11 +472,7 @@ mod tests {
     #[test]
     fn flags_beat_the_environment() {
         let spec = spec_from(
-            CliOverrides {
-                port: Some(5151),
-                pin: some("99999"),
-                user: some("walker"),
-            },
+            overrides(Some(5151), Some("walker"), Some("99999")),
             EnvSnapshot {
                 mobux_port: some("8080"),
                 auth_user: some("me"),
@@ -495,10 +504,7 @@ mod tests {
     #[test]
     fn no_unit_without_auth() {
         let error = resolve_unit_spec(
-            &CliOverrides {
-                user: some("me"),
-                ..CliOverrides::default()
-            },
+            &overrides(None, Some("me"), None),
             &EnvSnapshot::default(),
             Path::new("/home/me/.local/bin/mobux"),
         )
@@ -510,11 +516,7 @@ mod tests {
     fn a_pin_that_systemd_would_mangle_is_refused() {
         for pin in ["hunter 2", "hunter\"2", "hunter$2", "hunter\\2"] {
             let error = resolve_unit_spec(
-                &CliOverrides {
-                    pin: some(pin),
-                    user: some("me"),
-                    ..CliOverrides::default()
-                },
+                &overrides(None, Some("me"), Some(pin)),
                 &EnvSnapshot::default(),
                 Path::new("/home/me/.local/bin/mobux"),
             )
@@ -555,13 +557,7 @@ mod tests {
     #[test]
     fn an_identical_unit_is_refused_and_a_changed_one_is_an_update() {
         let unit = render_unit(&spec_from(CliOverrides::default(), authed_env()));
-        let other = render_unit(&spec_from(
-            CliOverrides {
-                port: Some(5151),
-                ..CliOverrides::default()
-            },
-            authed_env(),
-        ));
+        let other = render_unit(&spec_from(overrides(Some(5151), None, None), authed_env()));
 
         assert_eq!(decide(None, &unit), Decision::Create);
         assert_eq!(decide(Some(&unit), &unit), Decision::Unchanged);

@@ -384,8 +384,12 @@ async fn main() -> Result<()> {
 
     let mobux_port_env = env::var("MOBUX_PORT").ok();
     let port_env = env::var("PORT").ok();
-    let port = cli::resolve_port(overrides.port, mobux_port_env.clone(), port_env.clone());
-    if cli::port_is_deprecated_source(overrides.port, mobux_port_env, port_env) {
+    let port = cli::resolve_port(
+        overrides.server_port(),
+        mobux_port_env.clone(),
+        port_env.clone(),
+    );
+    if cli::port_is_deprecated_source(overrides.server_port(), mobux_port_env, port_env) {
         eprintln!(
             "[config] PORT is deprecated; rename it to MOBUX_PORT (still listening on {port})"
         );
@@ -764,8 +768,8 @@ fn load_auth_config(overrides: &cli::CliOverrides) -> Option<AuthConfig> {
     let pin_env = env::var("MOBUX_PIN").ok().map(|v| v.trim().to_string());
 
     let credentials = cli::resolve_credentials(
-        overrides.user.clone(),
-        overrides.pin.clone(),
+        overrides.auth_user(),
+        overrides.auth_pin(),
         user_env,
         pass_env,
         pin_env,
