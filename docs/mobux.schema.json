@@ -1,0 +1,233 @@
+{
+  "$defs": {
+    "AppConfig": {
+      "additionalProperties": false,
+      "description": "Identity of this instance.",
+      "properties": {
+        "dev": {
+          "default": false,
+          "description": "Dev mode, reported through `/api/build-info`. Env: `MOBUX_DEV`.",
+          "type": "boolean"
+        },
+        "domain": {
+          "default": "",
+          "description": "Public `host` or `host:port` the Android app is pinned to. Empty means\nunset. Env: `MOBUX_DOMAIN`.",
+          "type": "string"
+        },
+        "service_name": {
+          "default": "mobux",
+          "description": "systemd unit the self-updater restarts. Env: `MOBUX_SERVICE_NAME`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "AuthConfig": {
+      "additionalProperties": false,
+      "description": "The credentials that unlock the web UI.",
+      "properties": {
+        "pass": {
+          "default": "",
+          "description": "Password. Empty means unset; `pin` is the usual way to set it.\nEnv: `MOBUX_AUTH_PASS`.",
+          "type": "string"
+        },
+        "pin": {
+          "default": "",
+          "description": "Numeric PIN, 4-64 characters. Empty means unset. Env: `MOBUX_PIN`.\nFlag: `--pin`.",
+          "type": "string"
+        },
+        "user": {
+          "default": "",
+          "description": "Username. Empty means unset. Env: `MOBUX_AUTH_USER`. Flag: `--user`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PathsConfig": {
+      "additionalProperties": false,
+      "description": "Where mobux keeps its state.",
+      "properties": {
+        "data_dir": {
+          "default": "",
+          "description": "Directory for the database and other state. Empty means the platform\ndata directory. Env: `MOBUX_DATA_DIR`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PushConfig": {
+      "additionalProperties": false,
+      "description": "Web push.",
+      "properties": {
+        "vapid_contact": {
+          "default": "mailto:admin@example.com",
+          "description": "VAPID contact, a `mailto:` or `https:` URL. Env: `MOBUX_VAPID_CONTACT`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ServerConfig": {
+      "additionalProperties": false,
+      "description": "Where the server listens.",
+      "properties": {
+        "port": {
+          "default": 8080,
+          "description": "TCP port to listen on. Env: `MOBUX_PORT`. Flag: `--port`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SessionConfig": {
+      "additionalProperties": false,
+      "description": "How a terminal session starts.",
+      "properties": {
+        "shell": {
+          "default": "",
+          "description": "Shell to launch inside tmux. Empty means `$SHELL`.\nEnv: `MOBUX_SESSION_SHELL`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TlsConfig": {
+      "additionalProperties": false,
+      "description": "HTTPS: the built-in CA, a supplied key pair, or ACME.",
+      "properties": {
+        "acme_directory": {
+          "default": "https://acme-v02.api.letsencrypt.org/directory",
+          "description": "ACME directory URL. Env: `MOBUX_ACME_DIRECTORY`.",
+          "type": "string"
+        },
+        "acme_domains": {
+          "default": [],
+          "description": "Domains to obtain an ACME certificate for. A non-empty list switches\nTLS into ACME mode. Env: `MOBUX_ACME_DOMAINS` (comma separated).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "acme_email": {
+          "default": "",
+          "description": "Account contact for the ACME directory. Required in ACME mode.\nEnv: `MOBUX_ACME_EMAIL`.",
+          "type": "string"
+        },
+        "acme_http_port": {
+          "default": 80,
+          "description": "Port the HTTP-01 challenge responder binds. Env: `MOBUX_ACME_HTTP_PORT`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cert_file": {
+          "default": "",
+          "description": "Path to a certificate PEM. Set both this and `key_file` to skip\ncertificate generation. Env: `MOBUX_CERT_FILE`.",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Serve HTTPS. Env: `MOBUX_TLS`.",
+          "type": "boolean"
+        },
+        "hosts": {
+          "default": [],
+          "description": "Extra hostnames to add to the generated certificate.\nEnv: `MOBUX_TLS_HOSTS` (comma separated).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key_file": {
+          "default": "",
+          "description": "Path to the private key PEM matching `cert_file`. Env: `MOBUX_KEY_FILE`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UpdateConfig": {
+      "additionalProperties": false,
+      "description": "The self-updater.",
+      "properties": {
+        "check_url": {
+          "default": "https://index.crates.io/mo/bu/mobux",
+          "description": "Where the version list is fetched from. Env: `MOBUX_UPDATE_CHECK_URL`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Every setting mobux reads from a file. Absent state is a sentinel — an empty\nstring or an empty list — never a missing attribute, so a merged config is\nalways fully populated.",
+  "properties": {
+    "app": {
+      "$ref": "#/$defs/AppConfig",
+      "default": {
+        "dev": false,
+        "domain": "",
+        "service_name": "mobux"
+      }
+    },
+    "auth": {
+      "$ref": "#/$defs/AuthConfig",
+      "default": {
+        "pass": "",
+        "pin": "",
+        "user": ""
+      }
+    },
+    "paths": {
+      "$ref": "#/$defs/PathsConfig",
+      "default": {
+        "data_dir": ""
+      }
+    },
+    "push": {
+      "$ref": "#/$defs/PushConfig",
+      "default": {
+        "vapid_contact": "mailto:admin@example.com"
+      }
+    },
+    "server": {
+      "$ref": "#/$defs/ServerConfig",
+      "default": {
+        "port": 8080
+      }
+    },
+    "session": {
+      "$ref": "#/$defs/SessionConfig",
+      "default": {
+        "shell": ""
+      }
+    },
+    "tls": {
+      "$ref": "#/$defs/TlsConfig",
+      "default": {
+        "acme_directory": "https://acme-v02.api.letsencrypt.org/directory",
+        "acme_domains": [],
+        "acme_email": "",
+        "acme_http_port": 80,
+        "cert_file": "",
+        "enabled": true,
+        "hosts": [],
+        "key_file": ""
+      }
+    },
+    "update": {
+      "$ref": "#/$defs/UpdateConfig",
+      "default": {
+        "check_url": "https://index.crates.io/mo/bu/mobux"
+      }
+    }
+  },
+  "title": "Config",
+  "type": "object"
+}
