@@ -827,7 +827,7 @@ fn clear_text_auth_warning(
          WARNING  auth is on and TLS is off. The password and the session\n\
          cookie travel in clear text, and the cookie loses its Secure flag.\n\
          Turn HTTPS on with --tls, MOBUX_TLS=1, or {{\"tls\": {{\"enabled\": true}}}}\n\
-         in mobux.json. Plain HTTP is only safe behind a TLS proxy — say so\n\
+         in config.json. Plain HTTP is only safe behind a TLS proxy — say so\n\
          with --behind-tls-proxy to keep the cookie Secure and silence this.\n\
          {rule}"
     ))
