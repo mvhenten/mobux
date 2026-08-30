@@ -43,6 +43,7 @@ struct StaticAssets;
 
 mod cli;
 mod config;
+mod configure;
 mod db;
 mod host_suggestions;
 mod nodes;
@@ -342,6 +343,7 @@ async fn main() -> Result<()> {
         cli::Parsed::Run(overrides) => overrides,
         cli::Parsed::Service(command) => std::process::exit(service::run(&command)),
         cli::Parsed::Update(command) => std::process::exit(update_cli::run(command).await),
+        cli::Parsed::Configure(command) => std::process::exit(configure::run(&command)),
         cli::Parsed::Help => {
             print!("{}", cli::help_text(PKG_VERSION));
             return Ok(());

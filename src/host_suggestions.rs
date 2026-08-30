@@ -331,7 +331,9 @@ Host web?
         let hosts = parse_avahi_output(text);
         let names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, vec!["devbox.local", "labbox.local"]);
-        assert!(hosts.iter().all(|h| h.source == "mdns" && h.online.is_none()));
+        assert!(hosts
+            .iter()
+            .all(|h| h.source == "mdns" && h.online.is_none()));
     }
 
     #[test]

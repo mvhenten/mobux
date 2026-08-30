@@ -258,14 +258,20 @@ mod tests {
 
         let mut cfg = ProviderConfig::default_local();
         cfg.url = format!("http://{addr}/v1/audio/transcriptions");
-        assert!(probe_transcribe(&cfg).await, "responsive backend must probe reachable");
+        assert!(
+            probe_transcribe(&cfg).await,
+            "responsive backend must probe reachable"
+        );
     }
 
     #[tokio::test]
     async fn probe_transcribe_false_when_unreachable() {
         let mut cfg = ProviderConfig::default_local();
         cfg.url = "http://127.0.0.1:19999/v1/audio/transcriptions".to_string();
-        assert!(!probe_transcribe(&cfg).await, "connection refused must probe unreachable");
+        assert!(
+            !probe_transcribe(&cfg).await,
+            "connection refused must probe unreachable"
+        );
     }
 
     // Reproduces the real-world bug: the backend accepts the connection but
@@ -296,7 +302,10 @@ mod tests {
         let reachable = probe_transcribe(&cfg).await;
         let elapsed = started.elapsed();
 
-        assert!(!reachable, "hung transcribe path must probe unreachable, not a false green");
+        assert!(
+            !reachable,
+            "hung transcribe path must probe unreachable, not a false green"
+        );
         assert!(
             elapsed < PROBE_TIMEOUT + Duration::from_secs(2),
             "probe must give up around PROBE_TIMEOUT instead of waiting for the hang: took {elapsed:?}"
