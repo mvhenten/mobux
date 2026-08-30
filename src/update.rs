@@ -215,8 +215,13 @@ fn sparse_index_url(name: &str) -> String {
 }
 
 /// Fetch and parse the latest non-yanked version from the configured URL.
-async fn fetch_latest_version() -> Result<String, String> {
-    let url = check_url();
+pub async fn fetch_latest_version() -> Result<String, String> {
+    fetch_latest_version_from(&check_url()).await
+}
+
+/// The fetch with the URL handed in, so `mobux update` and the background
+/// poller share one code path and tests can point it at a local server.
+pub async fn fetch_latest_version_from(url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(FETCH_TIMEOUT)
@@ -224,7 +229,7 @@ async fn fetch_latest_version() -> Result<String, String> {
         .map_err(|e| format!("building http client: {e}"))?;
 
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("fetching {url}: {e}"))?;
@@ -364,6 +369,12 @@ fn cmp_pre(a: &[String], b: &[String]) -> std::cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
+/// True when the string is a version [`is_newer`] can reason about. Callers
+/// that must tell "not newer" apart from "cannot compare" check this first.
+pub fn is_semver(version: &str) -> bool {
+    SemVer::parse(version).is_some()
+}
+
 /// True when `latest` is a strictly newer semver than `current`. Unparseable
 /// versions return false (never offer an update we can't reason about).
 pub fn is_newer(current: &str, latest: &str) -> bool {
@@ -430,7 +441,7 @@ fn current_exe() -> Result<PathBuf, RunError> {
 
 /// Derive cargo's `--root` from the binary path: `<root>/bin/mobux` → `<root>`.
 /// Falls back to `~/.cargo` if the layout is unexpected.
-fn cargo_root(bin: &Path) -> String {
+pub fn cargo_root(bin: &Path) -> String {
     bin.parent()
         .and_then(|p| p.parent())
         .map(|p| p.to_string_lossy().into_owned())
@@ -462,7 +473,7 @@ fn resolve_cargo() -> Option<PathBuf> {
 }
 
 /// Write the updater script into `data_dir` (mode 0700) and return its path.
-fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
+pub fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
     let path = data_dir.join("mobux-update.sh");
     std::fs::write(&path, UPDATER_SCRIPT).map_err(|e| RunError::SpawnFailed {
         message: format!("writing updater script to {}: {e}", path.display()),
@@ -574,6 +585,27 @@ fn supervise_updater(state: UpdateState, mut child: std::process::Child) {
         let _ = child.wait();
         state.end_run();
     });
+}
+
+/// Serve one canned HTTP response over loopback and return its URL — the same
+/// seam `MOBUX_UPDATE_CHECK_URL` points at, without touching the live network.
+#[cfg(test)]
+pub async fn serve_once(status_line: &str, body: &str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/index", listener.local_addr().unwrap());
+    let response = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt as _;
+        let Ok((mut sock, _)) = listener.accept().await else {
+            return;
+        };
+        let _ = sock.write_all(response.as_bytes()).await;
+        let _ = sock.shutdown().await;
+    });
+    url
 }
 
 #[cfg(test)]
@@ -748,6 +780,31 @@ mod tests {
 "#;
         // 1.0.0-rc.1 > 0.9.0, so it wins even as a pre-release.
         assert_eq!(latest_from_index(body).as_deref(), Some("1.0.0-rc.1"));
+    }
+
+    #[tokio::test]
+    async fn fetch_reads_the_highest_version_from_the_check_url() {
+        let url = serve_once(
+            "200 OK",
+            "{\"name\":\"mobux\",\"vers\":\"0.1.4\",\"yanked\":false}\n\
+             {\"name\":\"mobux\",\"vers\":\"0.1.20\",\"yanked\":false}\n\
+             {\"name\":\"mobux\",\"vers\":\"0.2.0\",\"yanked\":true}\n",
+        )
+        .await;
+        assert_eq!(
+            fetch_latest_version_from(&url).await.as_deref(),
+            Ok("0.1.20")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_names_the_url_when_the_check_fails() {
+        let url = serve_once("500 Internal Server Error", "nope").await;
+        let error = fetch_latest_version_from(&url)
+            .await
+            .expect_err("a 500 must not look like a successful check");
+        assert!(error.contains(&url), "{error}");
+        assert!(error.contains("500"), "{error}");
     }
 
     #[tokio::test]

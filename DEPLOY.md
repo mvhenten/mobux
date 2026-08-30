@@ -63,7 +63,8 @@ it starts on boot (no login needed) and restarts on crash — no root required.
 `mobux service install --port 5151 --user me --pin 12345` does all of this for
 you: it writes the unit below (mode 600, since it holds the PIN) pointing at
 the binary you ran it from, reloads systemd, enables the service and turns on
-linger. `mobux service status` and `mobux service uninstall` cover the rest.
+linger. `mobux service status` and `mobux service uninstall` cover the rest, and
+`mobux update` installs the latest release and restarts that unit.
 Rerun `install` with different flags to rewrite and restart the unit. The
 manual recipe stays here as the reference for what that unit contains:
 

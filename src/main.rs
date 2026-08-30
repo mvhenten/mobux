@@ -57,6 +57,7 @@ mod tmux;
 mod transcribe;
 mod twa;
 mod update;
+mod update_cli;
 
 #[derive(Clone, Debug, PartialEq)]
 enum InstallPhase {
@@ -339,6 +340,7 @@ async fn main() -> Result<()> {
     let overrides = match cli::parse(env::args().skip(1)) {
         cli::Parsed::Run(overrides) => overrides,
         cli::Parsed::Service(command) => std::process::exit(service::run(&command)),
+        cli::Parsed::Update(command) => std::process::exit(update_cli::run(command).await),
         cli::Parsed::Help => {
             print!("{}", cli::help_text(PKG_VERSION));
             return Ok(());

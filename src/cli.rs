@@ -17,10 +17,19 @@ pub enum ServiceCommand {
     Status,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCommand {
+    /// Report the current and latest version without touching anything.
+    Check,
+    /// Install the latest version over this binary.
+    Apply,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     Run(CliOverrides),
     Service(ServiceCommand),
+    Update(UpdateCommand),
     Help,
     Version,
     Invalid(String),
@@ -35,6 +44,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
     if args.peek().is_some_and(|arg| arg == "service") {
         args.next();
         return parse_service(args);
+    }
+    if args.peek().is_some_and(|arg| arg == "update") {
+        args.next();
+        return parse_update(args);
     }
 
     match parse_flags(args) {
@@ -77,6 +90,22 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
             "unknown service subcommand {subcommand:?} — expected install, uninstall or status"
         )),
     }
+}
+
+fn parse_update<I: Iterator<Item = String>>(mut args: I) -> Parsed {
+    let mut command = UpdateCommand::Apply;
+    for arg in args.by_ref() {
+        match arg.as_str() {
+            "--help" | "-h" => return Parsed::Help,
+            "--check" => command = UpdateCommand::Check,
+            _ => {
+                return Parsed::Invalid(format!(
+                    "unknown argument {arg:?} — `mobux update` takes only --check"
+                ))
+            }
+        }
+    }
+    Parsed::Update(command)
 }
 
 enum Flags {
@@ -132,6 +161,7 @@ pub fn help_text(version: &str) -> String {
 
 Usage: mobux [OPTIONS]
        mobux service <install|uninstall|status> [OPTIONS]
+       mobux update [--check]
 
 Commands:
   service install     Install and start a systemd --user service that survives
@@ -139,6 +169,9 @@ Commands:
                       username and PIN are required.
   service uninstall   Stop, disable and remove that service
   service status      Show the service's systemd status
+  update              Install the latest release over this binary, then restart
+                      the systemd --user service when one is installed
+  update --check      Report the current and latest version, install nothing
 
 Options:
       --port <PORT>   Port to listen on (default {DEFAULT_PORT})
@@ -353,12 +386,44 @@ mod tests {
     }
 
     #[test]
+    fn update_parses_bare_and_with_check() {
+        assert_eq!(
+            parse(args(&["update"])),
+            Parsed::Update(UpdateCommand::Apply)
+        );
+        assert_eq!(
+            parse(args(&["update", "--check"])),
+            Parsed::Update(UpdateCommand::Check)
+        );
+        assert_eq!(parse(args(&["update", "--help"])), Parsed::Help);
+        assert_eq!(parse(args(&["update", "-h"])), Parsed::Help);
+    }
+
+    #[test]
+    fn update_rejects_anything_but_check() {
+        let Parsed::Invalid(message) = parse(args(&["update", "--force"])) else {
+            panic!("an unknown update flag should not parse");
+        };
+        assert!(message.contains("--force"), "{message}");
+        assert!(matches!(
+            parse(args(&["update", "--port", "5151"])),
+            Parsed::Invalid(_)
+        ));
+        assert!(matches!(
+            parse(args(&["update", "now"])),
+            Parsed::Invalid(_)
+        ));
+    }
+
+    #[test]
     fn help_lists_the_flags_and_the_main_env_vars() {
         let help = help_text("1.2.3");
         for expected in [
             "service install",
             "service uninstall",
             "service status",
+            "update",
+            "update --check",
             "--port",
             "--pin",
             "--user",

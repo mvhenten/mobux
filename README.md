@@ -47,6 +47,7 @@ export MOBUX_AUTH_USER=me
 export MOBUX_PIN=12345
 mobux --port 5151           # serves on https://0.0.0.0:5151
 mobux service install --port 5151   # or keep it running across reboots
+mobux update                        # or `mobux update --check` to look first
 ```
 
 It verifies the release checksum and installs to `~/.local/bin/mobux`. On any other platform, `cargo install mobux`.
