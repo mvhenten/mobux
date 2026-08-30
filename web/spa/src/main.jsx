@@ -6,6 +6,7 @@ import "./lib/errorLog.js";
 import { render } from "preact";
 import { App } from "./app.jsx";
 import { watchBuildHash } from "./lib/reload.js";
+import { u } from "./lib/base.js";
 import "./app.css";
 
 // Auto-reload on server update (#189) — remembers the server's build_hash
@@ -20,7 +21,7 @@ watchBuildHash();
 // it as a genuine dynamic import rather than trying to inline it. Always on —
 // no dev-mode gate.
 import(
-  /* @vite-ignore */ new URL("/static/telemetry.js", location.origin).href
+  /* @vite-ignore */ new URL(u("/static/telemetry.js"), location.origin).href
 ).catch((e) => console.warn("telemetry.js load failed", e));
 
 // External-link escape (#…): route any anchor to a non-mobux origin out of
@@ -28,7 +29,8 @@ import(
 // Loads the same backend module the classic terminal engine uses — one
 // shared open-path, one delegated click handler for the whole SPA.
 import(
-  /* @vite-ignore */ new URL("/static/external-link.js", location.origin).href
+  /* @vite-ignore */ new URL(u("/static/external-link.js"), location.origin)
+    .href
 )
   .then((m) => m.installExternalLinkHandler())
   .catch((e) => console.warn("external-link.js load failed", e));
@@ -41,7 +43,7 @@ import(
 async function boot() {
   try {
     const prefs = await import(
-      /* @vite-ignore */ new URL("/static/prefs.js", location.origin).href
+      /* @vite-ignore */ new URL(u("/static/prefs.js"), location.origin).href
     );
     await prefs.hydrate();
   } catch (e) {

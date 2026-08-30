@@ -1,6 +1,7 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiPutJSON } from "../../lib/api.js";
+import { u } from "../../lib/base.js";
 import { HostSuggestionSheet } from "../HostSuggestionSheet.jsx";
 
 // Nodes card — the inventory behind the Home node picker (#176 phase 3).
@@ -69,7 +70,7 @@ export function NodesCard() {
       // redirect:"manual" — an absent route lands on the catch-all 307;
       // following it leaves an abandoned body in flight (stalls the page's
       // network-idle state).
-      res = await fetch("/api/settings/nodes", {
+      res = await fetch(u("/api/settings/nodes"), {
         headers: { Accept: "application/json" },
         redirect: "manual",
       });

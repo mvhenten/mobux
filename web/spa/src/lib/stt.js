@@ -1,6 +1,8 @@
 // STT helpers ported 1:1 from the inline IIFE in src/main.rs. Kept framework-
 // free so the behaviour is auditable against the original.
 
+import { u } from "./base.js";
+
 export const FALLBACK_MODELS = {
   openai: ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
   local: [
@@ -66,7 +68,7 @@ export async function fetchModels(kind, host, port) {
     "&port=" +
     encodeURIComponent(port || "");
   try {
-    const resp = await fetch("/api/stt/models" + query);
+    const resp = await fetch(u("/api/stt/models") + query);
     if (!resp.ok) throw new Error("not ok");
     const data = await resp.json();
     if (!data.models || !data.models.length) throw new Error("empty");

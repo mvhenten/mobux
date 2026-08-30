@@ -1,5 +1,6 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
+import { u } from "../../lib/base.js";
 
 // Theme picker. The theme catalogue + apply logic lives in the backend ES
 // module /static/themes.js (single source of truth, also used by the terminal
@@ -18,7 +19,7 @@ export function ThemeCard() {
     // host in both dev (Vite proxy) and prod (served from /static). The URL is
     // assembled at runtime so the bundler treats it as a genuine dynamic import
     // and leaves it external (does not try to resolve /static/themes.js itself).
-    const themesUrl = new URL("/static/themes.js", location.origin).href;
+    const themesUrl = new URL(u("/static/themes.js"), location.origin).href;
     import(/* @vite-ignore */ themesUrl)
       .then((m) => {
         mod = m;

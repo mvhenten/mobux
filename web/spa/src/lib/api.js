@@ -4,6 +4,7 @@
 // backend itself at /app, so these stay same-origin.
 
 import { ApiError } from "./apiError.js";
+import { u } from "./base.js";
 
 // Best-effort response body for an ApiError — never throws.
 async function readBody(res) {
@@ -15,16 +16,17 @@ async function readBody(res) {
 }
 
 export async function apiGet(path) {
+  const url = u(path);
   let res;
   try {
-    res = await fetch(path, { headers: { Accept: "application/json" } });
+    res = await fetch(url, { headers: { Accept: "application/json" } });
   } catch (e) {
-    throw new ApiError("GET", path, null, e.message);
+    throw new ApiError("GET", url, null, e.message);
   }
   if (!res.ok)
     throw new ApiError(
       "GET",
-      path,
+      url,
       res.status,
       res.statusText,
       await readBody(res),
@@ -33,7 +35,7 @@ export async function apiGet(path) {
 }
 
 export async function apiPutJSON(path, body) {
-  return fetch(path, {
+  return fetch(u(path), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -48,7 +50,7 @@ export async function apiPost(path, body) {
         body: JSON.stringify(body),
       }
     : { method: "POST" };
-  return fetch(path, opts);
+  return fetch(u(path), opts);
 }
 
 // JSON POST/PUT that throws on non-2xx and returns the parsed body. Used by
@@ -59,16 +61,17 @@ export async function apiSend(path, opts = {}) {
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
   };
   const method = opts.method || "GET";
+  const url = u(path);
   let res;
   try {
-    res = await fetch(path, merged);
+    res = await fetch(url, merged);
   } catch (e) {
-    throw new ApiError(method, path, null, e.message);
+    throw new ApiError(method, url, null, e.message);
   }
   if (!res.ok)
     throw new ApiError(
       method,
-      path,
+      url,
       res.status,
       res.statusText,
       await readBody(res),
@@ -82,19 +85,20 @@ export async function apiSend(path, opts = {}) {
 // the page (mirrors update.js's `fetchPath`).
 
 export async function localGet(path) {
+  const url = u(path);
   let res;
   try {
-    res = await fetch(path, {
+    res = await fetch(url, {
       headers: { Accept: "application/json" },
       credentials: "same-origin",
     });
   } catch (e) {
-    throw new ApiError("GET", path, null, e.message);
+    throw new ApiError("GET", url, null, e.message);
   }
   if (!res.ok)
     throw new ApiError(
       "GET",
-      path,
+      url,
       res.status,
       res.statusText,
       await readBody(res),
@@ -103,5 +107,5 @@ export async function localGet(path) {
 }
 
 export async function localFetch(path, opts = {}) {
-  return fetch(path, { credentials: "same-origin", ...opts });
+  return fetch(u(path), { credentials: "same-origin", ...opts });
 }
