@@ -8,15 +8,26 @@
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
+// Everything the SW points at resolves against its own registration scope, so
+// a mobux mounted under a path prefix keeps its icons and deep links inside
+// that prefix. At the empty prefix the scope is the origin root, which makes
+// every result identical to the old absolute paths.
+const SCOPE = self.registration.scope;
+const resolve = (url) => {
+  try { return new URL(url, SCOPE).href; }
+  catch (_) { return SCOPE; }
+};
+
 self.addEventListener('push', (event) => {
   const data = event.data ? event.data.json() : {};
   const title = data.title || 'mobux';
+  const url = resolve(data.url || './');
   const options = {
     body: data.body || '',
     tag: data.tag,
-    data: { url: data.url || '/' },
-    icon: '/static/icon-192.png',
-    badge: '/static/icon-192.png',
+    data: { url },
+    icon: resolve('static/icon-192.png'),
+    badge: resolve('static/icon-192.png'),
     // Two-pulse vibration. Universal "noticed it" signal that works even
     // when the device is on silent. Sound itself is OS-channel-controlled
     // and can't be set from the SW; users who want a chime configure the
@@ -32,7 +43,7 @@ self.addEventListener('push', (event) => {
         .matchAll({ type: 'window', includeUncontrolled: true })
         .then((cs) =>
           cs.forEach((c) =>
-            c.postMessage({ type: 'mobux-push', title, body: data.body, url: data.url || '/' }),
+            c.postMessage({ type: 'mobux-push', title, body: data.body, url }),
           ),
         ),
     ]),
@@ -42,28 +53,25 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   // `url` is exactly the deep link the server chose when it sent the push
-  // (push.rs::session_url) — the SW does no URL construction of its own, so
-  // there's no separate node-correctness question here: whatever
-  // push.rs/terminal_page decided is what opens (issue #210).
-  const url = event.notification.data?.url || '/';
+  // (push.rs::session_url), only anchored to the scope — the SW picks no
+  // destination of its own, so there's no separate node-correctness question
+  // here: whatever push.rs/terminal_page decided is what opens (issue #210).
+  const target = new URL(resolve(event.notification.data?.url || './'));
   // Match an open client by session pathname (the `?w=N` query holds
   // the originating tmux window). On a hit, focus the existing tab and
   // post `mobux-navigate` so it can switch windows internally — no
   // duplicate tab, no full reload.
-  let target;
-  try { target = new URL(url, self.location.origin); }
-  catch (_) { target = new URL('/', self.location.origin); }
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((all) => {
       for (const client of all) {
         let cu;
         try { cu = new URL(client.url); } catch (_) { continue; }
         if (cu.pathname === target.pathname) {
-          client.postMessage({ type: 'mobux-navigate', url });
+          client.postMessage({ type: 'mobux-navigate', url: target.href });
           return client.focus();
         }
       }
-      return clients.openWindow(url);
+      return clients.openWindow(target.href);
     })
   );
 });
