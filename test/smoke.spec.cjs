@@ -3077,27 +3077,38 @@ test("session list: session names are escaped", async ({ page }) => {
 // The old server-rendered pages at /settings, /s/<name>, and /install now
 // 307-redirect into the SPA. These tests assert the redirects so that
 // deep-links, bookmarks, and the installed TWA keep working.
+//
+// The targets are relative: a path-prefixing proxy strips its prefix before
+// the server sees the request, so only the browser can resolve them back onto
+// the mount. `/settings` and `/install` are one segment deep and address a
+// sibling; `/s/<name>` is two and climbs one level.
 
-test("GET /settings 307-redirects to /app#/settings", async ({ page }) => {
+test("GET /settings 307-redirects to the app settings route", async ({
+  page,
+}) => {
   const resp = await page.request.get(`${BASE}/settings`, {
     maxRedirects: 0,
   });
   expect(resp.status()).toBe(307);
-  expect(resp.headers()["location"]).toBe("/app#/settings");
+  expect(resp.headers()["location"]).toBe("app#/settings");
 });
 
-test("GET /s/<name> 307-redirects to /app#/s/<name>", async ({ page }) => {
+test("GET /s/<name> 307-redirects to the app session route", async ({
+  page,
+}) => {
   const resp = await page.request.get(`${BASE}/s/${SESSION}`, {
     maxRedirects: 0,
   });
   expect(resp.status()).toBe(307);
-  expect(resp.headers()["location"]).toBe(`/app#/s/${SESSION}`);
+  expect(resp.headers()["location"]).toBe(`../app#/s/${SESSION}`);
 });
 
-test("GET /install 307-redirects to /app#/install", async ({ page }) => {
+test("GET /install 307-redirects to the app install route", async ({
+  page,
+}) => {
   const resp = await page.request.get(`${BASE}/install`, {
     maxRedirects: 0,
   });
   expect(resp.status()).toBe(307);
-  expect(resp.headers()["location"]).toBe("/app#/install");
+  expect(resp.headers()["location"]).toBe("app#/install");
 });

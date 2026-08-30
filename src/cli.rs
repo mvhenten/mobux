@@ -427,7 +427,10 @@ mod tests {
     fn flags_take_a_separate_or_inline_value() {
         let expected = Parsed::Run(RunOptions {
             overrides: CliOverrides {
-                server: Some(config::PartialServerConfig { port: Some(5151) }),
+                server: Some(config::PartialServerConfig {
+                    port: Some(5151),
+                    ..Default::default()
+                }),
                 auth: Some(config::PartialAuthConfig {
                     pin: some("12345"),
                     user: some("dogwalker"),
@@ -538,7 +541,10 @@ mod tests {
             ])),
             Parsed::Service(ServiceCommand::Install(RunOptions {
                 overrides: CliOverrides {
-                    server: Some(config::PartialServerConfig { port: Some(5151) }),
+                    server: Some(config::PartialServerConfig {
+                        port: Some(5151),
+                        ..Default::default()
+                    }),
                     auth: Some(config::PartialAuthConfig {
                         pin: some("99999"),
                         user: some("walker"),

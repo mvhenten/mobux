@@ -77,6 +77,21 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     #[garde(range(min = 1))]
     pub port: u16,
+    /// Path prefix a reverse proxy publishes mobux under, e.g. `/mobux`. Empty
+    /// means the site root. The proxy strips the prefix before mobux sees the
+    /// request, so routing never reads this — it exists so the session cookie
+    /// carries the `Path` the browser is actually on.
+    /// Env: `MOBUX_BASE_PATH`. Flag: `--base-path`.
+    #[serde(default)]
+    #[garde(custom(base_path_value))]
+    pub base_path: String,
+    /// Trust a reverse proxy to terminate TLS. The bind stays plain HTTP, but
+    /// the session cookie keeps its `Secure` flag because the browser reaches
+    /// mobux over HTTPS. Env: `MOBUX_BEHIND_TLS_PROXY`. Flag:
+    /// `--behind-tls-proxy`.
+    #[serde(default)]
+    #[garde(skip)]
+    pub behind_tls_proxy: bool,
 }
 
 /// The credentials that unlock the web UI.
@@ -236,6 +251,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             port: default_port(),
+            base_path: String::new(),
+            behind_tls_proxy: false,
         }
     }
 }
@@ -314,6 +331,10 @@ pub struct PartialConfig {
 pub struct PartialServerConfig {
     #[serde(default)]
     pub port: Option<u16>,
+    #[serde(default)]
+    pub base_path: Option<String>,
+    #[serde(default)]
+    pub behind_tls_proxy: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +428,8 @@ impl Config {
     pub fn merged(mut self, partial: PartialConfig) -> Config {
         if let Some(server) = partial.server {
             overlay(&mut self.server.port, server.port);
+            overlay(&mut self.server.base_path, server.base_path);
+            overlay(&mut self.server.behind_tls_proxy, server.behind_tls_proxy);
         }
         if let Some(auth) = partial.auth {
             overlay(&mut self.auth.user, auth.user);
@@ -494,6 +517,20 @@ pub const FIELDS: &[FieldSpec] = &[
         flag: Some("--port"),
         kind: FieldKind::Number,
         help: "Port to listen on (default 8080)",
+    },
+    FieldSpec {
+        key: "server.base_path",
+        env: "MOBUX_BASE_PATH",
+        flag: Some("--base-path"),
+        kind: FieldKind::Text,
+        help: "Path prefix a reverse proxy publishes mobux under, e.g. /mobux",
+    },
+    FieldSpec {
+        key: "server.behind_tls_proxy",
+        env: "MOBUX_BEHIND_TLS_PROXY",
+        flag: Some("--behind-tls-proxy"),
+        kind: FieldKind::Toggle,
+        help: "Trust a reverse proxy to terminate TLS (default off)",
     },
     FieldSpec {
         key: "auth.user",
@@ -1007,6 +1044,8 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
     PartialConfig {
         server: Some(PartialServerConfig {
             port: env_port(env),
+            base_path: text("MOBUX_BASE_PATH"),
+            behind_tls_proxy: env.get("MOBUX_BEHIND_TLS_PROXY").map(truthy_toggle),
         }),
         auth: Some(PartialAuthConfig {
             user: text("MOBUX_AUTH_USER"),
@@ -1031,7 +1070,7 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
         }),
         app: Some(PartialAppConfig {
             domain: text("MOBUX_DOMAIN"),
-            dev: env.get("MOBUX_DEV").map(truthy_dev),
+            dev: env.get("MOBUX_DEV").map(truthy_toggle),
             service_name: text("MOBUX_SERVICE_NAME"),
         }),
         push: Some(PartialPushConfig {
@@ -1050,7 +1089,10 @@ pub fn flags_partial(
     pin: Option<String>,
 ) -> PartialConfig {
     PartialConfig {
-        server: Some(PartialServerConfig { port }),
+        server: Some(PartialServerConfig {
+            port,
+            ..Default::default()
+        }),
         auth: Some(PartialAuthConfig {
             user,
             pass: None,
@@ -1122,7 +1164,9 @@ fn truthy_tls(value: &str) -> bool {
     value != "0" && !value.eq_ignore_ascii_case("false")
 }
 
-fn truthy_dev(value: &str) -> bool {
+/// Every toggle but `MOBUX_TLS`, which predates the table and reads any value
+/// other than `0`/`false` as on.
+fn truthy_toggle(value: &str) -> bool {
     value == "1" || value.eq_ignore_ascii_case("true")
 }
 
@@ -1189,6 +1233,28 @@ fn pin_value(value: &str, ctx: &()) -> garde::Result {
     if !(4..=64).contains(&length) {
         return Err(garde::Error::new(
             "must be between 4 and 64 characters, or empty to leave the PIN unset",
+        ));
+    }
+    Ok(())
+}
+
+/// A mount prefix as the browser spells it: absolute, and free of the
+/// characters a systemd unit or a cookie attribute cannot carry. A trailing
+/// slash is accepted and normalised away where the value is used.
+fn base_path_value(value: &str, ctx: &()) -> garde::Result {
+    if value.is_empty() {
+        return Ok(());
+    }
+    plain_value(value, ctx)?;
+    if !value.starts_with('/') {
+        return Err(garde::Error::new("must start with `/`, e.g. `/mobux`"));
+    }
+    if value.contains("..") {
+        return Err(garde::Error::new("must not contain `..`"));
+    }
+    if value.contains(';') {
+        return Err(garde::Error::new(
+            "must not contain `;`; it would split the Set-Cookie header",
         ));
     }
     Ok(())
@@ -1351,6 +1417,31 @@ mod tests {
         assert_eq!(config.app.service_name, "mobux");
         assert_eq!(config.push.vapid_contact, "mailto:admin@example.com");
         assert!(!config.app.dev);
+        assert_eq!(config.server.base_path, "");
+        assert!(!config.server.behind_tls_proxy);
+    }
+
+    #[test]
+    fn a_base_path_is_absolute_or_empty() {
+        assert_eq!(
+            parse_str(r#"{"server": {"base_path": "/mobux"}}"#)
+                .unwrap()
+                .server
+                .base_path,
+            "/mobux"
+        );
+        assert!(
+            message(r#"{"server": {"base_path": "mobux"}}"#).contains("must start with `/`"),
+            "a relative prefix is not a mount point"
+        );
+        assert!(
+            message(r#"{"server": {"base_path": "/a/../b"}}"#).contains("`..`"),
+            "a traversal is not a mount point"
+        );
+        assert!(
+            message(r#"{"server": {"base_path": "/a;Secure"}}"#).contains("`;`"),
+            "a semicolon would split the Set-Cookie header"
+        );
     }
 
     #[test]
@@ -1770,6 +1861,7 @@ mod tests {
     fn every_flagless_field_takes_the_env_over_the_file() {
         let file_layer = file(
             r#"{
+                "server": {"base_path": "/filed", "behind_tls_proxy": false},
                 "auth": {"pass": "filed"},
                 "tls": {
                     "enabled": true,
@@ -1789,6 +1881,8 @@ mod tests {
             }"#,
         );
         let env_layer = env(&[
+            ("MOBUX_BASE_PATH", "/enved"),
+            ("MOBUX_BEHIND_TLS_PROXY", "1"),
             ("MOBUX_AUTH_PASS", "enved"),
             ("MOBUX_TLS", "0"),
             ("MOBUX_TLS_HOSTS", "a.example, b.example"),
@@ -1808,6 +1902,8 @@ mod tests {
         ]);
 
         let config = resolved(file_layer.clone(), &env_layer, PartialConfig::default());
+        assert_eq!(config.server.base_path, "/enved");
+        assert!(config.server.behind_tls_proxy);
         assert_eq!(config.auth.pass, "enved");
         assert!(!config.tls.enabled);
         assert_eq!(config.tls.hosts, ["a.example", "b.example"]);
@@ -1826,6 +1922,8 @@ mod tests {
         assert_eq!(config.update.check_url, "https://enved.example/index");
 
         let filed = resolved(file_layer, &env(&[]), PartialConfig::default());
+        assert_eq!(filed.server.base_path, "/filed");
+        assert!(!filed.server.behind_tls_proxy);
         assert_eq!(filed.auth.pass, "filed");
         assert!(filed.tls.enabled);
         assert_eq!(filed.tls.acme_http_port, 8081);

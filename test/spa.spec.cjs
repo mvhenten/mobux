@@ -3547,3 +3547,111 @@ test("ribbon bug-report button opens a prefilled GitHub issue with the diagnosti
   expect(diagnostics.userAgent).toBeTruthy();
   expect(diagnostics.route).toContain(SEED);
 });
+
+// ── behind a path-prefixing reverse proxy ───────────────────────────────────
+//
+// The live case is a CloudFront CDE proxy publishing mobux at
+// /user/host/8080/ and stripping that prefix before the request arrives. The
+// server therefore never learns the prefix, and any root-absolute `Location`
+// it sends walks the browser out of the mount. Every redirect is relative
+// instead, resolved by the browser against the URL it actually asked for.
+//
+// The stub below is that proxy, minus TLS: it serves exactly the prefix and
+// 404s everything outside it, so a redirect that escapes the mount fails here
+// rather than only in production. The SPA's own assets are still root-absolute
+// (vite `base`), so these cases assert the served document, not a booted app.
+
+const http = require("http");
+const https = require("https");
+
+const PREFIX = "/user/host/8080";
+
+async function startPrefixProxy() {
+  const upstream = new URL(BASE);
+  const client = upstream.protocol === "https:" ? https : http;
+  const server = http.createServer((req, res) => {
+    if (req.url !== PREFIX && !req.url.startsWith(`${PREFIX}/`)) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end(`outside the mount: ${req.url}`);
+      return;
+    }
+    const forwarded = client.request(
+      {
+        protocol: upstream.protocol,
+        hostname: upstream.hostname,
+        port: upstream.port,
+        method: req.method,
+        path: req.url.slice(PREFIX.length) || "/",
+        headers: { ...req.headers, host: upstream.host },
+        rejectUnauthorized: false,
+      },
+      (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+        upstreamRes.pipe(res);
+      },
+    );
+    forwarded.on("error", (err) => {
+      res.writeHead(502, { "content-type": "text/plain" });
+      res.end(String(err));
+    });
+    req.pipe(forwarded);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return {
+    mount: `http://127.0.0.1:${port}${PREFIX}`,
+    stop: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+test.describe("behind a prefix-adding proxy", () => {
+  let proxy;
+
+  test.beforeAll(async () => {
+    proxy = await startPrefixProxy();
+  });
+
+  test.afterAll(async () => {
+    if (proxy) await proxy.stop();
+  });
+
+  test("the root lands on the app inside the mount", async ({ page }) => {
+    const response = await page.goto(`${proxy.mount}/`, {
+      waitUntil: "domcontentloaded",
+    });
+    expect(page.url()).toBe(`${proxy.mount}/app`);
+    expect(response.status()).toBe(200);
+    await expect(page.locator("#app")).toHaveCount(1);
+  });
+
+  test("the install link lands on the app's install route", async ({
+    page,
+  }) => {
+    await page.goto(`${proxy.mount}/install`, {
+      waitUntil: "domcontentloaded",
+    });
+    expect(page.url()).toBe(`${proxy.mount}/app#/install`);
+  });
+
+  // Two segments deep, so this is the redirect that needs a `../` — one too
+  // few would land on `<mount>/s/app`, one too many outside the mount.
+  test("a session link lands on the app's session route", async ({ page }) => {
+    await page.goto(`${proxy.mount}/s/${encodeURIComponent(SEED)}`, {
+      waitUntil: "domcontentloaded",
+    });
+    expect(page.url()).toBe(`${proxy.mount}/app#/s/${SEED}`);
+  });
+
+  // The fallback used to 307 to `/`, which under a prefix is the proxy root —
+  // outside the mount, and a 404 from the stub above.
+  test("an unknown path serves the app shell rather than redirecting", async ({
+    page,
+  }) => {
+    const response = await page.goto(`${proxy.mount}/nothing-here`, {
+      waitUntil: "domcontentloaded",
+    });
+    expect(response.status()).toBe(200);
+    expect(page.url()).toBe(`${proxy.mount}/nothing-here`);
+    await expect(page.locator("#app")).toHaveCount(1);
+  });
+});

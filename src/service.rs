@@ -468,7 +468,10 @@ WantedBy=default.target
 
     fn overrides(port: Option<u16>, user: Option<&str>, pin: Option<&str>) -> CliOverrides {
         CliOverrides {
-            server: port.map(|port| config::PartialServerConfig { port: Some(port) }),
+            server: port.map(|port| config::PartialServerConfig {
+                port: Some(port),
+                ..Default::default()
+            }),
             auth: (user.is_some() || pin.is_some()).then(|| config::PartialAuthConfig {
                 user: user.map(str::to_string),
                 pin: pin.map(str::to_string),
