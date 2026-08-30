@@ -49,21 +49,26 @@ use crate::db::{Db, Subscription, VapidKeys};
 /// Build the deep-link URL for a session notification, embedding
 /// `?w={window}` so a click can land on the originating tmux window.
 ///
+/// Relative on purpose: the service worker resolves it against its own
+/// registration scope (`web/static/sw.js`), so a mobux mounted under a path
+/// prefix deep-links inside that prefix. At the empty prefix the scope is the
+/// origin root and `s/{session}` resolves exactly where `/s/{session}` did.
+///
 /// Deliberately node-less: `session` always names a session on the HUB'S OWN
 /// local tmux. The only caller is `fire_bell`, driven exclusively by the
 /// `alert-bell` hook (`tmux::install_bell_hook`), which is installed once, at
 /// startup, on the hub's local tmux server only — nodes are plain SSH targets
 /// (see `nodes.rs`/`tmux.rs`), not separate mobux processes, so they have no
 /// hook to install and can never be the source of a bell. There is no node to
-/// know here, so producing a bare `/s/{session}` is already correct, not a
+/// know here, so producing a bare `s/{session}` is already correct, not a
 /// gap (contrast with the `/s/{name}` server route in `main.rs`, which is
 /// also reachable by a hand-typed/bookmarked link and — unlike this
 /// hook-driven one — cannot assume local; see `terminal_page` /
 /// `resolve_session_location` there, issue #210).
 fn session_url(session: &str, window: Option<&str>) -> String {
     match window {
-        Some(w) if !w.is_empty() => format!("/s/{session}?w={w}"),
-        _ => format!("/s/{session}"),
+        Some(w) if !w.is_empty() => format!("s/{session}?w={w}"),
+        _ => format!("s/{session}"),
     }
 }
 
@@ -91,7 +96,8 @@ pub struct Payload {
     /// Notification `tag`. Same tag from the same origin replaces an existing
     /// notification rather than stacking — free OS-side coalescing.
     pub tag: Option<String>,
-    /// Path the SW should deep-link to on click. Defaults to `/`.
+    /// Path the SW should deep-link to on click, relative to the SW's
+    /// registration scope. Defaults to the scope root.
     pub url: Option<String>,
 }
 
@@ -125,7 +131,7 @@ pub async fn notify(db: Arc<Db>, payload: Payload) {
         "title": payload.title,
         "body": payload.body,
         "tag": payload.tag,
-        "url": payload.url.unwrap_or_else(|| "/".to_string()),
+        "url": payload.url.unwrap_or_else(|| "./".to_string()),
     })
     .to_string()
     .into_bytes();
@@ -258,5 +264,45 @@ async fn deliver(
             eprintln!("push: HTTP error for {}: {e}", sub.endpoint);
             DeliveryOutcome::Failed
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_url;
+
+    /// What the browser's `new URL(relative, scope)` does for a scope ending
+    /// in `/` and a relative reference that starts with a path segment.
+    fn resolved_against_scope(scope: &str, url: &str) -> String {
+        format!("{scope}{url}")
+    }
+
+    #[test]
+    fn session_url_is_relative() {
+        assert_eq!(session_url("work", None), "s/work");
+        assert_eq!(session_url("work", Some("3")), "s/work?w=3");
+        assert_eq!(session_url("work", Some("")), "s/work");
+    }
+
+    #[test]
+    fn session_url_lands_where_it_always_did_at_the_empty_prefix() {
+        let scope = "https://host/";
+        assert_eq!(
+            resolved_against_scope(scope, &session_url("work", None)),
+            "https://host/s/work"
+        );
+        assert_eq!(
+            resolved_against_scope(scope, &session_url("work", Some("3"))),
+            "https://host/s/work?w=3"
+        );
+    }
+
+    #[test]
+    fn session_url_stays_inside_a_path_prefix() {
+        let scope = "https://host/mobux/";
+        assert_eq!(
+            resolved_against_scope(scope, &session_url("work", Some("3"))),
+            "https://host/mobux/s/work?w=3"
+        );
     }
 }
