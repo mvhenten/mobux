@@ -2,18 +2,20 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::{self, CliOverrides};
+use crate::cli::{RunOptions, CONFIG_FLAG};
+use crate::config::{self, Config};
+use crate::configure;
 
 pub const DEFAULT_UNIT: &str = "mobux";
 
-/// Everything the unit file needs, already resolved from flags and environment.
+/// Everything the unit file needs. The settings themselves live in the config
+/// file the unit names, so no credential reaches systemd.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitSpec {
     pub unit: String,
     pub exec_start: String,
+    pub config_path: String,
     pub port: u16,
-    pub user: String,
-    pub pin: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,34 +25,9 @@ pub enum Decision {
     Unchanged,
 }
 
-/// The environment `service install` reads when a flag is absent — passed in so
-/// the resolution is a pure function the tests can drive.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct EnvSnapshot {
-    pub mobux_port: Option<String>,
-    pub port: Option<String>,
-    pub auth_user: Option<String>,
-    pub auth_pass: Option<String>,
-    pub pin: Option<String>,
-    pub service_name: Option<String>,
-}
-
-impl EnvSnapshot {
-    fn from_env() -> Self {
-        let read = |key: &str| std::env::var(key).ok();
-        EnvSnapshot {
-            mobux_port: read("MOBUX_PORT"),
-            port: read("PORT"),
-            auth_user: read("MOBUX_AUTH_USER"),
-            auth_pass: read("MOBUX_AUTH_PASS"),
-            pin: read("MOBUX_PIN"),
-            service_name: read("MOBUX_SERVICE_NAME"),
-        }
-    }
-}
-
-/// The unit name the self-updater will restart: `MOBUX_SERVICE_NAME` if set,
-/// `mobux` otherwise — the same lookup `update::resolve_service_name` makes.
+/// The unit name the self-updater will restart: the config file and
+/// `MOBUX_SERVICE_NAME` state it, `mobux` is the default — the same answer
+/// `update::resolve_service_name` reaches.
 pub fn unit_name(service_name: Option<String>) -> String {
     service_name
         .map(|s| s.trim().to_string())
@@ -58,52 +35,42 @@ pub fn unit_name(service_name: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_UNIT.to_string())
 }
 
-/// Resolve the unit from the flags, the environment and the running binary.
+/// Resolve the unit from the settings it will run on, the running binary and
+/// the config file the unit will name.
 ///
 /// A boot service is reachable from the network the moment it starts, so an
 /// auth-less unit is refused rather than written.
 pub fn resolve_unit_spec(
-    overrides: &CliOverrides,
-    env: &EnvSnapshot,
+    settings: &Config,
     exec_start: &Path,
+    config_path: &Path,
 ) -> Result<UnitSpec, String> {
-    let credentials = cli::resolve_credentials(
-        overrides.auth_user(),
-        overrides.auth_pin(),
-        env.auth_user.clone(),
-        env.auth_pass.clone(),
-        env.pin.clone(),
-    )
-    .ok_or_else(|| {
-        "a boot service needs a username and PIN — nothing else stops the network from \
-         reaching it. Pass --user and --pin, or export MOBUX_AUTH_USER and MOBUX_PIN \
-         before running `mobux service install`."
-            .to_string()
-    })?;
+    config::check(settings)?;
+    if settings.credentials().is_none() {
+        return Err(
+            "a boot service needs a username and PIN — nothing else stops the network \
+                    from reaching it. Pass --user and --pin, or export MOBUX_AUTH_USER and \
+                    MOBUX_PIN before running `mobux service install`."
+                .to_string(),
+        );
+    }
 
     let spec = UnitSpec {
-        unit: unit_name(env.service_name.clone()),
+        unit: unit_name(Some(settings.app.service_name.clone())),
         exec_start: exec_start.to_string_lossy().into_owned(),
-        port: cli::resolve_port(
-            overrides.server_port(),
-            env.mobux_port.clone(),
-            env.port.clone(),
-        ),
-        user: credentials.user,
-        pin: credentials.pass,
+        config_path: config_path.to_string_lossy().into_owned(),
+        port: settings.server.port,
     };
 
-    check_unit_value("--user", &spec.user)?;
-    check_unit_value("--pin", &spec.pin)?;
     check_unit_value("the binary path", &spec.exec_start)?;
-    check_unit_value("MOBUX_SERVICE_NAME", &spec.unit)?;
+    check_unit_value("the config file path", &spec.config_path)?;
+    check_unit_value("app.service_name", &spec.unit)?;
     Ok(spec)
 }
 
-/// systemd splits an unquoted `Environment=` value on whitespace and eats
-/// quotes and backslashes, so a value carrying any of those would reach the
-/// server mangled. Refuse it here instead of writing a unit that starts with
-/// the wrong PIN.
+/// systemd splits an unquoted value on whitespace and eats quotes and
+/// backslashes, so a path or a unit name carrying any of those would reach the
+/// server mangled. Refuse it here instead of writing a unit that never starts.
 fn check_unit_value(label: &str, value: &str) -> Result<(), String> {
     let offender = value
         .chars()
@@ -112,19 +79,19 @@ fn check_unit_value(label: &str, value: &str) -> Result<(), String> {
         None => Ok(()),
         Some(c) => Err(format!(
             "{label} contains {c:?}; a systemd unit can't carry whitespace, quotes, \
-             backslashes or $ in an environment value. Use a plainer value."
+             backslashes or $ in a value. Use a plainer value."
         )),
     }
 }
 
-/// The unit file, mirroring the manual recipe in DEPLOY.md.
+/// The unit file, mirroring the manual recipe in DEPLOY.md. Every setting is
+/// read from the config file the unit names, so the PIN never lands here.
 pub fn render_unit(spec: &UnitSpec) -> String {
     let UnitSpec {
         unit,
         exec_start,
+        config_path,
         port,
-        user,
-        pin,
     } = spec;
     let mut out = String::new();
     let _ = write!(
@@ -136,10 +103,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exec_start}
-Environment=MOBUX_PORT={port}
-Environment=MOBUX_AUTH_USER={user}
-Environment=MOBUX_PIN={pin}
+ExecStart={exec_start} {CONFIG_FLAG} {config_path}
 "
     );
     if unit != DEFAULT_UNIT {
@@ -184,7 +148,7 @@ pub fn unit_path(config_dir: &Path, unit: &str) -> PathBuf {
 
 pub fn run(command: &crate::cli::ServiceCommand) -> i32 {
     match command {
-        crate::cli::ServiceCommand::Install(overrides) => report(install(overrides)),
+        crate::cli::ServiceCommand::Install(options) => report(install(options)),
         crate::cli::ServiceCommand::Uninstall => report(uninstall()),
         crate::cli::ServiceCommand::Status => match status() {
             Ok(code) => code,
@@ -206,47 +170,111 @@ fn report(result: Result<(), String>) -> i32 {
     }
 }
 
-fn install(overrides: &CliOverrides) -> Result<(), String> {
-    let env = EnvSnapshot::from_env();
+fn install(options: &RunOptions) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not resolve this binary's own path: {e}"))?;
+    let config_path = options
+        .config_path
+        .clone()
+        .unwrap_or_else(config::config_file_path);
+    let settings = resolve_settings(&config_path, options)?;
     // Resolve before the systemd probe so a missing PIN is reported as such
     // even on a host where the user bus is out of reach.
-    let spec = resolve_unit_spec(overrides, &env, &exe)?;
+    let spec = resolve_unit_spec(&settings, &exe, &config_path)?;
     preflight()?;
-    let desired = render_unit(&spec);
-    let path = unit_path(&config_dir()?, &spec.unit);
 
-    let existing = std::fs::read_to_string(&path).ok();
-    let decision = decide(existing.as_deref(), &desired);
-    if decision == Decision::Unchanged {
+    let unit_file = unit_path(&config_dir()?, &spec.unit);
+    let desired = render_unit(&spec);
+    let unit_change = decide(read(&unit_file).as_deref(), &desired);
+    let config_change = decide(
+        read(&config_path).as_deref(),
+        &configure::document(&settings),
+    );
+
+    if unit_change == Decision::Unchanged && config_change == Decision::Unchanged {
         return Err(format!(
-            "{} already describes this exact service — nothing to do. Pass --port/--user/--pin \
-             to change it, or `mobux service uninstall` to remove it.",
-            path.display()
+            "{} and {} already describe this exact service — nothing to do. Pass \
+             --port/--user/--pin to change it, or `mobux service uninstall` to remove it.",
+            config_path.display(),
+            unit_file.display()
         ));
     }
 
-    write_unit(&path, &desired)?;
-    println!("{} {} (mode 600)", verb(decision), path.display());
+    if config_change != Decision::Unchanged {
+        configure::write_file(&config_path, &settings, true)
+            .map_err(|e| format!("writing {}: {e}", config_path.display()))?;
+        println!(
+            "{} {} (mode 600)",
+            verb(config_change),
+            config_path.display()
+        );
+    }
+    if unit_change != Decision::Unchanged {
+        write_unit(&unit_file, &desired)?;
+        println!("{} {} (mode 600)", verb(unit_change), unit_file.display());
+    }
 
     systemctl(&["daemon-reload"])?;
-    match decision {
-        Decision::Update => systemctl(&["restart", &spec.unit])?,
-        _ => systemctl(&["enable", "--now", &spec.unit])?,
-    }
+    // The settings moved into the config file, so an unchanged unit still has
+    // to be restarted to pick them up.
+    systemctl(&["enable", &spec.unit])?;
+    systemctl(&["restart", &spec.unit])?;
     enable_linger();
 
     println!(
-        "mobux listens on http://<this-host>:{} as user {:?}",
-        spec.port, spec.user
+        "mobux listens on {}://<this-host>:{} as user {:?}",
+        if settings.tls.enabled {
+            "https"
+        } else {
+            "http"
+        },
+        spec.port,
+        settings.auth.user
     );
-    println!("add Environment=MOBUX_TLS=1 to the unit to serve HTTPS instead");
+    if !settings.tls.enabled {
+        println!("rerun `mobux service install --tls` to serve HTTPS instead");
+    }
     println!(
         "check it with: systemctl --user status {} --no-pager",
         spec.unit
     );
     Ok(())
+}
+
+fn read(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// The settings the unit will run on, layered the way a run layers them: the
+/// config file, then the environment, then the flags. `install` writes the
+/// result back, so a file that is not there yet is the defaults.
+fn resolve_settings(path: &Path, options: &RunOptions) -> Result<Config, String> {
+    let file = config::load_partial_from(path)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    Ok(config::resolve(
+        Config::default(),
+        file,
+        &config::EnvSnapshot::from_env(),
+        options.overrides.clone(),
+    ))
+}
+
+/// The unit `uninstall` and `status` act on: the one the config file and the
+/// environment name between them.
+fn installed_unit() -> String {
+    let path = config::config_file_path();
+    let file = config::load_partial_from(&path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let settings = config::resolve(
+        Config::default(),
+        file,
+        &config::EnvSnapshot::from_env(),
+        config::PartialConfig::default(),
+    );
+    unit_name(Some(settings.app.service_name))
 }
 
 fn verb(decision: Decision) -> &'static str {
@@ -258,7 +286,7 @@ fn verb(decision: Decision) -> &'static str {
 
 fn uninstall() -> Result<(), String> {
     preflight()?;
-    let unit = unit_name(std::env::var("MOBUX_SERVICE_NAME").ok());
+    let unit = installed_unit();
     let path = unit_path(&config_dir()?, &unit);
     if !path.exists() {
         return Err(format!(
@@ -279,7 +307,7 @@ fn uninstall() -> Result<(), String> {
 
 fn status() -> Result<i32, String> {
     preflight()?;
-    let unit = unit_name(std::env::var("MOBUX_SERVICE_NAME").ok());
+    let unit = installed_unit();
     let status = Command::new("systemctl")
         .args(["--user", "status", &unit, "--no-pager"])
         .status()
@@ -311,7 +339,8 @@ fn write_unit(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|e| format!("writing {}: {e}", path.display()))?;
     file.write_all(contents.as_bytes())
         .map_err(|e| format!("writing {}: {e}", path.display()))?;
-    // The unit carries the PIN, and an existing file keeps its old mode.
+    // `mode` only applies to a file this call created, and a rewrite lands on
+    // one it did not.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("securing {}: {e}", path.display()))
 }
@@ -408,11 +437,34 @@ fn whoami() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config;
+    use crate::cli::CliOverrides;
+    use std::os::unix::fs::PermissionsExt as _;
 
-    fn some(value: &str) -> Option<String> {
-        Some(value.to_string())
-    }
+    const EXE: &str = "/home/me/.local/bin/mobux";
+    const CONFIG: &str = "/home/me/.config/mobux/config.json";
+
+    /// The unit mobux wrote before the config file existed. It is still on
+    /// disk on every host installed by an older release.
+    const OLD_STYLE_UNIT: &str = "\
+[Unit]
+Description=mobux — mobile tmux web frontend (HTTPS on :5151)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/me/.local/bin/mobux
+Environment=MOBUX_PORT=5151
+Environment=MOBUX_AUTH_USER=walker
+Environment=MOBUX_PIN=99999
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=default.target
+";
 
     fn overrides(port: Option<u16>, user: Option<&str>, pin: Option<&str>) -> CliOverrides {
         CliOverrides {
@@ -426,36 +478,49 @@ mod tests {
         }
     }
 
-    fn authed_env() -> EnvSnapshot {
-        EnvSnapshot {
-            auth_user: some("me"),
-            pin: some("12345"),
-            ..EnvSnapshot::default()
-        }
+    /// The settings `install` would resolve from those flags alone.
+    fn settings(overrides: CliOverrides) -> Config {
+        config::resolve(
+            Config::default(),
+            config::PartialConfig::default(),
+            &config::EnvSnapshot::default(),
+            overrides,
+        )
     }
 
-    fn spec_from(overrides: CliOverrides, env: EnvSnapshot) -> UnitSpec {
-        resolve_unit_spec(&overrides, &env, Path::new("/home/me/.local/bin/mobux"))
-            .expect("spec should resolve")
+    fn authed() -> Config {
+        settings(overrides(None, Some("me"), Some("12345")))
+    }
+
+    fn spec_from(settings: &Config) -> UnitSpec {
+        resolve_unit_spec(settings, Path::new(EXE), Path::new(CONFIG)).expect("spec should resolve")
+    }
+
+    /// The environment a unit's `Environment=` lines put in front of mobux.
+    fn unit_environment(unit: &str) -> config::EnvSnapshot {
+        config::EnvSnapshot::new(
+            unit.lines()
+                .filter_map(|line| line.strip_prefix("Environment=")?.split_once('=')),
+        )
     }
 
     #[test]
-    fn unit_carries_the_binary_path_the_port_and_the_credentials() {
-        let unit = render_unit(&spec_from(
-            overrides(Some(5151), Some("walker"), Some("99999")),
-            EnvSnapshot::default(),
-        ));
+    fn the_unit_names_the_config_file_and_carries_no_credentials() {
+        let unit = render_unit(&spec_from(&settings(overrides(
+            Some(5151),
+            Some("walker"),
+            Some("99999"),
+        ))));
 
         assert!(
-            unit.contains("ExecStart=/home/me/.local/bin/mobux"),
+            unit.contains(&format!("ExecStart={EXE} --config {CONFIG}")),
             "{unit}"
         );
-        assert!(unit.contains("Environment=MOBUX_PORT=5151"), "{unit}");
-        assert!(
-            unit.contains("Environment=MOBUX_AUTH_USER=walker"),
-            "{unit}"
-        );
-        assert!(unit.contains("Environment=MOBUX_PIN=99999"), "{unit}");
+        assert!(!unit.contains("MOBUX_PIN"), "{unit}");
+        assert!(!unit.contains("MOBUX_AUTH_USER"), "{unit}");
+        assert!(!unit.contains("MOBUX_PORT"), "{unit}");
+        assert!(!unit.contains("99999"), "the PIN reached the unit: {unit}");
+        assert!(unit.contains("Description=mobux"), "{unit}");
         assert!(unit.contains("Restart=on-failure"), "{unit}");
         assert!(unit.contains("WantedBy=default.target"), "{unit}");
         assert!(unit.contains("KillMode=process"), "{unit}");
@@ -463,7 +528,7 @@ mod tests {
 
     #[test]
     fn unit_path_extends_the_default_path_with_cargo_bin() {
-        let unit = render_unit(&spec_from(CliOverrides::default(), authed_env()));
+        let unit = render_unit(&spec_from(&authed()));
         assert!(
             unit.contains("Environment=PATH=%h/.cargo/bin:"),
             "the self-updater shells out to cargo: {unit}"
@@ -471,43 +536,11 @@ mod tests {
     }
 
     #[test]
-    fn flags_beat_the_environment() {
-        let spec = spec_from(
-            overrides(Some(5151), Some("walker"), Some("99999")),
-            EnvSnapshot {
-                mobux_port: some("8080"),
-                auth_user: some("me"),
-                pin: some("12345"),
-                ..EnvSnapshot::default()
-            },
-        );
-        assert_eq!(spec.port, 5151);
-        assert_eq!(spec.user, "walker");
-        assert_eq!(spec.pin, "99999");
-    }
-
-    #[test]
-    fn the_environment_fills_in_what_the_flags_leave_out() {
-        let spec = spec_from(
-            CliOverrides::default(),
-            EnvSnapshot {
-                mobux_port: some("5151"),
-                auth_user: some("me"),
-                pin: some("12345"),
-                ..EnvSnapshot::default()
-            },
-        );
-        assert_eq!(spec.port, 5151);
-        assert_eq!(spec.user, "me");
-        assert_eq!(spec.pin, "12345");
-    }
-
-    #[test]
     fn no_unit_without_auth() {
         let error = resolve_unit_spec(
-            &overrides(None, Some("me"), None),
-            &EnvSnapshot::default(),
-            Path::new("/home/me/.local/bin/mobux"),
+            &settings(overrides(None, Some("me"), None)),
+            Path::new(EXE),
+            Path::new(CONFIG),
         )
         .expect_err("an auth-less boot service must be refused");
         assert!(error.contains("--pin"), "{error}");
@@ -517,20 +550,31 @@ mod tests {
     fn a_pin_that_systemd_would_mangle_is_refused() {
         for pin in ["hunter 2", "hunter\"2", "hunter$2", "hunter\\2"] {
             let error = resolve_unit_spec(
-                &overrides(None, Some("me"), Some(pin)),
-                &EnvSnapshot::default(),
-                Path::new("/home/me/.local/bin/mobux"),
+                &settings(overrides(None, Some("me"), Some(pin))),
+                Path::new(EXE),
+                Path::new(CONFIG),
             )
             .expect_err("a PIN systemd would mangle must be refused");
-            assert!(error.contains("--pin"), "{error}");
+            assert!(error.contains("auth.pin"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_config_path_the_unit_cannot_carry_is_refused() {
+        let error = resolve_unit_spec(
+            &authed(),
+            Path::new(EXE),
+            Path::new("/home/my configs/config.json"),
+        )
+        .expect_err("a path systemd would split must be refused");
+        assert!(error.contains("config file path"), "{error}");
     }
 
     #[test]
     fn the_default_unit_is_the_one_the_self_updater_restarts() {
         assert_eq!(unit_name(None), "mobux");
         assert_eq!(unit_name(Some("  ".to_string())), "mobux");
-        assert_eq!(unit_name(some("mobux-dev")), "mobux-dev");
+        assert_eq!(unit_name(Some("mobux-dev".to_string())), "mobux-dev");
         assert_eq!(
             unit_path(Path::new("/home/me/.config"), "mobux"),
             Path::new("/home/me/.config/systemd/user/mobux.service")
@@ -539,29 +583,63 @@ mod tests {
 
     #[test]
     fn a_renamed_unit_tells_the_self_updater_its_own_name() {
-        let default = render_unit(&spec_from(CliOverrides::default(), authed_env()));
+        let default = render_unit(&spec_from(&authed()));
         assert!(!default.contains("MOBUX_SERVICE_NAME"), "{default}");
 
-        let renamed = render_unit(&spec_from(
-            CliOverrides::default(),
-            EnvSnapshot {
-                service_name: some("mobux-dev"),
-                ..authed_env()
-            },
-        ));
+        let mut renamed = authed();
+        renamed.app.service_name = "mobux-dev".to_string();
+        let unit = render_unit(&spec_from(&renamed));
         assert!(
-            renamed.contains("Environment=MOBUX_SERVICE_NAME=mobux-dev"),
-            "{renamed}"
+            unit.contains("Environment=MOBUX_SERVICE_NAME=mobux-dev"),
+            "{unit}"
         );
     }
 
     #[test]
-    fn an_identical_unit_is_refused_and_a_changed_one_is_an_update() {
-        let unit = render_unit(&spec_from(CliOverrides::default(), authed_env()));
-        let other = render_unit(&spec_from(overrides(Some(5151), None, None), authed_env()));
+    fn an_identical_unit_is_refused_and_an_old_style_one_is_an_update() {
+        let unit = render_unit(&spec_from(&authed()));
 
         assert_eq!(decide(None, &unit), Decision::Create);
         assert_eq!(decide(Some(&unit), &unit), Decision::Unchanged);
-        assert_eq!(decide(Some(&other), &unit), Decision::Update);
+        assert_eq!(decide(Some(OLD_STYLE_UNIT), &unit), Decision::Update);
+    }
+
+    /// The security win only holds if an upgrade does not strand the hosts
+    /// running the old unit: its `Environment=` lines still answer, so it
+    /// resolves to exactly what the new install would write.
+    #[test]
+    fn an_old_style_unit_resolves_to_the_settings_it_always_did() {
+        let resolved = config::resolve(
+            Config::default(),
+            config::PartialConfig::default(),
+            &unit_environment(OLD_STYLE_UNIT),
+            config::PartialConfig::default(),
+        );
+
+        assert_eq!(
+            resolved,
+            settings(overrides(Some(5151), Some("walker"), Some("99999")))
+        );
+        assert_eq!(resolved.server.port, 5151);
+        assert_eq!(
+            resolved.credentials(),
+            Some(config::Credentials {
+                user: "walker".to_string(),
+                pass: "99999".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_config_the_unit_names_is_readable_by_its_owner_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(config::CONFIG_FILE_NAME);
+        let settings = settings(overrides(Some(5151), Some("walker"), Some("99999")));
+
+        configure::write_file(&path, &settings, true).expect("install writes the config");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+        assert_eq!(config::load_from(&path).expect("it reads back"), settings);
     }
 }

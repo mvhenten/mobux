@@ -3,9 +3,6 @@ use std::path::PathBuf;
 
 use crate::config::{self, FieldKind, FieldSpec, FieldValue, FIELDS};
 
-pub const DEFAULT_PORT: u16 = 8080;
-pub const DEFAULT_USER: &str = "mobux";
-
 /// Names the config file rather than a value inside it, so it has no field in
 /// the tree and no environment variable beside it.
 pub const CONFIG_FLAG: &str = "--config";
@@ -30,7 +27,7 @@ pub struct RunOptions {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceCommand {
-    Install(CliOverrides),
+    Install(RunOptions),
     Uninstall,
     Status,
 }
@@ -99,11 +96,7 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
     match subcommand.as_str() {
         "--help" | "-h" => Parsed::Help,
         "install" => match parse_flags(args) {
-            Ok(options) if options.config_path.is_some() => Parsed::Invalid(format!(
-                "{CONFIG_FLAG} names the file a run reads; `service install` writes its unit \
-                 from the flags and the environment"
-            )),
-            Ok(options) => Parsed::Service(ServiceCommand::Install(options.overrides)),
+            Ok(options) => Parsed::Service(ServiceCommand::Install(options)),
             Err(stop) => stop.parsed(),
         },
         "uninstall" | "status" => {
@@ -327,8 +320,8 @@ Usage: mobux [OPTIONS]
 
 Commands:
   service install     Install and start a systemd --user service that survives
-                      a reboot. Takes the same options; a username and PIN are
-                      required.
+                      a reboot. Takes the same options, writes them to the
+                      config file the unit reads, and needs a username and PIN.
   service uninstall   Stop, disable and remove that service
   service status      Show the service's systemd status
   update              Install the latest release over this binary, then restart
@@ -393,55 +386,6 @@ fn column_width<'a, I: Iterator<Item = &'a str>>(columns: I) -> usize {
         .map(|column| column.chars().count())
         .max()
         .unwrap_or(0)
-}
-
-/// `--port` wins over `MOBUX_PORT`, which wins over the deprecated bare `PORT`.
-/// An unparseable value falls through to the next source, matching the
-/// long-standing behavior of the `PORT` lookup.
-pub fn resolve_port(flag: Option<u16>, mobux_port: Option<String>, port: Option<String>) -> u16 {
-    flag.or_else(|| parse_port(mobux_port))
-        .or_else(|| parse_port(port))
-        .unwrap_or(DEFAULT_PORT)
-}
-
-fn parse_port(value: Option<String>) -> Option<u16> {
-    value.and_then(|v| v.trim().parse::<u16>().ok())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Credentials {
-    pub user: String,
-    pub pass: String,
-}
-
-/// Resolve the credentials that unlock the web UI, or `None` when auth is off.
-///
-/// `--user`/`--pin` win over `MOBUX_AUTH_USER`/`MOBUX_PIN`. A PIN given on the
-/// command line also wins over `MOBUX_AUTH_PASS`; otherwise the existing rule
-/// holds — a user/password pair beats a PIN.
-pub fn resolve_credentials(
-    flag_user: Option<String>,
-    flag_pin: Option<String>,
-    env_user: Option<String>,
-    env_pass: Option<String>,
-    env_pin: Option<String>,
-) -> Option<Credentials> {
-    let flag_pin = flag_pin.filter(|v| !v.is_empty());
-    let user = flag_user
-        .filter(|v| !v.is_empty())
-        .or(env_user)
-        .filter(|v| !v.is_empty());
-    let pass = env_pass.filter(|v| !v.is_empty() && flag_pin.is_none());
-    let pin = flag_pin.or(env_pin).filter(|v| !v.is_empty());
-
-    if let (Some(user), Some(pass)) = (user.clone(), pass) {
-        return Some(Credentials { user, pass });
-    }
-
-    pin.map(|pin| Credentials {
-        user: user.unwrap_or_else(|| DEFAULT_USER.to_string()),
-        pass: pin,
-    })
 }
 
 #[cfg(test)]
@@ -530,9 +474,13 @@ mod tests {
     }
 
     #[test]
-    fn service_install_rejects_config() {
-        assert!(
-            invalid(&["service", "install", "--config", "/etc/mobux.json"]).contains("--config")
+    fn service_install_names_the_file_its_unit_will_read() {
+        assert_eq!(
+            parse(args(&["service", "install", "--config", "/etc/mobux.json"])),
+            Parsed::Service(ServiceCommand::Install(RunOptions {
+                overrides: CliOverrides::default(),
+                config_path: Some(PathBuf::from("/etc/mobux.json")),
+            }))
         );
     }
 
@@ -570,7 +518,7 @@ mod tests {
     fn service_subcommands_parse() {
         assert_eq!(
             parse(args(&["service", "install"])),
-            Parsed::Service(ServiceCommand::Install(CliOverrides::default()))
+            Parsed::Service(ServiceCommand::Install(RunOptions::default()))
         );
         assert_eq!(
             parse(args(&["service", "uninstall"])),
@@ -588,14 +536,17 @@ mod tests {
             parse(args(&[
                 "service", "install", "--port", "5151", "--user", "walker", "--pin", "99999"
             ])),
-            Parsed::Service(ServiceCommand::Install(CliOverrides {
-                server: Some(config::PartialServerConfig { port: Some(5151) }),
-                auth: Some(config::PartialAuthConfig {
-                    pin: some("99999"),
-                    user: some("walker"),
+            Parsed::Service(ServiceCommand::Install(RunOptions {
+                overrides: CliOverrides {
+                    server: Some(config::PartialServerConfig { port: Some(5151) }),
+                    auth: Some(config::PartialAuthConfig {
+                        pin: some("99999"),
+                        user: some("walker"),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
+                },
+                config_path: None,
             }))
         );
         assert!(matches!(
@@ -917,7 +868,10 @@ mod tests {
     fn service_install_takes_the_whole_option_surface() {
         assert_eq!(
             parse(args(&["service", "install", "--data-dir", "/srv/mobux"])),
-            Parsed::Service(ServiceCommand::Install(run(&["--data-dir", "/srv/mobux"])))
+            Parsed::Service(ServiceCommand::Install(options(&[
+                "--data-dir",
+                "/srv/mobux"
+            ])))
         );
     }
 
@@ -933,114 +887,5 @@ mod tests {
             assert!(help.contains(spec.env), "help is missing {}", spec.env);
         }
         assert!(help.contains("--no-tls"), "help is missing --no-tls");
-    }
-
-    #[test]
-    fn port_falls_back_to_the_default() {
-        assert_eq!(resolve_port(None, None, None), 8080);
-    }
-
-    #[test]
-    fn port_flag_beats_both_env_vars() {
-        assert_eq!(resolve_port(Some(5151), some("5152"), some("5153")), 5151);
-    }
-
-    #[test]
-    fn mobux_port_beats_the_deprecated_port() {
-        assert_eq!(resolve_port(None, some("5152"), some("5153")), 5152);
-    }
-
-    #[test]
-    fn deprecated_port_alone_still_works() {
-        assert_eq!(resolve_port(None, None, some("5153")), 5153);
-    }
-
-    #[test]
-    fn unparseable_port_values_fall_through() {
-        assert_eq!(resolve_port(None, some("http"), some("5153")), 5153);
-        assert_eq!(resolve_port(None, some("http"), None), 8080);
-    }
-
-    #[test]
-    fn credentials_are_absent_without_a_pin_or_password() {
-        assert_eq!(
-            resolve_credentials(None, None, some("me"), None, None),
-            None
-        );
-        assert_eq!(resolve_credentials(None, None, None, None, None), None);
-    }
-
-    #[test]
-    fn env_pin_still_works_on_its_own() {
-        assert_eq!(
-            resolve_credentials(None, None, None, None, some("12345")),
-            Some(Credentials {
-                user: "mobux".to_string(),
-                pass: "12345".to_string(),
-            })
-        );
-        assert_eq!(
-            resolve_credentials(None, None, some("me"), None, some("12345")),
-            Some(Credentials {
-                user: "me".to_string(),
-                pass: "12345".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn env_user_and_password_still_work() {
-        assert_eq!(
-            resolve_credentials(None, None, some("me"), some("secret"), None),
-            Some(Credentials {
-                user: "me".to_string(),
-                pass: "secret".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn pin_and_user_flags_beat_their_env_vars() {
-        assert_eq!(
-            resolve_credentials(
-                some("walker"),
-                some("99999"),
-                some("me"),
-                None,
-                some("12345")
-            ),
-            Some(Credentials {
-                user: "walker".to_string(),
-                pass: "99999".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn pin_flag_beats_an_env_password() {
-        assert_eq!(
-            resolve_credentials(None, some("99999"), some("me"), some("secret"), None),
-            Some(Credentials {
-                user: "me".to_string(),
-                pass: "99999".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn empty_values_are_ignored() {
-        assert_eq!(
-            resolve_credentials(
-                Some(String::new()),
-                None,
-                some("me"),
-                Some(String::new()),
-                some("12345")
-            ),
-            Some(Credentials {
-                user: "me".to_string(),
-                pass: "12345".to_string(),
-            })
-        );
     }
 }
