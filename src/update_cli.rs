@@ -143,7 +143,10 @@ fn install(version: &str) -> Result<PathBuf, String> {
         );
     }
 
-    let dir = crate::resolve_data_dir().map_err(|e| format!("resolving the data dir: {e}"))?;
+    let settings = crate::resolve_config(&crate::cli::RunOptions::default())
+        .map_err(|e| format!("reading the config: {e}"))?;
+    let dir =
+        crate::resolve_data_dir(&settings).map_err(|e| format!("resolving the data dir: {e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let script = update::write_updater_script(&dir).map_err(|e| e.to_string())?;
 

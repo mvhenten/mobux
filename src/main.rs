@@ -298,20 +298,15 @@ struct AppState {
     /// with on the internal trigger endpoint. Generated fresh on every
     /// startup; the hook is reinstalled with the new value.
     internal_token: Arc<String>,
-    /// The TCP port this instance serves on. Used for self-update health-checks
-    /// and the detached updater spawn.
-    port: u16,
+    /// Every setting this instance resolved at startup, layered from the
+    /// defaults, the config file, the environment and the flags.
+    config: Arc<config::Config>,
     /// Where mobux persists state — used to write/spawn the detached updater.
+    /// Resolved from `paths.data_dir`, falling back to the platform data
+    /// directory, so it is a path rather than the raw setting.
     data_dir: PathBuf,
-    /// Whether this instance serves over TLS — the updater health-checks
-    /// `/api/identify` on the matching scheme.
-    use_tls: bool,
     /// In-memory cache of the latest crates.io version (self-update, #130).
     update: update::UpdateState,
-    /// Dev-mode flag (set via `MOBUX_DEV=1`). OFF in production. No longer
-    /// gates client telemetry (`/api/telemetry` is always active) — kept for
-    /// other dev-only behavior and reported via `/api/build-info`.
-    dev_mode: bool,
     /// SHA-256 prefix of the vendored JS bundles, computed by `web/build.js`
     /// and written to `web/static/build-info.json` at build time. Read from
     /// the embedded copy of that file so released binaries carry the hash
@@ -339,8 +334,8 @@ struct AuthConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let overrides = match cli::parse(env::args().skip(1)) {
-        cli::Parsed::Run(overrides) => overrides,
+    let options = match cli::parse(env::args().skip(1)) {
+        cli::Parsed::Run(options) => options,
         cli::Parsed::Service(command) => std::process::exit(service::run(&command)),
         cli::Parsed::Update(command) => std::process::exit(update_cli::run(command).await),
         cli::Parsed::Configure(command) => std::process::exit(configure::run(&command)),
@@ -367,8 +362,10 @@ async fn main() -> Result<()> {
         .install_default()
         .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
-    let auth = load_auth_config(&overrides);
-    let data_dir = resolve_data_dir()?;
+    let settings = Arc::new(resolve_config(&options)?);
+
+    let auth = load_auth_config(&settings);
+    let data_dir = resolve_data_dir(&settings)?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
     let db_path = data_dir.join("mobux.db");
@@ -384,30 +381,8 @@ async fn main() -> Result<()> {
         .map(char::from)
         .collect();
 
-    let mobux_port_env = env::var("MOBUX_PORT").ok();
-    let port_env = env::var("PORT").ok();
-    let port = cli::resolve_port(
-        overrides.server_port(),
-        mobux_port_env.clone(),
-        port_env.clone(),
-    );
-    if cli::port_is_deprecated_source(overrides.server_port(), mobux_port_env, port_env) {
-        eprintln!(
-            "[config] PORT is deprecated; rename it to MOBUX_PORT (still listening on {port})"
-        );
-    }
-
-    let use_tls = env::var("MOBUX_TLS")
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(true);
-
-    // Dev-mode toggle. OFF unless MOBUX_DEV is set to a truthy value (the
-    // `mobux-dev.service` unit sets `MOBUX_DEV=1`). No longer gates client
-    // telemetry (that's always on); reported via /api/build-info for any
-    // other dev-only behavior.
-    let dev_mode = env::var("MOBUX_DEV")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let port = settings.server.port;
+    let use_tls = settings.tls.enabled;
 
     // Read from the RustEmbed copy, not the source tree: `CARGO_MANIFEST_DIR`
     // is the build machine's path, which doesn't exist where a released
@@ -440,11 +415,9 @@ async fn main() -> Result<()> {
         ),
         db,
         internal_token: Arc::new(internal_token),
-        port,
+        config: settings.clone(),
         data_dir: data_dir.clone(),
-        use_tls,
         update: update_state,
-        dev_mode,
         build_hash,
         stt_install: BackgroundJobState::idle(),
         twa_build: BackgroundJobState::idle(),
@@ -611,38 +584,31 @@ async fn main() -> Result<()> {
 
     println!("telemetry: /api/telemetry active, logs to stderr");
 
-    if state.dev_mode {
+    if settings.app.dev {
         println!("dev mode: ON (MOBUX_DEV)");
     }
 
     if use_tls {
-        let extra_hosts: Vec<String> = env::var("MOBUX_TLS_HOSTS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let extra_hosts = settings.tls.hosts.clone();
 
-        let (cert_path, key_path) = match (env::var("MOBUX_CERT_FILE"), env::var("MOBUX_KEY_FILE"))
-        {
-            (Ok(c), Ok(k)) => {
-                eprintln!("[ssl] Using provided cert: {c}, key: {k}");
-                (std::path::PathBuf::from(c), std::path::PathBuf::from(k))
-            }
-            _ => {
-                // ACME mode needs the HTTP-01 route reachable BEFORE the order
-                // runs, so spin up a tiny HTTP-only server first. Same server
-                // stays up for renewals.
-                let challenges = if ssl::acme_mode_enabled() {
-                    let c = ssl::new_acme_challenges();
-                    spawn_acme_http_server(c.clone()).await?;
-                    Some(c)
-                } else {
-                    None
-                };
-                let paths = ssl::ensure_certs(&extra_hosts, challenges).await?;
-                (paths.cert, paths.key)
-            }
+        let cert_file = settings.tls.cert_file.trim();
+        let key_file = settings.tls.key_file.trim();
+        let (cert_path, key_path) = if !cert_file.is_empty() && !key_file.is_empty() {
+            eprintln!("[ssl] Using provided cert: {cert_file}, key: {key_file}");
+            (PathBuf::from(cert_file), PathBuf::from(key_file))
+        } else {
+            // ACME mode needs the HTTP-01 route reachable BEFORE the order
+            // runs, so spin up a tiny HTTP-only server first. Same server
+            // stays up for renewals.
+            let challenges = if ssl::acme_mode_enabled() {
+                let c = ssl::new_acme_challenges();
+                spawn_acme_http_server(c.clone(), settings.tls.acme_http_port).await?;
+                Some(c)
+            } else {
+                None
+            };
+            let paths = ssl::ensure_certs(&extra_hosts, challenges).await?;
+            (paths.cert, paths.key)
         };
         let tls_config = ssl::load_rustls_config(&cert_path, &key_path)?;
         let rustls_config =
@@ -661,13 +627,43 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn resolve_data_dir() -> Result<PathBuf> {
-    if let Some(override_dir) = env::var_os("MOBUX_DATA_DIR") {
-        let path = PathBuf::from(override_dir);
-        if path.as_os_str().is_empty() {
-            return Err(anyhow::anyhow!("MOBUX_DATA_DIR is set but empty"));
+/// The one place startup layers its settings: the defaults, the config file,
+/// the environment and the flags. A `--config` path that cannot be read is
+/// fatal; the default path is allowed to be absent, since mobux runs without a
+/// config file.
+fn resolve_config(options: &cli::RunOptions) -> Result<config::Config> {
+    let explicit = options.config_path.is_some();
+    let path = options
+        .config_path
+        .clone()
+        .unwrap_or_else(config::config_file_path);
+
+    let file = match config::load_partial_from(&path) {
+        Ok(Some(file)) => file,
+        Ok(None) if explicit => {
+            return Err(anyhow::anyhow!("{}: no such config file", path.display()))
         }
-        return Ok(path);
+        Ok(None) => config::PartialConfig::default(),
+        Err(err) => return Err(err.into()),
+    };
+
+    let env = config::EnvSnapshot::from_env();
+    if let Some(message) = config::port_deprecation(&env, &options.overrides) {
+        eprintln!("[config] {message}");
+    }
+
+    Ok(config::resolve(
+        config::Config::default(),
+        file,
+        &env,
+        options.overrides.clone(),
+    ))
+}
+
+fn resolve_data_dir(settings: &config::Config) -> Result<PathBuf> {
+    let data_dir = settings.paths.data_dir.trim();
+    if !data_dir.is_empty() {
+        return Ok(PathBuf::from(data_dir));
     }
     let dirs = directories::ProjectDirs::from("", "", "mobux")
         .ok_or_else(|| anyhow::anyhow!("could not resolve user home directory for data dir"))?;
@@ -675,13 +671,8 @@ fn resolve_data_dir() -> Result<PathBuf> {
 }
 
 /// Bind a tiny HTTP-only axum server that serves
-/// `/.well-known/acme-challenge/{token}`. Only used in ACME mode. Port comes
-/// from `MOBUX_ACME_HTTP_PORT` (default 80).
-async fn spawn_acme_http_server(challenges: ssl::AcmeChallenges) -> Result<()> {
-    let port: u16 = env::var("MOBUX_ACME_HTTP_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(80);
+/// `/.well-known/acme-challenge/{token}`. Only used in ACME mode.
+async fn spawn_acme_http_server(challenges: ssl::AcmeChallenges, port: u16) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     let router = Router::new()
@@ -760,22 +751,8 @@ fn ensure_session_cookie_value() -> String {
     value
 }
 
-fn load_auth_config(overrides: &cli::CliOverrides) -> Option<AuthConfig> {
-    let user_env = env::var("MOBUX_AUTH_USER")
-        .ok()
-        .map(|v| v.trim().to_string());
-    let pass_env = env::var("MOBUX_AUTH_PASS")
-        .ok()
-        .map(|v| v.trim().to_string());
-    let pin_env = env::var("MOBUX_PIN").ok().map(|v| v.trim().to_string());
-
-    let credentials = cli::resolve_credentials(
-        overrides.auth_user(),
-        overrides.auth_pin(),
-        user_env,
-        pass_env,
-        pin_env,
-    )?;
+fn load_auth_config(settings: &config::Config) -> Option<AuthConfig> {
+    let credentials = settings.credentials()?;
 
     Some(AuthConfig {
         user: credentials.user,
@@ -873,7 +850,7 @@ async fn auth_middleware(
         let set_cookie = build_session_cookie(
             &auth.session_cookie_name,
             &auth.session_cookie_value,
-            state.use_tls,
+            state.config.tls.enabled,
         );
         if let Ok(v) = HeaderValue::from_str(&set_cookie) {
             resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
@@ -940,7 +917,7 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
     Json(json!({
         "version": PKG_VERSION,
         "build_hash": state.build_hash,
-        "dev_mode": state.dev_mode,
+        "dev_mode": state.config.app.dev,
     }))
 }
 
@@ -993,8 +970,8 @@ async fn api_update_run(State(state): State<AppState>) -> Response {
         &state.update,
         &state.data_dir,
         &latest,
-        state.port,
-        state.use_tls,
+        state.config.server.port,
+        state.config.tls.enabled,
     ) {
         Ok(log_path) => {
             // Keep the flag set: a successful update restarts the process, and
@@ -3701,17 +3678,18 @@ mod tests {
     fn test_state(dev_mode: bool) -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Arc::new(db::Db::open(&dir.path().join("mobux.db")).expect("open db"));
+        let mut settings = config::Config::default();
+        settings.tls.enabled = false;
+        settings.app.dev = dev_mode;
         let state = AppState {
             session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap()),
             auth: None,
             cache_bust: "test".to_string(),
             db,
             internal_token: Arc::new("test-token".to_string()),
-            port: 8080,
+            config: Arc::new(settings),
             data_dir: dir.path().to_path_buf(),
-            use_tls: false,
             update: update::UpdateState::new(),
-            dev_mode,
             build_hash: "test".to_string(),
             stt_install: BackgroundJobState::idle(),
             twa_build: BackgroundJobState::idle(),

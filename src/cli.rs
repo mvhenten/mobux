@@ -1,14 +1,29 @@
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use crate::config::{self, FieldKind, FieldSpec, FieldValue, FIELDS};
 
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_USER: &str = "mobux";
 
+/// Names the config file rather than a value inside it, so it has no field in
+/// the tree and no environment variable beside it.
+pub const CONFIG_FLAG: &str = "--config";
+
 /// What the command line states, in the shape the config file states it. The
 /// flags are the same surface as the file and the environment, so they land in
 /// the same tree.
 pub type CliOverrides = config::PartialConfig;
+
+/// Everything a run takes from the command line: the layer the flags state,
+/// and the file the lower layers are read from.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RunOptions {
+    pub overrides: CliOverrides,
+    /// `--config PATH`. `None` reads the config file out of the config
+    /// directory, and its absence is not an error.
+    pub config_path: Option<PathBuf>,
+}
 
 // `install` carries the whole config surface; boxing it to shrink a value that
 // is built once at startup would only add indirection.
@@ -40,7 +55,7 @@ pub enum ConfigureCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
-    Run(CliOverrides),
+    Run(RunOptions),
     Service(ServiceCommand),
     Update(UpdateCommand),
     Configure(ConfigureCommand),
@@ -69,7 +84,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Parsed {
     }
 
     match parse_flags(args) {
-        Ok(overrides) => Parsed::Run(overrides),
+        Ok(options) => Parsed::Run(options),
         Err(stop) => stop.parsed(),
     }
 }
@@ -84,7 +99,11 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
     match subcommand.as_str() {
         "--help" | "-h" => Parsed::Help,
         "install" => match parse_flags(args) {
-            Ok(overrides) => Parsed::Service(ServiceCommand::Install(overrides)),
+            Ok(options) if options.config_path.is_some() => Parsed::Invalid(format!(
+                "{CONFIG_FLAG} names the file a run reads; `service install` writes its unit \
+                 from the flags and the environment"
+            )),
+            Ok(options) => Parsed::Service(ServiceCommand::Install(options.overrides)),
             Err(stop) => stop.parsed(),
         },
         "uninstall" | "status" => {
@@ -189,8 +208,9 @@ impl Stop {
     }
 }
 
-fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Result<CliOverrides, Stop> {
+fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Result<RunOptions, Stop> {
     let mut fields: Vec<(&'static str, FieldValue)> = Vec::new();
+    let mut config_path: Option<PathBuf> = None;
     let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
@@ -204,6 +224,18 @@ fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Result<CliOverrides, 
         }
         if name == "--version" || name == "-V" {
             return Err(Stop::Version);
+        }
+
+        if name == CONFIG_FLAG {
+            let Some(value) = inline_value.or_else(|| args.next()) else {
+                return Err(Stop::Invalid(format!("{CONFIG_FLAG} needs a value")));
+            };
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(Stop::Invalid(format!("{CONFIG_FLAG} needs a path")));
+            }
+            config_path = Some(PathBuf::from(value));
+            continue;
         }
 
         let Some((spec, negated)) = option_for(&name) else {
@@ -254,7 +286,10 @@ fn parse_flags<I: IntoIterator<Item = String>>(args: I) -> Result<CliOverrides, 
         }
     }
 
-    Ok(config::partial_from_fields(&fields))
+    Ok(RunOptions {
+        overrides: config::partial_from_fields(&fields),
+        config_path,
+    })
 }
 
 /// The field a flag names, and whether it was the `--no-` half of a toggle.
@@ -308,10 +343,15 @@ Options:
 "
     );
 
-    let mut options: Vec<(String, &str)> = FIELDS
-        .iter()
-        .filter_map(|spec| Some((option_column(spec.flag?, spec.kind), spec.help)))
-        .collect();
+    let mut options: Vec<(String, &str)> = vec![(
+        format!("      {CONFIG_FLAG} <PATH>"),
+        "Config file to read (default <config dir>/config.json)",
+    )];
+    options.extend(
+        FIELDS
+            .iter()
+            .filter_map(|spec| Some((option_column(spec.flag?, spec.kind), spec.help))),
+    );
     options.push(("  -h, --help".to_string(), "Print this help"));
     options.push(("  -V, --version".to_string(), "Print the version"));
     let width = column_width(options.iter().map(|(left, _)| left.as_str()));
@@ -328,10 +368,10 @@ Options:
     let _ = write!(
         out,
         "
-A flag wins over the environment variable next to it. A list flag may be
-repeated or take a comma-separated value. Anything on the command line is
-visible to other users in the process list, so prefer MOBUX_PIN on a shared
-host.
+A flag wins over the environment variable next to it, which wins over the
+config file. A list flag may be repeated or take a comma-separated value.
+Anything on the command line is visible to other users in the process list, so
+prefer MOBUX_PIN on a shared host.
 "
     );
     out
@@ -362,16 +402,6 @@ pub fn resolve_port(flag: Option<u16>, mobux_port: Option<String>, port: Option<
     flag.or_else(|| parse_port(mobux_port))
         .or_else(|| parse_port(port))
         .unwrap_or(DEFAULT_PORT)
-}
-
-/// True when the port in use came from the deprecated bare `PORT` var, so the
-/// caller can warn once at startup.
-pub fn port_is_deprecated_source(
-    flag: Option<u16>,
-    mobux_port: Option<String>,
-    port: Option<String>,
-) -> bool {
-    flag.is_none() && parse_port(mobux_port).is_none() && parse_port(port).is_some()
 }
 
 fn parse_port(value: Option<String>) -> Option<u16> {
@@ -427,8 +457,12 @@ mod tests {
     }
 
     fn run(list: &[&str]) -> CliOverrides {
+        options(list).overrides
+    }
+
+    fn options(list: &[&str]) -> RunOptions {
         match parse(args(list)) {
-            Parsed::Run(overrides) => overrides,
+            Parsed::Run(options) => options,
             other => panic!("expected a run, got {other:?}"),
         }
     }
@@ -442,19 +476,22 @@ mod tests {
 
     #[test]
     fn no_arguments_leaves_every_override_empty() {
-        assert_eq!(parse(args(&[])), Parsed::Run(CliOverrides::default()));
+        assert_eq!(parse(args(&[])), Parsed::Run(RunOptions::default()));
     }
 
     #[test]
     fn flags_take_a_separate_or_inline_value() {
-        let expected = Parsed::Run(CliOverrides {
-            server: Some(config::PartialServerConfig { port: Some(5151) }),
-            auth: Some(config::PartialAuthConfig {
-                pin: some("12345"),
-                user: some("dogwalker"),
+        let expected = Parsed::Run(RunOptions {
+            overrides: CliOverrides {
+                server: Some(config::PartialServerConfig { port: Some(5151) }),
+                auth: Some(config::PartialAuthConfig {
+                    pin: some("12345"),
+                    user: some("dogwalker"),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
+            },
+            config_path: None,
         });
         assert_eq!(
             parse(args(&[
@@ -470,6 +507,32 @@ mod tests {
         assert_eq!(
             parse(args(&["--port=5151", "--pin=12345", "--user=dogwalker"])),
             expected
+        );
+    }
+
+    #[test]
+    fn config_names_the_file_without_touching_the_tree() {
+        let expected = Some(PathBuf::from("/etc/mobux/config.json"));
+        for spelling in [
+            vec!["--config", "/etc/mobux/config.json"],
+            vec!["--config=/etc/mobux/config.json"],
+        ] {
+            let parsed = options(&spelling);
+            assert_eq!(parsed.config_path, expected);
+            assert_eq!(parsed.overrides, CliOverrides::default());
+        }
+    }
+
+    #[test]
+    fn config_without_a_path_is_rejected() {
+        assert!(invalid(&["--config"]).contains("--config"));
+        assert!(invalid(&["--config", "  "]).contains("--config"));
+    }
+
+    #[test]
+    fn service_install_rejects_config() {
+        assert!(
+            invalid(&["service", "install", "--config", "/etc/mobux.json"]).contains("--config")
         );
     }
 
@@ -650,6 +713,7 @@ mod tests {
             "configure",
             "configure --schema",
             "configure --check",
+            "--config",
             "--port",
             "--pin",
             "--user",
@@ -872,20 +936,17 @@ mod tests {
     #[test]
     fn mobux_port_beats_the_deprecated_port() {
         assert_eq!(resolve_port(None, some("5152"), some("5153")), 5152);
-        assert!(!port_is_deprecated_source(None, some("5152"), some("5153")));
     }
 
     #[test]
-    fn deprecated_port_alone_still_works_and_is_flagged() {
+    fn deprecated_port_alone_still_works() {
         assert_eq!(resolve_port(None, None, some("5153")), 5153);
-        assert!(port_is_deprecated_source(None, None, some("5153")));
     }
 
     #[test]
     fn unparseable_port_values_fall_through() {
         assert_eq!(resolve_port(None, some("http"), some("5153")), 5153);
         assert_eq!(resolve_port(None, some("http"), None), 8080);
-        assert!(!port_is_deprecated_source(Some(5151), None, some("5153")));
     }
 
     #[test]
