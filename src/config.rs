@@ -5,6 +5,7 @@
 //! schema, the defaults and the error messages can be reviewed on their own.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,12 @@ const DEFAULT_ACME_HTTP_PORT: u16 = 80;
 const DEFAULT_SERVICE_NAME: &str = "mobux";
 const DEFAULT_VAPID_CONTACT: &str = "mailto:admin@example.com";
 const DEFAULT_UPDATE_CHECK_URL: &str = "https://index.crates.io/mo/bu/mobux";
+
+/// The username a bare PIN unlocks the web UI as.
+pub const DEFAULT_AUTH_USER: &str = "mobux";
+
+/// What the caller prints when the port came from the deprecated bare `PORT`.
+pub const PORT_DEPRECATION: &str = "PORT is deprecated; rename it to MOBUX_PORT";
 
 // ---------------------------------------------------------------------------
 // The tree
@@ -766,6 +773,251 @@ fn validate(path: &Path, config: &Config) -> Result<(), LoadError> {
 }
 
 // ---------------------------------------------------------------------------
+// Layering
+// ---------------------------------------------------------------------------
+
+/// The environment the layering reads — passed in so the resolution is a pure
+/// function the tests can drive, the same shape as `service::resolve_unit_spec`.
+///
+/// Only the variables mobux knows about are kept, so a snapshot never carries
+/// the rest of the process environment around.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EnvSnapshot {
+    values: BTreeMap<String, String>,
+}
+
+impl EnvSnapshot {
+    pub fn from_env() -> Self {
+        EnvSnapshot::new(std::env::vars())
+    }
+
+    pub fn new<K, V, I>(pairs: I) -> Self
+    where
+        K: AsRef<str>,
+        V: Into<String>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let values = pairs
+            .into_iter()
+            .filter(|(key, _)| is_known_env(key.as_ref()))
+            .map(|(key, value)| (key.as_ref().to_string(), value.into()))
+            .collect();
+        EnvSnapshot { values }
+    }
+
+    /// The trimmed value, or `None` when the variable is unset or blank. A
+    /// blank variable states nothing, so the next layer down answers.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    }
+}
+
+fn is_known_env(key: &str) -> bool {
+    FIELDS.iter().any(|field| field.env == key) || ENV_ONLY.contains(&key)
+}
+
+/// The credentials that unlock the web UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Credentials {
+    pub user: String,
+    pub pass: String,
+}
+
+/// Layer the four sources into one config: a flag beats the environment, which
+/// beats the file, which beats the defaults.
+///
+/// Two rules survive from the flag-only resolution. An unparseable numeric
+/// value states nothing and falls through to the next layer, and a PIN given on
+/// the command line clears any password the lower layers set — otherwise
+/// `MOBUX_AUTH_PASS` would silently win over the PIN the user just typed.
+pub fn resolve(
+    defaults: Config,
+    file: PartialConfig,
+    env: &EnvSnapshot,
+    flags: PartialConfig,
+) -> Config {
+    let flags = without_blank_credentials(flags);
+    let mut file = file;
+    let mut environment = env_partial(env);
+
+    if stated_pin(&flags).is_some() {
+        clear_pass(&mut file);
+        clear_pass(&mut environment);
+    }
+
+    defaults.merged(file).merged(environment).merged(flags)
+}
+
+/// The layer the environment states. `MOBUX_PORT` outranks the deprecated bare
+/// `PORT`, and either falling through leaves the port to the layers below.
+pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
+    let text = |key: &str| env.get(key).map(str::to_string);
+    let list = |key: &str| env.get(key).map(split_list);
+
+    PartialConfig {
+        server: Some(PartialServerConfig {
+            port: env_port(env),
+        }),
+        auth: Some(PartialAuthConfig {
+            user: text("MOBUX_AUTH_USER"),
+            pass: text("MOBUX_AUTH_PASS"),
+            pin: text("MOBUX_PIN"),
+        }),
+        tls: Some(PartialTlsConfig {
+            enabled: env.get("MOBUX_TLS").map(truthy_tls),
+            hosts: list("MOBUX_TLS_HOSTS"),
+            cert_file: text("MOBUX_CERT_FILE"),
+            key_file: text("MOBUX_KEY_FILE"),
+            acme_domains: list("MOBUX_ACME_DOMAINS"),
+            acme_email: text("MOBUX_ACME_EMAIL"),
+            acme_directory: text("MOBUX_ACME_DIRECTORY"),
+            acme_http_port: env.get("MOBUX_ACME_HTTP_PORT").and_then(parse_u16),
+        }),
+        paths: Some(PartialPathsConfig {
+            data_dir: text("MOBUX_DATA_DIR"),
+        }),
+        session: Some(PartialSessionConfig {
+            shell: text("MOBUX_SESSION_SHELL"),
+        }),
+        app: Some(PartialAppConfig {
+            domain: text("MOBUX_DOMAIN"),
+            dev: env.get("MOBUX_DEV").map(truthy_dev),
+            service_name: text("MOBUX_SERVICE_NAME"),
+        }),
+        push: Some(PartialPushConfig {
+            vapid_contact: text("MOBUX_VAPID_CONTACT"),
+        }),
+        update: Some(PartialUpdateConfig {
+            check_url: text("MOBUX_UPDATE_CHECK_URL"),
+        }),
+    }
+}
+
+/// The command-line layer, built from the three flags mobux takes.
+pub fn flags_partial(
+    port: Option<u16>,
+    user: Option<String>,
+    pin: Option<String>,
+) -> PartialConfig {
+    PartialConfig {
+        server: Some(PartialServerConfig { port }),
+        auth: Some(PartialAuthConfig {
+            user,
+            pass: None,
+            pin,
+        }),
+        ..PartialConfig::default()
+    }
+}
+
+/// `Some` when the resolved port came from the deprecated bare `PORT`, so the
+/// caller can warn once at startup.
+pub fn port_deprecation(env: &EnvSnapshot, flags: &PartialConfig) -> Option<&'static str> {
+    if flags
+        .server
+        .as_ref()
+        .and_then(|server| server.port)
+        .is_some()
+    {
+        return None;
+    }
+    if env.get("MOBUX_PORT").and_then(parse_u16).is_some() {
+        return None;
+    }
+    env.get("PORT")
+        .and_then(parse_u16)
+        .map(|_| PORT_DEPRECATION)
+}
+
+impl Config {
+    /// The credentials that unlock the web UI, or `None` when auth is off.
+    ///
+    /// A user and password pair beats a PIN; a PIN on its own logs in as
+    /// `mobux` unless a username is set.
+    pub fn credentials(&self) -> Option<Credentials> {
+        let user = non_blank(&self.auth.user);
+        let pass = non_blank(&self.auth.pass);
+        let pin = non_blank(&self.auth.pin);
+
+        if let (Some(user), Some(pass)) = (user, pass) {
+            return Some(Credentials {
+                user: user.to_string(),
+                pass: pass.to_string(),
+            });
+        }
+
+        pin.map(|pin| Credentials {
+            user: user.unwrap_or(DEFAULT_AUTH_USER).to_string(),
+            pass: pin.to_string(),
+        })
+    }
+}
+
+fn env_port(env: &EnvSnapshot) -> Option<u16> {
+    env.get("MOBUX_PORT")
+        .and_then(parse_u16)
+        .or_else(|| env.get("PORT").and_then(parse_u16))
+}
+
+fn parse_u16(value: &str) -> Option<u16> {
+    value.trim().parse::<u16>().ok()
+}
+
+fn split_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn truthy_tls(value: &str) -> bool {
+    value != "0" && !value.eq_ignore_ascii_case("false")
+}
+
+fn truthy_dev(value: &str) -> bool {
+    value == "1" || value.eq_ignore_ascii_case("true")
+}
+
+fn non_blank(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn stated_pin(partial: &PartialConfig) -> Option<&str> {
+    partial
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.pin.as_deref())
+        .and_then(non_blank)
+}
+
+/// A blank flag states nothing: `--user ""` leaves the environment to answer.
+fn without_blank_credentials(mut partial: PartialConfig) -> PartialConfig {
+    if let Some(auth) = partial.auth.as_mut() {
+        drop_blank(&mut auth.user);
+        drop_blank(&mut auth.pass);
+        drop_blank(&mut auth.pin);
+    }
+    partial
+}
+
+fn drop_blank(value: &mut Option<String>) {
+    if value.as_deref().is_some_and(|v| v.trim().is_empty()) {
+        *value = None;
+    }
+}
+
+fn clear_pass(partial: &mut PartialConfig) {
+    if let Some(auth) = partial.auth.as_mut() {
+        auth.pass = Some(String::new());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Value rules
 // ---------------------------------------------------------------------------
 
@@ -1174,6 +1426,419 @@ mod tests {
                 field.env
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Layering
+    // -----------------------------------------------------------------------
+
+    fn env(pairs: &[(&str, &str)]) -> EnvSnapshot {
+        EnvSnapshot::new(pairs.iter().copied())
+    }
+
+    fn flags(port: Option<u16>, user: Option<&str>, pin: Option<&str>) -> PartialConfig {
+        flags_partial(port, user.map(str::to_string), pin.map(str::to_string))
+    }
+
+    fn file(raw: &str) -> PartialConfig {
+        parse_partial(Path::new(SOURCE), raw).expect("a valid partial document")
+    }
+
+    fn resolved(
+        file_layer: PartialConfig,
+        env_layer: &EnvSnapshot,
+        flag_layer: PartialConfig,
+    ) -> Config {
+        resolve(Config::default(), file_layer, env_layer, flag_layer)
+    }
+
+    fn credentials(env_layer: &EnvSnapshot, flag_layer: PartialConfig) -> Option<Credentials> {
+        resolved(PartialConfig::default(), env_layer, flag_layer).credentials()
+    }
+
+    fn creds(user: &str, pass: &str) -> Option<Credentials> {
+        Some(Credentials {
+            user: user.to_string(),
+            pass: pass.to_string(),
+        })
+    }
+
+    #[test]
+    fn nothing_stated_anywhere_is_the_default_config() {
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env(&[]),
+                PartialConfig::default()
+            ),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn a_flag_beats_the_env_which_beats_the_file_which_beats_the_default() {
+        let file_layer = file(r#"{"server": {"port": 5150}}"#);
+        let env_layer = env(&[("MOBUX_PORT", "5152")]);
+
+        assert_eq!(
+            resolved(
+                file_layer.clone(),
+                &env_layer,
+                flags(Some(5151), None, None)
+            )
+            .server
+            .port,
+            5151
+        );
+        assert_eq!(
+            resolved(file_layer.clone(), &env_layer, PartialConfig::default())
+                .server
+                .port,
+            5152
+        );
+        assert_eq!(
+            resolved(file_layer, &env(&[]), PartialConfig::default())
+                .server
+                .port,
+            5150
+        );
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env(&[]),
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            8080
+        );
+    }
+
+    #[test]
+    fn the_user_and_pin_flags_beat_the_env_which_beats_the_file() {
+        let file_layer = file(r#"{"auth": {"user": "filed", "pin": "1111"}}"#);
+        let env_layer = env(&[("MOBUX_AUTH_USER", "enved"), ("MOBUX_PIN", "2222")]);
+
+        let flagged = resolved(
+            file_layer.clone(),
+            &env_layer,
+            flags(None, Some("flagged"), Some("3333")),
+        );
+        assert_eq!(flagged.auth.user, "flagged");
+        assert_eq!(flagged.auth.pin, "3333");
+
+        let enved = resolved(file_layer.clone(), &env_layer, PartialConfig::default());
+        assert_eq!(enved.auth.user, "enved");
+        assert_eq!(enved.auth.pin, "2222");
+
+        let filed = resolved(file_layer, &env(&[]), PartialConfig::default());
+        assert_eq!(filed.auth.user, "filed");
+        assert_eq!(filed.auth.pin, "1111");
+    }
+
+    #[test]
+    fn every_flagless_field_takes_the_env_over_the_file() {
+        let file_layer = file(
+            r#"{
+                "auth": {"pass": "filed"},
+                "tls": {
+                    "enabled": true,
+                    "hosts": ["filed.example"],
+                    "cert_file": "/filed/cert.pem",
+                    "key_file": "/filed/key.pem",
+                    "acme_domains": ["filed.example"],
+                    "acme_email": "filed@example.com",
+                    "acme_directory": "https://filed.example/dir",
+                    "acme_http_port": 8081
+                },
+                "paths": {"data_dir": "/filed/data"},
+                "session": {"shell": "/filed/sh"},
+                "app": {"domain": "filed.example", "dev": false, "service_name": "filed"},
+                "push": {"vapid_contact": "mailto:filed@example.com"},
+                "update": {"check_url": "https://filed.example/index"}
+            }"#,
+        );
+        let env_layer = env(&[
+            ("MOBUX_AUTH_PASS", "enved"),
+            ("MOBUX_TLS", "0"),
+            ("MOBUX_TLS_HOSTS", "a.example, b.example"),
+            ("MOBUX_CERT_FILE", "/enved/cert.pem"),
+            ("MOBUX_KEY_FILE", "/enved/key.pem"),
+            ("MOBUX_ACME_DOMAINS", "acme.example"),
+            ("MOBUX_ACME_EMAIL", "enved@example.com"),
+            ("MOBUX_ACME_DIRECTORY", "https://enved.example/dir"),
+            ("MOBUX_ACME_HTTP_PORT", "8082"),
+            ("MOBUX_DATA_DIR", "/enved/data"),
+            ("MOBUX_SESSION_SHELL", "/enved/sh"),
+            ("MOBUX_DOMAIN", "enved.example"),
+            ("MOBUX_DEV", "1"),
+            ("MOBUX_SERVICE_NAME", "enved"),
+            ("MOBUX_VAPID_CONTACT", "mailto:enved@example.com"),
+            ("MOBUX_UPDATE_CHECK_URL", "https://enved.example/index"),
+        ]);
+
+        let config = resolved(file_layer.clone(), &env_layer, PartialConfig::default());
+        assert_eq!(config.auth.pass, "enved");
+        assert!(!config.tls.enabled);
+        assert_eq!(config.tls.hosts, ["a.example", "b.example"]);
+        assert_eq!(config.tls.cert_file, "/enved/cert.pem");
+        assert_eq!(config.tls.key_file, "/enved/key.pem");
+        assert_eq!(config.tls.acme_domains, ["acme.example"]);
+        assert_eq!(config.tls.acme_email, "enved@example.com");
+        assert_eq!(config.tls.acme_directory, "https://enved.example/dir");
+        assert_eq!(config.tls.acme_http_port, 8082);
+        assert_eq!(config.paths.data_dir, "/enved/data");
+        assert_eq!(config.session.shell, "/enved/sh");
+        assert_eq!(config.app.domain, "enved.example");
+        assert!(config.app.dev);
+        assert_eq!(config.app.service_name, "enved");
+        assert_eq!(config.push.vapid_contact, "mailto:enved@example.com");
+        assert_eq!(config.update.check_url, "https://enved.example/index");
+
+        let filed = resolved(file_layer, &env(&[]), PartialConfig::default());
+        assert_eq!(filed.auth.pass, "filed");
+        assert!(filed.tls.enabled);
+        assert_eq!(filed.tls.acme_http_port, 8081);
+        assert_eq!(filed.app.service_name, "filed");
+    }
+
+    #[test]
+    fn a_blank_env_var_states_nothing() {
+        let file_layer = file(r#"{"session": {"shell": "/filed/sh"}}"#);
+        let env_layer = env(&[("MOBUX_SESSION_SHELL", "   "), ("MOBUX_PORT", "")]);
+        let config = resolved(file_layer, &env_layer, PartialConfig::default());
+        assert_eq!(config.session.shell, "/filed/sh");
+        assert_eq!(config.server.port, 8080);
+    }
+
+    #[test]
+    fn an_unknown_variable_is_not_kept_in_the_snapshot() {
+        assert_eq!(env(&[("PATH", "/usr/bin")]), env(&[]));
+        assert_eq!(env(&[("PORT", "5153")]).get("PORT"), Some("5153"));
+    }
+
+    #[test]
+    fn port_falls_back_to_the_default() {
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env(&[]),
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            8080
+        );
+    }
+
+    #[test]
+    fn port_flag_beats_both_env_vars() {
+        let env_layer = env(&[("MOBUX_PORT", "5152"), ("PORT", "5153")]);
+        let flag_layer = flags(Some(5151), None, None);
+        assert_eq!(
+            resolved(PartialConfig::default(), &env_layer, flag_layer.clone())
+                .server
+                .port,
+            5151
+        );
+        assert_eq!(port_deprecation(&env_layer, &flag_layer), None);
+    }
+
+    #[test]
+    fn mobux_port_beats_the_deprecated_port() {
+        let env_layer = env(&[("MOBUX_PORT", "5152"), ("PORT", "5153")]);
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env_layer,
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            5152
+        );
+        assert_eq!(
+            port_deprecation(&env_layer, &PartialConfig::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn deprecated_port_alone_still_works_and_is_flagged() {
+        let env_layer = env(&[("PORT", "5153")]);
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env_layer,
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            5153
+        );
+        assert_eq!(
+            port_deprecation(&env_layer, &PartialConfig::default()),
+            Some(PORT_DEPRECATION)
+        );
+    }
+
+    #[test]
+    fn unparseable_port_values_fall_through() {
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env(&[("MOBUX_PORT", "http"), ("PORT", "5153")]),
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            5153
+        );
+        assert_eq!(
+            resolved(
+                PartialConfig::default(),
+                &env(&[("MOBUX_PORT", "http")]),
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            8080
+        );
+        assert_eq!(
+            resolved(
+                file(r#"{"server": {"port": 5150}}"#),
+                &env(&[("MOBUX_PORT", "http"), ("PORT", "nope")]),
+                PartialConfig::default()
+            )
+            .server
+            .port,
+            5150
+        );
+        assert_eq!(
+            port_deprecation(&env(&[("PORT", "5153")]), &flags(Some(5151), None, None)),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unparseable_acme_http_port_falls_through() {
+        assert_eq!(
+            resolved(
+                file(r#"{"tls": {"acme_http_port": 8081}}"#),
+                &env(&[("MOBUX_ACME_HTTP_PORT", "http")]),
+                PartialConfig::default()
+            )
+            .tls
+            .acme_http_port,
+            8081
+        );
+    }
+
+    #[test]
+    fn credentials_are_absent_without_a_pin_or_password() {
+        assert_eq!(
+            credentials(&env(&[("MOBUX_AUTH_USER", "me")]), PartialConfig::default()),
+            None
+        );
+        assert_eq!(credentials(&env(&[]), PartialConfig::default()), None);
+    }
+
+    #[test]
+    fn env_pin_still_works_on_its_own() {
+        assert_eq!(
+            credentials(&env(&[("MOBUX_PIN", "12345")]), PartialConfig::default()),
+            creds("mobux", "12345")
+        );
+        assert_eq!(
+            credentials(
+                &env(&[("MOBUX_AUTH_USER", "me"), ("MOBUX_PIN", "12345")]),
+                PartialConfig::default()
+            ),
+            creds("me", "12345")
+        );
+    }
+
+    #[test]
+    fn env_user_and_password_still_work() {
+        assert_eq!(
+            credentials(
+                &env(&[("MOBUX_AUTH_USER", "me"), ("MOBUX_AUTH_PASS", "secret")]),
+                PartialConfig::default()
+            ),
+            creds("me", "secret")
+        );
+    }
+
+    #[test]
+    fn a_user_and_password_beat_a_pin() {
+        assert_eq!(
+            credentials(
+                &env(&[
+                    ("MOBUX_AUTH_USER", "me"),
+                    ("MOBUX_AUTH_PASS", "secret"),
+                    ("MOBUX_PIN", "12345"),
+                ]),
+                PartialConfig::default()
+            ),
+            creds("me", "secret")
+        );
+    }
+
+    #[test]
+    fn pin_and_user_flags_beat_their_env_vars() {
+        assert_eq!(
+            credentials(
+                &env(&[("MOBUX_AUTH_USER", "me"), ("MOBUX_PIN", "12345")]),
+                flags(None, Some("walker"), Some("99999"))
+            ),
+            creds("walker", "99999")
+        );
+    }
+
+    #[test]
+    fn pin_flag_beats_an_env_password() {
+        assert_eq!(
+            credentials(
+                &env(&[("MOBUX_AUTH_USER", "me"), ("MOBUX_AUTH_PASS", "secret")]),
+                flags(None, None, Some("99999"))
+            ),
+            creds("me", "99999")
+        );
+    }
+
+    #[test]
+    fn a_pin_flag_also_beats_a_password_from_the_file() {
+        let config = resolved(
+            file(r#"{"auth": {"user": "me", "pass": "secret"}}"#),
+            &env(&[]),
+            flags(None, None, Some("99999")),
+        );
+        assert_eq!(config.credentials(), creds("me", "99999"));
+    }
+
+    #[test]
+    fn empty_values_are_ignored() {
+        assert_eq!(
+            credentials(
+                &env(&[
+                    ("MOBUX_AUTH_USER", "me"),
+                    ("MOBUX_AUTH_PASS", ""),
+                    ("MOBUX_PIN", "12345"),
+                ]),
+                flags(None, Some(""), None)
+            ),
+            creds("me", "12345")
+        );
+    }
+
+    #[test]
+    fn a_file_password_still_beats_an_env_pin() {
+        let config = resolved(
+            file(r#"{"auth": {"user": "me", "pass": "secret"}}"#),
+            &env(&[("MOBUX_PIN", "12345")]),
+            PartialConfig::default(),
+        );
+        assert_eq!(config.credentials(), creds("me", "secret"));
     }
 
     #[test]
