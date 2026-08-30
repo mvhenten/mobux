@@ -42,6 +42,7 @@ use serde_json::json;
 struct StaticAssets;
 
 mod cli;
+mod config;
 mod db;
 mod host_suggestions;
 mod nodes;
