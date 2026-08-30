@@ -127,6 +127,13 @@ pub async fn transcribe_with_provider(
 // instead of leaving the "reachable" poll itself looking dead.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
+// Warm-up timeout. The local backend downloads its whisper model on the first
+// transcription request, not at container start, so this one request has to
+// outlive a multi-gigabyte download on a slow line. Nobody is waiting on it —
+// it runs detached so the probe stays fast — and a short timeout would abort
+// the download the whole flow is waiting for.
+const WARMUP_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+
 /// 10 ms of 16 kHz mono silence, WAV-encoded — just enough audio for a real
 /// provider to round-trip through its actual transcription pipeline.
 fn probe_audio_bytes() -> Vec<u8> {
@@ -159,7 +166,19 @@ fn probe_audio_bytes() -> Vec<u8> {
 /// error status, means the backend round-tripped and is reachable; a timeout
 /// or connection failure means it is not.
 pub async fn probe_transcribe(config: &ProviderConfig) -> bool {
-    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
+    transcribe_round_trip(config, PROBE_TIMEOUT).await
+}
+
+/// Send one real transcription so the backend does its first-request work now
+/// — for the local server, downloading the whisper model into its volume —
+/// instead of on the first thing the user dictates. Nothing reads the result;
+/// what matters is that the request is allowed to run to completion.
+pub async fn warm_up(config: &ProviderConfig) {
+    transcribe_round_trip(config, WARMUP_TIMEOUT).await;
+}
+
+async fn transcribe_round_trip(config: &ProviderConfig, timeout: Duration) -> bool {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
         Err(_) => return false,
     };

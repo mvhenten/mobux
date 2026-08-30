@@ -3,7 +3,10 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use anyhow::{Context, Result};
@@ -318,6 +321,9 @@ struct AppState {
     build_hash: String,
     /// Tracks background STT install state (phase + rolling output tail).
     stt_install: Arc<tokio::sync::Mutex<BackgroundJobState>>,
+    /// Set while a warm-up transcription is in flight, so the status poll can
+    /// keep nudging a warming backend without piling up one request per poll.
+    stt_warmup: Arc<AtomicBool>,
     /// Tracks the background TWA/APK build behind the install page's
     /// "Generate package" button. One build at a time.
     twa_build: Arc<tokio::sync::Mutex<BackgroundJobState>>,
@@ -425,6 +431,7 @@ async fn main() -> Result<()> {
         update: update_state,
         build_hash,
         stt_install: BackgroundJobState::idle(),
+        stt_warmup: Arc::new(AtomicBool::new(false)),
         twa_build: BackgroundJobState::idle(),
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
     };
@@ -2937,6 +2944,151 @@ async fn api_set_stt_config(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── local speech server: podman, and the wait for its first model ─────
+//
+// The local backend is a speaches container. Two things about it decide what
+// the UI can honestly say, and neither is visible from a transcribe probe
+// alone.
+//
+// It downloads its whisper model on the first transcription request, not at
+// container start, so a freshly started server fails the probe for as long as
+// that download takes — minutes on a slow line. Reporting that as "backend
+// unreachable" sent the user back to an install button that was never the
+// problem. A running container plus a failing probe is warm-up, and the UI
+// waits it out rather than declaring failure.
+//
+// And podman may simply not be on the host. Every script here is a podman
+// wrapper, so its absence is the one gap mobux cannot close for the user — it
+// gets named, with the command that closes it, the same way the APK build
+// reports a missing host package.
+
+/// What the host can tell us about the local speech server's container.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LocalRuntime {
+    PodmanMissing,
+    ContainerRunning,
+    ContainerStopped,
+}
+
+/// The one OS package the local speech server needs and mobux cannot install.
+const PODMAN_PACKAGE: &str = "podman";
+
+async fn local_runtime() -> LocalRuntime {
+    let output = tokio::process::Command::new("podman")
+        .args([
+            "ps",
+            "--filter",
+            "name=^mobux-stt$",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .await;
+    match output {
+        Ok(o) if !o.stdout.trim_ascii().is_empty() => LocalRuntime::ContainerRunning,
+        Ok(_) => LocalRuntime::ContainerStopped,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LocalRuntime::PodmanMissing,
+        Err(_) => LocalRuntime::ContainerStopped,
+    }
+}
+
+fn podman_install_command(present: impl Fn(&str) -> bool) -> Option<String> {
+    twa::PackageManager::detect(present).map(|m| m.install_command(&[PODMAN_PACKAGE]))
+}
+
+fn podman_missing_message(install_command: Option<&str>) -> String {
+    match install_command {
+        Some(cmd) => format!(
+            "podman is not installed. The local speech server runs in a podman container — install it with `{cmd}`, then try again."
+        ),
+        None => "podman is not installed. The local speech server runs in a podman container, and this host has no package manager mobux recognises — install podman yourself, then try again.".to_string(),
+    }
+}
+
+/// The facts `/api/stt/status` reports, resolved once so the JSON shape is
+/// built from plain data rather than from three awaits.
+struct SttStatus {
+    kind: String,
+    url: String,
+    reachable: bool,
+    runtime: LocalRuntime,
+    installed: bool,
+    install_phase: &'static str,
+    install_error: Option<String>,
+    install_output: Vec<String>,
+}
+
+impl SttStatus {
+    fn is_local(&self) -> bool {
+        self.kind == "local"
+    }
+
+    /// One word for what the UI should render. `warming` is the whole point:
+    /// the container answers `podman ps` but not yet a transcription, which
+    /// is progress, not a fault.
+    fn state(&self) -> &'static str {
+        if self.reachable {
+            return "ready";
+        }
+        if !self.is_local() {
+            return "unreachable";
+        }
+        match self.runtime {
+            LocalRuntime::PodmanMissing => "podman_missing",
+            LocalRuntime::ContainerRunning => "warming",
+            LocalRuntime::ContainerStopped if self.installed => "stopped",
+            LocalRuntime::ContainerStopped => "not_installed",
+        }
+    }
+
+    fn into_json(self, podman_install_command: Option<String>) -> serde_json::Value {
+        let state = self.state();
+        let podman_missing = self.runtime == LocalRuntime::PodmanMissing;
+        let mut body = json!({
+            "kind": self.kind,
+            "url": self.url,
+            "state": state,
+            "reachable": self.reachable,
+            "local_process_running": self.runtime == LocalRuntime::ContainerRunning,
+            "installed": self.installed,
+            "podman_missing": podman_missing,
+            "install_phase": self.install_phase,
+            "install_output": self.install_output,
+        });
+        if let Some(err) = self.install_error {
+            body["install_error"] = serde_json::Value::String(err);
+        }
+        if podman_missing {
+            body["podman_install_command"] = match &podman_install_command {
+                Some(cmd) => serde_json::Value::String(cmd.clone()),
+                None => serde_json::Value::Null,
+            };
+            body["podman_message"] = serde_json::Value::String(podman_missing_message(
+                podman_install_command.as_deref(),
+            ));
+        }
+        body
+    }
+}
+
+/// Start a warm-up transcription unless one is already running. Fire and
+/// forget: it outlives the request that triggered it, because the download it
+/// starts is the thing the user is waiting for.
+fn spawn_warmup(flag: Arc<AtomicBool>, provider_cfg: transcribe::ProviderConfig) {
+    if flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        transcribe::warm_up(&provider_cfg).await;
+        flag.store(false, Ordering::SeqCst);
+    });
+}
+
 async fn api_stt_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -2964,24 +3116,7 @@ async fn api_stt_status(
     // transcribe::probe_transcribe for why a health ping alone is a false
     // green.
     let reachable = transcribe::probe_transcribe(&provider_cfg).await;
-    let active_url = provider_cfg.url;
-
-    // Check whether the mobux-stt podman container is running.
-    let local_process_running = tokio::process::Command::new("podman")
-        .args([
-            "ps",
-            "--filter",
-            "name=^mobux-stt$",
-            "--filter",
-            "status=running",
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .await
-        .map(|o| !o.stdout.trim_ascii().is_empty())
-        .unwrap_or(false);
-
+    let runtime = local_runtime().await;
     let installed = state.data_dir.join("stt").join(".installed").exists();
 
     let (install_phase, install_error, install_output) = {
@@ -2990,20 +3125,28 @@ async fn api_stt_status(
         (phase_str, error, guard.output_tail.clone())
     };
 
-    let mut body = json!({
-        "kind": active_kind_str,
-        "url": active_url,
-        "reachable": reachable,
-        "local_process_running": local_process_running,
-        "installed": installed,
-        "install_phase": install_phase,
-        "install_output": install_output,
-    });
-    let _ = cfg; // kept for install_cmd/start_cmd/stop_cmd indirectly; suppress unused
-    if let Some(err) = install_error {
-        body["install_error"] = serde_json::Value::String(err);
+    let status = SttStatus {
+        kind: active_kind_str,
+        url: provider_cfg.url.clone(),
+        reachable,
+        runtime,
+        installed,
+        install_phase,
+        install_error,
+        install_output,
+    };
+
+    // A warming backend only downloads its model while a transcription
+    // request is open, and the probe's own request is aborted after four
+    // seconds. So every poll that sees warm-up keeps one long-lived request
+    // alive behind it — otherwise the download restarts forever and never
+    // finishes.
+    if status.state() == "warming" {
+        spawn_warmup(state.stt_warmup.clone(), provider_cfg);
     }
-    Ok(Json(body))
+
+    let _ = cfg; // kept for install_cmd/start_cmd/stop_cmd indirectly; suppress unused
+    Ok(Json(status.into_json(podman_install_command(twa::on_path))))
 }
 
 async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
@@ -3017,6 +3160,32 @@ async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoRespo
         }
         guard.phase = InstallPhase::Running;
         guard.output_tail.clear();
+        guard.missing_host_packages = None;
+    }
+
+    // The install script is `podman pull`. Without podman it dies on exit
+    // 127 minutes of polling later, with the shell's "not found" as the only
+    // clue, so say it up front and hand back the command that fixes it.
+    if local_runtime().await == LocalRuntime::PodmanMissing {
+        let command = podman_install_command(twa::on_path);
+        let message = podman_missing_message(command.as_deref());
+        record_host_package_gap(
+            &state.stt_install,
+            twa::HostPackageGap {
+                packages: vec![PODMAN_PACKAGE.to_string()],
+                install_command: command.clone(),
+                message: message.clone(),
+            },
+        )
+        .await;
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({
+                "status": "podman_missing",
+                "error": message,
+                "podman_install_command": command,
+            })),
+        ));
     }
 
     let install_state = state.stt_install.clone();
@@ -3064,10 +3233,13 @@ async fn api_stt_install_status(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let guard = state.stt_install.lock().await;
     let (phase_str, error) = phase_parts(&guard.phase);
+    let gap = guard.missing_host_packages.as_ref();
     Ok(Json(json!({
         "phase": phase_str,
         "output": guard.output_tail,
         "error": error,
+        "missing_host_packages": gap.map(|g| g.packages.clone()),
+        "install_command": gap.map(|g| g.install_command.clone()),
     })))
 }
 
@@ -3210,10 +3382,55 @@ async fn api_install_apk_status(
     })))
 }
 
+/// Run the start script, refusing up front on a host with no podman and
+/// failing loudly on a script that exits non-zero. The old version discarded
+/// the exit status, so `podman: not found` was answered with 204 and the UI
+/// went on to poll a server that was never going to appear.
+async fn run_stt_start(runtime: LocalRuntime, cmd: &str) -> Result<(), AppError> {
+    if runtime == LocalRuntime::PodmanMissing {
+        return Err(AppError::precondition(anyhow::anyhow!(
+            "{}",
+            podman_missing_message(podman_install_command(twa::on_path).as_deref())
+        )));
+    }
+
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    let detail = detail.rsplit('\n').next().unwrap_or_default();
+    Err(AppError::internal(anyhow::anyhow!(
+        "the speech server did not start (exit {}){}{}",
+        output.status.code().unwrap_or(-1),
+        if detail.is_empty() { "" } else { ": " },
+        detail
+    )))
+}
+
 async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppError> {
-    let cfg = tokio::task::spawn_blocking({
+    let (cfg, provider_cfg, kind) = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || db.stt_config()
+        move || -> anyhow::Result<_> {
+            let cfg = db.stt_config()?;
+            let kind = db.stt_active_kind()?;
+            let row = db
+                .stt_provider(&kind)?
+                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+            let provider_cfg = transcribe::ProviderConfig {
+                url: row.transcription_url(),
+                model: row.model,
+                api_key: row.api_key,
+            };
+            Ok((cfg, provider_cfg, kind))
+        }
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -3224,14 +3441,14 @@ async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppE
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no start_cmd configured")))?;
     let cmd_str = stt_scripts::resolve(&cmd_str, stt_scripts::SERVE_SCRIPT);
 
-    tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd_str)
-        .spawn()
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?
-        .wait()
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("start cmd failed: {e}")))?;
+    run_stt_start(local_runtime().await, &cmd_str).await?;
+
+    // The container is up but has no model yet. Pull it now, in the
+    // background, so the wait happens while the user watches a progress line
+    // rather than in the middle of their first dictation.
+    if kind == "local" {
+        spawn_warmup(state.stt_warmup.clone(), provider_cfg);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3409,6 +3626,16 @@ impl AppError {
     fn internal(err: anyhow::Error) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: err.to_string(),
+        }
+    }
+
+    /// The host is missing something only the user can supply. Distinct from a
+    /// bad request so the UI can tell "you asked for the wrong thing" apart
+    /// from "this machine can't do it yet".
+    fn precondition(err: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
             message: err.to_string(),
         }
     }
@@ -3813,6 +4040,7 @@ mod tests {
             update: update::UpdateState::new(String::new()),
             build_hash: "test".to_string(),
             stt_install: BackgroundJobState::idle(),
+            stt_warmup: Arc::new(AtomicBool::new(false)),
             twa_build: BackgroundJobState::idle(),
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
         };
@@ -4162,6 +4390,176 @@ mod tests {
         std::fs::File::create(stt_dir.join(".installed")).unwrap();
         let resp2 = api_stt_status(State(state)).await.unwrap();
         assert_eq!(resp2.0["installed"], true);
+    }
+
+    // ── the first-run model download (issue #302) ────────────────────────
+    //
+    // The local backend pulls its whisper model on the first transcription
+    // request, so a freshly started container fails the four-second probe for
+    // as long as that download runs. Reporting that as "backend unreachable"
+    // pointed the user back at an install button and gave up after 30 s.
+    // A running container with a failing probe is warm-up, and it is the one
+    // state the UI must render as progress.
+
+    fn local_status(reachable: bool, runtime: LocalRuntime, installed: bool) -> SttStatus {
+        SttStatus {
+            kind: "local".to_string(),
+            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
+            reachable,
+            runtime,
+            installed,
+            install_phase: "idle",
+            install_error: None,
+            install_output: vec![],
+        }
+    }
+
+    #[test]
+    fn stt_status_reports_warming_while_a_running_container_fails_the_probe() {
+        let status = local_status(false, LocalRuntime::ContainerRunning, true);
+        assert_eq!(status.state(), "warming");
+
+        let body = status.into_json(None);
+        assert_eq!(body["state"], "warming");
+        assert_eq!(body["reachable"], false);
+        assert_eq!(
+            body["local_process_running"], true,
+            "warm-up is only distinguishable from a dead backend by the container being up"
+        );
+        assert_eq!(body["podman_missing"], false);
+    }
+
+    #[test]
+    fn stt_status_separates_ready_stopped_and_never_installed() {
+        assert_eq!(
+            local_status(true, LocalRuntime::ContainerRunning, true).state(),
+            "ready"
+        );
+        assert_eq!(
+            local_status(false, LocalRuntime::ContainerStopped, true).state(),
+            "stopped"
+        );
+        assert_eq!(
+            local_status(false, LocalRuntime::ContainerStopped, false).state(),
+            "not_installed"
+        );
+    }
+
+    // A remote provider has no container to warm up, so a failing probe there
+    // means what it always meant.
+    #[test]
+    fn stt_status_keeps_calling_a_remote_provider_unreachable() {
+        let mut status = local_status(false, LocalRuntime::ContainerStopped, false);
+        status.kind = "openai".to_string();
+        assert_eq!(status.state(), "unreachable");
+    }
+
+    #[test]
+    fn stt_status_names_missing_podman_with_the_command_that_installs_it() {
+        let status = local_status(false, LocalRuntime::PodmanMissing, false);
+        assert_eq!(status.state(), "podman_missing");
+
+        let body = status.into_json(Some("sudo apt-get install -y podman".to_string()));
+        assert_eq!(body["podman_missing"], true);
+        assert_eq!(
+            body["podman_install_command"],
+            "sudo apt-get install -y podman"
+        );
+        assert!(
+            body["podman_message"]
+                .as_str()
+                .unwrap()
+                .contains("sudo apt-get install -y podman"),
+            "the message must carry the fix, not just the fault: {}",
+            body["podman_message"]
+        );
+    }
+
+    // No package manager mobux recognises: still named, still not an opaque
+    // failure — there is just no command to hand over.
+    #[test]
+    fn stt_status_reports_missing_podman_on_a_host_with_no_known_package_manager() {
+        let body = local_status(false, LocalRuntime::PodmanMissing, false).into_json(None);
+        assert_eq!(body["podman_missing"], true);
+        assert_eq!(body["podman_install_command"], serde_json::Value::Null);
+        assert!(body["podman_message"]
+            .as_str()
+            .unwrap()
+            .contains("podman is not installed"));
+    }
+
+    #[test]
+    fn podman_install_command_follows_the_host_package_manager() {
+        assert_eq!(
+            podman_install_command(|tool| tool == "apt-get").as_deref(),
+            Some("sudo apt-get install -y podman")
+        );
+        assert_eq!(podman_install_command(|_| false), None);
+    }
+
+    // Regression: the start handler discarded the script's exit status, so a
+    // host without podman got a 204 and the UI polled for a server that was
+    // never coming.
+    #[tokio::test]
+    async fn stt_start_refuses_up_front_when_podman_is_missing() {
+        let err = run_stt_start(LocalRuntime::PodmanMissing, "true")
+            .await
+            .expect_err("a host without podman cannot start the speech server");
+        assert_eq!(err.status, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            err.message.contains("podman is not installed"),
+            "the failure must name podman: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn stt_start_surfaces_a_start_script_that_exits_non_zero() {
+        let err = run_stt_start(
+            LocalRuntime::ContainerStopped,
+            "echo 'podman: command not found' >&2; exit 127",
+        )
+        .await
+        .expect_err("a failing start script must not answer 204");
+        assert!(
+            err.message.contains("127") && err.message.contains("command not found"),
+            "the failure must carry the script's own words: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn stt_start_accepts_a_start_script_that_succeeds() {
+        run_stt_start(LocalRuntime::ContainerStopped, "true")
+            .await
+            .expect("a clean exit is a started server");
+    }
+
+    // An install that stops on a missing podman must reach the page that
+    // started it. It used to end as an exit-127 line buried in the output
+    // tail, or as nothing at all.
+    #[tokio::test]
+    async fn stt_install_status_hands_the_missing_podman_gap_to_the_ui() {
+        let (state, _dir) = test_state(false);
+        let command = "sudo apt-get install -y podman".to_string();
+        record_host_package_gap(
+            &state.stt_install,
+            twa::HostPackageGap {
+                packages: vec![PODMAN_PACKAGE.to_string()],
+                install_command: Some(command.clone()),
+                message: podman_missing_message(Some(&command)),
+            },
+        )
+        .await;
+
+        let resp = api_stt_install_status(State(state)).await.unwrap();
+        assert_eq!(resp.0["phase"], "failed");
+        assert!(resp.0["error"]
+            .as_str()
+            .unwrap()
+            .contains("podman is not installed"));
+        assert_eq!(resp.0["missing_host_packages"], json!(["podman"]));
+        assert_eq!(resp.0["install_command"], command);
     }
 
     // Regression: a node's stored ssh target starting with `-` (e.g.

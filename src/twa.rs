@@ -115,7 +115,7 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-fn on_path(tool: &str) -> bool {
+pub fn on_path(tool: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };

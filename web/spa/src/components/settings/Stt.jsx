@@ -27,6 +27,19 @@ const sttStatus = signal(null); // { installed, local_process_running }
 
 const CUSTOM = "__custom__";
 
+const WARM_UP_CEILING_MS = 45 * 60 * 1000;
+const WARMING_TEXT =
+  "Downloading the speech model… this happens once and can take a few minutes.";
+
+function elapsed(ms) {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function podmanMessage(s) {
+  return s?.podman_message || "podman is not installed.";
+}
+
 // Which fields a kind exposes — this is the component-model replacement for the
 // old visibility toggling. We render only what applies (no [hidden]).
 const isLocal = computed(() => kind.value === "local");
@@ -182,7 +195,15 @@ export function SttCard() {
       return;
     }
     if (!r.ok && r.status !== 202 && r.status !== 409) {
-      flash(action, "Install request failed: " + r.status, false);
+      // A host without podman is refused with a sentence and the command
+      // that fixes it; the bare status code threw that away.
+      const body = await r.json().catch(() => null);
+      flash(
+        action,
+        (body && body.error) || "Install request failed: " + r.status,
+        false,
+      );
+      await refreshSttStatus();
       return;
     }
     // Poll install status to completion.
@@ -223,26 +244,64 @@ export function SttCard() {
   const onToggle = async () => {
     const running = !!sttStatus.value?.local_process_running;
     const ep = running ? "/api/stt/stop" : "/api/stt/start";
+    let ok = false;
     try {
       const r = await apiPost(ep);
-      flash(
-        action,
-        r.ok
-          ? running
-            ? "Server stopped."
-            : "Server started."
-          : "Action failed.",
-        r.ok,
-      );
+      ok = r.ok;
+      if (!r.ok) {
+        const detail = await r.text().catch(() => "");
+        flash(action, detail || "Action failed.", false);
+      } else {
+        flash(action, running ? "Server stopped." : "Server started.", true);
+      }
     } catch (_) {
       flash(action, "Action failed.", false);
     }
-    refreshSttStatus();
+    await refreshSttStatus();
+    if (ok && !running) await waitForWarmUp();
+  };
+
+  // The local server downloads its whisper model on the first transcription
+  // request, so it stays unreachable for minutes after a successful start.
+  // Poll through that instead of leaving the card claiming "Server started"
+  // over a backend nothing can dictate into yet.
+  const waitForWarmUp = async () => {
+    const began = Date.now();
+    while (Date.now() - began < WARM_UP_CEILING_MS) {
+      await new Promise((res) => setTimeout(res, 2000));
+      let s;
+      try {
+        s = await apiGet("/api/stt/status");
+      } catch (_) {
+        continue;
+      }
+      sttStatus.value = s;
+      if (s.state === "warming") {
+        flash(action, `${WARMING_TEXT} (${elapsed(Date.now() - began)})`, true);
+        continue;
+      }
+      if (s.reachable) {
+        flash(action, "Server ready.", true);
+        return;
+      }
+      return;
+    }
+    flash(action, "The speech model is still downloading.", true);
   };
 
   const onProbe = async () => {
     try {
       const s = await apiGet("/api/stt/status");
+      sttStatus.value = s;
+      if (s.state === "warming") {
+        flash(status, WARMING_TEXT, true);
+        waitForWarmUp();
+        return;
+      }
+      if (s.state === "podman_missing") {
+        flash(status, podmanMessage(s), false);
+        return;
+      }
       flash(
         status,
         s.reachable
@@ -257,6 +316,8 @@ export function SttCard() {
 
   const installed = !!sttStatus.value?.installed;
   const running = !!sttStatus.value?.local_process_running;
+  const sttState = sttStatus.value?.state;
+  const podmanMissing = sttState === "podman_missing";
 
   return (
     <section class="settings-group" id="stt-provider">
@@ -384,6 +445,33 @@ export function SttCard() {
         </div>
       )}
 
+      {/* What the local server is actually doing. Warm-up is the state the
+          card used to render as "not reachable": the container is up and
+          pulling its model, which is progress, not a fault. */}
+      {isLocal.value && sttState === "warming" && (
+        <div
+          class="settings-status"
+          id="sttWarming"
+          style={{ color: "#7ec87e" }}
+        >
+          {WARMING_TEXT}
+        </div>
+      )}
+      {isLocal.value && podmanMissing && (
+        <div
+          class="settings-status"
+          id="sttPodmanMissing"
+          style={{ color: "#c87e7e" }}
+        >
+          {podmanMessage(sttStatus.value)}
+          {sttStatus.value?.podman_install_command && (
+            <div class="install-command">
+              <code>{sttStatus.value.podman_install_command}</code>
+            </div>
+          )}
+        </div>
+      )}
+
       <div class="settings-actions">
         <button type="button" id="sttProbeBtn" onClick={onProbe}>
           Check status
@@ -391,14 +479,19 @@ export function SttCard() {
         {/* Install + single run toggle: local only. */}
         {isLocal.value && (
           <>
-            <button type="button" id="sttInstallBtn" onClick={onInstall}>
+            <button
+              type="button"
+              id="sttInstallBtn"
+              onClick={onInstall}
+              disabled={podmanMissing}
+            >
               {installed ? "Reinstall" : "Install local server"}
             </button>
             <button
               type="button"
               id="sttToggleBtn"
               onClick={onToggle}
-              disabled={!installed}
+              disabled={!installed || podmanMissing}
             >
               {running ? "Stop" : "Start"}
             </button>

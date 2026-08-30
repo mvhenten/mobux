@@ -215,6 +215,10 @@ function ensureStyles() {
   white-space: pre-wrap;
   word-break: break-all;
 }
+#mobux-mic-overlay .mo-install-cmd {
+  color: #cfd6d0;
+  user-select: all;
+}
 #mobux-mic-overlay .mo-install-hint {
   font-size: 13px;
   color: #7e857f;
@@ -659,46 +663,95 @@ export function createMicOverlay(handlers) {
         .catch(() => null)
         .then((status) => {
           if (!root || !actionArea) return;
-          if (status && status.kind === 'local' && !status.reachable) {
-            if (!status.installed) {
-              const btn = document.createElement('button');
-              btn.className = 'mo-install-btn';
-              btn.textContent = 'Install local speech server';
-              const hint = document.createElement('div');
-              hint.className = 'mo-install-hint';
-              hint.textContent = '';
-              const log = document.createElement('pre');
-              log.className = 'mo-install-log';
-              log.style.display = 'none';
-              actionArea.appendChild(btn);
-              actionArea.appendChild(hint);
-              actionArea.appendChild(log);
-              btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                runInstallFlow(btn, hint, log);
-              });
-            } else {
-              const btn = document.createElement('button');
-              btn.className = 'mo-install-btn';
-              btn.textContent = 'Start speech server';
-              const hint = document.createElement('div');
-              hint.className = 'mo-install-hint';
-              actionArea.appendChild(btn);
-              actionArea.appendChild(hint);
-              btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                runStartFlow(btn, hint);
-              });
+          const state = sttState(status);
+          const hint = () => {
+            const el = document.createElement('div');
+            el.className = 'mo-install-hint';
+            actionArea.appendChild(el);
+            return el;
+          };
+
+          // podman is the one gap mobux cannot close for the user: every
+          // local-server script is a podman wrapper. Name it and hand over
+          // the command instead of offering a button that cannot work.
+          if (state === 'podman_missing') {
+            hint().textContent =
+              status.podman_message || 'podman is not installed.';
+            if (status.podman_install_command) {
+              const cmd = document.createElement('pre');
+              cmd.className = 'mo-install-log mo-install-cmd';
+              cmd.textContent = status.podman_install_command;
+              actionArea.appendChild(cmd);
             }
-          } else {
-            const a = document.createElement('a');
-            a.className = 'mo-action';
-            a.href = u('settings');
-            a.textContent = 'Open settings';
-            actionArea.appendChild(a);
+            return;
           }
+
+          // The server is up and pulling its whisper model — the first
+          // request does that, not the container start. Nothing to press;
+          // this is progress, so show it and wait it out.
+          if (state === 'warming') {
+            const el = hint();
+            el.textContent = WARMING_TEXT;
+            startAndRetry(el);
+            return;
+          }
+
+          if (state === 'not_installed') {
+            const btn = document.createElement('button');
+            btn.className = 'mo-install-btn';
+            btn.textContent = 'Install local speech server';
+            actionArea.appendChild(btn);
+            const el = hint();
+            const log = document.createElement('pre');
+            log.className = 'mo-install-log';
+            log.style.display = 'none';
+            actionArea.appendChild(log);
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              runInstallFlow(btn, el, log);
+            });
+            return;
+          }
+
+          if (state === 'stopped') {
+            const btn = document.createElement('button');
+            btn.className = 'mo-install-btn';
+            btn.textContent = 'Start speech server';
+            actionArea.appendChild(btn);
+            const el = hint();
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              runStartFlow(btn, el);
+            });
+            return;
+          }
+
+          const a = document.createElement('a');
+          a.className = 'mo-action';
+          a.href = u('settings');
+          a.textContent = 'Open settings';
+          actionArea.appendChild(a);
         });
     }
+  }
+
+  // /api/stt/status answers with a `state` word; the fallback keeps an old
+  // cached bundle working against a new server and vice versa.
+  function sttState(status) {
+    if (!status) return 'unknown';
+    if (status.state) return status.state;
+    if (status.reachable) return 'ready';
+    if (status.kind !== 'local') return 'unreachable';
+    if (status.local_process_running) return 'warming';
+    return status.installed ? 'stopped' : 'not_installed';
+  }
+
+  const WARMING_TEXT =
+    'Downloading the speech model… this happens once and can take a few minutes.';
+
+  function elapsedText(ms) {
+    const s = Math.round(ms / 1000);
+    return s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
   }
 
   async function runInstallFlow(btn, hint, log) {
@@ -714,7 +767,13 @@ export function createMicOverlay(handlers) {
     try {
       const r = await fetch(u('api/stt/install'), { method: 'POST' });
       if (!r.ok && r.status !== 202) {
-        hint.textContent = 'Install request failed: ' + r.status;
+        // The server refuses a host it cannot install on (no podman) with a
+        // sentence and the command that fixes it — showing the bare status
+        // code instead threw that away.
+        const body = await r.json().catch(() => null);
+        hint.textContent =
+          (body && (body.error || body.podman_install_command)) ||
+          'Install request failed: ' + r.status;
         btn.disabled = false;
         return;
       }
@@ -768,20 +827,47 @@ export function createMicOverlay(handlers) {
     btn.disabled = true;
     hint.textContent = 'Starting…';
     try {
-      await fetch(u('api/stt/start'), { method: 'POST' });
-    } catch (_) {}
+      const r = await fetch(u('api/stt/start'), { method: 'POST' });
+      if (!r.ok) {
+        // A start that cannot work (no podman, a script that exits non-zero)
+        // used to answer 204 and send the user into a poll for a server that
+        // was never coming.
+        hint.textContent =
+          (await r.text().catch(() => '')) || 'Could not start the speech server.';
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) {
+      hint.textContent = 'Could not start the speech server: ' + (e.message || 'network error');
+      btn.disabled = false;
+      return;
+    }
     await startAndRetry(hint);
   }
 
+  // A started container still has no model — it pulls one on the first
+  // transcription request. That download runs for minutes, so a fixed 30 s
+  // clock reported failure while the thing the user was waiting for was
+  // working. Wait for as long as the server says it is warming; keep a short
+  // patience for every other reason it isn't answering yet.
+  const WARMING_CEILING_MS = 45 * 60 * 1000;
+  const STARTING_GRACE_MS = 60 * 1000;
+
   async function startAndRetry(hint) {
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline) {
+    const began = Date.now();
+    let warming = false;
+    for (;;) {
+      const waited = Date.now() - began;
+      if (waited > WARMING_CEILING_MS) break;
+      if (!warming && waited > STARTING_GRACE_MS) break;
+
       await new Promise((r) => setTimeout(r, 2000));
       let data;
       try {
         const r = await fetch(u('api/stt/status'));
         data = await r.json();
       } catch (_) { continue; }
+
       if (data.reachable) {
         hint.textContent = 'Server ready. Retrying…';
         if (typeof handlers.retryTranscription === 'function') {
@@ -790,8 +876,20 @@ export function createMicOverlay(handlers) {
         }
         return;
       }
+
+      const state = sttState(data);
+      if (state === 'podman_missing') {
+        hint.textContent = data.podman_message || 'podman is not installed.';
+        return;
+      }
+      if (state === 'warming') {
+        warming = true;
+        hint.textContent = WARMING_TEXT + ' (' + elapsedText(Date.now() - began) + ')';
+      }
     }
-    hint.textContent = 'Server did not start in time. Try again.';
+    hint.textContent = warming
+      ? 'The speech model is still downloading. Leave it running and try again shortly.'
+      : 'Server did not start in time. Try again.';
   }
 
   return { showRecording, showTranscribing, showReview, showFault, dismiss };
