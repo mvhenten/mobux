@@ -456,7 +456,7 @@ test("read mode: an empty record explains itself and links to shell integration"
   expect(result.empty.text).toBe(
     "Nothing recorded yet. Commands appear here as they finish.",
   );
-  expect(result.empty.linkHref).toBe("/settings#shell-integration");
+  expect(result.empty.linkHref).toBe(`${BASE}/settings#shell-integration`);
   expect(result.empty.linkVisible).toBe(true);
 });
 

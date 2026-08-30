@@ -12,6 +12,7 @@
 // visible; UI-only details (focus restore, error toasts) are injected via
 // callbacks so behavior stays identical per surface.
 
+import { u } from './base.js';
 import telemetry from './telemetry.js';
 import { createMicOverlay, faultMessage } from './mic-overlay.js';
 import { openExternal } from './external-link.js';
@@ -248,7 +249,7 @@ export function createAttachAction({ send, node, button, errorContainer } = {}) 
   async function uploadFile(file) {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(withNode('/api/upload', node), { method: 'POST', body: form });
+    const res = await fetch(withNode(u('api/upload'), node), { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
     // A prior failure's surface must not linger once an attempt succeeds.
@@ -517,7 +518,7 @@ export function createDictateAction({ send, button, onText } = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
       try {
-        const res = await fetch('/api/stt/status', { signal: controller.signal });
+        const res = await fetch(u('api/stt/status'), { signal: controller.signal });
         status = await res.json();
       } finally {
         clearTimeout(timer);
@@ -667,7 +668,7 @@ export function createDictateAction({ send, button, onText } = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), TRANSCRIBE_TIMEOUT_MS);
       try {
-        res = await fetch('/transcribe', { method: 'POST', body: form, signal: controller.signal });
+        res = await fetch(u('transcribe'), { method: 'POST', body: form, signal: controller.signal });
       } catch (netErr) {
         if (netErr?.name === 'AbortError') {
           telemetry.log('mic.transcribe.err', { stage: 'timeout' });

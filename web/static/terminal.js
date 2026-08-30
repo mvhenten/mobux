@@ -1,3 +1,4 @@
+import { u } from "./base.js";
 import { TerminalEngine } from "./terminal-engine.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
@@ -686,7 +687,9 @@ export function createTerminal({
   function selectWindow(windowIndex) {
     if (windowIndex == null || windowIndex === "") return;
     fetch(
-      `/api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select${nodeQuery()}`,
+      u(
+        `api/sessions/${encodeURIComponent(session)}/panes/${encodeURIComponent(windowIndex)}/select${nodeQuery()}`,
+      ),
       { method: "POST" },
     )
       .then(() => {

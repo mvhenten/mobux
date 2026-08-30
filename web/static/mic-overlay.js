@@ -13,6 +13,8 @@
 //
 // House style: muted, low-contrast palette. Android-only target.
 
+import { u } from './base.js';
+
 // One place for the fault-reason mapping so logs and UI agree. `kind` is a
 // stable short code; the overlay shows {title, detail}. Pass `extra` to fill
 // the technical detail line for the generic/network cases.
@@ -97,14 +99,14 @@ function buildReportUrl(kind, extra, buildInfo) {
 async function fetchBuildInfo() {
   const info = {};
   await Promise.all([
-    fetch('/api/build-info')
+    fetch(u('api/build-info'))
       .then((r) => r.json())
       .then((d) => {
         info.version = d?.version;
         info.serverHash = d?.build_hash;
       })
       .catch(() => {}),
-    fetch('/static/build-info.json')
+    fetch(u('static/build-info.json'))
       .then((r) => r.json())
       .then((d) => {
         info.feHash = d?.hash;
@@ -652,7 +654,7 @@ export function createMicOverlay(handlers) {
 
     if (kind === 'model') {
       const actionArea = root.querySelector('.mo-action-area');
-      fetch('/api/stt/status')
+      fetch(u('api/stt/status'))
         .then((r) => r.json())
         .catch(() => null)
         .then((status) => {
@@ -691,7 +693,7 @@ export function createMicOverlay(handlers) {
           } else {
             const a = document.createElement('a');
             a.className = 'mo-action';
-            a.href = '/settings';
+            a.href = u('settings');
             a.textContent = 'Open settings';
             actionArea.appendChild(a);
           }
@@ -710,7 +712,7 @@ export function createMicOverlay(handlers) {
     root && root.addEventListener('click', cancelPoll, { once: true });
 
     try {
-      const r = await fetch('/api/stt/install', { method: 'POST' });
+      const r = await fetch(u('api/stt/install'), { method: 'POST' });
       if (!r.ok && r.status !== 202) {
         hint.textContent = 'Install request failed: ' + r.status;
         btn.disabled = false;
@@ -740,7 +742,7 @@ export function createMicOverlay(handlers) {
       if (isCancelled && isCancelled()) return 'cancelled';
       let data;
       try {
-        const r = await fetch('/api/stt/install/status');
+        const r = await fetch(u('api/stt/install/status'));
         data = await r.json();
         errCount = 0;
       } catch (_) {
@@ -766,7 +768,7 @@ export function createMicOverlay(handlers) {
     btn.disabled = true;
     hint.textContent = 'Starting…';
     try {
-      await fetch('/api/stt/start', { method: 'POST' });
+      await fetch(u('api/stt/start'), { method: 'POST' });
     } catch (_) {}
     await startAndRetry(hint);
   }
@@ -777,7 +779,7 @@ export function createMicOverlay(handlers) {
       await new Promise((r) => setTimeout(r, 2000));
       let data;
       try {
-        const r = await fetch('/api/stt/status');
+        const r = await fetch(u('api/stt/status'));
         data = await r.json();
       } catch (_) { continue; }
       if (data.reachable) {

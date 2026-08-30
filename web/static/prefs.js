@@ -12,7 +12,9 @@
 // ES import of this module) share one instance: the browser dedupes the module
 // by URL, so `get()` reads the same in-memory blob the SPA hydrated at boot.
 
-const ENDPOINT = "/api/settings/preferences";
+import { u } from "./base.js";
+
+const ENDPOINT = u("api/settings/preferences");
 
 export const DEFAULTS = Object.freeze({
   renderer: "xterm",
