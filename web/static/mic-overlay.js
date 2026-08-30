@@ -9,7 +9,9 @@
 //   FAULT       — human error message, Retry + optional install/start flow.
 //                 If reached with captured audio still pending, Retry re-sends
 //                 that audio instead of forcing a fresh recording. A pre-record
-//                 probe fault additionally offers "Record anyway".
+//                 probe fault additionally offers "Record anyway"; a fault
+//                 raised with audio already captured and no speech backend to
+//                 transcribe it offers "Submit as audio file" instead.
 //
 // House style: muted, low-contrast palette. Android-only target.
 
@@ -50,6 +52,11 @@ export function faultMessage(kind, extra) {
       return {
         title: 'Speech provider not available.',
         detail: extra || 'Configure a provider in settings, or install a local server.',
+      };
+    case 'audio-upload': // /api/upload rejected the raw recording
+      return {
+        title: 'Could not hand over the recording.',
+        detail: extra || 'upload error',
       };
     case 'http': // other non-200
       return { title: 'Transcription failed.', detail: extra || 'server error' };
@@ -294,8 +301,11 @@ function pad(n) {
 //   onRetry       — REVIEW state's Retry: discard and record again.
 //   onFaultRetry  — FAULT state's Retry: caller decides fresh vs re-send
 //                   already-captured audio (see createDictateAction).
-//   showFault(kind, extra, { onProceedAnyway }) — onProceedAnyway renders a
-//   "Record anyway" action for faults raised before any audio was captured.
+//   showFault(kind, extra, { onProceedAnyway, onSubmitAudio }) —
+//   onProceedAnyway renders a "Record anyway" action for faults raised before
+//   any audio was captured; onSubmitAudio renders a "Submit as audio file"
+//   action for faults raised after, where the recording can still be handed
+//   over as an uploaded file instead of a transcript.
 export function createMicOverlay(handlers) {
   // Support legacy two-arg call: createMicOverlay(onStop, retryTranscription)
   if (typeof handlers === 'function') {
@@ -577,6 +587,8 @@ export function createMicOverlay(handlers) {
   // showFault(kind, extra, opts) — render the mapped fault. Tap to dismiss.
   //   opts.onProceedAnyway — when set, adds a "Record anyway" action (used
   //   for the pre-record backend probe, where nothing has been captured yet).
+  //   opts.onSubmitAudio — when set, adds a "Submit as audio file" action
+  //   (used once audio HAS been captured but no backend can transcribe it).
   function showFault(kind, extra, opts) {
     opts = opts || {};
     stopRaf();
@@ -641,6 +653,37 @@ export function createMicOverlay(handlers) {
         opts.onProceedAnyway();
       });
       root.querySelector('.mo-action-area').appendChild(proceedBtn);
+    }
+
+    // The recording is real even when nothing can transcribe it — hand the
+    // raw WAV to the terminal as an uploaded file rather than making the
+    // user re-record into a backend that is still down. Rendered
+    // synchronously so it never waits on the /api/stt/status round-trip the
+    // model-fault block below makes.
+    if (typeof opts.onSubmitAudio === 'function') {
+      const audioBtn = document.createElement('button');
+      audioBtn.className = 'mo-install-btn mo-submit-audio';
+      audioBtn.textContent = '⇪ Submit as audio file';
+      const audioHint = document.createElement('div');
+      audioHint.className = 'mo-install-hint mo-submit-audio-hint';
+      audioBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        audioBtn.disabled = true;
+        audioHint.textContent = 'Uploading the recording…';
+        // onSubmitAudio renders its own fault on failure; this catch is the
+        // last line of defense so an unexpected throw still leaves a live
+        // button and a stated reason instead of a stuck "Uploading…".
+        Promise.resolve()
+          .then(() => opts.onSubmitAudio())
+          .catch((err) => {
+            audioBtn.disabled = false;
+            audioHint.textContent =
+              'Upload failed: ' + (err?.message || 'upload error');
+          });
+      });
+      const audioArea = root.querySelector('.mo-action-area');
+      audioArea.appendChild(audioBtn);
+      audioArea.appendChild(audioHint);
     }
 
     root.addEventListener('click', (e) => {

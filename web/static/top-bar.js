@@ -172,7 +172,7 @@ export function createTopBar({
     button: attachBtn,
     errorContainer,
   });
-  const dictate = createDictateAction({ send, button: micBtn });
+  const dictate = createDictateAction({ send, node, button: micBtn });
 
   attachBtn.addEventListener('click', (e) => { e.preventDefault(); attach.trigger(); });
   micBtn.addEventListener('click', (e) => { e.preventDefault(); dictate.toggle(); });

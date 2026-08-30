@@ -1712,6 +1712,95 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     ).toBe(1);
   });
 
+  // ── regression (#302): no speech backend must not strand the recording ──
+  //
+  // /transcribe answers 503 when the local STT backend is unreachable, and
+  // the resulting `model` fault used to leave the user three bad options:
+  // re-record, install a server, or throw the take away. The audio is real
+  // either way, so the fault now offers to hand it over as a file — encoded
+  // by the same encodeWav the transcribe path uses, POSTed to the EXISTING
+  // /api/upload endpoint under the same multipart `file` field the 📎 attach
+  // button uses, and the returned path typed into the terminal like any
+  // other attachment.
+  test("with no speech backend, the fault offers to submit the recording as an uploaded WAV", async ({
+    page,
+  }) => {
+    const UPLOAD_PATH = "/tmp/mobux-uploads/dictation-audio.wav";
+
+    await page.route(/\/transcribe$/, (route) =>
+      route.fulfill({ status: 503, body: "speech backend unreachable" }),
+    );
+
+    let uploaded = null;
+    await page.route(/\/api\/upload(\?|$)/, async (route) => {
+      const req = route.request();
+      const buf = req.postDataBuffer();
+      uploaded = {
+        method: req.method(),
+        contentType: req.headers()["content-type"] || "",
+        // latin1 keeps the raw PCM bytes byte-for-byte, so the multipart
+        // headers and the WAV's own "RIFF"/"WAVE" magic stay searchable.
+        body: buf ? buf.toString("latin1") : "",
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          path: UPLOAD_PATH,
+          size: 4242,
+          name: "dictation-audio.wav",
+        }),
+      });
+    });
+
+    const sent = [];
+    page.on("websocket", (ws) => {
+      ws.on("framesent", (frame) => sent.push(String(frame.payload)));
+    });
+
+    await openRecording(page);
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Stop" })
+      .click();
+
+    await expect(page.locator("#mobux-mic-overlay.fault")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Speech provider not available",
+    );
+
+    const audioBtn = page.locator("#mobux-mic-overlay .mo-submit-audio");
+    await expect(audioBtn).toBeVisible();
+    await expect(audioBtn).toContainText("Submit as audio file");
+
+    await audioBtn.click();
+
+    // Overlay closes and mic state resets — the recording has left the app.
+    await expect(page.locator("#mobux-mic-overlay")).toHaveCount(0, {
+      timeout: 10000,
+    });
+
+    expect(uploaded, "the recording must be POSTed to /api/upload").not.toBe(
+      null,
+    );
+    expect(uploaded.method).toBe("POST");
+    expect(uploaded.contentType).toContain("multipart/form-data");
+    // The existing endpoint's existing field name — no new route, no new shape.
+    expect(uploaded.body).toContain('name="file"');
+    expect(uploaded.body).toMatch(/filename="dictation-\d+\.wav"/);
+    // A real 16 kHz mono WAV, not an empty part.
+    expect(uploaded.body).toContain("RIFF");
+    expect(uploaded.body).toContain("WAVE");
+
+    // The returned path goes to the terminal exactly like an attachment,
+    // followed by the carriage return that submits it.
+    await expect
+      .poll(() => sent.indexOf(UPLOAD_PATH), { timeout: 10000 })
+      .toBeGreaterThanOrEqual(0);
+    expect(sent[sent.indexOf(UPLOAD_PATH) + 1]).toBe("\r");
+  });
+
   // ── regression: no fault is ever silent — every kind gets a report link ──
   //
   // The mic button used to fail silently on a denied Android permission: the
