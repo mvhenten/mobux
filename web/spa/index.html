@@ -20,8 +20,12 @@
     />
     <meta name="theme-color" content="#0f1115" />
     <!-- Reuse the existing app stylesheet (served by the Rust backend through
-         the Vite proxy) so the ported pages match the current look. -->
-    <link rel="stylesheet" href="/static/style.css" />
+         the Vite proxy) so the ported pages match the current look. Relative,
+         like every other asset here: the document is served at <prefix>/app, so
+         this resolves to <prefix>/static/style.css inside whatever mount the
+         proxy publishes. In dev the document sits at /static/spa/, so it lands
+         on /static/spa/static/style.css and the proxy rewrite catches it. -->
+    <link rel="stylesheet" href="./static/style.css" />
   </head>
   <body>
     <div id="app"></div>

@@ -51,7 +51,7 @@ parity. Phase 1 (below) built the foundation.
 
 Phase 2 done:
 
-- **Served from Rust at `/app`** (and `/app/*`, SPA history fallback) behind the
+- **Served from Rust at `/app`** behind the
   existing auth + `Cache-Control: no-store`. The old Rust-rendered pages (`/`,
   `/s/:name`, `/settings`, `/install`) are untouched — both UIs coexist; the SPA
   is shadow-mounted. See "Prod serving in Rust" below.
@@ -145,15 +145,23 @@ before `cargo build`, so the shipped binary embeds the SPA.
 
 ## Prod serving in Rust
 
-The binary serves the SPA at **`/app`** (and `/app/*` for an SPA history
-fallback — every sub-path returns the SPA's `index.html`). `serve_spa_index`
-reads the embedded `spa/index.html`, sets `text/html` + `Cache-Control:
-no-store`, and sits behind the global auth layer like every other page. The
-SPA's JS/CSS at `/static/spa/assets/…` ride the existing `serve_static` handler.
+The binary serves the SPA at **`/app`** — one document, one URL.
+`serve_spa_index` reads the embedded `spa/index.html`, sets `text/html` +
+`Cache-Control: no-store`, and sits behind the global auth layer like every
+other page. The SPA's JS/CSS at `/static/spa/assets/…` ride the existing
+`serve_static` handler.
 
 Routing is hash-based (`/app#/settings`, `/app#/s/<name>`), so deep links and
-reloads work without any extra server config; the `/app/*` fallback is belt-and-
-suspenders for a future switch to history routing.
+reloads work without any extra server config. `/app/*` used to serve the shell
+as a history fallback; it now 307s back to `/app`, because the shell's asset
+URLs are relative and only resolve from `/app`'s own directory.
+
+Those URLs are relative (`./static/spa/…`) so mobux works behind a proxy that
+publishes it at a sub-path and strips that prefix before the request arrives —
+the server never learns the prefix, but the browser resolves the document's own
+directory correctly at any mount. Vite only accepts `./` as a relative `base`,
+so `vite.config.js` applies the real prefix through
+`experimental.renderBuiltUrl` instead.
 
 The old Rust-rendered pages — `/`, `/s/:name`, `/settings`, `/install` — are
 **unchanged**. Both UIs coexist; the SPA is shadow-mounted at `/app`. Cutting

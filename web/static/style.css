@@ -2,17 +2,21 @@
    Latin + box-drawing + dingbats + geometric shapes). The
    SterkTUISymbols fallback is declared under the same family names
    with unicode-range so the browser fetches it once and uses it for
-   the dingbat/symbol ranges no general-purpose mono ships. */
+   the dingbat/symbol ranges no general-purpose mono ships.
+
+   The url()s are relative to this stylesheet, which is served at
+   <prefix>/static/style.css. Root-absolute, they would leave the mount a
+   path-prefixing proxy publishes and the fonts would 404 there. */
 @font-face {
   font-family: 'JetBrains Mono';
-  src: url('/static/vendor/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  src: url('vendor/fonts/JetBrainsMono-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
   font-family: 'JetBrains Mono';
-  src: url('/static/vendor/fonts/SterkTUISymbols.woff2') format('woff2');
+  src: url('vendor/fonts/SterkTUISymbols.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -24,7 +28,7 @@
    no such constraint and reads better proportional on a phone screen. */
 @font-face {
   font-family: 'Inter';
-  src: url('/static/vendor/fonts/Inter-Regular.woff2') format('woff2');
+  src: url('vendor/fonts/Inter-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
