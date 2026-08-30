@@ -47,9 +47,10 @@ self-contained binary at `~/.cargo/bin/mobux`. It runs from any directory.
 ## Configuration
 
 `mobux --help` lists the flags (`--port`, `--pin`, `--user`) and the main
-environment variables. A flag wins over the variable next to it; a PIN on the
-command line is visible in the process list, so a service unit should keep
-using `MOBUX_PIN`.
+environment variables. A flag wins over the variable next to it, which wins
+over the config file at `~/.config/mobux/config.json` (`--config PATH` names
+another one). A PIN on the command line is visible in the process list, so a
+long-running instance should keep it in the config file or in `MOBUX_PIN`.
 
 The listen port resolves as `--port` → `MOBUX_PORT` → `PORT` → 8080. Bare
 `PORT` is deprecated: it still works, and the server warns at startup until it
@@ -61,16 +62,21 @@ The host runs mobux as a **systemd `--user`** service with linger enabled, so
 it starts on boot (no login needed) and restarts on crash — no root required.
 
 `mobux service install --port 5151 --user me --pin 12345` does all of this for
-you: it writes the unit below (mode 600, since it holds the PIN) pointing at
-the binary you ran it from, reloads systemd, enables the service and turns on
-linger. `mobux service status` and `mobux service uninstall` cover the rest, and
+you: it writes those settings to `~/.config/mobux/config.json` (mode 600, since
+it holds the PIN), writes the unit below pointing at the binary you ran it from
+and at that file, reloads systemd, enables the service and turns on linger.
+`--config PATH` puts the settings somewhere else and points the unit there.
+`mobux service status` and `mobux service uninstall` cover the rest, and
 `mobux update` installs the latest release and restarts that unit.
-Rerun `install` with different flags to rewrite and restart the unit. The
-manual recipe stays here as the reference for what that unit contains:
+Rerun `install` with different flags to rewrite the config and restart the
+service. The manual recipe stays here as the reference for what that unit
+contains:
 
 ```bash
 cargo install mobux --locked                 # → ~/.cargo/bin/mobux
 loginctl enable-linger "$USER"                # start the user service at boot
+
+mobux configure                               # → ~/.config/mobux/config.json
 
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/mobux.service <<'EOF'
@@ -81,13 +87,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/mobux
-Environment=MOBUX_PORT=5151
-Environment=MOBUX_AUTH_USER=changeme
-Environment=MOBUX_PIN=changeme
-# mobux serves plain HTTP by default. Drop this line when a reverse proxy
-# terminates TLS in front of it.
-Environment=MOBUX_TLS=1
+ExecStart=%h/.cargo/bin/mobux --config %h/.config/mobux/config.json
 # The self-updater runs `cargo install`; the default unit PATH lacks ~/.cargo/bin.
 Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
@@ -104,9 +104,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now mobux
 ```
 
-`mobux service install` writes the unit without `MOBUX_TLS`, so the service
-serves plain HTTP; add `Environment=MOBUX_TLS=1` and restart it to serve HTTPS.
-With TLS on, the cert is auto-generated (and reused across restarts) at
+Units written by an older release carry the port, username and PIN as
+`Environment=` lines instead. They keep working — the environment still
+outranks the config file — and rerunning `mobux service install` migrates them.
+
+`mobux service install` leaves `tls.enabled` off unless you pass `--tls`, so
+the service serves plain HTTP. With TLS on, the cert is auto-generated (and
+reused across restarts) at
 `~/.config/mobux/leaf.crt`; the data dir (sessions, push subscriptions, and
 the Android package once built) is `~/.local/share/mobux`. Nothing depends on
 the working directory.
