@@ -75,19 +75,15 @@ fn session_url(session: &str, window: Option<&str>) -> String {
 /// Fire a "bell" push for `session` (and optional `window`). Spawned
 /// fire-and-forget by the tmux-hook callback — tmux already deduped the
 /// event, so callers don't need to.
-pub fn fire_bell(db: Arc<Db>, session: &str, window: Option<&str>) {
+pub fn fire_bell(db: Arc<Db>, contact: String, session: &str, window: Option<&str>) {
     let payload = Payload {
         title: "mobux".to_string(),
         body: format!("session {session}: 🔔"),
         tag: Some(format!("bell-{session}")),
         url: Some(session_url(session, window)),
     };
-    tokio::spawn(notify(db, payload));
+    tokio::spawn(notify(db, contact, payload));
 }
-
-/// Default VAPID contact (RFC 8292 requires `mailto:` or `https:`).
-/// Override with `MOBUX_VAPID_CONTACT`.
-const DEFAULT_VAPID_CONTACT: &str = "mailto:admin@example.com";
 
 /// A single push payload.
 pub struct Payload {
@@ -102,11 +98,13 @@ pub struct Payload {
 }
 
 /// Send `payload` as a Web Push notification to every subscribed device.
+/// `contact` is the resolved `push.vapid_contact` setting — RFC 8292 requires
+/// a `mailto:` or `https:` URL.
 ///
 /// Best-effort: errors are logged and swallowed. Dead subscriptions
 /// (HTTP 404 / 410) are pruned from the DB on the fly. Returns when all
 /// delivery attempts have completed.
-pub async fn notify(db: Arc<Db>, payload: Payload) {
+pub async fn notify(db: Arc<Db>, contact: String, payload: Payload) {
     let vapid = match db.vapid_keys() {
         Ok(v) => v,
         Err(e) => {
@@ -135,9 +133,6 @@ pub async fn notify(db: Arc<Db>, payload: Payload) {
     })
     .to_string()
     .into_bytes();
-
-    let contact =
-        std::env::var("MOBUX_VAPID_CONTACT").unwrap_or_else(|_| DEFAULT_VAPID_CONTACT.to_string());
 
     eprintln!(
         "push: notify title={:?} subscribers={}",

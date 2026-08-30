@@ -503,14 +503,19 @@ fn new_session_args(name: &str, shell_cmd: Option<&str>, home: Option<&Path>) ->
     args
 }
 
-pub async fn new_session(name: &str, target: Option<&str>) -> Result<()> {
+pub async fn new_session(
+    name: &str,
+    target: Option<&str>,
+    session_shell: &str,
+    data_dir: &Path,
+) -> Result<()> {
     // Remote node: the OSC-133 rcfile lives on the hub's local disk, so it
     // can't be injected into a session on another machine, and the hub's
     // $HOME has no meaning there either — start the node's default shell
     // in its own default directory instead.
     let Some(ssh_target) = target else {
-        let (shell_type, shell_path) = detect_session_shell();
-        let shell_cmd = prepare_shell_with_osc133(shell_type, &shell_path)?;
+        let (shell_type, shell_path) = detect_session_shell(session_shell);
+        let shell_cmd = prepare_shell_with_osc133(data_dir, shell_type, &shell_path)?;
         let home = home_dir().ok();
         let args = new_session_args(name, Some(&shell_cmd), home.as_deref());
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -551,27 +556,16 @@ pub async fn new_session(name: &str, target: Option<&str>) -> Result<()> {
 /// For bash: creates a temp rcfile that sources user's ~/.bashrc then adds snippet.
 /// For zsh: creates a ZDOTDIR with .zshrc that sources user's ~/.zshrc then adds snippet.
 /// For fish: uses -C flag to inject commands inline.
-fn prepare_shell_with_osc133(shell: Shell, shell_path: &str) -> Result<String> {
-    let data_dir = resolve_shell_init_dir()?;
-    fs::create_dir_all(&data_dir)
-        .with_context(|| format!("creating shell-init dir: {}", data_dir.display()))?;
+fn prepare_shell_with_osc133(data_dir: &Path, shell: Shell, shell_path: &str) -> Result<String> {
+    let shell_init_dir = data_dir.join("shell-init");
+    fs::create_dir_all(&shell_init_dir)
+        .with_context(|| format!("creating shell-init dir: {}", shell_init_dir.display()))?;
 
     match shell {
-        Shell::Bash => prepare_bash_rcfile(&data_dir, shell_path),
-        Shell::Zsh => prepare_zsh_zdotdir(&data_dir, shell_path),
+        Shell::Bash => prepare_bash_rcfile(&shell_init_dir, shell_path),
+        Shell::Zsh => prepare_zsh_zdotdir(&shell_init_dir, shell_path),
         Shell::Fish => prepare_fish_command(shell_path),
     }
-}
-
-fn resolve_shell_init_dir() -> Result<PathBuf> {
-    let data_dir = if let Ok(override_dir) = env::var("MOBUX_DATA_DIR") {
-        PathBuf::from(override_dir)
-    } else {
-        let dirs = directories::ProjectDirs::from("", "", "mobux")
-            .ok_or_else(|| anyhow!("could not resolve user home for shell-init dir"))?;
-        dirs.data_dir().to_path_buf()
-    };
-    Ok(data_dir.join("shell-init"))
 }
 
 fn prepare_bash_rcfile(shell_init_dir: &Path, shell_path: &str) -> Result<String> {

@@ -3,14 +3,16 @@
 //! Two modes:
 //!
 //! 1. **Default (CA mode)**: Generate a long-lived local root CA at
-//!    `$MOBUX_CONFIG_DIR/ca.{crt,key}` (10 years, ECDSA P-256, CN=`mobux local CA`)
+//!    `<config dir>/ca.{crt,key}` (10 years, ECDSA P-256, CN=`mobux local CA`)
 //!    and a 90-day per-host leaf cert. The CA cert is later served by the
 //!    install page so users can install it on their devices.
-//! 2. **ACME mode**: When `MOBUX_ACME_DOMAINS` is set, obtain a real
+//! 2. **ACME mode**: When `tls.acme_domains` is non-empty, obtain a real
 //!    Let's Encrypt cert via HTTP-01. Renew automatically.
 //!
-//! The user-supplied `MOBUX_CERT_FILE` / `MOBUX_KEY_FILE` env vars take
-//! priority over both modes — handled in `main.rs`, not here.
+//! Every setting arrives as a resolved [`crate::config::TlsConfig`] and the
+//! config directory as a path — this module reads no environment of its own.
+//! The user-supplied `tls.cert_file` / `tls.key_file` pair takes priority over
+//! both modes — handled in `main.rs`, not here.
 
 use std::collections::HashMap;
 use std::fs;
@@ -33,7 +35,6 @@ const LEAF_VALIDITY_DAYS: i64 = 90;
 const LEAF_REISSUE_THRESHOLD_DAYS: i64 = 14;
 const ACME_RENEW_THRESHOLD_DAYS: i64 = 30;
 const ACME_RENEW_INTERVAL: Duration = Duration::from_secs(24 * 3600);
-const ACME_DEFAULT_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
 /// Shared state for the HTTP-01 challenge server route. The map is `token ->
 /// key_authorization`. `main.rs` mounts a route that reads from it; this
@@ -59,12 +60,10 @@ pub struct CertPaths {
     pub ca_cert: Option<PathBuf>,
 }
 
-/// True if ACME mode is enabled (i.e. `MOBUX_ACME_DOMAINS` is set and non-empty).
-pub fn acme_mode_enabled() -> bool {
-    std::env::var("MOBUX_ACME_DOMAINS")
-        .ok()
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+/// True if ACME mode is enabled, i.e. `tls.acme_domains` names at least one
+/// domain.
+pub fn acme_mode_enabled(tls: &crate::config::TlsConfig) -> bool {
+    tls.acme_domains.iter().any(|d| !d.trim().is_empty())
 }
 
 /// Orchestrator: resolve cert + key paths for the running server.
@@ -73,16 +72,17 @@ pub fn acme_mode_enabled() -> bool {
 /// shared with the HTTP-01 route in `main.rs`. In CA mode the handle is unused
 /// and may be `None`.
 pub async fn ensure_certs(
-    extra_hosts: &[String],
+    config_dir: &Path,
+    tls: &crate::config::TlsConfig,
     acme_challenges: Option<AcmeChallenges>,
 ) -> Result<CertPaths> {
-    if acme_mode_enabled() {
+    if acme_mode_enabled(tls) {
         let challenges = acme_challenges
             .ok_or_else(|| anyhow!("ACME mode enabled but no challenge handle provided"))?;
-        return ensure_acme(challenges).await;
+        return ensure_acme(config_dir, tls, challenges).await;
     }
 
-    ensure_ca_mode(extra_hosts)
+    ensure_ca_mode(config_dir, &tls.hosts)
 }
 
 /// Load a rustls `ServerConfig` from PEM files on disk.
@@ -110,64 +110,54 @@ pub fn load_rustls_config(cert_path: &Path, key_path: &Path) -> Result<rustls::S
 // Path resolution
 // ---------------------------------------------------------------------------
 
-pub fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("MOBUX_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("mobux")
-}
-
 /// Path to the local root CA cert PEM. Used by the install page in CA mode
 /// so users can download and trust the CA on their device.
-pub fn ca_cert_path() -> PathBuf {
-    config_dir().join("ca.crt")
+pub fn ca_cert_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("ca.crt")
 }
 
-fn ca_key_path() -> PathBuf {
-    config_dir().join("ca.key")
+fn ca_key_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("ca.key")
 }
 
-fn leaf_cert_path() -> PathBuf {
-    config_dir().join("leaf.crt")
+fn leaf_cert_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("leaf.crt")
 }
 
-fn leaf_key_path() -> PathBuf {
-    config_dir().join("leaf.key")
+fn leaf_key_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("leaf.key")
 }
 
-fn leaf_meta_path() -> PathBuf {
+fn leaf_meta_path(config_dir: &Path) -> PathBuf {
     // Stores hash of the SAN list so we can detect host-set changes
     // without re-parsing the leaf cert.
-    config_dir().join("leaf.meta")
+    config_dir.join("leaf.meta")
 }
 
-fn leaf_expiry_path() -> PathBuf {
+fn leaf_expiry_path(config_dir: &Path) -> PathBuf {
     // Stores the leaf's not_after as a unix timestamp (seconds, decimal).
     // This avoids pulling in x509-parser just to read the validity field.
-    config_dir().join("leaf.expiry")
+    config_dir.join("leaf.expiry")
 }
 
-fn acme_expiry_path() -> PathBuf {
-    acme_dir().join("cert.expiry")
+fn acme_expiry_path(config_dir: &Path) -> PathBuf {
+    acme_dir(config_dir).join("cert.expiry")
 }
 
-fn acme_dir() -> PathBuf {
-    config_dir().join("acme")
+fn acme_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("acme")
 }
 
-fn acme_account_path() -> PathBuf {
-    acme_dir().join("account.json")
+fn acme_account_path(config_dir: &Path) -> PathBuf {
+    acme_dir(config_dir).join("account.json")
 }
 
-fn acme_cert_path() -> PathBuf {
-    acme_dir().join("cert.pem")
+fn acme_cert_path(config_dir: &Path) -> PathBuf {
+    acme_dir(config_dir).join("cert.pem")
 }
 
-fn acme_key_path() -> PathBuf {
-    acme_dir().join("key.pem")
+fn acme_key_path(config_dir: &Path) -> PathBuf {
+    acme_dir(config_dir).join("key.pem")
 }
 
 // ---------------------------------------------------------------------------
@@ -179,24 +169,24 @@ struct CaMaterial {
     key: KeyPair,
 }
 
-fn ensure_ca_mode(extra_hosts: &[String]) -> Result<CertPaths> {
-    let dir = config_dir();
-    fs::create_dir_all(&dir).with_context(|| format!("creating config dir: {}", dir.display()))?;
+fn ensure_ca_mode(config_dir: &Path, extra_hosts: &[String]) -> Result<CertPaths> {
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("creating config dir: {}", config_dir.display()))?;
 
-    let ca = ensure_ca()?;
-    issue_leaf_if_needed(&ca, extra_hosts)?;
+    let ca = ensure_ca(config_dir)?;
+    issue_leaf_if_needed(config_dir, &ca, extra_hosts)?;
 
     Ok(CertPaths {
-        cert: leaf_cert_path(),
-        key: leaf_key_path(),
-        ca_cert: Some(ca_cert_path()),
+        cert: leaf_cert_path(config_dir),
+        key: leaf_key_path(config_dir),
+        ca_cert: Some(ca_cert_path(config_dir)),
     })
 }
 
 /// Read or generate the local root CA (`mobux local CA`).
-fn ensure_ca() -> Result<CaMaterial> {
-    let cert_path = ca_cert_path();
-    let key_path = ca_key_path();
+fn ensure_ca(config_dir: &Path) -> Result<CaMaterial> {
+    let cert_path = ca_cert_path(config_dir);
+    let key_path = ca_key_path(config_dir);
 
     if cert_path.exists() && key_path.exists() {
         let key_pem = fs::read_to_string(&key_path)
@@ -212,7 +202,7 @@ fn ensure_ca() -> Result<CaMaterial> {
 
     eprintln!(
         "[ssl] Generating new local root CA at {}",
-        config_dir().display()
+        config_dir.display()
     );
 
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generating CA key")?;
@@ -249,18 +239,18 @@ fn ensure_ca() -> Result<CaMaterial> {
 
 /// Issue a fresh leaf cert if none exists, or if SAN set changed, or if the
 /// existing leaf is within the reissue threshold of expiry.
-fn issue_leaf_if_needed(ca: &CaMaterial, extra_hosts: &[String]) -> Result<()> {
+fn issue_leaf_if_needed(config_dir: &Path, ca: &CaMaterial, extra_hosts: &[String]) -> Result<()> {
     let hosts = collect_hosts(extra_hosts);
     let want_hash = hash_hosts(&hosts);
 
-    let cert_path = leaf_cert_path();
-    let meta_path = leaf_meta_path();
+    let cert_path = leaf_cert_path(config_dir);
+    let meta_path = leaf_meta_path(config_dir);
 
     let same_hosts = fs::read_to_string(&meta_path)
         .map(|s| s.trim() == want_hash)
         .unwrap_or(false);
 
-    let remaining = remaining_days_from_sidecar(&leaf_expiry_path()).unwrap_or(-1);
+    let remaining = remaining_days_from_sidecar(&leaf_expiry_path(config_dir)).unwrap_or(-1);
     let fresh = cert_path.exists() && remaining > LEAF_REISSUE_THRESHOLD_DAYS;
 
     if same_hosts && fresh {
@@ -272,13 +262,13 @@ fn issue_leaf_if_needed(ca: &CaMaterial, extra_hosts: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    issue_leaf(ca, &hosts)?;
+    issue_leaf(config_dir, ca, &hosts)?;
     fs::write(&meta_path, want_hash).context("writing leaf meta")?;
     Ok(())
 }
 
 /// Generate a 90-day leaf cert covering `hosts` (DNS names + IP literals).
-fn issue_leaf(ca: &CaMaterial, hosts: &[String]) -> Result<()> {
+fn issue_leaf(config_dir: &Path, ca: &CaMaterial, hosts: &[String]) -> Result<()> {
     let sans = build_sans(hosts)?;
 
     let san_display: Vec<String> = sans
@@ -326,10 +316,16 @@ fn issue_leaf(ca: &CaMaterial, hosts: &[String]) -> Result<()> {
     chain.push('\n');
     chain.push_str(&ca.cert.pem());
 
-    write_secret(&leaf_key_path(), leaf_key.serialize_pem().as_bytes())?;
-    fs::write(leaf_cert_path(), chain).context("writing leaf cert")?;
-    fs::write(leaf_expiry_path(), not_after.unix_timestamp().to_string())
-        .context("writing leaf expiry sidecar")?;
+    write_secret(
+        &leaf_key_path(config_dir),
+        leaf_key.serialize_pem().as_bytes(),
+    )?;
+    fs::write(leaf_cert_path(config_dir), chain).context("writing leaf cert")?;
+    fs::write(
+        leaf_expiry_path(config_dir),
+        not_after.unix_timestamp().to_string(),
+    )
+    .context("writing leaf expiry sidecar")?;
 
     Ok(())
 }
@@ -412,25 +408,32 @@ fn remaining_days_from_sidecar(expiry_path: &Path) -> Option<i64> {
 // ACME mode
 // ---------------------------------------------------------------------------
 
-async fn ensure_acme(challenges: AcmeChallenges) -> Result<CertPaths> {
-    fs::create_dir_all(acme_dir())
-        .with_context(|| format!("creating ACME dir: {}", acme_dir().display()))?;
+async fn ensure_acme(
+    config_dir: &Path,
+    tls: &crate::config::TlsConfig,
+    challenges: AcmeChallenges,
+) -> Result<CertPaths> {
+    let dir = acme_dir(config_dir);
+    fs::create_dir_all(&dir).with_context(|| format!("creating ACME dir: {}", dir.display()))?;
 
-    let domains = parse_acme_domains()?;
-    let email = std::env::var("MOBUX_ACME_EMAIL")
-        .context("MOBUX_ACME_EMAIL is required when MOBUX_ACME_DOMAINS is set")?;
-    let directory = std::env::var("MOBUX_ACME_DIRECTORY")
-        .unwrap_or_else(|_| ACME_DEFAULT_DIRECTORY.to_string());
+    let domains = parse_acme_domains(tls)?;
+    let email = tls.acme_email.trim();
+    if email.is_empty() {
+        return Err(anyhow!(
+            "tls.acme_email is required when tls.acme_domains is set (env: MOBUX_ACME_EMAIL)"
+        ));
+    }
+    let directory = tls.acme_directory.clone();
 
-    let cert_path = acme_cert_path();
-    let key_path = acme_key_path();
+    let cert_path = acme_cert_path(config_dir);
+    let key_path = acme_key_path(config_dir);
 
-    let remaining = remaining_days_from_sidecar(&acme_expiry_path()).unwrap_or(-1);
+    let remaining = remaining_days_from_sidecar(&acme_expiry_path(config_dir)).unwrap_or(-1);
     let need_obtain =
         !cert_path.exists() || !key_path.exists() || remaining <= ACME_RENEW_THRESHOLD_DAYS;
 
     if need_obtain {
-        obtain_acme_cert(&domains, &email, &directory, challenges.clone()).await?;
+        obtain_acme_cert(config_dir, &domains, email, &directory, challenges.clone()).await?;
     } else {
         eprintln!(
             "[ssl] ACME cert at {} valid for {} more day(s)",
@@ -439,7 +442,13 @@ async fn ensure_acme(challenges: AcmeChallenges) -> Result<CertPaths> {
         );
     }
 
-    spawn_renewal_task(domains, email, directory, challenges);
+    spawn_renewal_task(
+        config_dir.to_path_buf(),
+        domains,
+        email.to_string(),
+        directory,
+        challenges,
+    );
 
     Ok(CertPaths {
         cert: cert_path,
@@ -448,20 +457,21 @@ async fn ensure_acme(challenges: AcmeChallenges) -> Result<CertPaths> {
     })
 }
 
-fn parse_acme_domains() -> Result<Vec<String>> {
-    let raw = std::env::var("MOBUX_ACME_DOMAINS").context("MOBUX_ACME_DOMAINS not set")?;
-    let domains: Vec<String> = raw
-        .split(',')
+fn parse_acme_domains(tls: &crate::config::TlsConfig) -> Result<Vec<String>> {
+    let domains: Vec<String> = tls
+        .acme_domains
+        .iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
     if domains.is_empty() {
-        return Err(anyhow!("MOBUX_ACME_DOMAINS contains no domains"));
+        return Err(anyhow!("tls.acme_domains contains no domains"));
     }
     Ok(domains)
 }
 
 async fn obtain_acme_cert(
+    config_dir: &Path,
     domains: &[String],
     email: &str,
     directory: &str,
@@ -478,7 +488,7 @@ async fn obtain_acme_cert(
     );
 
     let contact = format!("mailto:{email}");
-    let account = load_or_create_account(directory, &contact).await?;
+    let account = load_or_create_account(config_dir, directory, &contact).await?;
 
     let identifiers: Vec<Identifier> = domains.iter().map(|d| Identifier::Dns(d.clone())).collect();
     let mut order = account
@@ -529,13 +539,14 @@ async fn obtain_acme_cert(
         .await
         .context("polling ACME certificate")?;
 
-    write_secret(&acme_key_path(), private_key_pem.as_bytes())?;
-    fs::write(acme_cert_path(), cert_chain_pem).context("writing ACME cert")?;
+    write_secret(&acme_key_path(config_dir), private_key_pem.as_bytes())?;
+    fs::write(acme_cert_path(config_dir), cert_chain_pem).context("writing ACME cert")?;
     // Let's Encrypt issues 90-day certs; record an expiry one day shy of that
     // so the renewal task triggers slightly early on the boundary.
     let assumed_validity_days: i64 = 90;
     let expiry = OffsetDateTime::now_utc().unix_timestamp() + (assumed_validity_days - 1) * 86400;
-    fs::write(acme_expiry_path(), expiry.to_string()).context("writing ACME expiry sidecar")?;
+    fs::write(acme_expiry_path(config_dir), expiry.to_string())
+        .context("writing ACME expiry sidecar")?;
 
     // Drop tokens once we're done — they should not be reused.
     if let Ok(mut map) = challenges.lock() {
@@ -546,15 +557,19 @@ async fn obtain_acme_cert(
 
     eprintln!(
         "[ssl] ACME: cert installed at {}",
-        acme_cert_path().display()
+        acme_cert_path(config_dir).display()
     );
     Ok(())
 }
 
-async fn load_or_create_account(directory: &str, contact: &str) -> Result<instant_acme::Account> {
+async fn load_or_create_account(
+    config_dir: &Path,
+    directory: &str,
+    contact: &str,
+) -> Result<instant_acme::Account> {
     use instant_acme::{Account, NewAccount};
 
-    let creds_path = acme_account_path();
+    let creds_path = acme_account_path(config_dir);
     if creds_path.exists() {
         let raw = fs::read_to_string(&creds_path)
             .with_context(|| format!("reading {}", creds_path.display()))?;
@@ -588,6 +603,7 @@ async fn load_or_create_account(directory: &str, contact: &str) -> Result<instan
 }
 
 fn spawn_renewal_task(
+    config_dir: PathBuf,
     domains: Vec<String>,
     email: String,
     directory: String,
@@ -596,7 +612,8 @@ fn spawn_renewal_task(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(ACME_RENEW_INTERVAL).await;
-            let remaining = remaining_days_from_sidecar(&acme_expiry_path()).unwrap_or(-1);
+            let remaining =
+                remaining_days_from_sidecar(&acme_expiry_path(&config_dir)).unwrap_or(-1);
             if remaining > ACME_RENEW_THRESHOLD_DAYS {
                 continue;
             }
@@ -604,7 +621,14 @@ fn spawn_renewal_task(
                 "[ssl] ACME: cert has {} day(s) remaining; renewing",
                 remaining
             );
-            if let Err(e) = obtain_acme_cert(&domains, &email, &directory, challenges.clone()).await
+            if let Err(e) = obtain_acme_cert(
+                &config_dir,
+                &domains,
+                &email,
+                &directory,
+                challenges.clone(),
+            )
+            .await
             {
                 eprintln!("[ssl] ACME renewal failed: {e:#}");
             }
@@ -619,4 +643,42 @@ fn spawn_renewal_task(
 /// Lookup the key-authorization for an HTTP-01 challenge token.
 pub fn lookup_acme_challenge(challenges: &AcmeChallenges, token: &str) -> Option<String> {
     challenges.lock().ok().and_then(|m| m.get(token).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TlsConfig;
+
+    #[test]
+    fn acme_mode_follows_the_configured_domains() {
+        let mut tls = TlsConfig::default();
+        assert!(!acme_mode_enabled(&tls), "no domains means CA mode");
+
+        tls.acme_domains = vec!["   ".to_string()];
+        assert!(!acme_mode_enabled(&tls), "a blank domain states nothing");
+
+        tls.acme_domains = vec!["mobux.example".to_string()];
+        assert!(acme_mode_enabled(&tls));
+    }
+
+    #[test]
+    fn acme_domains_are_trimmed_and_blanks_dropped() {
+        let tls = TlsConfig {
+            acme_domains: vec![" a.example ".to_string(), String::new(), "b.example".into()],
+            ..TlsConfig::default()
+        };
+        assert_eq!(
+            parse_acme_domains(&tls).unwrap(),
+            vec!["a.example".to_string(), "b.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn every_cert_path_hangs_off_the_config_dir_it_is_given() {
+        let dir = Path::new("/somewhere/mobux");
+        assert_eq!(ca_cert_path(dir), dir.join("ca.crt"));
+        assert_eq!(leaf_cert_path(dir), dir.join("leaf.crt"));
+        assert_eq!(acme_cert_path(dir), dir.join("acme/cert.pem"));
+    }
 }

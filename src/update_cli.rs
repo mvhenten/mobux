@@ -1,8 +1,8 @@
 //! `mobux update` — the CLI face of the in-app self-updater.
 //!
-//! The check reuses `update::fetch_latest_version`, so the CLI and the
+//! The check reuses `update::fetch_latest_version_from`, so the CLI and the
 //! background poller read the same crates.io sparse index through the same
-//! `MOBUX_UPDATE_CHECK_URL` seam. The install reuses the embedded
+//! `update.check_url` setting. The install reuses the embedded
 //! `update_runner.sh` in `--install-only` mode, so the release-asset download,
 //! the sha256 verification, the atomic rename over the live binary and the
 //! `cargo install` fallback are one implementation rather than two.
@@ -74,14 +74,22 @@ pub fn has_prebuilt_asset(os: &str, arch: &str) -> bool {
 }
 
 pub async fn run(command: UpdateCommand) -> i32 {
+    let settings = match crate::resolve_config(&crate::cli::RunOptions::default()) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("mobux: could not read the config: {e}");
+            return 1;
+        }
+    };
+
     let current = update::UpdateState::current_version();
-    let latest = match update::fetch_latest_version().await {
+    let latest = match update::fetch_latest_version_from(&settings.update.check_url).await {
         Ok(latest) => latest,
         Err(e) => {
             eprintln!("mobux: could not check for updates: {e}");
             eprintln!(
-                "       point MOBUX_UPDATE_CHECK_URL at a reachable mirror of the crates.io \
-                 index, or install by hand: cargo install mobux --locked"
+                "       point update.check_url (env: MOBUX_UPDATE_CHECK_URL) at a reachable \
+                 mirror of the crates.io index, or install by hand: cargo install mobux --locked"
             );
             return 1;
         }
@@ -104,7 +112,7 @@ pub async fn run(command: UpdateCommand) -> i32 {
             );
             1
         }
-        Decision::Available { latest, .. } => apply(&latest),
+        Decision::Available { latest, .. } => apply(&settings, &latest),
     }
 }
 
@@ -112,9 +120,9 @@ pub async fn run(command: UpdateCommand) -> i32 {
 // Everything below shells out to bash and systemctl; the tests never call it.
 // ---------------------------------------------------------------------------
 
-fn apply(version: &str) -> i32 {
-    match install(version) {
-        Ok(bin) => restart_or_report(version, &bin),
+fn apply(settings: &crate::config::Config, version: &str) -> i32 {
+    match install(settings, version) {
+        Ok(bin) => restart_or_report(&settings.app.service_name, version, &bin),
         Err(message) => {
             eprintln!("mobux: {message}");
             1
@@ -122,7 +130,7 @@ fn apply(version: &str) -> i32 {
     }
 }
 
-fn install(version: &str) -> Result<PathBuf, String> {
+fn install(settings: &crate::config::Config, version: &str) -> Result<PathBuf, String> {
     if std::env::var_os("MOBUX_UPDATE_DISABLE_RUN").is_some() {
         return Err(
             "self-update is disabled on this host (MOBUX_UPDATE_DISABLE_RUN); update mobux \
@@ -143,10 +151,8 @@ fn install(version: &str) -> Result<PathBuf, String> {
         );
     }
 
-    let settings = crate::resolve_config(&crate::cli::RunOptions::default())
-        .map_err(|e| format!("reading the config: {e}"))?;
     let dir =
-        crate::resolve_data_dir(&settings).map_err(|e| format!("resolving the data dir: {e}"))?;
+        crate::resolve_data_dir(settings).map_err(|e| format!("resolving the data dir: {e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let script = update::write_updater_script(&dir).map_err(|e| e.to_string())?;
 
@@ -204,8 +210,8 @@ fn check_replaceable(bin: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn restart_or_report(version: &str, bin: &Path) -> i32 {
-    let unit = service::unit_name(std::env::var("MOBUX_SERVICE_NAME").ok());
+fn restart_or_report(service_name: &str, version: &str, bin: &Path) -> i32 {
+    let unit = service::unit_name(Some(service_name.to_string()));
     let installed = service::config_dir()
         .map(|dir| service::unit_path(&dir, &unit).exists())
         .unwrap_or(false);
