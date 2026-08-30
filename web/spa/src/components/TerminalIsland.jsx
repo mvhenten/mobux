@@ -4,6 +4,7 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
 import { readLoadedBundleHash } from "../lib/bundleHash.js";
 import { createViewController } from "../lib/viewController.js";
+import { u } from "../lib/base.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -118,7 +119,7 @@ export function TerminalIsland({ node, session }) {
     const bundle = renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js";
 
     if (renderer === "xterm") {
-      ensureStylesheet(`/static/vendor/xterm.css${v}`);
+      ensureStylesheet(u(`/static/vendor/xterm.css${v}`));
     }
 
     (async () => {
@@ -126,25 +127,25 @@ export function TerminalIsland({ node, session }) {
       let createReader;
       let createReadMode;
       try {
-        await loadScript(`/static/vendor/${bundle}${v}`);
+        await loadScript(u(`/static/vendor/${bundle}${v}`));
         // The engine and reader modules are pure factory exports (no side
         // effects), so the browser's module-map caching is exactly right:
         // first mount fetches them, every later mount reuses them.
         ({ createTerminal } = await import(
-          /* @vite-ignore */ `/static/terminal.js${v}`
+          /* @vite-ignore */ u(`/static/terminal.js${v}`)
         ));
         ({ createReader } = await import(
-          /* @vite-ignore */ `/static/reader.js${v}`
+          /* @vite-ignore */ u(`/static/reader.js${v}`)
         ));
         ({ createReadMode } = await import(
-          /* @vite-ignore */ `/static/read-mode.js${v}`
+          /* @vite-ignore */ u(`/static/read-mode.js${v}`)
         ));
         // chime.js sets up the in-page bell that plays when the SW delivers a
         // push notification. It self-boots via IIFE (attaches to SW messages),
         // so loading it once is enough; it also guards itself via the global
         // it exposes.
         if (!window.__mobuxChime) {
-          await loadScript(`/static/chime.js${v}`);
+          await loadScript(u(`/static/chime.js${v}`));
         }
       } catch (e) {
         // Surface boot failure in the loading splash rather than a blank page.

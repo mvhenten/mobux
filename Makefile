@@ -273,7 +273,13 @@ test-spa:
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs
+		npx playwright test test/spa.spec.cjs test/spa-base.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs
+
+# URL base helper (web/spa/src/lib/base.js): pure Node, no browser and no
+# server, so it runs on its own. Rides `make test-spa` in CI.
+.PHONY: test-spa-base
+test-spa-base:
+	npx playwright test test/spa-base.spec.cjs
 
 # Reader font (issue #218): plain-output text renders proportional while
 # prompt/code stay monospace. Drives reader.js's real render pipeline with a

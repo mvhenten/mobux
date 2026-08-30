@@ -2,6 +2,7 @@ import { useEffect, useRef } from "preact/hooks";
 import { useLocation } from "wouter-preact";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
+import { u } from "../lib/base.js";
 import { getSelectedNode, setSelectedNode, withNode } from "../lib/nodes.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
@@ -40,7 +41,7 @@ async function refresh() {
 async function loadNodes() {
   let res;
   try {
-    res = await fetch("/api/nodes", {
+    res = await fetch(u("/api/nodes"), {
       headers: { Accept: "application/json" },
       redirect: "manual",
     });

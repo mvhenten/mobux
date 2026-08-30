@@ -102,6 +102,22 @@ test("app route serves the SPA shell and Home lists sessions", async ({
   await expect(page.locator("#fabNew")).toBeVisible();
 });
 
+// lib/base.js derives the SPA's mount prefix from the entry script's own URL.
+// A shell that stopped matching that selector would send the helper silently
+// back to the bare root, so pin the coupling to the really-served document.
+test("the served shell carries the entry script the base helper reads", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const src = await page.evaluate(
+    () =>
+      document.querySelector('script[type="module"][src*="/static/spa/"]')
+        ?.src || null,
+  );
+  expect(src).toBeTruthy();
+  expect(new URL(src).pathname).toMatch(/^\/static\/spa\//);
+});
+
 // ── server-synced UI preferences (#211) ───────────────────────────────
 
 const PREF_DEFAULTS = {
