@@ -278,7 +278,7 @@ test("a bare session-name link resolves to the node that actually owns it", asyn
       redirect: "manual",
     });
     expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toBe(`/app#/s/${node.name}/${solo}`);
+    expect(res.headers.get("location")).toBe(`../app#/s/${node.name}/${solo}`);
   } finally {
     node.ssh(`tmux kill-session -t ${solo} || true`);
   }
@@ -295,7 +295,7 @@ test("a bare session-name link ambiguous between local and a node lands on Home,
     });
     expect(res.status).toBe(307);
     // Same name lives in two places — never guess which one the user meant.
-    expect(res.headers.get("location")).toBe("/app#/");
+    expect(res.headers.get("location")).toBe("../app#/");
   } finally {
     node.ssh(`tmux kill-session -t ${dupe} || true`);
     hubTmux(`kill-session -t ${dupe}`);
@@ -308,7 +308,7 @@ test("a bare session-name link with no match anywhere lands on Home", async () =
     redirect: "manual",
   });
   expect(res.status).toBe(307);
-  expect(res.headers.get("location")).toBe("/app#/");
+  expect(res.headers.get("location")).toBe("../app#/");
 });
 
 test("resize reaches the remote PTY", async ({ page }) => {

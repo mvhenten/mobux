@@ -72,6 +72,16 @@
       "additionalProperties": false,
       "description": "Where the server listens.",
       "properties": {
+        "base_path": {
+          "default": "",
+          "description": "Path prefix a reverse proxy publishes mobux under, e.g. `/mobux`. Empty\nmeans the site root. The proxy strips the prefix before mobux sees the\nrequest, so routing never reads this — it exists so the session cookie\ncarries the `Path` the browser is actually on.\nEnv: `MOBUX_BASE_PATH`. Flag: `--base-path`.",
+          "type": "string"
+        },
+        "behind_tls_proxy": {
+          "default": false,
+          "description": "Trust a reverse proxy to terminate TLS. The bind stays plain HTTP, but\nthe session cookie keeps its `Secure` flag because the browser reaches\nmobux over HTTPS. Env: `MOBUX_BEHIND_TLS_PROXY`. Flag:\n`--behind-tls-proxy`.",
+          "type": "boolean"
+        },
         "port": {
           "default": 8080,
           "description": "TCP port to listen on. Env: `MOBUX_PORT`. Flag: `--port`.",
@@ -199,6 +209,8 @@
     "server": {
       "$ref": "#/$defs/ServerConfig",
       "default": {
+        "base_path": "",
+        "behind_tls_proxy": false,
         "port": 8080
       }
     },

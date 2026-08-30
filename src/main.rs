@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{ws::Message, Path, Query, State, WebSocketUpgrade},
+    extract::{ws::Message, Path, Query, RawQuery, State, WebSocketUpgrade},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, HeaderValue, Request, StatusCode,
@@ -570,7 +570,12 @@ async fn main() -> Result<()> {
     };
 
     let app = app
-        .fallback(get(|| async { axum::response::Redirect::temporary("/") }))
+        // An unmatched path serves the SPA shell, which routes it client-side.
+        // It used to redirect to `/`, which a path-prefixing proxy sends
+        // outside the mount entirely — and root-absolute is the one thing a
+        // prefixed deployment cannot express. Serving the shell needs no URL
+        // at all.
+        .fallback(get(serve_spa_index))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state_for_mw,
@@ -587,7 +592,11 @@ async fn main() -> Result<()> {
         );
     }
 
-    if let Some(warning) = clear_text_auth_warning(state.auth.is_some(), use_tls) {
+    if let Some(warning) = clear_text_auth_warning(
+        state.auth.is_some(),
+        use_tls,
+        settings.server.behind_tls_proxy,
+    ) {
         eprintln!("{warning}");
     }
 
@@ -795,10 +804,17 @@ fn is_public_path(path: &str) -> bool {
 }
 
 /// The startup warning for the one combination that leaks credentials: auth is
-/// on, TLS is off, so the password and the session cookie cross the network in
-/// clear text. Silence would let a plain-HTTP bind pass for a private one.
-fn clear_text_auth_warning(auth_enabled: bool, use_tls: bool) -> Option<String> {
-    if !auth_enabled || use_tls {
+/// on, TLS is off, and nothing else terminates it, so the password and the
+/// session cookie cross the network in clear text. Silence would let a
+/// plain-HTTP bind pass for a private one. A stated TLS proxy is the sanctioned
+/// way to run plain HTTP, and it keeps the cookie's `Secure` flag, so the
+/// warning would be false there.
+fn clear_text_auth_warning(
+    auth_enabled: bool,
+    use_tls: bool,
+    behind_tls_proxy: bool,
+) -> Option<String> {
+    if !auth_enabled || use_tls || behind_tls_proxy {
         return None;
     }
     let rule = "─".repeat(68);
@@ -807,22 +823,44 @@ fn clear_text_auth_warning(auth_enabled: bool, use_tls: bool) -> Option<String> 
          WARNING  auth is on and TLS is off. The password and the session\n\
          cookie travel in clear text, and the cookie loses its Secure flag.\n\
          Turn HTTPS on with --tls, MOBUX_TLS=1, or {{\"tls\": {{\"enabled\": true}}}}\n\
-         in mobux.json. Plain HTTP is only safe behind a TLS proxy.\n\
+         in mobux.json. Plain HTTP is only safe behind a TLS proxy — say so\n\
+         with --behind-tls-proxy to keep the cookie Secure and silence this.\n\
          {rule}"
     ))
 }
 
+/// The session cookie's `Path`. A proxy that strips its prefix never shows
+/// mobux the prefix, so `Path=/` would scope the cookie to the whole proxy
+/// origin — shared with every other app it fronts. `server.base_path` is the
+/// one setting that cannot be expressed relatively, so it names the mount here.
+/// The trailing slash is normalised away: `Path=/mobux` covers `/mobux` itself
+/// as well as everything under it, `Path=/mobux/` does not.
+fn cookie_path(base_path: &str) -> String {
+    let trimmed = base_path.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    if trimmed.starts_with('/') {
+        return trimmed.to_string();
+    }
+    format!("/{trimmed}")
+}
+
 /// Build the `Set-Cookie` header value for the session cookie.
 ///
-/// `Secure` is only added when `use_tls` is true: on a plain-HTTP bind the
-/// browser will not store a `Secure` cookie, so every subsequent request
-/// falls back to a fresh Basic-auth prompt instead of the cached session.
-fn build_session_cookie(name: &str, value: &str, use_tls: bool) -> String {
-    if use_tls {
-        format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000")
+/// `Secure` is added when the browser reaches mobux over HTTPS: either mobux
+/// serves TLS itself, or a proxy terminates it and `server.behind_tls_proxy`
+/// says so. On a genuinely plain-HTTP bind the browser refuses to store a
+/// `Secure` cookie, so every subsequent request falls back to a fresh
+/// Basic-auth prompt instead of the cached session.
+fn build_session_cookie(name: &str, value: &str, settings: &config::Config) -> String {
+    let path = cookie_path(&settings.server.base_path);
+    let secure = if settings.tls.enabled || settings.server.behind_tls_proxy {
+        "; Secure"
     } else {
-        format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
-    }
+        ""
+    };
+    format!("{name}={value}; Path={path}; HttpOnly; SameSite=Lax{secure}; Max-Age=2592000")
 }
 
 async fn auth_middleware(
@@ -875,7 +913,7 @@ async fn auth_middleware(
         let set_cookie = build_session_cookie(
             &auth.session_cookie_name,
             &auth.session_cookie_value,
-            state.config.tls.enabled,
+            &state.config,
         );
         if let Ok(v) = HeaderValue::from_str(&set_cookie) {
             resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
@@ -891,14 +929,19 @@ async fn auth_middleware(
     resp
 }
 
-/// Dev-only root redirect: `GET /` → 307 `/app` with `Cache-Control: no-store`
-/// so browsers and BFCache never pin a stale redirect. The old `index` handler
-/// is kept intact; it is just no longer mounted at `/`.
+/// `GET /` → 307 `app`, with `Cache-Control: no-store` so browsers and BFCache
+/// never pin a stale redirect.
+///
+/// The target is relative on purpose. A path-prefixing proxy strips its prefix
+/// before mobux sees the request, so the server cannot know it — but the
+/// browser resolves a relative `Location` against the URL it actually asked
+/// for, which still carries the prefix. `/` is one segment deep, so `app`
+/// lands on `<prefix>/app` behind a proxy and on `/app` at the bare root.
 async fn root_redirect() -> impl IntoResponse {
     (
         axum::http::StatusCode::TEMPORARY_REDIRECT,
         [
-            (axum::http::header::LOCATION, "/app"),
+            (axum::http::header::LOCATION, "app"),
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
     )
@@ -1824,11 +1867,12 @@ async fn api_shell_integration_uninstall(
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// `/settings` is one segment deep, so the relative target is `app#/settings`.
 async fn settings_page() -> impl IntoResponse {
     (
         axum::http::StatusCode::TEMPORARY_REDIRECT,
         [
-            (axum::http::header::LOCATION, "/app#/settings"),
+            (axum::http::header::LOCATION, "app#/settings"),
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
     )
@@ -1946,20 +1990,30 @@ async fn locate_session(state: &AppState, name: &str) -> Result<Option<SessionLo
 /// local (issue #210: the previous behavior — always redirecting to the
 /// hub-local hash route regardless of where the session actually lived —
 /// silently attached the wrong tmux whenever the two disagreed).
+///
+/// `/s/{name}` is two segments deep, so the relative target climbs one level:
+/// `../app` resolves against `<prefix>/s/` and lands on `<prefix>/app`. The
+/// query the link carried (`?w=<window>`, written by `push::session_url`) is
+/// carried across ahead of the fragment, where a query belongs.
 async fn terminal_page(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> Result<impl IntoResponse, AppError> {
     validate_session_name(&state, &name)?;
+    let query = query
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
     // Name is already validated to [a-zA-Z0-9_-], so no percent-encoding
     // is needed in any of these hash routes.
     let location = match locate_session(&state, &name).await? {
-        Some(SessionLocation::Local) => format!("/app#/s/{name}"),
-        Some(SessionLocation::Node(node)) => format!("/app#/s/{node}/{name}"),
+        Some(SessionLocation::Local) => format!("../app{query}#/s/{name}"),
+        Some(SessionLocation::Node(node)) => format!("../app{query}#/s/{node}/{name}"),
         // Not found anywhere, or found in more than one place — never guess;
         // land on Home so the user picks explicitly instead of silently
         // attaching to the wrong tmux.
-        None => "/app#/".to_string(),
+        None => format!("../app{query}#/"),
     };
     Ok((
         axum::http::StatusCode::TEMPORARY_REDIRECT,
@@ -2063,12 +2117,13 @@ async fn serve_spa_index() -> Response {
 // ── /install: redirect to the SPA Install page ────────────────────────
 // APK and CA downloads (/install/mobux.apk, /install/mobux-ca.crt) are
 // preserved as-is. The install UI itself lives in the SPA at /app#/install.
+// `/install` is one segment deep, so the relative target is `app#/install`.
 
 async fn install_page() -> impl IntoResponse {
     (
         axum::http::StatusCode::TEMPORARY_REDIRECT,
         [
-            (axum::http::header::LOCATION, "/app#/install"),
+            (axum::http::header::LOCATION, "app#/install"),
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
     )
@@ -3755,45 +3810,170 @@ mod tests {
     // HTTP and present only when TLS is actually serving — which, with TLS off
     // by default, is now the opt-in half.
 
+    fn cookie_config(tls: bool, behind_tls_proxy: bool, base_path: &str) -> config::Config {
+        let mut settings = config::Config::default();
+        settings.tls.enabled = tls;
+        settings.server.behind_tls_proxy = behind_tls_proxy;
+        settings.server.base_path = base_path.to_string();
+        settings
+    }
+
+    fn cookie(tls: bool, behind_tls_proxy: bool, base_path: &str) -> String {
+        build_session_cookie(
+            "mobux_session",
+            "abc123",
+            &cookie_config(tls, behind_tls_proxy, base_path),
+        )
+    }
+
     #[test]
     fn session_cookie_defaults_to_no_secure() {
-        let config = config::Config::default();
-        assert!(!config.tls.enabled, "TLS is off by default");
-        let cookie = build_session_cookie("mobux_session", "abc123", config.tls.enabled);
+        let settings = config::Config::default();
+        assert!(!settings.tls.enabled, "TLS is off by default");
+        let cookie = build_session_cookie("mobux_session", "abc123", &settings);
         assert!(
             !cookie.contains("Secure"),
             "the default bind is plain HTTP, so no Secure: {cookie}"
         );
-    }
-
-    #[test]
-    fn session_cookie_no_secure_on_plain_http() {
-        let cookie = build_session_cookie("mobux_session", "abc123", false);
         assert!(
-            !cookie.contains("Secure"),
-            "plain-HTTP bind must not set Secure: {cookie}"
-        );
-        assert!(
-            cookie.contains("HttpOnly"),
-            "HttpOnly must always be present: {cookie}"
-        );
-        assert!(
-            cookie.contains("SameSite=Lax"),
-            "SameSite=Lax must always be present: {cookie}"
+            cookie.contains("Path=/;"),
+            "no base path means the site root: {cookie}"
         );
     }
 
+    // The four ways a bind can be reached: mobux's own TLS, a proxy that
+    // terminates it, both, or neither. Only the last is genuinely clear text,
+    // and only there must the cookie drop `Secure` — a `Secure` cookie is never
+    // stored over plain HTTP, which is what put the login prompt back on every
+    // request.
     #[test]
-    fn session_cookie_has_secure_on_tls() {
-        let cookie = build_session_cookie("mobux_session", "abc123", true);
+    fn session_cookie_is_secure_whenever_the_browser_is_on_https() {
+        assert!(!cookie(false, false, "").contains("Secure"));
+        assert!(cookie(true, false, "").contains("Secure"));
+        assert!(cookie(false, true, "").contains("Secure"));
+        assert!(cookie(true, true, "").contains("Secure"));
+    }
+
+    #[test]
+    fn session_cookie_always_carries_httponly_and_samesite() {
+        for cookie in [cookie(false, false, ""), cookie(true, true, "/mobux")] {
+            assert!(cookie.contains("HttpOnly"), "{cookie}");
+            assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+            assert!(cookie.contains("Max-Age=2592000"), "{cookie}");
+        }
+    }
+
+    // Behind a prefix-stripping proxy the request mobux sees has no prefix, so
+    // `Path=/` would hand the cookie to every other app on the proxy origin.
+    #[test]
+    fn session_cookie_path_follows_the_base_path() {
+        assert!(cookie(false, false, "").contains("Path=/;"));
+        assert!(cookie(false, false, "/mobux").contains("Path=/mobux;"));
+        assert!(cookie(false, false, "/user/host/8080").contains("Path=/user/host/8080;"));
+    }
+
+    // `Path=/mobux/` does not match `/mobux` itself, so the trailing slash a
+    // proxy config usually carries has to come off.
+    #[test]
+    fn cookie_path_normalises_the_slashes() {
+        assert_eq!(cookie_path(""), "/");
+        assert_eq!(cookie_path("/"), "/");
+        assert_eq!(cookie_path("  "), "/");
+        assert_eq!(cookie_path("/mobux/"), "/mobux");
+        assert_eq!(cookie_path("mobux"), "/mobux");
+        assert_eq!(cookie_path("/user/host/8080/"), "/user/host/8080");
+    }
+
+    // ── relative redirect targets ───────────────────────────────────────────
+    //
+    // A path-prefixing proxy strips its prefix before mobux sees the request,
+    // so a root-absolute `Location` sends the browser out of the mount and off
+    // the app. Every redirect is relative instead, and the browser resolves it
+    // against the URL it actually asked for — which still carries the prefix.
+    // The number of `../` is the whole correctness argument, so each literal is
+    // pinned here: one too many escapes the mount at the bare root, one too few
+    // lands a level deep.
+
+    fn location_of(response: Response) -> String {
+        response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .expect("a Location header")
+            .to_str()
+            .expect("an ASCII Location")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_root_redirect_is_a_sibling_of_the_request() {
+        let response = root_redirect().await.into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location_of(response), "app");
+    }
+
+    #[tokio::test]
+    async fn the_settings_redirect_is_a_sibling_of_the_request() {
+        let response = settings_page().await.into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location_of(response), "app#/settings");
+    }
+
+    #[tokio::test]
+    async fn the_install_redirect_is_a_sibling_of_the_request() {
+        let response = install_page().await.into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location_of(response), "app#/install");
+    }
+
+    // `/s/{name}` is two segments deep, so its target climbs one level. The
+    // session does not exist anywhere, which is the branch that needs no tmux.
+    #[tokio::test]
+    async fn a_session_link_climbs_one_level_to_reach_the_app() {
+        let (state, _dir) = test_state(false);
+        let response = terminal_page(
+            State(state),
+            Path("no-such-session".to_string()),
+            RawQuery(None),
+        )
+        .await
+        .expect("a redirect")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location_of(response), "../app#/");
+    }
+
+    // A bell notification links to `s/<name>?w=<window>`; the window has to
+    // survive the hop or the click loses which pane rang.
+    #[tokio::test]
+    async fn a_session_link_keeps_its_window_query_ahead_of_the_fragment() {
+        let (state, _dir) = test_state(false);
+        let response = terminal_page(
+            State(state),
+            Path("no-such-session".to_string()),
+            RawQuery(Some("w=3".to_string())),
+        )
+        .await
+        .expect("a redirect")
+        .into_response();
+        assert_eq!(location_of(response), "../app?w=3#/");
+    }
+
+    // The fallback used to 307 to `/`, the one target a prefixed deployment
+    // cannot express. It now answers with the SPA shell, which needs no URL at
+    // all. `cargo test` runs without `make build`, so the shell may not be
+    // embedded — the property under test is that nothing redirects.
+    #[tokio::test]
+    async fn the_router_fallback_answers_with_a_document_never_a_redirect() {
+        let response = serve_spa_index().await;
         assert!(
-            cookie.contains("Secure"),
-            "TLS bind must set Secure: {cookie}"
+            !response.status().is_redirection(),
+            "the fallback redirected: {}",
+            response.status()
         );
-        assert!(
-            cookie.contains("HttpOnly"),
-            "HttpOnly must always be present: {cookie}"
-        );
+        assert!(response
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .is_none());
     }
 
     // ── clear-text credential warning ───────────────────────────────────────
@@ -3803,16 +3983,23 @@ mod tests {
 
     #[test]
     fn clear_text_warning_fires_only_with_auth_on_and_tls_off() {
-        assert!(clear_text_auth_warning(true, false).is_some());
-        assert!(clear_text_auth_warning(true, true).is_none());
-        assert!(clear_text_auth_warning(false, false).is_none());
-        assert!(clear_text_auth_warning(false, true).is_none());
+        assert!(clear_text_auth_warning(true, false, false).is_some());
+        assert!(clear_text_auth_warning(true, true, false).is_none());
+        assert!(clear_text_auth_warning(false, false, false).is_none());
+        assert!(clear_text_auth_warning(false, true, false).is_none());
+        // A stated TLS proxy is the sanctioned plain-HTTP bind.
+        assert!(clear_text_auth_warning(true, false, true).is_none());
     }
 
     #[test]
     fn clear_text_warning_says_how_to_turn_https_on() {
-        let warning = clear_text_auth_warning(true, false).expect("a warning");
-        for hint in ["--tls", "MOBUX_TLS=1", r#"{"tls": {"enabled": true}}"#] {
+        let warning = clear_text_auth_warning(true, false, false).expect("a warning");
+        for hint in [
+            "--tls",
+            "MOBUX_TLS=1",
+            r#"{"tls": {"enabled": true}}"#,
+            "--behind-tls-proxy",
+        ] {
             assert!(
                 warning.contains(hint),
                 "warning is missing {hint}: {warning}"
@@ -4146,7 +4333,8 @@ mod tests {
             conn.execute("DROP TABLE nodes", [])
                 .expect("drop nodes table to force list_nodes() to fail");
         }
-        let result = terminal_page(State(state), Path("whatever".to_string())).await;
+        let result =
+            terminal_page(State(state), Path("whatever".to_string()), RawQuery(None)).await;
         match result {
             Err(e) => assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR),
             Ok(_) => panic!("expected an error when the node inventory can't be read"),
