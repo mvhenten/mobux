@@ -1086,3 +1086,68 @@ test("tap-to-snap: a tap snaps to bottom, a swipe does not", async ({
 
   assertNoFailures(captured);
 });
+
+// ── Base-relative URLs (issue #282) ────────────────────────────────
+//
+// The legacy static modules build every URL through web/static/base.js,
+// which derives the app root from its own `import.meta.url`. Two things
+// have to hold: nothing moved at prefix "" (the shape mobux ships in),
+// and the whole surface follows a path prefix when one is present.
+
+test("base: at the origin root every URL resolves exactly where it used to", async ({
+  page,
+}) => {
+  const origin = new URL(BASE).origin;
+  await page.goto(`${BASE}/app`, { waitUntil: "domcontentloaded" });
+
+  const resolved = await page.evaluate(async () => {
+    const { base, u, wsUrl } = await import("/static/base.js");
+    return {
+      base: base(),
+      api: u("api/telemetry"),
+      leadingSlash: u("/api/telemetry"),
+      asset: u("static/chime.ogg"),
+      ws: wsUrl("ws/dev?node=box&build=abc"),
+    };
+  });
+
+  expect(resolved.base).toBe(`${origin}/`);
+  expect(resolved.api).toBe(`${origin}/api/telemetry`);
+  expect(resolved.leadingSlash).toBe(`${origin}/api/telemetry`);
+  expect(resolved.asset).toBe(`${origin}/static/chime.ogg`);
+  expect(resolved.ws).toBe(
+    `${origin.replace(/^http/, "ws")}/ws/dev?node=box&build=abc`,
+  );
+});
+
+test("base: under a path prefix every URL moves with it", async ({ page }) => {
+  const origin = new URL(BASE).origin;
+  const prefix = "/proxy/workspace/8080";
+  const source = require("fs").readFileSync(
+    require("path").join(__dirname, "..", "web", "static", "base.js"),
+    "utf8",
+  );
+
+  // Serve the real module from a prefixed path. mobux itself still owns the
+  // origin root here; the point is that the module never consults it.
+  await page.route(`**${prefix}/static/base.js`, (route) =>
+    route.fulfill({ contentType: "text/javascript", body: source }),
+  );
+  await page.route(`**${prefix}/`, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><title>p",
+    }),
+  );
+
+  await page.goto(`${origin}${prefix}/`, { waitUntil: "domcontentloaded" });
+
+  const resolved = await page.evaluate(async (p) => {
+    const { base, u, wsUrl } = await import(`${p}/static/base.js`);
+    return { base: base(), api: u("api/telemetry"), ws: wsUrl("ws/dev") };
+  }, prefix);
+
+  expect(resolved.base).toBe(`${origin}${prefix}/`);
+  expect(resolved.api).toBe(`${origin}${prefix}/api/telemetry`);
+  expect(resolved.ws).toBe(`${origin.replace(/^http/, "ws")}${prefix}/ws/dev`);
+});

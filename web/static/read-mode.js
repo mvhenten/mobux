@@ -40,6 +40,7 @@
 // Read mode does not scroll natively — it renders into an inner box that
 // synthetic-scroll.js translates. See that module for why.
 
+import { u } from "./base.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createSyntheticScroller } from "./synthetic-scroll.js";
 
@@ -158,7 +159,9 @@ export function createReadMode({
         ? { tail: String(MOUNT_TAIL) }
         : { cursor, limit: String(REFRESH_LIMIT) };
     const query = new URLSearchParams(params).toString();
-    return `/api/sessions/${encodeURIComponent(session)}/conversation?${query}`;
+    return u(
+      `api/sessions/${encodeURIComponent(session)}/conversation?${query}`,
+    );
   }
 
   function applyPage(page) {
@@ -582,7 +585,7 @@ function buildEmptyState() {
   const wrap = makeEl("div", "cv-empty");
   wrap.appendChild(makeEl("p", "cv-empty-text", EMPTY_STATE_TEXT));
   const link = makeEl("a", "cv-empty-link", "Set up shell integration →");
-  link.href = "/settings#shell-integration";
+  link.href = u("settings#shell-integration");
   wrap.appendChild(link);
   return wrap;
 }

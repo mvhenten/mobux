@@ -39,6 +39,7 @@
 // the engine; the reader (reader.js) is a sibling the SPA mounts — the engine
 // has no knowledge of it.
 
+import { u, wsUrl } from "./base.js";
 import { openExternal } from "./external-link.js";
 import { createTerminalDocument } from "./terminal-document.js";
 import {
@@ -178,9 +179,8 @@ export class TerminalEngine extends EventTarget {
       this._reconnectTimer = null;
     }
     this.intentionalClose = false;
-    const proto = location.protocol === "https:" ? "wss" : "ws";
     this.ws = new WebSocket(
-      `${proto}://${location.host}/ws/${encodeURIComponent(this.session)}${this._wsQuery()}`,
+      wsUrl(`ws/${encodeURIComponent(this.session)}${this._wsQuery()}`),
     );
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
@@ -477,7 +477,9 @@ export class TerminalEngine extends EventTarget {
   async refreshPanes() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/panes${this._nodeQuery()}`,
+        u(
+          `api/sessions/${encodeURIComponent(this.session)}/panes${this._nodeQuery()}`,
+        ),
       );
       if (!res.ok) return;
       this.panes = await res.json();
@@ -506,7 +508,9 @@ export class TerminalEngine extends EventTarget {
   async runTmuxCmd(command) {
     try {
       await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/command${this._nodeQuery()}`,
+        u(
+          `api/sessions/${encodeURIComponent(this.session)}/command${this._nodeQuery()}`,
+        ),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -528,7 +532,9 @@ export class TerminalEngine extends EventTarget {
   async reloadHistory() {
     try {
       const res = await fetch(
-        `/api/sessions/${encodeURIComponent(this.session)}/history${this._nodeQuery()}`,
+        u(
+          `api/sessions/${encodeURIComponent(this.session)}/history${this._nodeQuery()}`,
+        ),
       );
       if (!res.ok) return;
       const history = await res.text();

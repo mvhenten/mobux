@@ -7,13 +7,20 @@
 // Browsers gate audio playback on a user gesture. We unlock the element on
 // the first interaction with the page so subsequent push-driven plays work
 // without a click.
+//
+// This is the one file here that cannot import base.js: the SPA appends it as
+// a CLASSIC <script>, so there is no `import.meta.url` and no module scope.
+// `document.currentScript.src` is the classic-script equivalent — the resolved
+// URL of this very file — and the app root is the same one directory up from
+// `<prefix>/static/` that base.js derives.
 
 (function () {
   'use strict';
 
   if (!('serviceWorker' in navigator) || !('Audio' in window)) return;
 
-  const audio = new Audio('/static/chime.ogg');
+  const base = new URL('../', document.currentScript.src);
+  const audio = new Audio(new URL('static/chime.ogg', base).href);
   audio.preload = 'auto';
   audio.volume = 0.7;
 

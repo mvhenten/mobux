@@ -8,7 +8,7 @@
 // this behind — it ships live in every build, dev or not.
 //
 // Usage (from any module):
-//   import telemetry from '/static/telemetry.js';
+//   import telemetry from './telemetry.js';
 //   telemetry.log('ws-open', { session });        // structured
 //   telemetry.log('resize', `${cols}x${rows}`);   // or a plain string
 //
@@ -16,6 +16,8 @@
 // `telemetry.overlay(true|false)` toggles it at runtime. The runtime toggle is
 // in-memory only (mobux keeps no client-side storage), so it resets on reload;
 // use the URL param for a choice that survives a reload.
+
+import { u } from './base.js';
 
 // Per-page session id so lines from one page load are correlatable in the
 // journal. Short random token; not security-sensitive.
@@ -105,7 +107,7 @@ function log(event, data) {
 
   // Fire-and-forget. Swallow all errors — never let telemetry break the page.
   try {
-    fetch('/api/telemetry', {
+    fetch(u('api/telemetry'), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: line,
