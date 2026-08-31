@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,6 +8,8 @@ use crate::config::{self, Config};
 use crate::configure;
 
 pub const DEFAULT_UNIT: &str = "mobux";
+
+const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
 
 /// Everything the unit file needs. The settings themselves live in the config
 /// file the unit names, so no credential reaches systemd.
@@ -308,8 +311,8 @@ fn uninstall() -> Result<(), String> {
 fn status() -> Result<i32, String> {
     preflight()?;
     let unit = installed_unit();
-    let status = Command::new("systemctl")
-        .args(["--user", "status", &unit, "--no-pager"])
+    let status = user_systemctl()
+        .args(["status", &unit, "--no-pager"])
         .status()
         .map_err(|e| format!("running systemctl: {e}"))?;
     Ok(status.code().unwrap_or(1))
@@ -345,6 +348,70 @@ fn write_unit(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|e| format!("securing {}: {e}", path.display()))
 }
 
+/// systemd's user bus is a socket under `$XDG_RUNTIME_DIR`, and an SSH session
+/// inherits no runtime dir — so `systemctl --user` fails to connect even where
+/// the user manager is running and lingering. Hand it the directory systemd
+/// made for this uid when the session left the variable out.
+fn runtime_dir_default(
+    current: Option<OsString>,
+    uid: u32,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if current.is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    let dir = PathBuf::from(format!("/run/user/{uid}"));
+    is_dir(&dir).then_some(dir)
+}
+
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata("/proc/self").ok().map(|meta| meta.uid())
+}
+
+fn session_runtime_dir() -> Option<PathBuf> {
+    runtime_dir_default(std::env::var_os(RUNTIME_DIR_VAR), current_uid()?, |path| {
+        path.is_dir()
+    })
+}
+
+/// Where the user bus is expected, for an error that has to name it.
+fn runtime_dir_path() -> String {
+    std::env::var(RUNTIME_DIR_VAR)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| current_uid().map(|uid| format!("/run/user/{uid}")))
+        .unwrap_or_else(|| "/run/user/<uid>".to_string())
+}
+
+fn systemctl_command(runtime_dir: Option<PathBuf>) -> Command {
+    let mut command = Command::new("systemctl");
+    if let Some(dir) = runtime_dir {
+        command.env(RUNTIME_DIR_VAR, dir);
+    }
+    command.arg("--user");
+    command
+}
+
+/// Every `systemctl --user` call in this module goes through here, so install,
+/// uninstall and status all reach the same bus.
+fn user_systemctl() -> Command {
+    systemctl_command(session_runtime_dir())
+}
+
+/// The bus stayed out of reach even with the runtime dir defaulted, so the
+/// directory itself is missing — which is what lingering creates, for this
+/// user rather than for root.
+fn no_bus_error(probe: &str, runtime_dir: &str, user: &str) -> String {
+    format!(
+        "no systemd --user bus for this session: {}\n\
+         {runtime_dir} is missing, so no user manager is running for {user}. Start one with: \
+         loginctl enable-linger {user}\n\
+         then log in again — mobux sets XDG_RUNTIME_DIR itself once that directory exists.",
+        probe.trim()
+    )
+}
+
 /// Refuse early where systemd can't be reached, naming the fix for each case.
 fn preflight() -> Result<(), String> {
     if !cfg!(target_os = "linux") {
@@ -355,9 +422,7 @@ fn preflight() -> Result<(), String> {
         );
     }
 
-    let probe = Command::new("systemctl")
-        .args(["--user", "is-system-running"])
-        .output();
+    let probe = user_systemctl().arg("is-system-running").output();
 
     let output = match probe {
         Ok(output) => output,
@@ -377,21 +442,13 @@ fn preflight() -> Result<(), String> {
         String::from_utf8_lossy(&output.stderr)
     );
     if combined.contains("Failed to connect to") || combined.contains("Failed to get D-Bus") {
-        return Err(format!(
-            "no systemd --user bus for this session: {}\n\
-             That usually means an SSH session without lingering. Fix it from a local login \
-             (or as root) with: loginctl enable-linger {}\n\
-             then reconnect, or export XDG_RUNTIME_DIR=/run/user/$(id -u).",
-            combined.trim(),
-            whoami()
-        ));
+        return Err(no_bus_error(&combined, &runtime_dir_path(), &whoami()));
     }
     Ok(())
 }
 
 fn systemctl(args: &[&str]) -> Result<(), String> {
-    let output = Command::new("systemctl")
-        .arg("--user")
+    let output = user_systemctl()
         .args(args)
         .output()
         .map_err(|e| format!("running systemctl --user {}: {e}", args.join(" ")))?;
@@ -431,7 +488,10 @@ fn enable_linger() {
 fn whoami() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "$USER".to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| current_uid().map(|uid| uid.to_string()))
+        .unwrap_or_else(|| "$USER".to_string())
 }
 
 #[cfg(test)]
@@ -630,6 +690,66 @@ WantedBy=default.target
                 user: "walker".to_string(),
                 pass: "99999".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn an_ssh_session_without_a_runtime_dir_gets_the_one_systemd_made() {
+        let made = |path: &Path| path == Path::new("/run/user/1001");
+
+        assert_eq!(
+            runtime_dir_default(None, 1001, made),
+            Some(PathBuf::from("/run/user/1001")),
+            "an SSH session inherits no XDG_RUNTIME_DIR and must not fail on it"
+        );
+        assert_eq!(
+            runtime_dir_default(Some(OsString::new()), 1001, made),
+            Some(PathBuf::from("/run/user/1001"))
+        );
+        assert_eq!(
+            runtime_dir_default(Some(OsString::from("/run/user/0")), 1001, made),
+            None,
+            "a session that already has one keeps it"
+        );
+        assert_eq!(
+            runtime_dir_default(None, 1001, |_| false),
+            None,
+            "nothing to default to when systemd made no runtime dir"
+        );
+    }
+
+    #[test]
+    fn every_user_call_carries_the_defaulted_runtime_dir() {
+        use std::ffi::OsStr;
+
+        let command = systemctl_command(Some(PathBuf::from("/run/user/1001")));
+        let env: Vec<_> = command.get_envs().collect();
+
+        assert_eq!(
+            env,
+            vec![(
+                OsStr::new("XDG_RUNTIME_DIR"),
+                Some(OsStr::new("/run/user/1001"))
+            )]
+        );
+        assert!(command.get_args().eq([OsStr::new("--user")]));
+        assert_eq!(systemctl_command(None).get_envs().count(), 0);
+    }
+
+    #[test]
+    fn the_missing_bus_hint_names_this_user_and_the_runtime_dir() {
+        let error = no_bus_error(
+            "Failed to connect to bus: No medium found\n",
+            "/run/user/1001",
+            "walker",
+        );
+
+        assert!(error.contains("loginctl enable-linger walker"), "{error}");
+        assert!(!error.contains("enable-linger root"), "{error}");
+        assert!(error.contains("/run/user/1001 is missing"), "{error}");
+        assert!(
+            !error.contains("export XDG_RUNTIME_DIR"),
+            "mobux sets it itself now: {error}"
         );
     }
 
