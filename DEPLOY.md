@@ -124,6 +124,12 @@ you: it writes those settings to `~/.config/mobux/config.json` (mode 600, since
 it holds the PIN), writes the unit below pointing at the binary you ran it from
 and at that file, reloads systemd, enables the service and turns on linger.
 `--config PATH` puts the settings somewhere else and points the unit there.
+Run it as the user the service belongs to — under `sudo` it is refused, since
+it would install a second service for root; `--allow-root` is there for a
+deliberate root install, and `sudo loginctl enable-linger "$USER"` covers the
+one step polkit may deny. Behind a proxy that authenticates for mobux, pass
+`--no-auth` instead of `--user`/`--pin`: the config is written without
+credentials, and both the install and every start say auth is off.
 `mobux service status` and `mobux service uninstall` cover the rest, and
 `mobux update` installs the latest release and restarts that unit.
 Rerun `install` with different flags to rewrite the config and restart the

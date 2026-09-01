@@ -30,6 +30,12 @@ const DEFAULT_UPDATE_CHECK_URL: &str = "https://index.crates.io/mo/bu/mobux";
 /// The username a bare PIN unlocks the web UI as.
 pub const DEFAULT_AUTH_USER: &str = "mobux";
 
+/// Serving without credentials is a deployment choice — mobux behind a proxy
+/// that authenticates for it — and never a quiet default, so the install and
+/// every start say it in the same words.
+pub const NO_AUTH_WARNING: &str = "warning: authentication is OFF — mobux serves anyone who \
+     reaches this port. Access control is delegated to the reverse proxy in front of it.";
+
 /// What the caller prints when the port came from the deprecated bare `PORT`.
 pub const PORT_DEPRECATION: &str = "PORT is deprecated; rename it to MOBUX_PORT";
 

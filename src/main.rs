@@ -375,6 +375,9 @@ async fn main() -> Result<()> {
 
     let config_dir = config::config_dir();
     let auth = load_auth_config(&config_dir, &settings);
+    if auth.is_none() {
+        eprintln!("{}", config::NO_AUTH_WARNING);
+    }
     let data_dir = resolve_data_dir(&settings)?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
