@@ -46,22 +46,33 @@ pub fn unit_name(service_name: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_UNIT.to_string())
 }
 
+/// Who checks that a request is allowed in: mobux itself, or the proxy the
+/// deployment puts in front of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auth {
+    Required,
+    DelegatedToProxy,
+}
+
 /// Resolve the unit from the settings it will run on, the running binary and
 /// the config file the unit will name.
 ///
 /// A boot service is reachable from the network the moment it starts, so an
-/// auth-less unit is refused rather than written.
+/// auth-less unit is refused rather than written — unless the install says a
+/// proxy authenticates for it.
 pub fn resolve_unit_spec(
     settings: &Config,
     exec_start: &Path,
     config_path: &Path,
+    auth: Auth,
 ) -> Result<UnitSpec, String> {
     config::check(settings)?;
-    if settings.credentials().is_none() {
+    if auth == Auth::Required && settings.credentials().is_none() {
         return Err(
             "a boot service needs a username and PIN — nothing else stops the network \
                     from reaching it. Pass --user and --pin, or export MOBUX_AUTH_USER and \
-                    MOBUX_PIN before running `mobux service install`."
+                    MOBUX_PIN before running `mobux service install`. Pass --no-auth if a \
+                    proxy in front of mobux authenticates instead."
                 .to_string(),
         );
     }
@@ -197,10 +208,13 @@ fn install(options: &InstallOptions) -> Result<(), String> {
         .config_path
         .clone()
         .unwrap_or_else(config::config_file_path);
-    let settings = resolve_settings(&config_path, &options.run)?;
+    let settings = drop_credentials(
+        resolve_settings(&config_path, &options.run)?,
+        options.no_auth,
+    );
     // Resolve before the systemd probe so a missing PIN is reported as such
     // even on a host where the user bus is out of reach.
-    let spec = resolve_unit_spec(&settings, &exe, &config_path)?;
+    let spec = resolve_unit_spec(&settings, &exe, &config_path, auth_mode(options.no_auth))?;
     preflight()?;
 
     let unit_file = unit_path(&config_dir()?, &spec.unit);
@@ -241,21 +255,46 @@ fn install(options: &InstallOptions) -> Result<(), String> {
     systemctl(&["restart", &spec.unit])?;
     enable_linger();
 
-    println!(
-        "mobux listens on {}://<this-host>:{} as user {:?}",
-        if settings.tls.enabled {
-            "https"
-        } else {
-            "http"
-        },
-        spec.port,
-        settings.auth.user
-    );
+    let scheme = if settings.tls.enabled {
+        "https"
+    } else {
+        "http"
+    };
+    match settings.credentials() {
+        Some(credentials) => println!(
+            "mobux listens on {scheme}://<this-host>:{} as user {:?}",
+            spec.port, credentials.user
+        ),
+        None => println!("mobux listens on {scheme}://<this-host>:{}", spec.port),
+    }
     if !settings.tls.enabled {
         println!("rerun `mobux service install --tls` to serve HTTPS instead");
     }
+    if settings.credentials().is_none() {
+        eprintln!("{}", config::NO_AUTH_WARNING);
+    }
     println!("{CHECK_HINT}");
     Ok(())
+}
+
+fn auth_mode(no_auth: bool) -> Auth {
+    if no_auth {
+        return Auth::DelegatedToProxy;
+    }
+    Auth::Required
+}
+
+/// `--no-auth` is a statement about the deployment, so it beats the credentials
+/// the config file and the environment still carry — the install would
+/// otherwise write back the PIN it was told to stop using.
+fn drop_credentials(settings: Config, no_auth: bool) -> Config {
+    if !no_auth {
+        return settings;
+    }
+    Config {
+        auth: config::AuthConfig::default(),
+        ..settings
+    }
 }
 
 /// `sudo mobux service install` writes root's config, starts root's unit and
@@ -628,7 +667,8 @@ WantedBy=default.target
     }
 
     fn spec_from(settings: &Config) -> UnitSpec {
-        resolve_unit_spec(settings, Path::new(EXE), Path::new(CONFIG)).expect("spec should resolve")
+        resolve_unit_spec(settings, Path::new(EXE), Path::new(CONFIG), Auth::Required)
+            .expect("spec should resolve")
     }
 
     /// The environment a unit's `Environment=` lines put in front of mobux.
@@ -676,9 +716,47 @@ WantedBy=default.target
             &settings(overrides(None, Some("me"), None)),
             Path::new(EXE),
             Path::new(CONFIG),
+            Auth::Required,
         )
         .expect_err("an auth-less boot service must be refused");
         assert!(error.contains("--pin"), "{error}");
+    }
+
+    /// A deployment behind an authenticating proxy has no use for Basic auth —
+    /// the proxy strips the header anyway — so the install writes a config with
+    /// no credentials rather than one carrying a PIN nothing reads.
+    #[test]
+    fn no_auth_installs_without_credentials() {
+        let settings = drop_credentials(authed(), true);
+
+        assert_eq!(settings.credentials(), None);
+        assert_eq!(
+            settings.server.port,
+            authed().server.port,
+            "only the credentials go"
+        );
+        assert_eq!(auth_mode(true), Auth::DelegatedToProxy);
+        assert_eq!(auth_mode(false), Auth::Required);
+
+        let spec = resolve_unit_spec(
+            &settings,
+            Path::new(EXE),
+            Path::new(CONFIG),
+            Auth::DelegatedToProxy,
+        )
+        .expect("a proxy-gated service installs without credentials");
+        assert_eq!(spec.unit, DEFAULT_UNIT);
+
+        assert_eq!(
+            drop_credentials(authed(), false),
+            authed(),
+            "without --no-auth the credentials stand"
+        );
+        assert!(
+            config::NO_AUTH_WARNING.contains("authentication is OFF"),
+            "both the install and the server say it: {}",
+            config::NO_AUTH_WARNING
+        );
     }
 
     #[test]
@@ -688,6 +766,7 @@ WantedBy=default.target
                 &settings(overrides(None, Some("me"), Some(pin))),
                 Path::new(EXE),
                 Path::new(CONFIG),
+                Auth::Required,
             )
             .expect_err("a PIN systemd would mangle must be refused");
             assert!(error.contains("auth.pin"), "{error}");
@@ -700,6 +779,7 @@ WantedBy=default.target
             &authed(),
             Path::new(EXE),
             Path::new("/home/my configs/config.json"),
+            Auth::Required,
         )
         .expect_err("a path systemd would split must be refused");
         assert!(error.contains("config file path"), "{error}");

@@ -11,6 +11,11 @@ pub const CONFIG_FLAG: &str = "--config";
 /// taken apart from the run flags and only by `service install`.
 pub const ALLOW_ROOT_FLAG: &str = "--allow-root";
 
+/// States that the deployment authenticates elsewhere, so it clears the
+/// credentials the config file and the environment still carry rather than
+/// setting a value of its own.
+pub const NO_AUTH_FLAG: &str = "--no-auth";
+
 /// What the command line states, in the shape the config file states it. The
 /// flags are the same surface as the file and the environment, so they land in
 /// the same tree.
@@ -35,6 +40,9 @@ pub struct InstallOptions {
     /// refusing the `sudo mobux service install` that installs a second copy
     /// under `/root` by accident.
     pub allow_root: bool,
+    /// `--no-auth`. Write a config with no credentials, for a deployment an
+    /// authenticating proxy already gates.
+    pub no_auth: bool,
 }
 
 // `install` carries the whole config surface; boxing it to shrink a value that
@@ -112,19 +120,29 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
         "--help" | "-h" => Parsed::Help,
         "install" => {
             let mut allow_root = false;
+            let mut no_auth = false;
             let flags: Vec<String> = args
                 .filter(|arg| {
-                    let is_allow_root = arg == ALLOW_ROOT_FLAG;
-                    allow_root |= is_allow_root;
-                    !is_allow_root
+                    allow_root |= arg == ALLOW_ROOT_FLAG;
+                    no_auth |= arg == NO_AUTH_FLAG;
+                    arg != ALLOW_ROOT_FLAG && arg != NO_AUTH_FLAG
                 })
                 .collect();
-            match parse_flags(flags) {
-                Ok(run) => {
-                    Parsed::Service(ServiceCommand::Install(InstallOptions { run, allow_root }))
-                }
-                Err(stop) => stop.parsed(),
+            let run = match parse_flags(flags) {
+                Ok(run) => run,
+                Err(stop) => return stop.parsed(),
+            };
+            if no_auth && states_credentials(&run.overrides) {
+                return Parsed::Invalid(format!(
+                    "{NO_AUTH_FLAG} serves the UI to anyone who reaches it, so it cannot be \
+                     combined with --user or --pin. Pass one or the other."
+                ));
             }
+            Parsed::Service(ServiceCommand::Install(InstallOptions {
+                run,
+                allow_root,
+                no_auth,
+            }))
         }
         "uninstall" | "status" => {
             let command = match subcommand.as_str() {
@@ -143,6 +161,13 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
             "unknown service subcommand {subcommand:?} — expected install, uninstall or status"
         )),
     }
+}
+
+fn states_credentials(overrides: &CliOverrides) -> bool {
+    overrides
+        .auth
+        .as_ref()
+        .is_some_and(|auth| auth.user.is_some() || auth.pin.is_some() || auth.pass.is_some())
 }
 
 fn parse_update<I: Iterator<Item = String>>(mut args: I) -> Parsed {
@@ -350,7 +375,9 @@ Commands:
                       a reboot. Takes the same options, writes them to the
                       config file the unit reads, and needs a username and PIN.
                       Run it as the user the service belongs to; --allow-root
-                      installs root's own service on purpose.
+                      installs root's own service on purpose. --no-auth writes
+                      a config with no credentials, for a deployment an
+                      authenticating proxy already gates.
   service uninstall   Stop, disable and remove that service
   service status      Show the service's systemd status
   update              Install the latest release over this binary, then restart
@@ -443,7 +470,7 @@ mod tests {
     fn installing(run: RunOptions) -> Parsed {
         Parsed::Service(ServiceCommand::Install(InstallOptions {
             run,
-            allow_root: false,
+            ..Default::default()
         }))
     }
 
@@ -929,9 +956,37 @@ mod tests {
             Parsed::Service(ServiceCommand::Install(InstallOptions {
                 run: options(&["--data-dir", "/srv/mobux"]),
                 allow_root: true,
+                no_auth: false,
             }))
         );
         assert!(invalid(&["--allow-root"]).contains("--allow-root"));
+    }
+
+    /// A deployment behind an authenticating proxy states that once, and never
+    /// beside credentials the proxy would strip anyway.
+    #[test]
+    fn no_auth_is_an_install_flag_that_excludes_credentials() {
+        assert_eq!(
+            parse(args(&["service", "install", "--no-auth", "--port", "5151"])),
+            Parsed::Service(ServiceCommand::Install(InstallOptions {
+                run: options(&["--port", "5151"]),
+                allow_root: false,
+                no_auth: true,
+            }))
+        );
+
+        for combination in [
+            vec!["service", "install", "--no-auth", "--user", "walker"],
+            vec!["service", "install", "--pin", "99999", "--no-auth"],
+            vec!["service", "install", "--no-auth", "--user=walker"],
+        ] {
+            let Parsed::Invalid(message) = parse(args(&combination)) else {
+                panic!("{combination:?} should not parse");
+            };
+            assert!(message.contains("--no-auth"), "{message}");
+        }
+
+        assert!(invalid(&["--no-auth"]).contains("--no-auth"));
     }
 
     #[test]
