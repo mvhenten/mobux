@@ -3,13 +3,21 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::{RunOptions, CONFIG_FLAG};
+use crate::cli::{InstallOptions, RunOptions, ALLOW_ROOT_FLAG, CONFIG_FLAG};
 use crate::config::{self, Config};
 use crate::configure;
 
 pub const DEFAULT_UNIT: &str = "mobux";
 
 const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
+
+const SUDO_USER_VAR: &str = "SUDO_USER";
+
+const PASSWD_FILE: &str = "/etc/passwd";
+
+/// `systemctl --user` needs `XDG_RUNTIME_DIR`, and an SSH session has none — so
+/// the check the install prints goes through mobux, which defaults it.
+const CHECK_HINT: &str = "check it with: mobux service status";
 
 /// Everything the unit file needs. The settings themselves live in the config
 /// file the unit names, so no credential reaches systemd.
@@ -173,14 +181,23 @@ fn report(result: Result<(), String>) -> i32 {
     }
 }
 
-fn install(options: &RunOptions) -> Result<(), String> {
+fn install(options: &InstallOptions) -> Result<(), String> {
+    if let Some(refusal) = root_refusal(
+        current_uid(),
+        std::env::var(SUDO_USER_VAR).ok(),
+        options.allow_root,
+    ) {
+        return Err(refusal);
+    }
+
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not resolve this binary's own path: {e}"))?;
     let config_path = options
+        .run
         .config_path
         .clone()
         .unwrap_or_else(config::config_file_path);
-    let settings = resolve_settings(&config_path, options)?;
+    let settings = resolve_settings(&config_path, &options.run)?;
     // Resolve before the systemd probe so a missing PIN is reported as such
     // even on a host where the user bus is out of reach.
     let spec = resolve_unit_spec(&settings, &exe, &config_path)?;
@@ -237,11 +254,28 @@ fn install(options: &RunOptions) -> Result<(), String> {
     if !settings.tls.enabled {
         println!("rerun `mobux service install --tls` to serve HTTPS instead");
     }
-    println!(
-        "check it with: systemctl --user status {} --no-pager",
-        spec.unit
-    );
+    println!("{CHECK_HINT}");
     Ok(())
+}
+
+/// `sudo mobux service install` writes root's config, starts root's unit and
+/// lingers root — a second, invisible copy of a service the login user wanted.
+/// Only `--allow-root` makes that the deliberate thing it reads as.
+fn root_refusal(uid: Option<u32>, sudo_user: Option<String>, allow_root: bool) -> Option<String> {
+    if allow_root || uid != Some(0) {
+        return None;
+    }
+    let user = sudo_user
+        .filter(|name| !name.is_empty() && name != "root")
+        .unwrap_or_else(|| "<user>".to_string());
+    Some(format!(
+        "refusing to install as root: this would write /root/.config/mobux and linger root, \
+         not {user}, and leave a second copy of the service behind.\n\
+         Run it as {user}: mobux service install --port <port> --user <name> --pin <pin>\n\
+         If that install cannot enable linger on its own, grant only that step: \
+         sudo loginctl enable-linger {user}\n\
+         Pass {ALLOW_ROOT_FLAG} to install root's own service on purpose."
+    ))
 }
 
 fn read(path: &Path) -> Option<String> {
@@ -304,7 +338,7 @@ fn uninstall() -> Result<(), String> {
 
     println!("removed {}", path.display());
     println!("linger is left enabled — other user services may depend on it. Turn it off with:");
-    println!("  loginctl disable-linger");
+    println!("  loginctl disable-linger {}", whoami());
     Ok(())
 }
 
@@ -474,9 +508,8 @@ fn enable_linger() {
             println!("linger enabled for {user} — the service starts at boot without a login")
         }
         Ok(output) => eprintln!(
-            "warning: loginctl enable-linger {user} failed: {}\n\
-             mobux will start when you log in, not at boot. Run it again as root to fix that.",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{}",
+            linger_failure_hint(&user, &String::from_utf8_lossy(&output.stderr))
         ),
         Err(e) => eprintln!(
             "warning: could not run loginctl enable-linger {user}: {e}\n\
@@ -485,13 +518,52 @@ fn enable_linger() {
     }
 }
 
+/// polkit refuses `enable-linger` to an unprivileged session, and the fix is
+/// privilege on that one command. Rerunning the install as root is not the fix:
+/// it installs a whole second service under `/root`.
+fn linger_failure_hint(user: &str, stderr: &str) -> String {
+    format!(
+        "warning: loginctl enable-linger {user} failed: {}\n\
+         mobux will start when you log in, not at boot. Enable it with: \
+         sudo loginctl enable-linger {user}\n\
+         Leave the install itself alone — installing it under sudo gives root its own second \
+         copy of the service.",
+        stderr.trim()
+    )
+}
+
+/// The user this install belongs to: the one who invoked it, never root by
+/// default. `$USER` can lie — a session carrying another user's environment
+/// reports that user — so the uid the process runs as decides, and the
+/// environment answers only where no passwd entry does.
 fn whoami() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .ok()
-        .filter(|name| !name.is_empty())
-        .or_else(|| current_uid().map(|uid| uid.to_string()))
+    resolve_user(
+        current_uid(),
+        |uid| user_for_uid(&read(Path::new(PASSWD_FILE)).unwrap_or_default(), uid),
+        std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .ok(),
+    )
+}
+
+fn resolve_user(
+    uid: Option<u32>,
+    name_for_uid: impl Fn(u32) -> Option<String>,
+    env_name: Option<String>,
+) -> String {
+    uid.and_then(name_for_uid)
+        .or_else(|| env_name.filter(|name| !name.is_empty()))
+        .or_else(|| uid.map(|uid| uid.to_string()))
         .unwrap_or_else(|| "$USER".to_string())
+}
+
+fn user_for_uid(passwd: &str, uid: u32) -> Option<String> {
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let entry: u32 = fields.nth(1)?.trim().parse().ok()?;
+        (entry == uid && !name.is_empty()).then(|| name.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -750,6 +822,94 @@ WantedBy=default.target
         assert!(
             !error.contains("export XDG_RUNTIME_DIR"),
             "mobux sets it itself now: {error}"
+        );
+    }
+
+    const PASSWD: &str = "\
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+walker:x:1001:1001:Walker:/home/walker:/bin/bash
+";
+
+    /// The session that installed mobux carried `USER=root` while running as
+    /// uid 1001, and linger went to root — a user with no service installed.
+    #[test]
+    fn linger_targets_the_invoking_user_and_never_root() {
+        let passwd = |uid| user_for_uid(PASSWD, uid);
+
+        assert_eq!(
+            resolve_user(Some(1001), passwd, Some("root".to_string())),
+            "walker",
+            "the uid decides, not an environment that says otherwise"
+        );
+        assert_eq!(resolve_user(Some(0), passwd, None), "root");
+        assert_eq!(
+            resolve_user(Some(1002), passwd, Some("walker".to_string())),
+            "walker",
+            "a uid with no passwd entry falls back to the environment"
+        );
+        assert_eq!(
+            resolve_user(Some(1002), passwd, Some(String::new())),
+            "1002"
+        );
+        assert_eq!(resolve_user(None, passwd, None), "$USER");
+    }
+
+    #[test]
+    fn the_linger_hint_asks_for_sudo_on_that_one_command() {
+        let hint = linger_failure_hint(
+            "walker",
+            "Could not enable linger: Interactive authentication required.\n",
+        );
+
+        assert!(
+            hint.contains("sudo loginctl enable-linger walker"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("Interactive authentication required."),
+            "the real failure is still reported: {hint}"
+        );
+        assert!(
+            !hint.to_lowercase().contains("again as root"),
+            "rerunning the install as root installs a second service: {hint}"
+        );
+        assert!(!hint.contains("enable-linger root"), "{hint}");
+    }
+
+    /// `sudo mobux service install` wrote /root/.config/mobux and lingered
+    /// root, leaving the login user's own service untouched.
+    #[test]
+    fn installing_under_sudo_is_refused_and_names_the_right_invocation() {
+        let refusal = root_refusal(Some(0), Some("walker".to_string()), false)
+            .expect("an install as root must be refused");
+
+        assert!(refusal.contains("Run it as walker"), "{refusal}");
+        assert!(
+            refusal.contains("sudo loginctl enable-linger walker"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("--allow-root"), "{refusal}");
+
+        assert!(
+            root_refusal(Some(0), None, false).is_some(),
+            "a root shell installs the same second copy a sudo one does"
+        );
+        assert_eq!(
+            root_refusal(Some(0), Some("walker".to_string()), true),
+            None,
+            "--allow-root is the deliberate root install"
+        );
+        assert_eq!(root_refusal(Some(1001), None, false), None);
+        assert_eq!(root_refusal(None, None, false), None);
+    }
+
+    #[test]
+    fn the_check_hint_goes_through_mobux_not_systemctl() {
+        assert!(CHECK_HINT.contains("mobux service status"), "{CHECK_HINT}");
+        assert!(
+            !CHECK_HINT.contains("systemctl"),
+            "raw systemctl --user has no bus in an SSH session: {CHECK_HINT}"
         );
     }
 

@@ -7,6 +7,10 @@ use crate::config::{self, FieldKind, FieldSpec, FieldValue, FIELDS};
 /// the tree and no environment variable beside it.
 pub const CONFIG_FLAG: &str = "--config";
 
+/// Names the install itself rather than a value the unit will run on, so it is
+/// taken apart from the run flags and only by `service install`.
+pub const ALLOW_ROOT_FLAG: &str = "--allow-root";
+
 /// What the command line states, in the shape the config file states it. The
 /// flags are the same surface as the file and the environment, so they land in
 /// the same tree.
@@ -22,12 +26,23 @@ pub struct RunOptions {
     pub config_path: Option<PathBuf>,
 }
 
+/// What `service install` takes: the run flags the unit will carry, and the
+/// one flag that is about the install itself.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InstallOptions {
+    pub run: RunOptions,
+    /// `--allow-root`. Install root's own service on purpose, instead of
+    /// refusing the `sudo mobux service install` that installs a second copy
+    /// under `/root` by accident.
+    pub allow_root: bool,
+}
+
 // `install` carries the whole config surface; boxing it to shrink a value that
 // is built once at startup would only add indirection.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceCommand {
-    Install(RunOptions),
+    Install(InstallOptions),
     Uninstall,
     Status,
 }
@@ -95,10 +110,22 @@ fn parse_service<I: Iterator<Item = String>>(mut args: I) -> Parsed {
 
     match subcommand.as_str() {
         "--help" | "-h" => Parsed::Help,
-        "install" => match parse_flags(args) {
-            Ok(options) => Parsed::Service(ServiceCommand::Install(options)),
-            Err(stop) => stop.parsed(),
-        },
+        "install" => {
+            let mut allow_root = false;
+            let flags: Vec<String> = args
+                .filter(|arg| {
+                    let is_allow_root = arg == ALLOW_ROOT_FLAG;
+                    allow_root |= is_allow_root;
+                    !is_allow_root
+                })
+                .collect();
+            match parse_flags(flags) {
+                Ok(run) => {
+                    Parsed::Service(ServiceCommand::Install(InstallOptions { run, allow_root }))
+                }
+                Err(stop) => stop.parsed(),
+            }
+        }
         "uninstall" | "status" => {
             let command = match subcommand.as_str() {
                 "uninstall" => ServiceCommand::Uninstall,
@@ -322,6 +349,8 @@ Commands:
   service install     Install and start a systemd --user service that survives
                       a reboot. Takes the same options, writes them to the
                       config file the unit reads, and needs a username and PIN.
+                      Run it as the user the service belongs to; --allow-root
+                      installs root's own service on purpose.
   service uninstall   Stop, disable and remove that service
   service status      Show the service's systemd status
   update              Install the latest release over this binary, then restart
@@ -411,6 +440,13 @@ mod tests {
         }
     }
 
+    fn installing(run: RunOptions) -> Parsed {
+        Parsed::Service(ServiceCommand::Install(InstallOptions {
+            run,
+            allow_root: false,
+        }))
+    }
+
     fn invalid(list: &[&str]) -> String {
         match parse(args(list)) {
             Parsed::Invalid(message) => message,
@@ -480,10 +516,10 @@ mod tests {
     fn service_install_names_the_file_its_unit_will_read() {
         assert_eq!(
             parse(args(&["service", "install", "--config", "/etc/mobux.json"])),
-            Parsed::Service(ServiceCommand::Install(RunOptions {
+            installing(RunOptions {
                 overrides: CliOverrides::default(),
                 config_path: Some(PathBuf::from("/etc/mobux.json")),
-            }))
+            })
         );
     }
 
@@ -521,7 +557,7 @@ mod tests {
     fn service_subcommands_parse() {
         assert_eq!(
             parse(args(&["service", "install"])),
-            Parsed::Service(ServiceCommand::Install(RunOptions::default()))
+            installing(RunOptions::default())
         );
         assert_eq!(
             parse(args(&["service", "uninstall"])),
@@ -539,7 +575,7 @@ mod tests {
             parse(args(&[
                 "service", "install", "--port", "5151", "--user", "walker", "--pin", "99999"
             ])),
-            Parsed::Service(ServiceCommand::Install(RunOptions {
+            installing(RunOptions {
                 overrides: CliOverrides {
                     server: Some(config::PartialServerConfig {
                         port: Some(5151),
@@ -553,7 +589,7 @@ mod tests {
                     ..Default::default()
                 },
                 config_path: None,
-            }))
+            })
         );
         assert!(matches!(
             parse(args(&["service", "install", "--nope"])),
@@ -874,11 +910,28 @@ mod tests {
     fn service_install_takes_the_whole_option_surface() {
         assert_eq!(
             parse(args(&["service", "install", "--data-dir", "/srv/mobux"])),
-            Parsed::Service(ServiceCommand::Install(options(&[
+            installing(options(&["--data-dir", "/srv/mobux"]))
+        );
+    }
+
+    /// A root install is deliberate or it is a mistake, so the flag saying so
+    /// belongs to `service install` alone and never to a run.
+    #[test]
+    fn allow_root_is_an_install_flag() {
+        assert_eq!(
+            parse(args(&[
+                "service",
+                "install",
+                "--allow-root",
                 "--data-dir",
                 "/srv/mobux"
-            ])))
+            ])),
+            Parsed::Service(ServiceCommand::Install(InstallOptions {
+                run: options(&["--data-dir", "/srv/mobux"]),
+                allow_root: true,
+            }))
         );
+        assert!(invalid(&["--allow-root"]).contains("--allow-root"));
     }
 
     #[test]
