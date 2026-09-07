@@ -16,6 +16,19 @@ pub const ALLOW_ROOT_FLAG: &str = "--allow-root";
 /// setting a value of its own.
 pub const NO_AUTH_FLAG: &str = "--no-auth";
 
+/// The way out of every refusal that turns on missing credentials, so the flag
+/// that resolves it is never further away than the end of the message.
+pub const NO_AUTH_HINT: &str = "Use --no-auth if you know what you are doing";
+
+/// What `service install` refuses with when no layer states credentials. It
+/// names the two ways to supply them and ends with the way to go without.
+pub const MISSING_CREDENTIALS: &str = concat!(
+    "no username and PIN, so the service would serve anyone who reaches the port. ",
+    "Pass --user and --pin, or export MOBUX_AUTH_USER and MOBUX_PIN. ",
+    "A proxy in front of mobux can authenticate instead. ",
+    "Use --no-auth if you know what you are doing"
+);
+
 /// What the command line states, in the shape the config file states it. The
 /// flags are the same surface as the file and the environment, so they land in
 /// the same tree.
@@ -375,9 +388,10 @@ Commands:
                       a reboot. Takes the same options, writes them to the
                       config file the unit reads, and needs a username and PIN.
                       Run it as the user the service belongs to; --allow-root
-                      installs root's own service on purpose. --no-auth writes
-                      a config with no credentials, for a deployment an
-                      authenticating proxy already gates.
+                      installs root's own service on purpose.
+                      --no-auth writes a config with no credentials, for a
+                      deployment an authenticating proxy already gates.
+                      {NO_AUTH_HINT}.
   service uninstall   Stop, disable and remove that service
   service status      Show the service's systemd status
   update              Install the latest release over this binary, then restart
@@ -987,6 +1001,30 @@ mod tests {
         }
 
         assert!(invalid(&["--no-auth"]).contains("--no-auth"));
+    }
+
+    /// An install with nothing to authenticate with is still refused, but the
+    /// refusal ends with the flag that gets past it, and so does the help.
+    #[test]
+    fn missing_credentials_names_the_way_out() {
+        assert!(
+            MISSING_CREDENTIALS.ends_with(NO_AUTH_HINT),
+            "{MISSING_CREDENTIALS}"
+        );
+
+        let refusal = crate::service::resolve_unit_spec(
+            &config::Config::default(),
+            std::path::Path::new("/usr/bin/mobux"),
+            std::path::Path::new("/home/walker/.config/mobux/config.json"),
+            crate::service::Auth::Required,
+        )
+        .expect_err("no credentials, so no unit");
+        assert!(refusal.contains(NO_AUTH_HINT), "{refusal}");
+
+        assert!(
+            help_text("1.2.3").contains(NO_AUTH_HINT),
+            "help is missing the --no-auth hint"
+        );
     }
 
     #[test]
