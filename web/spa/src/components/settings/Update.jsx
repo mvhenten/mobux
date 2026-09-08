@@ -38,7 +38,11 @@ export function UpdateCard() {
       const res = await localFetch(path, force ? { method: "POST" } : {});
       if (!res.ok) throw new Error("HTTP " + res.status);
       info.value = await res.json();
+      // A successful check clears the recorded reason server-side, so it
+      // reports its own outcome; only a passive load surfaces an old failure.
       if (force) show("Checked crates.io.", "ok");
+      else if (info.value.lastRunError)
+        show("Last update rolled back. " + info.value.lastRunError, "error");
     } catch (err) {
       show("Update check failed: " + err.message, "error");
     }
@@ -51,6 +55,9 @@ export function UpdateCard() {
       "ok",
     );
     busy.value = true;
+    // The identify poll is cheap; the status poll reads a file on the host, so
+    // it runs at most every 15s rather than on every 3s tick.
+    let nextStatusPoll = Date.now() + 15000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
@@ -65,6 +72,18 @@ export function UpdateCard() {
             busy.value = false;
             if (confirm(`mobux updated to ${id.version}. Reload now?`))
               location.reload();
+            return;
+          }
+        }
+        if (Date.now() < nextStatusPoll) continue;
+        nextStatusPoll = Date.now() + 15000;
+        const st = await localFetch("/api/update/status", {});
+        if (st.ok) {
+          const next = await st.json();
+          info.value = next;
+          if (next.lastRunError) {
+            show("Update rolled back. " + next.lastRunError, "error");
+            busy.value = false;
             return;
           }
         }

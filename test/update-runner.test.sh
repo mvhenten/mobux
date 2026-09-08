@@ -33,6 +33,13 @@ if [ "$mode" = "fail" ]; then
   echo "stub cargo: build failed" >&2
   exit 1
 fi
+# Installs the payload and destroys the snapshot, so the rollback the updater
+# attempts afterwards has nothing to restore from.
+if [ "$mode" = "wipe-snapshot" ]; then
+  cp "$payload" "\$MOBUX_UPDATE_BIN"
+  rm -f "\$MOBUX_UPDATE_BIN.prev"
+  exit 0
+fi
 # Find --root <root>; install to <root>/bin/<crate-name-from-BIN-basename>
 root=""
 prev=""
@@ -91,8 +98,9 @@ run_updater() {
     MOBUX_UPDATE_ROOT="$3" \
     MOBUX_UPDATE_SERVICE="ignored" \
     MOBUX_UPDATE_PORT="$HC_PORT" \
-    MOBUX_UPDATE_SCHEME="http" \
+    MOBUX_UPDATE_SCHEME="${SCHEME:-http}" \
     MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
+    MOBUX_UPDATE_RESULT="${RESULT_FILE:-$WORK/result.txt}" \
     MOBUX_UPDATE_CARGO="$4" \
     MOBUX_UPDATE_CRATE="mobux" \
     MOBUX_UPDATE_ASSET_BASE="${ASSET_BASE:-file://$WORK/no-assets}" \
@@ -270,6 +278,161 @@ case "$OUT9" in
   *) bad "no-asset: missing fallback log line" ;;
 esac
 [ "$(cat "$BIN9")" = "NEW-V9" ] && ok "no-asset: installed via cargo" || bad "no-asset: wrong binary content"
+
+# ── Test 10: scheme mismatch → rollback with an actionable reason ──────────
+# The instance is configured for https, but the new version answers on plain
+# http (the #295 default flip). The generic path would burn the whole timeout
+# and log "did not come up"; the updater must spot the new version on the other
+# scheme and say so, in the log and in the result file the server reads.
+ROOT10="$WORK/root10"; mkdir -p "$ROOT10/bin"
+BIN10="$ROOT10/bin/mobux"
+printf 'OLD-V0' > "$BIN10"
+printf 'NEW-V10' > "$WORK/payload-v10"
+# The health server speaks plain http and reports the NEW version.
+printf '{"app":"mobux","version":"10.0.0"}' > "$WORK/identify.json"
+CARGO_OK10="$(make_stub_cargo success "$WORK/payload-v10")"
+RESULT10="$WORK/result10.txt"
+
+OUT10="$(SCHEME="https" RESULT_FILE="$RESULT10" run_updater "10.0.0" "$BIN10" "$ROOT10" "$CARGO_OK10")"
+rc=$?
+[ "$rc" -eq 2 ] && ok "scheme-mismatch: exit 2 (rolled back)" || bad "scheme-mismatch: exit $rc (expected 2)"
+[ "$(cat "$BIN10")" = "OLD-V0" ] && ok "scheme-mismatch: binary restored to old" || bad "scheme-mismatch: binary not restored ($(cat "$BIN10"))"
+case "$OUT10" in
+  *"serves http, but this instance is configured for https"*) ok "scheme-mismatch: log names both schemes" ;;
+  *) bad "scheme-mismatch: log does not name the scheme mismatch" ;;
+esac
+case "$OUT10" in
+  *"MOBUX_TLS=1"*) ok "scheme-mismatch: log names the remedy" ;;
+  *) bad "scheme-mismatch: log does not name the remedy" ;;
+esac
+if [ -f "$RESULT10" ]; then
+  case "$(cat "$RESULT10")" in
+    *"serves http, but this instance is configured for https"*) ok "scheme-mismatch: reason written for the update card" ;;
+    *) bad "scheme-mismatch: result file has the wrong reason ($(cat "$RESULT10"))" ;;
+  esac
+else
+  bad "scheme-mismatch: no result file written"
+fi
+
+# ── Test 11: a healthy update clears a stale failure reason ────────────────
+ROOT11="$WORK/root11"; mkdir -p "$ROOT11/bin"
+BIN11="$ROOT11/bin/mobux"
+printf 'OLD-V0' > "$BIN11"
+printf 'NEW-V11' > "$WORK/payload-v11"
+printf '{"app":"mobux","version":"11.0.0"}' > "$WORK/identify.json"
+CARGO_OK11="$(make_stub_cargo success "$WORK/payload-v11")"
+RESULT11="$WORK/result11.txt"
+printf 'stale reason from an earlier run\n' > "$RESULT11"
+
+RESULT_FILE="$RESULT11" run_updater "11.0.0" "$BIN11" "$ROOT11" "$CARGO_OK11"
+rc=$?
+[ "$rc" -eq 0 ] && ok "clear-reason: exit 0" || bad "clear-reason: exit $rc"
+[ ! -f "$RESULT11" ] && ok "clear-reason: stale reason removed" || bad "clear-reason: stale reason still present ($(cat "$RESULT11"))"
+
+# ── Test 12: rollback failure → reason must not claim a rollback ───────────
+# The stub cargo installs the new version and destroys the snapshot, so the
+# rollback has nothing to restore. The recorded reason has to say the new
+# binary is still live, not that we rolled back.
+ROOT12="$WORK/root12"; mkdir -p "$ROOT12/bin"
+BIN12="$ROOT12/bin/mobux"
+printf 'OLD-V0' > "$BIN12"
+printf 'BROKEN-V12' > "$WORK/payload-v12"
+# Health server keeps reporting the OLD version → 12.0.0 never comes up.
+printf '{"app":"mobux","version":"0.0.0"}' > "$WORK/identify.json"
+CARGO_WIPE12="$(make_stub_cargo wipe-snapshot "$WORK/payload-v12")"
+RESULT12="$WORK/result12.txt"
+
+RESULT_FILE="$RESULT12" run_updater "12.0.0" "$BIN12" "$ROOT12" "$CARGO_WIPE12"
+rc=$?
+[ "$rc" -eq 3 ] && ok "rollback-failed: exit 3" || bad "rollback-failed: exit $rc (expected 3)"
+REASON12="$(cat "$RESULT12" 2>/dev/null)"
+case "$REASON12" in
+  *"The rollback failed"*) ok "rollback-failed: reason says the rollback failed" ;;
+  *) bad "rollback-failed: reason does not mention the failed rollback ($REASON12)" ;;
+esac
+case "$REASON12" in
+  *"Rolled back to the previous version"*) bad "rollback-failed: reason wrongly claims a rollback" ;;
+  *) ok "rollback-failed: reason does not claim a rollback" ;;
+esac
+
+# ── Test 13: a lock-refused run keeps the reason the owning run left ────────
+if command -v flock >/dev/null 2>&1; then
+  ROOT13="$WORK/root13"; mkdir -p "$ROOT13/bin"
+  BIN13="$ROOT13/bin/mobux"
+  printf 'OLD-V0' > "$BIN13"
+  printf 'NEW-V13' > "$WORK/payload-v13"
+  printf '{"app":"mobux","version":"13.0.0"}' > "$WORK/identify.json"
+  CARGO_OK13="$(make_stub_cargo success "$WORK/payload-v13")"
+  RESULT13="$WORK/result13.txt"
+  EARLIER="version 12.0.0 serves http, but this instance is configured for https."
+  printf '%s\n' "$EARLIER" > "$RESULT13"
+
+  ( exec 8>"$ROOT13/mobux-update.lock"; flock 8; sleep 5 ) &
+  HOLDER13=$!
+  sleep 0.5
+
+  RESULT_FILE="$RESULT13" run_updater "13.0.0" "$BIN13" "$ROOT13" "$CARGO_OK13"
+  rc=$?
+  kill "$HOLDER13" 2>/dev/null; wait "$HOLDER13" 2>/dev/null
+
+  [ "$rc" -eq 4 ] && ok "lock-reason: refused (exit 4)" || bad "lock-reason: exit $rc (expected 4)"
+  [ "$(cat "$RESULT13")" = "$EARLIER" ] && ok "lock-reason: earlier reason left intact" || bad "lock-reason: earlier reason overwritten ($(cat "$RESULT13"))"
+
+  # With no earlier reason on disk, the refusal records its own.
+  RESULT13B="$WORK/result13b.txt"
+  ( exec 8>"$ROOT13/mobux-update.lock"; flock 8; sleep 5 ) &
+  HOLDER13B=$!
+  sleep 0.5
+  RESULT_FILE="$RESULT13B" run_updater "13.0.0" "$BIN13" "$ROOT13" "$CARGO_OK13"
+  rc=$?
+  kill "$HOLDER13B" 2>/dev/null; wait "$HOLDER13B" 2>/dev/null
+  [ "$rc" -eq 4 ] && ok "lock-reason: second refusal exit 4" || bad "lock-reason: exit $rc (expected 4)"
+  case "$(cat "$RESULT13B" 2>/dev/null)" in
+    *"already holds"*) ok "lock-reason: refusal records its own reason" ;;
+    *) bad "lock-reason: refusal wrote no reason" ;;
+  esac
+else
+  echo "ok   - lock-reason: SKIP (flock not installed)"
+fi
+
+# ── Test 14: an abort before install still records a reason ────────────────
+ROOT14="$WORK/root14"; mkdir -p "$ROOT14/bin"
+BIN14="$ROOT14/bin/mobux"  # deliberately absent
+RESULT14="$WORK/result14.txt"
+RESULT_FILE="$RESULT14" run_updater "14.0.0" "$BIN14" "$ROOT14" "$CARGO_OK"
+rc=$?
+[ "$rc" -eq 1 ] && ok "missing-bin: exit 1 (abort)" || bad "missing-bin: exit $rc (expected 1)"
+case "$(cat "$RESULT14" 2>/dev/null)" in
+  *"no binary at"*) ok "missing-bin: reason recorded for the update card" ;;
+  *) bad "missing-bin: no reason recorded" ;;
+esac
+
+# ── Test 15: unresolvable cargo records a reason naming the remedy ─────────
+ROOT15="$WORK/root15"; mkdir -p "$ROOT15/bin"
+BIN15="$ROOT15/bin/mobux"
+printf 'OLD-V0' > "$BIN15"
+RESULT15="$WORK/result15.txt"
+env \
+  HOME="$WORK" \
+  MOBUX_UPDATE_ASSET_BASE="file://$WORK/no-assets" \
+  MOBUX_UPDATE_VERSION="15.0.0" \
+  MOBUX_UPDATE_BIN="$BIN15" \
+  MOBUX_UPDATE_ROOT="$ROOT15" \
+  MOBUX_UPDATE_SERVICE="ignored" \
+  MOBUX_UPDATE_PORT="$HC_PORT" \
+  MOBUX_UPDATE_SCHEME="http" \
+  MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
+  MOBUX_UPDATE_CARGO="cargo-definitely-not-installed" \
+  MOBUX_UPDATE_CRATE="mobux" \
+  MOBUX_UPDATE_RESULT="$RESULT15" \
+  MOBUX_UPDATE_LOG="$WORK/update.log" \
+  bash "$UPDATER" --no-systemd >/dev/null
+rc=$?
+[ "$rc" -eq 1 ] && ok "no-cargo: exit 1 (abort)" || bad "no-cargo: exit $rc (expected 1)"
+case "$(cat "$RESULT15" 2>/dev/null)" in
+  *"MOBUX_UPDATE_CARGO"*) ok "no-cargo: reason names the remedy" ;;
+  *) bad "no-cargo: reason missing or unhelpful ($(cat "$RESULT15" 2>/dev/null))" ;;
+esac
 
 echo "---"
 echo "passed: $PASS  failed: $FAIL"

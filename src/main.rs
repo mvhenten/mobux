@@ -1009,12 +1009,22 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
 /// last-checked timestamp. Reads the in-memory cache the background poller
 /// maintains — no network call here.
 async fn api_update_status(State(state): State<AppState>) -> Json<update::UpdateStatus> {
-    Json(state.update.status().await)
+    let mut status = state.update.status().await;
+    status.last_run_error = update::last_run_error(&state.data_dir);
+    Json(status)
 }
 
-/// Force an immediate crates.io poll and return the refreshed status.
+/// Force an immediate crates.io poll and return the refreshed status. A check
+/// that reaches crates.io also clears any recorded rollback reason: the user
+/// asked for a fresh answer, and the card should show this run's outcome
+/// rather than an old failure forever.
 async fn api_update_check(State(state): State<AppState>) -> Json<update::UpdateStatus> {
-    Json(state.update.refresh().await)
+    let mut status = state.update.refresh().await;
+    if status.error.is_none() {
+        update::clear_last_run_error(&state.data_dir);
+    }
+    status.last_run_error = update::last_run_error(&state.data_dir);
+    Json(status)
 }
 
 /// Spawn the detached updater toward the latest known version. Returns 202 when

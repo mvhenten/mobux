@@ -86,6 +86,10 @@ pub struct UpdateStatus {
     /// Last poll error, if the most recent attempt failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why the last self-update run failed, written by the detached updater and
+    /// read back from the data dir. Present only after a failed run.
+    #[serde(rename = "lastRunError", skip_serializing_if = "Option::is_none")]
+    pub last_run_error: Option<String>,
 }
 
 impl UpdateState {
@@ -140,6 +144,7 @@ impl UpdateState {
             available,
             checked_at: c.checked_at.clone(),
             error: c.last_error.clone(),
+            last_run_error: None,
         }
     }
 
@@ -453,6 +458,31 @@ pub fn write_updater_script(data_dir: &Path) -> Result<PathBuf, RunError> {
     Ok(path)
 }
 
+/// Path of the file the detached updater writes its failure reason to. Read
+/// back by the status endpoint so the update card can say *why* a run rolled
+/// back instead of timing out on a generic message.
+pub fn result_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("mobux-update-result.txt")
+}
+
+/// The reason the last self-update run failed, if there is one on disk. Empty
+/// or unreadable means "nothing to report".
+pub fn last_run_error(data_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(result_path(data_dir)).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Drop the recorded failure. The card would otherwise carry a rollback reason
+/// forever — nothing else on the host removes it — so an explicit check that
+/// succeeds clears it and reports its own outcome instead.
+pub fn clear_last_run_error(data_dir: &Path) {
+    let _ = std::fs::remove_file(result_path(data_dir));
+}
+
 /// Spawn the detached updater for `version`. The child is fully detached
 /// (`setsid`, own session, stdio redirected to a log file in `data_dir`) so it
 /// survives the server restart it triggers. Returns the log path on success.
@@ -507,6 +537,8 @@ pub fn spawn_updater(
     })?;
 
     let scheme = if use_tls { "https" } else { "http" };
+    let result_path = result_path(data_dir);
+    let _ = std::fs::remove_file(&result_path);
 
     // `setsid` detaches into a new session so the child isn't killed when the
     // systemd unit (this process) is restarted. stdin from /dev/null; stdout +
@@ -521,6 +553,7 @@ pub fn spawn_updater(
         .env("MOBUX_UPDATE_PORT", port.to_string())
         .env("MOBUX_UPDATE_SCHEME", scheme)
         .env("MOBUX_UPDATE_LOG", &log_path)
+        .env("MOBUX_UPDATE_RESULT", &result_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err));
@@ -599,6 +632,23 @@ mod tests {
         assert!(!is_newer("0.1.4", "0.1.4"));
         assert!(!is_newer("0.1.5", "0.1.4"));
         assert!(!is_newer("1.0.0", "0.9.9"));
+    }
+
+    /// The rollback reason the detached updater leaves behind is what the
+    /// update card shows instead of a generic timeout.
+    #[test]
+    fn the_updaters_failure_reason_is_read_back_from_the_data_dir() {
+        let tmp = std::env::temp_dir().join(format!("mobux-update-reason-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(last_run_error(&tmp), None);
+
+        let reason = "version 9.9.9 serves http, but this instance is configured for https.";
+        std::fs::write(result_path(&tmp), format!("{reason}\n")).unwrap();
+        assert_eq!(last_run_error(&tmp).as_deref(), Some(reason));
+
+        std::fs::write(result_path(&tmp), "  \n").unwrap();
+        assert_eq!(last_run_error(&tmp), None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
