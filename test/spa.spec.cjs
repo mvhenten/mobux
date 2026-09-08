@@ -1801,6 +1801,127 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     expect(sent[sent.indexOf(UPLOAD_PATH) + 1]).toBe("\r");
   });
 
+  // ── regression (#303): every post-capture fault must offer the fallback ──
+  //
+  // The 503 fix above only wired the fallback into the `model` fault. The
+  // other faults raised by transcribePending after a real recording exists —
+  // a dropped connection, a stalled backend, an unexpected HTTP status, an
+  // encode error — used to strand the same recording. Each of those now
+  // passes audioFallbackOpts() through to micFault too.
+  test("a dropped connection to /transcribe still offers to submit the recording as an uploaded WAV", async ({
+    page,
+  }) => {
+    const UPLOAD_PATH = "/tmp/mobux-uploads/dictation-network.wav";
+
+    await page.route(/\/transcribe$/, (route) => route.abort());
+
+    let uploaded = null;
+    await page.route(/\/api\/upload(\?|$)/, async (route) => {
+      uploaded = route.request().postDataBuffer();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          path: UPLOAD_PATH,
+          size: 4242,
+          name: "dictation-network.wav",
+        }),
+      });
+    });
+
+    const sent = [];
+    page.on("websocket", (ws) => {
+      ws.on("framesent", (frame) => sent.push(String(frame.payload)));
+    });
+
+    await openRecording(page);
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Stop" })
+      .click();
+
+    await expect(page.locator("#mobux-mic-overlay.fault")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Transcription failed",
+    );
+
+    const audioBtn = page.locator("#mobux-mic-overlay .mo-submit-audio");
+    await expect(audioBtn).toBeVisible();
+    await expect(audioBtn).toContainText("Submit as audio file");
+    await audioBtn.click();
+
+    await expect(page.locator("#mobux-mic-overlay")).toHaveCount(0, {
+      timeout: 10000,
+    });
+    expect(uploaded, "the recording must be POSTed to /api/upload").not.toBe(
+      null,
+    );
+
+    await expect
+      .poll(() => sent.indexOf(UPLOAD_PATH), { timeout: 10000 })
+      .toBeGreaterThanOrEqual(0);
+    expect(sent[sent.indexOf(UPLOAD_PATH) + 1]).toBe("\r");
+  });
+
+  test("a /transcribe that never responds still offers to submit the recording as an uploaded WAV", async ({
+    page,
+  }) => {
+    test.setTimeout(50000);
+    const UPLOAD_PATH = "/tmp/mobux-uploads/dictation-timeout.wav";
+
+    // Never call route.fulfill/continue — the request stays pending until
+    // transcribePending's own TRANSCRIBE_TIMEOUT_MS abort fires.
+    await page.route(/\/transcribe$/, () => {});
+
+    let uploaded = null;
+    await page.route(/\/api\/upload(\?|$)/, async (route) => {
+      uploaded = route.request().postDataBuffer();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          path: UPLOAD_PATH,
+          size: 4242,
+          name: "dictation-timeout.wav",
+        }),
+      });
+    });
+
+    const sent = [];
+    page.on("websocket", (ws) => {
+      ws.on("framesent", (frame) => sent.push(String(frame.payload)));
+    });
+
+    await openRecording(page);
+    await page
+      .locator("#mobux-mic-overlay .mo-btn", { hasText: "Stop" })
+      .click();
+
+    const overlay = page.locator("#mobux-mic-overlay.fault");
+    await expect(overlay).toBeVisible({ timeout: 35000 });
+    await expect(page.locator("#mobux-mic-overlay .mo-title")).toContainText(
+      "Transcription backend did not respond",
+    );
+
+    const audioBtn = page.locator("#mobux-mic-overlay .mo-submit-audio");
+    await expect(audioBtn).toBeVisible();
+    await expect(audioBtn).toContainText("Submit as audio file");
+    await audioBtn.click();
+
+    await expect(page.locator("#mobux-mic-overlay")).toHaveCount(0, {
+      timeout: 10000,
+    });
+    expect(uploaded, "the recording must be POSTed to /api/upload").not.toBe(
+      null,
+    );
+
+    await expect
+      .poll(() => sent.indexOf(UPLOAD_PATH), { timeout: 10000 })
+      .toBeGreaterThanOrEqual(0);
+    expect(sent[sent.indexOf(UPLOAD_PATH) + 1]).toBe("\r");
+  });
+
   // ── regression: no fault is ever silent — every kind gets a report link ──
   //
   // The mic button used to fail silently on a denied Android permission: the

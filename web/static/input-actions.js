@@ -678,11 +678,11 @@ export function createDictateAction({ send, node, button, onText } = {}) {
       } catch (netErr) {
         if (netErr?.name === 'AbortError') {
           telemetry.log('mic.transcribe.err', { stage: 'timeout' });
-          micFault('transcribe-timeout');
+          micFault('transcribe-timeout', undefined, audioFallbackOpts());
           return null;
         }
         telemetry.log('mic.transcribe.err', { stage: 'network', message: netErr?.message || '' });
-        micFault('network', netErr?.message || 'network error');
+        micFault('network', netErr?.message || 'network error', audioFallbackOpts());
         return null;
       } finally {
         clearTimeout(timer);
@@ -695,7 +695,7 @@ export function createDictateAction({ send, node, button, onText } = {}) {
         if (res.status === 503) {
           micFault('model', '503 ' + bodyText.slice(0, 120), audioFallbackOpts());
         } else {
-          micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText));
+          micFault('http', res.status + ' ' + (bodyText.slice(0, 120) || res.statusText), audioFallbackOpts());
         }
         return null;
       }
@@ -707,7 +707,7 @@ export function createDictateAction({ send, node, button, onText } = {}) {
     } catch (err) {
       console.error('Transcription failed:', err);
       telemetry.log('mic.transcribe.err', { stage: 'exception', message: err?.message || String(err) });
-      micFault('mic', err?.message || 'encode/transcribe error');
+      micFault('mic', err?.message || 'encode/transcribe error', audioFallbackOpts());
       return null;
     }
   }
