@@ -69,6 +69,9 @@ ASSET="${MOBUX_UPDATE_ASSET:-${CRATE}-x86_64-unknown-linux-gnu.tar.gz}"
 RESULT_FILE="${MOBUX_UPDATE_RESULT:-}"
 
 PREV="${BIN}.prev"
+# Why the new version was judged unhealthy. Set by health_check, turned into a
+# recorded reason by main() once the rollback outcome is known.
+HEALTH_FAILURE=""
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -79,6 +82,15 @@ log() {
 record_failure() {
   log "FAILURE: $*"
   [ -n "$RESULT_FILE" ] || return 0
+  printf '%s\n' "$*" > "$RESULT_FILE" 2>/dev/null || true
+}
+
+# Same, but never clobbers a reason already on disk. Used where this run is
+# refusing to start because another updater owns the file.
+record_failure_if_absent() {
+  log "FAILURE: $*"
+  [ -n "$RESULT_FILE" ] || return 0
+  [ -s "$RESULT_FILE" ] && return 0
   printf '%s\n' "$*" > "$RESULT_FILE" 2>/dev/null || true
 }
 
@@ -166,11 +178,13 @@ identify() {
 }
 
 # The new binary is up, just not on the scheme this instance was configured
-# for — the one failure mode a generic timeout hides completely.
+# for — the one failure mode a generic timeout hides completely. Only
+# MOBUX_TLS / --tls decides which scheme mobux serves; --behind-tls-proxy is
+# about the auth gate, so it is deliberately not offered as a remedy here.
 scheme_mismatch_reason() {
   local served="$1"
   if [ "$served" = "http" ]; then
-    printf '%s' "version ${VERSION} serves http, but this instance is configured for https. mobux serves plain HTTP unless TLS is asked for: set MOBUX_TLS=1 or --tls (or --behind-tls-proxy when a proxy terminates TLS) in the systemd unit '${SERVICE}', or switch this instance to http, then upgrade again."
+    printf '%s' "version ${VERSION} serves http, but this instance is configured for https. mobux serves plain HTTP unless TLS is asked for: set MOBUX_TLS=1 or --tls in the systemd unit '${SERVICE}' to keep https, or switch this instance to http, then upgrade again."
     return 0
   fi
   printf '%s' "version ${VERSION} serves https, but this instance is configured for http. Drop MOBUX_TLS / --tls from the systemd unit '${SERVICE}', or switch this instance to https, then upgrade again."
@@ -182,6 +196,10 @@ scheme_mismatch_reason() {
 # answering there is a configuration mismatch, not a broken build, and it gets
 # its own actionable message. We still roll back — the phone talks to the
 # configured scheme.
+#
+# The reason lands in HEALTH_FAILURE rather than the result file: what the user
+# needs to read also depends on whether the rollback then worked, and only
+# main() knows that.
 health_check() {
   local deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
   local other; other="$(other_scheme)"
@@ -196,7 +214,8 @@ health_check() {
       if body="$(identify "$other")"; then
         case "$body" in
           *"\"version\":\"${VERSION}\""*)
-            record_failure "$(scheme_mismatch_reason "$other") Rolled back to the previous version."
+            HEALTH_FAILURE="$(scheme_mismatch_reason "$other")"
+            log "health-check FAILED: ${HEALTH_FAILURE}"
             return 1
             ;;
         esac
@@ -204,7 +223,8 @@ health_check() {
     fi
     sleep 2
   done
-  record_failure "version ${VERSION} did not answer on ${SCHEME}://127.0.0.1:${PORT}/api/identify within ${HEALTH_TIMEOUT}s. Rolled back to the previous version; see ${MOBUX_UPDATE_LOG:-the update log} on the host."
+  HEALTH_FAILURE="version ${VERSION} did not answer on ${SCHEME}://127.0.0.1:${PORT}/api/identify within ${HEALTH_TIMEOUT}s."
+  log "health-check FAILED: ${HEALTH_FAILURE}"
   return 1
 }
 
@@ -221,38 +241,48 @@ rollback() {
 
 main() {
   log "self-update start: crate=${CRATE} version=${VERSION} bin=${BIN} root=${ROOT} service=${SERVICE} port=${PORT} scheme=${SCHEME}"
-  clear_failure
 
   # Cross-process lock (belt-and-braces with the in-process guard in mobux):
   # even two independently spawned scripts can't race the snapshot/install. The
   # lock fd stays open for the whole run; flock releases it when the process
   # exits. If flock isn't available, proceed (the in-process guard still holds).
+  #
+  # Nothing is cleared before the lock is ours: a run that refuses to start
+  # must not wipe the reason the run that owns the file left behind.
   LOCK_FILE="${ROOT}/mobux-update.lock"
   if command -v flock >/dev/null 2>&1; then
-    exec 9>"$LOCK_FILE" || { log "ABORT: could not open lock file ${LOCK_FILE}"; exit 4; }
+    exec 9>"$LOCK_FILE" || {
+      record_failure_if_absent "could not open the updater lock file ${LOCK_FILE}; no update was attempted."
+      exit 4
+    }
     if ! flock -n 9; then
-      log "ABORT: another updater holds the lock (${LOCK_FILE}); refusing to race"
+      record_failure_if_absent "another updater already holds ${LOCK_FILE}; this run refused to race it and no update was attempted."
       exit 4
     fi
   else
     log "WARN: flock not found; relying on in-process guard only"
   fi
 
+  clear_failure
+
   if [ ! -f "$BIN" ]; then
-    log "ABORT: binary not found at ${BIN}"
+    record_failure "no binary at ${BIN}; the update could not start. Check that the '${SERVICE}' unit runs the cargo-installed mobux."
     exit 1
   fi
 
   log "snapshot ${BIN} -> ${PREV}"
   if ! cp -f "$BIN" "$PREV"; then
-    log "ABORT: could not snapshot current binary"
+    record_failure "could not snapshot ${BIN} to ${PREV}; the update was abandoned before anything changed. Check the permissions and free space on ${ROOT}."
     exit 1
   fi
 
   if ! install_from_release; then
     # Fallback: releases without a prebuilt asset install via cargo, the
     # original (slow, 5-10 min compile) path. cargo is only required here.
-    resolve_cargo || exit 1
+    if ! resolve_cargo; then
+      record_failure "no prebuilt asset for ${VERSION} and cargo was not found on PATH or at \$HOME/.cargo/bin/cargo, so the fallback build could not run. Add ~/.cargo/bin to the '${SERVICE}' unit's PATH or set MOBUX_UPDATE_CARGO. The previous version is untouched."
+      exit 1
+    fi
     log "cargo install ${CRATE} --locked --version ${VERSION} --root ${ROOT}"
     if ! "$CARGO_BIN" install "$CRATE" --locked --version "$VERSION" --root "$ROOT" --force; then
       record_failure "installing ${VERSION} failed: the prebuilt asset was unusable and cargo install did not complete. The previous version is untouched."
@@ -277,12 +307,19 @@ main() {
   fi
 
   log "new version unhealthy; rolling back"
-  if rollback && health_check_prev; then
-    log "self-update rolled back successfully"
-    exit 2
+  if ! rollback; then
+    record_failure "${HEALTH_FAILURE} The rollback failed: ${BIN} still holds ${VERSION}. Restore the snapshot at ${PREV} by hand and restart the '${SERVICE}' unit."
+    log "self-update FAILED and the rollback did not run — manual intervention needed"
+    exit 3
   fi
-  log "self-update FAILED and rollback may be incomplete — manual intervention needed"
-  exit 3
+  if ! health_check_prev; then
+    record_failure "${HEALTH_FAILURE} The previous binary was restored to ${BIN}, but nothing is answering on port ${PORT}. Restart the '${SERVICE}' unit by hand."
+    log "self-update FAILED and rollback may be incomplete — manual intervention needed"
+    exit 3
+  fi
+  record_failure "${HEALTH_FAILURE} Rolled back to the previous version, which is answering again."
+  log "self-update rolled back successfully"
+  exit 2
 }
 
 # After rollback we can't know the prior version string here, so just confirm

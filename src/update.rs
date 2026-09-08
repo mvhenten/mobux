@@ -476,6 +476,13 @@ pub fn last_run_error(data_dir: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Drop the recorded failure. The card would otherwise carry a rollback reason
+/// forever — nothing else on the host removes it — so an explicit check that
+/// succeeds clears it and reports its own outcome instead.
+pub fn clear_last_run_error(data_dir: &Path) {
+    let _ = std::fs::remove_file(result_path(data_dir));
+}
+
 /// Spawn the detached updater for `version`. The child is fully detached
 /// (`setsid`, own session, stdio redirected to a log file in `data_dir`) so it
 /// survives the server restart it triggers. Returns the log path on success.
