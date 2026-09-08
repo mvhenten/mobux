@@ -91,8 +91,9 @@ run_updater() {
     MOBUX_UPDATE_ROOT="$3" \
     MOBUX_UPDATE_SERVICE="ignored" \
     MOBUX_UPDATE_PORT="$HC_PORT" \
-    MOBUX_UPDATE_SCHEME="http" \
+    MOBUX_UPDATE_SCHEME="${SCHEME:-http}" \
     MOBUX_UPDATE_HEALTH_TIMEOUT="6" \
+    MOBUX_UPDATE_RESULT="${RESULT_FILE:-$WORK/result.txt}" \
     MOBUX_UPDATE_CARGO="$4" \
     MOBUX_UPDATE_CRATE="mobux" \
     MOBUX_UPDATE_ASSET_BASE="${ASSET_BASE:-file://$WORK/no-assets}" \
@@ -270,6 +271,56 @@ case "$OUT9" in
   *) bad "no-asset: missing fallback log line" ;;
 esac
 [ "$(cat "$BIN9")" = "NEW-V9" ] && ok "no-asset: installed via cargo" || bad "no-asset: wrong binary content"
+
+# ── Test 10: scheme mismatch → rollback with an actionable reason ──────────
+# The instance is configured for https, but the new version answers on plain
+# http (the #295 default flip). The generic path would burn the whole timeout
+# and log "did not come up"; the updater must spot the new version on the other
+# scheme and say so, in the log and in the result file the server reads.
+ROOT10="$WORK/root10"; mkdir -p "$ROOT10/bin"
+BIN10="$ROOT10/bin/mobux"
+printf 'OLD-V0' > "$BIN10"
+printf 'NEW-V10' > "$WORK/payload-v10"
+# The health server speaks plain http and reports the NEW version.
+printf '{"app":"mobux","version":"10.0.0"}' > "$WORK/identify.json"
+CARGO_OK10="$(make_stub_cargo success "$WORK/payload-v10")"
+RESULT10="$WORK/result10.txt"
+
+OUT10="$(SCHEME="https" RESULT_FILE="$RESULT10" run_updater "10.0.0" "$BIN10" "$ROOT10" "$CARGO_OK10")"
+rc=$?
+[ "$rc" -eq 2 ] && ok "scheme-mismatch: exit 2 (rolled back)" || bad "scheme-mismatch: exit $rc (expected 2)"
+[ "$(cat "$BIN10")" = "OLD-V0" ] && ok "scheme-mismatch: binary restored to old" || bad "scheme-mismatch: binary not restored ($(cat "$BIN10"))"
+case "$OUT10" in
+  *"serves http, but this instance is configured for https"*) ok "scheme-mismatch: log names both schemes" ;;
+  *) bad "scheme-mismatch: log does not name the scheme mismatch" ;;
+esac
+case "$OUT10" in
+  *"MOBUX_TLS=1"*) ok "scheme-mismatch: log names the remedy" ;;
+  *) bad "scheme-mismatch: log does not name the remedy" ;;
+esac
+if [ -f "$RESULT10" ]; then
+  case "$(cat "$RESULT10")" in
+    *"serves http, but this instance is configured for https"*) ok "scheme-mismatch: reason written for the update card" ;;
+    *) bad "scheme-mismatch: result file has the wrong reason ($(cat "$RESULT10"))" ;;
+  esac
+else
+  bad "scheme-mismatch: no result file written"
+fi
+
+# ── Test 11: a healthy update clears a stale failure reason ────────────────
+ROOT11="$WORK/root11"; mkdir -p "$ROOT11/bin"
+BIN11="$ROOT11/bin/mobux"
+printf 'OLD-V0' > "$BIN11"
+printf 'NEW-V11' > "$WORK/payload-v11"
+printf '{"app":"mobux","version":"11.0.0"}' > "$WORK/identify.json"
+CARGO_OK11="$(make_stub_cargo success "$WORK/payload-v11")"
+RESULT11="$WORK/result11.txt"
+printf 'stale reason from an earlier run\n' > "$RESULT11"
+
+RESULT_FILE="$RESULT11" run_updater "11.0.0" "$BIN11" "$ROOT11" "$CARGO_OK11"
+rc=$?
+[ "$rc" -eq 0 ] && ok "clear-reason: exit 0" || bad "clear-reason: exit $rc"
+[ ! -f "$RESULT11" ] && ok "clear-reason: stale reason removed" || bad "clear-reason: stale reason still present ($(cat "$RESULT11"))"
 
 echo "---"
 echo "passed: $PASS  failed: $FAIL"

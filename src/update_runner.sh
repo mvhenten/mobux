@@ -21,6 +21,9 @@
 #   MOBUX_UPDATE_PORT      port the instance serves on (for health check)
 #   MOBUX_UPDATE_SCHEME    http|https (default https)
 #   MOBUX_UPDATE_LOG       log file path
+#   MOBUX_UPDATE_RESULT    optional file the last failure reason is written to,
+#                          so the server can show it on the update card instead
+#                          of a generic "it didn't come up"
 #   MOBUX_UPDATE_CARGO     cargo to run for the fallback (default "cargo",
 #                          with a fallback to ~/.cargo/bin/cargo when that's
 #                          not on PATH)
@@ -63,11 +66,25 @@ CARGO_BIN="${MOBUX_UPDATE_CARGO:-cargo}"
 CRATE="${MOBUX_UPDATE_CRATE:-mobux}"
 ASSET_BASE="${MOBUX_UPDATE_ASSET_BASE:-https://github.com/mvhenten/mobux/releases/download}"
 ASSET="${MOBUX_UPDATE_ASSET:-${CRATE}-x86_64-unknown-linux-gnu.tar.gz}"
+RESULT_FILE="${MOBUX_UPDATE_RESULT:-}"
 
 PREV="${BIN}.prev"
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+# Record why the run failed, both in the log and in the result file the server
+# reads for the update card. Called for terminal failures only.
+record_failure() {
+  log "FAILURE: $*"
+  [ -n "$RESULT_FILE" ] || return 0
+  printf '%s\n' "$*" > "$RESULT_FILE" 2>/dev/null || true
+}
+
+clear_failure() {
+  [ -n "$RESULT_FILE" ] || return 0
+  rm -f "$RESULT_FILE" 2>/dev/null || true
 }
 
 # Resolve a usable cargo. Under systemd the unit PATH usually lacks
@@ -138,22 +155,56 @@ restart_service() {
   systemctl --user restart "$SERVICE"
 }
 
+other_scheme() {
+  if [ "$SCHEME" = "https" ]; then printf 'http'; else printf 'https'; fi
+}
+
+# Fetch /api/identify over $1. -k: self-signed leaf certs are expected on the
+# local instance. Prints the body; returns non-zero when nothing answers.
+identify() {
+  curl -fsSk --max-time 5 "${1}://127.0.0.1:${PORT}/api/identify" 2>/dev/null
+}
+
+# The new binary is up, just not on the scheme this instance was configured
+# for — the one failure mode a generic timeout hides completely.
+scheme_mismatch_reason() {
+  local served="$1"
+  if [ "$served" = "http" ]; then
+    printf '%s' "version ${VERSION} serves http, but this instance is configured for https. mobux serves plain HTTP unless TLS is asked for: set MOBUX_TLS=1 or --tls (or --behind-tls-proxy when a proxy terminates TLS) in the systemd unit '${SERVICE}', or switch this instance to http, then upgrade again."
+    return 0
+  fi
+  printf '%s' "version ${VERSION} serves https, but this instance is configured for http. Drop MOBUX_TLS / --tls from the systemd unit '${SERVICE}', or switch this instance to https, then upgrade again."
+}
+
 # Poll the running instance's /api/identify until it reports VERSION or we
-# time out. Returns 0 on the new version showing up, 1 otherwise.
+# time out. Returns 0 on the new version showing up, 1 otherwise. When the
+# expected scheme stays silent we also probe the other one: the new version
+# answering there is a configuration mismatch, not a broken build, and it gets
+# its own actionable message. We still roll back — the phone talks to the
+# configured scheme.
 health_check() {
   local deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
-  local url="${SCHEME}://127.0.0.1:${PORT}/api/identify"
-  log "health-check ${url} expecting version ${VERSION} (timeout ${HEALTH_TIMEOUT}s)"
+  local other; other="$(other_scheme)"
+  log "health-check ${SCHEME}://127.0.0.1:${PORT}/api/identify expecting version ${VERSION} (timeout ${HEALTH_TIMEOUT}s)"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    # -k: self-signed leaf certs are expected on the local instance.
     local body
-    body="$(curl -fsSk --max-time 5 "$url" 2>/dev/null)" || { sleep 2; continue; }
-    case "$body" in
-      *"\"version\":\"${VERSION}\""*) log "health-check ok: ${VERSION} live"; return 0 ;;
-    esac
+    if body="$(identify "$SCHEME")"; then
+      case "$body" in
+        *"\"version\":\"${VERSION}\""*) log "health-check ok: ${VERSION} live"; return 0 ;;
+      esac
+    else
+      if body="$(identify "$other")"; then
+        case "$body" in
+          *"\"version\":\"${VERSION}\""*)
+            record_failure "$(scheme_mismatch_reason "$other") Rolled back to the previous version."
+            return 1
+            ;;
+        esac
+      fi
+    fi
     sleep 2
   done
-  log "health-check FAILED: ${VERSION} did not come up within ${HEALTH_TIMEOUT}s"
+  record_failure "version ${VERSION} did not answer on ${SCHEME}://127.0.0.1:${PORT}/api/identify within ${HEALTH_TIMEOUT}s. Rolled back to the previous version; see ${MOBUX_UPDATE_LOG:-the update log} on the host."
   return 1
 }
 
@@ -169,7 +220,8 @@ rollback() {
 }
 
 main() {
-  log "self-update start: crate=${CRATE} version=${VERSION} bin=${BIN} root=${ROOT} service=${SERVICE} port=${PORT}"
+  log "self-update start: crate=${CRATE} version=${VERSION} bin=${BIN} root=${ROOT} service=${SERVICE} port=${PORT} scheme=${SCHEME}"
+  clear_failure
 
   # Cross-process lock (belt-and-braces with the in-process guard in mobux):
   # even two independently spawned scripts can't race the snapshot/install. The
@@ -203,7 +255,7 @@ main() {
     resolve_cargo || exit 1
     log "cargo install ${CRATE} --locked --version ${VERSION} --root ${ROOT}"
     if ! "$CARGO_BIN" install "$CRATE" --locked --version "$VERSION" --root "$ROOT" --force; then
-      log "ERROR: cargo install failed; binary unchanged, no restart needed"
+      record_failure "installing ${VERSION} failed: the prebuilt asset was unusable and cargo install did not complete. The previous version is untouched."
       # cargo install is atomic-ish: a failed build leaves the old binary. No
       # rollback needed, but make sure the snapshot is in place anyway.
       cp -f "$PREV" "$BIN" 2>/dev/null || true
@@ -219,6 +271,7 @@ main() {
   restart_service
 
   if health_check; then
+    clear_failure
     log "self-update SUCCESS: now running ${VERSION}"
     exit 0
   fi
@@ -240,15 +293,19 @@ health_check_prev() {
     return 0
   fi
   local deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
-  local url="${SCHEME}://127.0.0.1:${PORT}/api/identify"
+  local other; other="$(other_scheme)"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -fsSk --max-time 5 "$url" >/dev/null 2>&1; then
-      log "post-rollback health-check ok: instance answering on ${PORT}"
+    if identify "$SCHEME" >/dev/null; then
+      log "post-rollback health-check ok: instance answering on ${SCHEME}://127.0.0.1:${PORT}"
+      return 0
+    fi
+    if identify "$other" >/dev/null; then
+      log "post-rollback health-check ok, but on ${other} while this instance is configured for ${SCHEME} — reconcile the unit's TLS setting with ${SCHEME}"
       return 0
     fi
     sleep 2
   done
-  log "post-rollback health-check FAILED: nothing answering on ${PORT}"
+  log "post-rollback health-check FAILED: nothing answering on ${PORT} over ${SCHEME} or ${other}"
   return 1
 }
 

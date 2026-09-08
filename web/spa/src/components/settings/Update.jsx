@@ -38,7 +38,9 @@ export function UpdateCard() {
       const res = await localFetch(path, force ? { method: "POST" } : {});
       if (!res.ok) throw new Error("HTTP " + res.status);
       info.value = await res.json();
-      if (force) show("Checked crates.io.", "ok");
+      if (info.value.lastRunError)
+        show("Last update rolled back. " + info.value.lastRunError, "error");
+      else if (force) show("Checked crates.io.", "ok");
     } catch (err) {
       show("Update check failed: " + err.message, "error");
     }
@@ -65,6 +67,16 @@ export function UpdateCard() {
             busy.value = false;
             if (confirm(`mobux updated to ${id.version}. Reload now?`))
               location.reload();
+            return;
+          }
+        }
+        const st = await localFetch("/api/update/status", {});
+        if (st.ok) {
+          const next = await st.json();
+          info.value = next;
+          if (next.lastRunError) {
+            show("Update rolled back. " + next.lastRunError, "error");
+            busy.value = false;
             return;
           }
         }

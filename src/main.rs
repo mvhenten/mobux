@@ -1009,12 +1009,16 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
 /// last-checked timestamp. Reads the in-memory cache the background poller
 /// maintains — no network call here.
 async fn api_update_status(State(state): State<AppState>) -> Json<update::UpdateStatus> {
-    Json(state.update.status().await)
+    let mut status = state.update.status().await;
+    status.last_run_error = update::last_run_error(&state.data_dir);
+    Json(status)
 }
 
 /// Force an immediate crates.io poll and return the refreshed status.
 async fn api_update_check(State(state): State<AppState>) -> Json<update::UpdateStatus> {
-    Json(state.update.refresh().await)
+    let mut status = state.update.refresh().await;
+    status.last_run_error = update::last_run_error(&state.data_dir);
+    Json(status)
 }
 
 /// Spawn the detached updater toward the latest known version. Returns 202 when
