@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::{InstallOptions, RunOptions, ALLOW_ROOT_FLAG, CONFIG_FLAG};
+use crate::cli::{self, InstallOptions, RunOptions, ALLOW_ROOT_FLAG, CONFIG_FLAG};
 use crate::config::{self, Config};
 use crate::configure;
 
@@ -68,13 +68,7 @@ pub fn resolve_unit_spec(
 ) -> Result<UnitSpec, String> {
     config::check(settings)?;
     if auth == Auth::Required && settings.credentials().is_none() {
-        return Err(
-            "a boot service needs a username and PIN — nothing else stops the network \
-                    from reaching it. Pass --user and --pin, or export MOBUX_AUTH_USER and \
-                    MOBUX_PIN before running `mobux service install`. Pass --no-auth if a \
-                    proxy in front of mobux authenticates instead."
-                .to_string(),
-        );
+        return Err(cli::MISSING_CREDENTIALS.to_string());
     }
 
     let spec = UnitSpec {
