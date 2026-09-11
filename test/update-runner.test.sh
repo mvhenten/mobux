@@ -282,6 +282,51 @@ case "$OUT9" in
 esac
 [ "$(cat "$BIN9")" = "NEW-V9" ] && ok "no-asset: installed via cargo" || bad "no-asset: wrong binary content"
 
+# ── Test 9b: an architecture with no release asset must not take the x86_64 one
+# The release only builds x86_64 and aarch64 assets. On anything else there is
+# no asset to install, and picking x86_64 anyway lands a binary that cannot
+# execute while the checksum verifies and the run reports success. MOBUX_UPDATE_ASSET
+# is unset here (as it is whenever the spawning binary finds no asset for its
+# platform), so the runner's own arch mapping decides — and it must choose the
+# cargo fallback.
+ROOT9B="$WORK/root9b"; mkdir -p "$ROOT9B/bin"
+BIN9B="$ROOT9B/bin/mobux"
+printf 'OLD-V0' > "$BIN9B"
+# A complete, valid x86_64 release lives at the base URL, so guessing it would
+# succeed — that is exactly what must not happen.
+ASSETS9B="$WORK/assets/v9.5.0"; mkdir -p "$ASSETS9B"
+PAYDIR9B="$WORK/pay9b"; mkdir -p "$PAYDIR9B"
+printf 'WRONG-ARCH-X86_64' > "$PAYDIR9B/mobux"
+X86_ASSET="mobux-x86_64-unknown-linux-gnu.tar.gz"
+tar -C "$PAYDIR9B" -czf "$ASSETS9B/$X86_ASSET" mobux
+( cd "$ASSETS9B" && sha256sum "$X86_ASSET" > "$X86_ASSET.sha256" )
+UNAME_STUB="$WORK/uname-stub"; mkdir -p "$UNAME_STUB"
+cat > "$UNAME_STUB/uname" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -m) echo armv7l ;;
+  *)  echo Linux ;;
+esac
+EOF
+chmod +x "$UNAME_STUB/uname"
+printf 'NEW-V9B-CARGO' > "$WORK/payload-v9b"
+printf '{"app":"mobux","version":"9.5.0"}' > "$WORK/identify.json"
+CARGO_OK9B="$(make_stub_cargo success "$WORK/payload-v9b")"
+
+OUT9B="$(PATH="$UNAME_STUB:$PATH" ASSET_BASE="file://$WORK/assets" \
+  run_updater "9.5.0" "$BIN9B" "$ROOT9B" "$CARGO_OK9B")"
+rc=$?
+[ "$rc" -eq 0 ] && ok "other-arch: exit 0 via cargo fallback" || bad "other-arch: exit $rc"
+[ "$(cat "$BIN9B")" = "NEW-V9B-CARGO" ] && ok "other-arch: installed via cargo, not the x86_64 asset" || bad "other-arch: wrong binary content ($(cat "$BIN9B"))"
+case "$OUT9B" in
+  *"$X86_ASSET"*) bad "other-arch: reached for the x86_64 asset" ;;
+  *) ok "other-arch: never named the x86_64 asset" ;;
+esac
+case "$OUT9B" in
+  *"no prebuilt asset for architecture armv7l"*) ok "other-arch: logged the missing asset" ;;
+  *) bad "other-arch: missing the no-asset log line" ;;
+esac
+
 # ── Test 10: scheme mismatch → rollback with an actionable reason ──────────
 # The instance is configured for https, but the new version answers on plain
 # http (the #295 default flip). The generic path would burn the whole timeout

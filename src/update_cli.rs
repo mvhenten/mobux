@@ -320,7 +320,9 @@ mod tests {
     fn both_linux_architectures_have_a_prebuilt_asset() {
         assert!(has_prebuilt_asset("linux", "x86_64"));
         assert!(has_prebuilt_asset("linux", "aarch64"));
+        assert!(has_prebuilt_asset("linux", "arm64"));
         assert!(!has_prebuilt_asset("linux", "armv7"));
+        assert!(!has_prebuilt_asset("linux", "armv7l"));
         assert!(!has_prebuilt_asset("macos", "x86_64"));
         assert!(!has_prebuilt_asset("macos", "aarch64"));
     }
@@ -338,6 +340,11 @@ mod tests {
             update::asset_name("linux", "x86_64").as_deref(),
             Some("mobux-x86_64-unknown-linux-gnu.tar.gz")
         );
+        assert_eq!(
+            update::asset_name("linux", "arm64").as_deref(),
+            Some("mobux-aarch64-unknown-linux-gnu.tar.gz")
+        );
+        assert_eq!(update::asset_name("linux", "armv7l"), None);
         assert_eq!(update::asset_name("macos", "aarch64"), None);
     }
 

@@ -34,7 +34,9 @@
 #                          file:// dir to stay off the network.
 #   MOBUX_UPDATE_ASSET     asset file name (default: the asset for the running
 #                          architecture, mobux-<triple>.tar.gz, matching what
-#                          scripts/build-release-asset.sh uploads)
+#                          scripts/build-release-asset.sh uploads). Empty on an
+#                          architecture the release ships no asset for, which
+#                          takes the cargo fallback below.
 #
 # Flags:
 #   --no-systemd    skip all systemctl calls (test mode); steps 1,2,4,5 only,
@@ -68,9 +70,14 @@ ASSET_BASE="${MOBUX_UPDATE_ASSET_BASE:-https://github.com/mvhenten/mobux/release
 if [ -n "${MOBUX_UPDATE_ASSET:-}" ]; then
   ASSET="$MOBUX_UPDATE_ASSET"
 else
+  # Only the architectures the release actually builds for get an asset name.
+  # Anything else leaves ASSET empty and takes the cargo fallback: guessing
+  # x86_64 here downloads a tarball whose checksum verifies and whose binary
+  # cannot execute, so the update reports success over a dead binary.
   case "$(uname -m)" in
+    x86_64)        ASSET="${CRATE}-x86_64-unknown-linux-gnu.tar.gz" ;;
     aarch64|arm64) ASSET="${CRATE}-aarch64-unknown-linux-gnu.tar.gz" ;;
-    *)             ASSET="${CRATE}-x86_64-unknown-linux-gnu.tar.gz" ;;
+    *)             ASSET="" ;;
   esac
 fi
 RESULT_FILE="${MOBUX_UPDATE_RESULT:-}"
@@ -128,6 +135,10 @@ resolve_cargo() {
 # Any failure returns 1 and the caller falls back to `cargo install` — the
 # asset is simply missing on releases that predate prebuilt binaries.
 install_from_release() {
+  if [ -z "$ASSET" ]; then
+    log "no prebuilt asset for architecture $(uname -m); falling back to cargo install"
+    return 1
+  fi
   local url="${ASSET_BASE}/v${VERSION}/${ASSET}"
   local work
   work="$(mktemp -d "${ROOT}/mobux-update-dl.XXXXXX")" || {

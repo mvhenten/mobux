@@ -38,6 +38,18 @@ trap 'rm -rf "$WORK"' EXIT
 ASSET="mobux-x86_64-unknown-linux-gnu.tar.gz"
 ASSET_ARM64="mobux-aarch64-unknown-linux-gnu.tar.gz"
 
+# The payload stands in for the real binary, so it has to run: the installer
+# execs it once installed. A tiny shell script echoing <body> keeps every case
+# able to identify which asset it got. The body UNRUNNABLE builds a payload
+# that cannot execute at all, standing in for a wrong-arch release binary.
+payload_script() {
+  if [ "$1" = "UNRUNNABLE" ]; then
+    printf '%s\n' "#!/mobux-test/no-such-interpreter"
+    return 0
+  fi
+  printf '%s\n' "#!/bin/sh" "printf '%s' $1"
+}
+
 # Build a release-shaped asset dir: the tarball holds a single `mobux` at the
 # root, next to a `sha256sum`-format checksum file — exactly what
 # scripts/build-release-asset.sh uploads. A release carries one asset per
@@ -50,7 +62,8 @@ make_assets() {
   [ "${#assets[@]}" -gt 0 ] || assets=("$ASSET" "$ASSET_ARM64")
   local pay="$dir/payload" asset
   mkdir -p "$dir" "$pay"
-  printf '%s' "$body" > "$pay/mobux"
+  payload_script "$body" > "$pay/mobux"
+  chmod 755 "$pay/mobux"
   for asset in "${assets[@]}"; do
     tar -C "$pay" -czf "$dir/$asset" mobux
     if [ "$checksum" = "good" ]; then
@@ -71,8 +84,10 @@ run_installer() {
     bash "$INSTALLER" 2>&1
 }
 
+# What the installed binary reports for itself. The installer only leaves a
+# binary in place once it has run it, so asking it doubles as the exec check.
 installed_body() {
-  cat "$1/mobux" 2>/dev/null
+  "$1/mobux" --version 2>/dev/null
 }
 
 # ── Test 1: happy path installs the binary and reports the checksum ─────────
@@ -154,6 +169,17 @@ rc=$?
 check "armv7l: non-zero exit" test "$rc" -ne 0
 contains "armv7l: pointed at cargo install" "$OUT4C" "cargo install mobux"
 check "armv7l: installed nothing" test ! -e "$D4C/mobux"
+
+# A binary that verifies and installs but cannot execute here — wrong arch, or
+# a glibc older than the release was built against — is reported, not left
+# behind silently for the user to discover on first run.
+A4D="$WORK/assets-unrunnable"; D4D="$WORK/dest4d"
+make_assets "$A4D" "UNRUNNABLE" good
+OUT4D="$(run_installer "$A4D" "$D4D")"
+rc=$?
+check "unrunnable: non-zero exit" test "$rc" -ne 0
+contains "unrunnable: said the binary does not run" "$OUT4D" "does not run on this host"
+contains "unrunnable: pointed at cargo install" "$OUT4D" "cargo install mobux"
 
 D5="$WORK/dest5"
 OUT5="$(run_installer "$A1" "$D5" "PATH=$STUB:$PATH" FAKE_OS=Darwin)"

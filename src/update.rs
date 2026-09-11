@@ -366,7 +366,7 @@ pub fn asset_target(os: &str, arch: &str) -> Option<&'static str> {
     }
     match arch {
         "x86_64" => Some("x86_64-unknown-linux-gnu"),
-        "aarch64" => Some("aarch64-unknown-linux-gnu"),
+        "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
         _ => None,
     }
 }
