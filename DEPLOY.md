@@ -17,15 +17,23 @@ deliberately `cargo install` a new version and restart the service.
 
 ## Install
 
-Prebuilt Linux x86_64 binary from the GitHub release (seconds, no compile;
-every release ships `mobux-x86_64-unknown-linux-gnu.tar.gz` + a `.sha256`
-checksum file as assets):
+Prebuilt Linux binary from the GitHub release (seconds, no compile; every
+release ships `mobux-x86_64-unknown-linux-gnu.tar.gz` and
+`mobux-aarch64-unknown-linux-gnu.tar.gz`, each with a `.sha256` checksum file,
+as assets). `install.sh` picks the one matching `uname -m`:
 
 ```bash
-curl -fsSLO https://github.com/mvhenten/mobux/releases/latest/download/mobux-x86_64-unknown-linux-gnu.tar.gz
-curl -fsSLO https://github.com/mvhenten/mobux/releases/latest/download/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c mobux-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf mobux-x86_64-unknown-linux-gnu.tar.gz -C ~/.cargo/bin mobux
+curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | bash
+```
+
+By hand, naming the triple for your architecture:
+
+```bash
+ASSET=mobux-x86_64-unknown-linux-gnu.tar.gz   # or mobux-aarch64-unknown-linux-gnu.tar.gz
+curl -fsSLO "https://github.com/mvhenten/mobux/releases/latest/download/$ASSET"
+curl -fsSLO "https://github.com/mvhenten/mobux/releases/latest/download/$ASSET.sha256"
+sha256sum -c "$ASSET.sha256"
+tar -xzf "$ASSET" -C ~/.cargo/bin mobux
 ```
 
 From crates.io (released versions; 5-10 min release-mode compile):
@@ -278,9 +286,11 @@ and **no commit back to `main`** (branch protection forbids it). The pipeline is
    `workflow_run` on CI) runs `npx semantic-release`. It computes the next
    version from the conventional commits since the latest `v*` tag, then:
    creates the **git tag** (`vX.Y.Z`), a **GitHub Release** with generated
-   notes plus a **prebuilt Linux x86_64 binary**
-   (`mobux-x86_64-unknown-linux-gnu.tar.gz` + `.sha256`, built by
-   `scripts/build-release-asset.sh` after the version is patched in), and
+   notes plus **prebuilt Linux x86_64 and aarch64 binaries**
+   (`mobux-<triple>-unknown-linux-gnu.tar.gz` + `.sha256`, built by
+   `scripts/build-release-asset.sh` after the version is patched in; aarch64 is
+   cross-compiled with the `gcc-aarch64-linux-gnu` toolchain the workflow
+   installs), and
    **publishes to crates.io**. The in-app self-updater consumes that asset, so
    updates take seconds instead of a 5-10 min compile.
 
@@ -330,11 +340,11 @@ longer used** and can be removed.
 
 Deploying to hosts stays a separate concern: manual (see above) or the in-app
 self-updater (issue #130). The updater downloads the release's prebuilt binary
-asset, verifies its sha256, and atomically replaces the binary `ExecStart`
-points at (`~/.cargo/bin/mobux`), then restarts the unit and health-checks the
-new version (rollback on failure). Releases without the asset (≤ v0.1.10) fall
-back to `cargo install`, which is why the unit PATH should still include
-`~/.cargo/bin`.
+asset for the running architecture, verifies its sha256, and atomically
+replaces the binary `ExecStart` points at (`~/.cargo/bin/mobux`), then restarts
+the unit and health-checks the new version (rollback on failure). Releases
+without the asset (≤ v0.1.10) fall back to `cargo install`, which is why the
+unit PATH should still include `~/.cargo/bin`.
 
 ## Development (never touch `:5151`)
 

@@ -18,9 +18,6 @@ use std::process::Command;
 use crate::cli::UpdateCommand;
 use crate::{service, update};
 
-/// The prebuilt release asset the updater prefers, per install.sh.
-const ASSET_TARGET: &str = "x86_64-unknown-linux-gnu";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     UpToDate {
@@ -67,10 +64,10 @@ pub fn describe(decision: &Decision) -> String {
     }
 }
 
-/// The release ships a prebuilt asset for Linux x86_64 only; everywhere else
-/// the updater compiles from source through `cargo install`.
+/// The release ships a prebuilt asset for Linux x86_64 and Linux aarch64;
+/// everywhere else the updater compiles from source through `cargo install`.
 pub fn has_prebuilt_asset(os: &str, arch: &str) -> bool {
-    os == "linux" && arch == "x86_64"
+    update::asset_target(os, arch).is_some()
 }
 
 pub async fn run(command: UpdateCommand) -> i32 {
@@ -144,10 +141,11 @@ fn install(settings: &crate::config::Config, version: &str) -> Result<PathBuf, S
     check_replaceable(&bin)?;
 
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let asset = update::asset_name(os, arch);
     if !has_prebuilt_asset(os, arch) {
         println!(
-            "no prebuilt {ASSET_TARGET} asset for {os}/{arch} — installing from source with \
-             cargo install, which takes several minutes"
+            "no prebuilt release asset for {os}/{arch} — installing from source with cargo \
+             install, which takes several minutes"
         );
     }
 
@@ -157,12 +155,16 @@ fn install(settings: &crate::config::Config, version: &str) -> Result<PathBuf, S
     let script = update::write_updater_script(&dir).map_err(|e| e.to_string())?;
 
     println!("installing mobux {version} over {}", bin.display());
-    let status = Command::new("bash")
-        .arg(&script)
+    let mut cmd = Command::new("bash");
+    cmd.arg(&script)
         .arg("--install-only")
         .env("MOBUX_UPDATE_VERSION", version)
         .env("MOBUX_UPDATE_BIN", &bin)
-        .env("MOBUX_UPDATE_ROOT", update::cargo_root(&bin))
+        .env("MOBUX_UPDATE_ROOT", update::cargo_root(&bin));
+    if let Some(asset) = &asset {
+        cmd.env("MOBUX_UPDATE_ASSET", asset);
+    }
+    let status = cmd
         .status()
         .map_err(|e| format!("running the updater ({}): {e}", script.display()))?;
 
@@ -315,10 +317,28 @@ mod tests {
     }
 
     #[test]
-    fn only_linux_x86_64_has_a_prebuilt_asset() {
+    fn both_linux_architectures_have_a_prebuilt_asset() {
         assert!(has_prebuilt_asset("linux", "x86_64"));
-        assert!(!has_prebuilt_asset("linux", "aarch64"));
+        assert!(has_prebuilt_asset("linux", "aarch64"));
+        assert!(!has_prebuilt_asset("linux", "armv7"));
         assert!(!has_prebuilt_asset("macos", "x86_64"));
+        assert!(!has_prebuilt_asset("macos", "aarch64"));
+    }
+
+    /// The updater must ask for the asset built for the arch it is running on;
+    /// handing an aarch64 host the x86_64 tarball installs a binary that cannot
+    /// execute, and the health check would only catch it after the swap.
+    #[test]
+    fn the_asset_name_follows_the_running_arch() {
+        assert_eq!(
+            update::asset_name("linux", "aarch64").as_deref(),
+            Some("mobux-aarch64-unknown-linux-gnu.tar.gz")
+        );
+        assert_eq!(
+            update::asset_name("linux", "x86_64").as_deref(),
+            Some("mobux-x86_64-unknown-linux-gnu.tar.gz")
+        );
+        assert_eq!(update::asset_name("macos", "aarch64"), None);
     }
 
     /// The check path end to end against a local server — proving the CLI reads

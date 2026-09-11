@@ -32,9 +32,9 @@
 #                          the asset is fetched from
 #                          <BASE>/v<VERSION>/<ASSET>). Tests point this at a
 #                          file:// dir to stay off the network.
-#   MOBUX_UPDATE_ASSET     asset file name (default
-#                          mobux-x86_64-unknown-linux-gnu.tar.gz, matching
-#                          what scripts/build-release-asset.sh uploads)
+#   MOBUX_UPDATE_ASSET     asset file name (default: the asset for the running
+#                          architecture, mobux-<triple>.tar.gz, matching what
+#                          scripts/build-release-asset.sh uploads)
 #
 # Flags:
 #   --no-systemd    skip all systemctl calls (test mode); steps 1,2,4,5 only,
@@ -65,7 +65,14 @@ HEALTH_TIMEOUT="${MOBUX_UPDATE_HEALTH_TIMEOUT:-90}"
 CARGO_BIN="${MOBUX_UPDATE_CARGO:-cargo}"
 CRATE="${MOBUX_UPDATE_CRATE:-mobux}"
 ASSET_BASE="${MOBUX_UPDATE_ASSET_BASE:-https://github.com/mvhenten/mobux/releases/download}"
-ASSET="${MOBUX_UPDATE_ASSET:-${CRATE}-x86_64-unknown-linux-gnu.tar.gz}"
+if [ -n "${MOBUX_UPDATE_ASSET:-}" ]; then
+  ASSET="$MOBUX_UPDATE_ASSET"
+else
+  case "$(uname -m)" in
+    aarch64|arm64) ASSET="${CRATE}-aarch64-unknown-linux-gnu.tar.gz" ;;
+    *)             ASSET="${CRATE}-x86_64-unknown-linux-gnu.tar.gz" ;;
+  esac
+fi
 RESULT_FILE="${MOBUX_UPDATE_RESULT:-}"
 
 PREV="${BIN}.prev"

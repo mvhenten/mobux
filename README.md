@@ -38,7 +38,7 @@ mobux is meant to live on your private network, not the open internet.
 
 ## Quick start
 
-Install the prebuilt binary (Linux x86_64, needs `tmux`):
+Install the prebuilt binary (Linux x86_64 or aarch64, needs `tmux`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | bash
@@ -50,7 +50,7 @@ mobux service install --port 5151   # or keep it running across reboots
 mobux update                        # or `mobux update --check` to look first
 ```
 
-It verifies the release checksum and installs to `~/.local/bin/mobux`. On any other platform, `cargo install mobux`.
+It picks the release asset matching `uname -m`, verifies its checksum, and installs to `~/.local/bin/mobux`. On any other platform, `cargo install mobux`.
 
 From source:
 

@@ -222,7 +222,10 @@ esac
 ROOT7="$WORK/root7"; mkdir -p "$ROOT7/bin"
 BIN7="$ROOT7/bin/mobux"
 printf 'OLD-V0' > "$BIN7"
-ASSET_NAME="mobux-x86_64-unknown-linux-gnu.tar.gz"
+case "$(uname -m)" in
+  aarch64|arm64) ASSET_NAME="mobux-aarch64-unknown-linux-gnu.tar.gz" ;;
+  *)             ASSET_NAME="mobux-x86_64-unknown-linux-gnu.tar.gz" ;;
+esac
 ASSETS7="$WORK/assets/v7.0.0"; mkdir -p "$ASSETS7"
 PAYDIR7="$WORK/pay7"; mkdir -p "$PAYDIR7"
 printf 'NEW-V7-PREBUILT' > "$PAYDIR7/mobux"
