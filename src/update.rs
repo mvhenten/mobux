@@ -16,8 +16,9 @@
 //!     unit name.
 //!
 //! Design decisions (from #130):
-//!   * Installs the prebuilt Linux x86_64 release asset (seconds instead of a
-//!     5-10 min release compile); `cargo install` remains the fallback.
+//!   * Installs the prebuilt release asset for the running architecture (Linux
+//!     x86_64 and aarch64; seconds instead of a 5-10 min release compile);
+//!     `cargo install` remains the fallback.
 //!   * Rollback runs in a process that outlives the server, since the restart
 //!     kills the server mid-update.
 //!   * The crates.io URL is the resolved `update.check_url` setting, so CI /
@@ -357,6 +358,25 @@ pub fn is_newer(current: &str, latest: &str) -> bool {
 /// The embedded updater script. Written to MOBUX_DATA_DIR and run detached.
 const UPDATER_SCRIPT: &str = include_str!("update_runner.sh");
 
+/// The release target triple prebuilt for a platform, or `None` where the
+/// release ships no asset and the updater has to fall back to `cargo install`.
+pub fn asset_target(os: &str, arch: &str) -> Option<&'static str> {
+    if os != "linux" {
+        return None;
+    }
+    match arch {
+        "x86_64" => Some("x86_64-unknown-linux-gnu"),
+        "aarch64" | "arm64" => Some("aarch64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+/// The release asset name for a platform, matching what
+/// `scripts/build-release-asset.sh` uploads.
+pub fn asset_name(os: &str, arch: &str) -> Option<String> {
+    asset_target(os, arch).map(|target| format!("mobux-{target}.tar.gz"))
+}
+
 /// Structured reasons `/api/update/run` declines to start an update.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -559,6 +579,9 @@ pub fn spawn_updater(
         .stderr(std::process::Stdio::from(log_err));
     if let Some(cargo) = &cargo {
         cmd.env("MOBUX_UPDATE_CARGO", cargo);
+    }
+    if let Some(asset) = asset_name(std::env::consts::OS, std::env::consts::ARCH) {
+        cmd.env("MOBUX_UPDATE_ASSET", asset);
     }
 
     let child = cmd.spawn().map_err(|e| RunError::SpawnFailed {

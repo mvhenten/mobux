@@ -36,21 +36,42 @@ WORK="$(mktemp -d "${TEST_CACHE}/mobux-install-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 ASSET="mobux-x86_64-unknown-linux-gnu.tar.gz"
+ASSET_ARM64="mobux-aarch64-unknown-linux-gnu.tar.gz"
+
+# The payload stands in for the real binary, so it has to run: the installer
+# execs it once installed. A tiny shell script echoing <body> keeps every case
+# able to identify which asset it got. The body UNRUNNABLE builds a payload
+# that cannot execute at all, standing in for a wrong-arch release binary.
+payload_script() {
+  if [ "$1" = "UNRUNNABLE" ]; then
+    printf '%s\n' "#!/mobux-test/no-such-interpreter"
+    return 0
+  fi
+  printf '%s\n' "#!/bin/sh" "printf '%s' $1"
+}
 
 # Build a release-shaped asset dir: the tarball holds a single `mobux` at the
 # root, next to a `sha256sum`-format checksum file — exactly what
-# scripts/build-release-asset.sh uploads.
+# scripts/build-release-asset.sh uploads. A release carries one asset per
+# architecture, so make_assets writes both unless a case names just one — which
+# is how the arch cases prove the installer picks by name.
 make_assets() {
-  local dir="$1" body="$2" checksum="$3"  # checksum: good|bad
-  local pay="$dir/payload"
+  local dir="$1" body="$2" checksum="$3"
+  shift 3
+  local assets=("$@")
+  [ "${#assets[@]}" -gt 0 ] || assets=("$ASSET" "$ASSET_ARM64")
+  local pay="$dir/payload" asset
   mkdir -p "$dir" "$pay"
-  printf '%s' "$body" > "$pay/mobux"
-  tar -C "$pay" -czf "$dir/$ASSET" mobux
-  if [ "$checksum" = "good" ]; then
-    (cd "$dir" && sha256sum "$ASSET" > "$ASSET.sha256")
-  else
-    printf '%s  %s\n' "$(printf '0%.0s' {1..64})" "$ASSET" > "$dir/$ASSET.sha256"
-  fi
+  payload_script "$body" > "$pay/mobux"
+  chmod 755 "$pay/mobux"
+  for asset in "${assets[@]}"; do
+    tar -C "$pay" -czf "$dir/$asset" mobux
+    if [ "$checksum" = "good" ]; then
+      (cd "$dir" && sha256sum "$asset" > "$asset.sha256")
+    else
+      printf '%s  %s\n' "$(printf '0%.0s' {1..64})" "$asset" > "$dir/$asset.sha256"
+    fi
+  done
   rm -rf "$pay"
 }
 
@@ -63,8 +84,10 @@ run_installer() {
     bash "$INSTALLER" 2>&1
 }
 
+# What the installed binary reports for itself. The installer only leaves a
+# binary in place once it has run it, so asking it doubles as the exec check.
 installed_body() {
-  cat "$1/mobux" 2>/dev/null
+  "$1/mobux" --version 2>/dev/null
 }
 
 # ── Test 1: happy path installs the binary and reports the checksum ─────────
@@ -104,7 +127,7 @@ rc=$?
 check "no-asset: non-zero exit" test "$rc" -ne 0
 contains "no-asset: reported the download failure" "$OUT3" "could not download"
 
-# ── Test 4: unsupported OS/arch points at cargo install ────────────────────
+# ── Test 4: the running arch decides the asset ─────────────────────────────
 STUB="$WORK/stub-bin"; mkdir -p "$STUB"
 cat > "$STUB/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -116,12 +139,47 @@ esac
 EOF
 chmod +x "$STUB/uname"
 
-D4="$WORK/dest4"
-OUT4="$(run_installer "$A1" "$D4" "PATH=$STUB:$PATH" FAKE_ARCH=aarch64)"
+# Each arch installs from its own asset. Every dir below holds only the one
+# tarball, so reaching for the other name cannot pass.
+A4X="$WORK/assets-x86_64"; D4X="$WORK/dest4x"
+make_assets "$A4X" "MOBUX-BINARY-X86_64" good "$ASSET"
+OUT4X="$(run_installer "$A4X" "$D4X" "PATH=$STUB:$PATH" FAKE_ARCH=x86_64)"
 rc=$?
-check "arm64: non-zero exit" test "$rc" -ne 0
-contains "arm64: pointed at cargo install" "$OUT4" "cargo install mobux"
-check "arm64: installed nothing" test ! -e "$D4/mobux"
+check "x86_64: exit 0" test "$rc" -eq 0
+check "x86_64: binary installed" test "$(installed_body "$D4X")" = "MOBUX-BINARY-X86_64"
+contains "x86_64: downloaded the x86_64 asset" "$OUT4X" "$ASSET"
+
+A4="$WORK/assets-arm64"; D4="$WORK/dest4"
+make_assets "$A4" "MOBUX-BINARY-ARM64" good "$ASSET_ARM64"
+OUT4="$(run_installer "$A4" "$D4" "PATH=$STUB:$PATH" FAKE_ARCH=aarch64)"
+rc=$?
+check "arm64: exit 0" test "$rc" -eq 0
+check "arm64: binary installed" test "$(installed_body "$D4")" = "MOBUX-BINARY-ARM64"
+contains "arm64: downloaded the aarch64 asset" "$OUT4" "$ASSET_ARM64"
+
+# Some hosts spell it arm64; it is the same target triple.
+D4B="$WORK/dest4b"
+run_installer "$A4" "$D4B" "PATH=$STUB:$PATH" FAKE_ARCH=arm64 >/dev/null
+check "arm64 alias: binary installed" test "$(installed_body "$D4B")" = "MOBUX-BINARY-ARM64"
+
+# An architecture with no release asset is refused, not half-installed.
+D4C="$WORK/dest4c"
+OUT4C="$(run_installer "$A1" "$D4C" "PATH=$STUB:$PATH" FAKE_ARCH=armv7l)"
+rc=$?
+check "armv7l: non-zero exit" test "$rc" -ne 0
+contains "armv7l: pointed at cargo install" "$OUT4C" "cargo install mobux"
+check "armv7l: installed nothing" test ! -e "$D4C/mobux"
+
+# A binary that verifies and installs but cannot execute here — wrong arch, or
+# a glibc older than the release was built against — is reported, not left
+# behind silently for the user to discover on first run.
+A4D="$WORK/assets-unrunnable"; D4D="$WORK/dest4d"
+make_assets "$A4D" "UNRUNNABLE" good
+OUT4D="$(run_installer "$A4D" "$D4D")"
+rc=$?
+check "unrunnable: non-zero exit" test "$rc" -ne 0
+contains "unrunnable: said the binary does not run" "$OUT4D" "does not run on this host"
+contains "unrunnable: pointed at cargo install" "$OUT4D" "cargo install mobux"
 
 D5="$WORK/dest5"
 OUT5="$(run_installer "$A1" "$D5" "PATH=$STUB:$PATH" FAKE_OS=Darwin)"

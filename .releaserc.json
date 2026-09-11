@@ -39,7 +39,9 @@
         "failComment": false,
         "assets": [
           { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz" },
-          { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256" }
+          { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256" },
+          { "path": "target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz" },
+          { "path": "target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz.sha256" }
         ]
       }
     ]

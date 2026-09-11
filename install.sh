@@ -3,9 +3,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | bash
 #
-# Downloads the latest GitHub release asset built by
-# scripts/build-release-asset.sh, verifies its sha256, and drops the binary in
-# ~/.local/bin. User-local only: no sudo, no writes outside $HOME, no stdin.
+# Downloads the latest GitHub release asset for the running architecture (Linux
+# x86_64 and aarch64) built by scripts/build-release-asset.sh, verifies its
+# sha256, and drops the binary in ~/.local/bin. User-local only: no writes
+# outside $HOME, no stdin.
 #
 # Overridable for tests and mirrors:
 #   MOBUX_INSTALL_BASE_URL  where to fetch <asset> and <asset>.sha256 from
@@ -16,8 +17,6 @@
 set -euo pipefail
 
 CRATE="mobux"
-TARGET="x86_64-unknown-linux-gnu"
-ASSET="${CRATE}-${TARGET}.tar.gz"
 BASE_URL="${MOBUX_INSTALL_BASE_URL:-https://github.com/mvhenten/mobux/releases/latest/download}"
 INSTALL_DIR="${MOBUX_INSTALL_DIR:-$HOME/.local/bin}"
 
@@ -27,10 +26,13 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 os="$(uname -s)"
 arch="$(uname -m)"
-if [ "$os" != "Linux" ] || [ "$arch" != "x86_64" ]; then
-  die "no prebuilt binary for ${os}/${arch} — mobux ships one only for Linux x86_64.
-Build from source instead: cargo install ${CRATE}"
-fi
+case "${os}/${arch}" in
+  Linux/x86_64)              TARGET="x86_64-unknown-linux-gnu" ;;
+  Linux/aarch64|Linux/arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+  *) die "no prebuilt binary for ${os}/${arch} — mobux ships one for Linux x86_64 and Linux aarch64 only.
+Build from source instead: cargo install ${CRATE}" ;;
+esac
+ASSET="${CRATE}-${TARGET}.tar.gz"
 
 for tool in curl tar sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required but not installed"
@@ -63,6 +65,13 @@ mv -f "${WORK}/${CRATE}" "${INSTALL_DIR}/.${CRATE}.new" \
 chmod 755 "${INSTALL_DIR}/.${CRATE}.new"
 mv -f "${INSTALL_DIR}/.${CRATE}.new" "${INSTALL_DIR}/${CRATE}"
 say "installed ${INSTALL_DIR}/${CRATE}"
+
+# A wrong-architecture asset, or one built against a newer glibc than this host
+# has, downloads and verifies cleanly and then fails on every invocation. Prove
+# the binary runs here rather than leaving a dead one behind without a word.
+"${INSTALL_DIR}/${CRATE}" --version >/dev/null 2>&1 \
+  || die "${INSTALL_DIR}/${CRATE} was installed but does not run on this host — the release binary does not match this architecture or this system's glibc.
+Build from source instead: cargo install ${CRATE}"
 
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
