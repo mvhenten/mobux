@@ -66,6 +66,13 @@ chmod 755 "${INSTALL_DIR}/.${CRATE}.new"
 mv -f "${INSTALL_DIR}/.${CRATE}.new" "${INSTALL_DIR}/${CRATE}"
 say "installed ${INSTALL_DIR}/${CRATE}"
 
+# A wrong-architecture asset, or one built against a newer glibc than this host
+# has, downloads and verifies cleanly and then fails on every invocation. Prove
+# the binary runs here rather than leaving a dead one behind without a word.
+"${INSTALL_DIR}/${CRATE}" --version >/dev/null 2>&1 \
+  || die "${INSTALL_DIR}/${CRATE} was installed but does not run on this host — the release binary does not match this architecture or this system's glibc.
+Build from source instead: cargo install ${CRATE}"
+
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
   *) warn "${INSTALL_DIR} is not on your PATH — add it: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
