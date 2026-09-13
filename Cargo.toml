@@ -20,6 +20,9 @@ local-stt = [
     "dep:candle-nn",
     "dep:candle-transformers",
     "dep:tokenizers",
+    "dep:flate2",
+    "dep:tar",
+    "dep:sha2",
 ]
 
 [dependencies]
@@ -63,6 +66,11 @@ candle-transformers = { version = "0.11", optional = true }
 # Pinned to the version and feature set candle-core already depends on, so
 # the tree carries one tokenizers rather than two.
 tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
+# Unpacking the release tarball the weights ride in, and checking it against
+# the hashes in src/local_stt/model.lock.json. miniz_oxide backend: no zlib.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+tar = { version = "0.4", default-features = false, optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

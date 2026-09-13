@@ -11,9 +11,18 @@
 # gcc-aarch64-linux-gnu toolchain the workflow installs; on a native aarch64
 # host the same target builds without it.
 #
+# Each asset carries the binary plus the vendored speech model, so install.sh
+# lands a host that can dictate without fetching a model from anywhere. The
+# weights come from scripts/stt-model.mjs, the only thing that talks to Hugging
+# Face, and are checked against src/local_stt/model.lock.json before packing.
+#
 # Output (uploaded by @semantic-release/github, see .releaserc.json):
 #   target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz[.sha256]
 #   target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz[.sha256]
+#
+# Tarball layout:
+#   mobux
+#   stt-models/<model>/{config.json,tokenizer.json,model.safetensors}
 
 set -euo pipefail
 
@@ -53,11 +62,25 @@ setup_cross() {
 
 mkdir -p "$OUT_DIR"
 
+# The weights ride along, so the model has to be on disk and matching the lock
+# before anything is packed. `ensure` is a no-op once it is.
+MODEL_DIR="target/stt-model"
+MODEL_ID="$(node -e 'process.stdout.write(require("./src/local_stt/model.lock.json").model)')"
+node scripts/stt-model.mjs ensure "$MODEL_DIR"
+
 for target in $TARGETS; do
   setup_cross "$target"
   asset="${CRATE}-${target}.tar.gz"
-  cargo build --release --target "$target"
-  tar -C "target/${target}/release" -czf "${OUT_DIR}/${asset}" "$CRATE"
+  cargo build --release --target "$target" --features local-stt
+
+  stage="${OUT_DIR}/stage-${target}"
+  rm -rf "$stage"
+  mkdir -p "${stage}/stt-models/${MODEL_ID}"
+  cp "target/${target}/release/${CRATE}" "${stage}/${CRATE}"
+  cp "${MODEL_DIR}"/* "${stage}/stt-models/${MODEL_ID}/"
+
+  tar -C "$stage" -czf "${OUT_DIR}/${asset}" "$CRATE" "stt-models"
+  rm -rf "$stage"
   (cd "$OUT_DIR" && sha256sum "$asset" > "${asset}.sha256")
-  echo "built ${OUT_DIR}/${asset} (version ${VERSION})"
+  echo "built ${OUT_DIR}/${asset} (version ${VERSION}, model ${MODEL_ID})"
 done

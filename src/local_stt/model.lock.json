@@ -1,0 +1,21 @@
+{
+  "model": "tiny.en",
+  "repo": "openai/whisper-tiny.en",
+  "revision": "main",
+  "dtype": "f16",
+  "weights_source": "model.safetensors",
+  "files": {
+    "config.json": {
+      "sha256": "b5366317df280f79e6cc366f259f379674f81a8721d458acf2e00680ccb10b1d",
+      "bytes": 1937
+    },
+    "tokenizer.json": {
+      "sha256": "5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0",
+      "bytes": 2405679
+    },
+    "model.safetensors": {
+      "sha256": "27e6cbbc03132b9e95bc2ff4fe1a8c4ccb207f77998cc7567a3945b626b733f7",
+      "bytes": 75539400
+    }
+  }
+}

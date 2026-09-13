@@ -3146,7 +3146,9 @@ async fn api_stt_install_status(
 fn install_status_json(phase: &local_stt::Phase) -> serde_json::Value {
     let (name, error) = match phase {
         local_stt::Phase::Ready => ("success", None),
-        local_stt::Phase::Downloading { .. } | local_stt::Phase::Loading => ("running", None),
+        local_stt::Phase::Downloading { .. }
+        | local_stt::Phase::Verifying
+        | local_stt::Phase::Loading => ("running", None),
         local_stt::Phase::NotDownloaded => ("idle", None),
         local_stt::Phase::Disabled => ("failed", Some(local_stt::UNSUPPORTED_MESSAGE.to_string())),
         local_stt::Phase::Failed(err) => ("failed", Some(err.clone())),

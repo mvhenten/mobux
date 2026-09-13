@@ -2,8 +2,15 @@
 //!
 //! The local provider runs whisper inside the mobux process through candle —
 //! pure Rust, so `cargo install mobux --features local-stt` needs no cmake, no
-//! C++ toolchain and no container runtime. Weights are fetched from Hugging
-//! Face once into `<data_dir>/stt-models/<model>/` and kept there.
+//! C++ toolchain and no container runtime.
+//!
+//! The weights are vendored, not fetched from a model host. They ride in the
+//! release tarball `install.sh` already downloads and sha256-verifies, so that
+//! path never reaches the network for a model at all. A `cargo install` build
+//! has no weights beside it, so it pulls that same release asset and checks
+//! every file against `model.lock.json` — the hashes this source tree was
+//! built against. `scripts/stt-model.mjs` is the only thing that talks to
+//! Hugging Face, and only when a maintainer refreshes the vendored model.
 //!
 //! The engine itself is behind the `local-stt` feature so the default build
 //! stays small. Without it every entry point here still exists and reports
@@ -22,44 +29,70 @@ mod wav;
 /// Whether this binary was built with the in-process engine.
 pub const ENABLED: bool = cfg!(feature = "local-stt");
 
-/// Smallest model that transcribes dictation usefully on a CPU. A phone-length
-/// clip finishes in a second or two and the download is ~150 MB, which is what
-/// makes "record, wait, get text" hold on a first run.
+/// The vendored checkpoint. Small enough that a phone-length clip finishes in
+/// a second or two on a CPU, and small enough to ride in the release tarball.
+/// English-only: the decoder here does not detect language, so a multilingual
+/// checkpoint would silently transcribe into the wrong one.
 pub const DEFAULT_MODEL: &str = "tiny.en";
 
-/// The whisper checkpoints the engine can run, smallest first. English-only:
-/// the decoder here does not do language detection, so a multilingual
-/// checkpoint would silently transcribe into the wrong language.
-const MODELS: [(&str, &str); 3] = [
-    ("tiny.en", "openai/whisper-tiny.en"),
-    ("base.en", "openai/whisper-base.en"),
-    ("small.en", "openai/whisper-small.en"),
-];
+/// Point this at a directory holding `config.json`, `tokenizer.json` and
+/// `model.safetensors` to run weights this host already has — an airgapped
+/// install, or a checkpoint other than the vendored one. A directory named
+/// here is used as given and never checked against the lock.
+pub const MODEL_DIR_ENV: &str = "MOBUX_STT_MODEL_DIR";
 
-/// Files pulled from the model repo, in download order.
-const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+/// Where the release assets are fetched from. Mirrors `MOBUX_INSTALL_BASE_URL`
+/// in install.sh, and exists for the same reasons: tests and mirrors.
+pub const ASSET_BASE_URL_ENV: &str = "MOBUX_STT_ASSET_BASE_URL";
+pub const DEFAULT_ASSET_BASE_URL: &str =
+    "https://github.com/mvhenten/mobux/releases/latest/download";
+
+/// Path inside the release tarball that the weights are packed at.
+pub fn asset_model_prefix(model: &str) -> String {
+    format!("stt-models/{model}/")
+}
+
+/// The model this source tree was built against, pinned by content hash.
+/// Rewritten only by `scripts/stt-model.mjs`.
+const MODEL_LOCK_JSON: &str = include_str!("local_stt/model.lock.json");
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LockedFile {
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelLock {
+    pub model: String,
+    pub files: std::collections::BTreeMap<String, LockedFile>,
+}
+
+pub fn model_lock() -> &'static ModelLock {
+    static LOCK: std::sync::OnceLock<ModelLock> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| {
+        serde_json::from_str(MODEL_LOCK_JSON).expect("model.lock.json is built into the binary")
+    })
+}
+
+/// The files the engine loads, in the order they are unpacked.
+pub fn model_files() -> Vec<&'static str> {
+    model_lock().files.keys().map(String::as_str).collect()
+}
 
 pub fn model_ids() -> Vec<String> {
-    MODELS.iter().map(|(id, _)| (*id).to_string()).collect()
+    vec![model_lock().model.clone()]
 }
 
-/// The Hugging Face repo backing a model id, or None for an unknown id.
-pub fn repo_for(model: &str) -> Option<&'static str> {
-    MODELS
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, repo)| *repo)
+pub fn is_known_model(model: &str) -> bool {
+    model_lock().model == model.trim()
 }
 
-/// Resolve a configured model name to one the engine can run. A value left
+/// Resolve a configured model name to the one the engine can run. A value left
 /// over from another provider (a `Systran/faster-whisper-*` id, say) falls back
-/// to the default rather than failing the transcription.
-pub fn resolve_model(configured: &str) -> &'static str {
-    MODELS
-        .iter()
-        .find(|(id, _)| *id == configured.trim())
-        .map(|(id, _)| *id)
-        .unwrap_or(DEFAULT_MODEL)
+/// to the vendored model rather than failing the transcription.
+pub fn resolve_model(_configured: &str) -> &'static str {
+    DEFAULT_MODEL
 }
 
 pub fn cache_dir(data_dir: &Path) -> PathBuf {
@@ -70,10 +103,33 @@ pub fn model_dir(data_dir: &Path, model: &str) -> PathBuf {
     cache_dir(data_dir).join(model)
 }
 
-/// True once every file the engine loads is on disk.
+/// True once every file the engine loads is in `dir`.
+pub fn files_present(dir: &Path) -> bool {
+    model_files().iter().all(|f| dir.join(f).is_file())
+}
+
 pub fn model_files_present(data_dir: &Path, model: &str) -> bool {
-    let dir = model_dir(data_dir, model);
-    MODEL_FILES.iter().all(|f| dir.join(f).is_file())
+    files_present(&model_dir(data_dir, model))
+}
+
+/// The release tarball carrying the weights for this host, or None on an
+/// architecture mobux publishes no prebuilt asset for.
+pub fn release_asset_name() -> Option<&'static str> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    match std::env::consts::ARCH {
+        "x86_64" => Some("mobux-x86_64-unknown-linux-gnu.tar.gz"),
+        "aarch64" => Some("mobux-aarch64-unknown-linux-gnu.tar.gz"),
+        _ => None,
+    }
+}
+
+pub fn asset_base_url() -> String {
+    std::env::var(ASSET_BASE_URL_ENV)
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| DEFAULT_ASSET_BASE_URL.to_string())
 }
 
 /// What the local engine is doing, as the status endpoint reports it.
@@ -83,6 +139,8 @@ pub enum Phase {
     Disabled,
     /// Weights are not on disk yet and nothing is fetching them.
     NotDownloaded,
+    /// Checking unpacked weights against the hashes in the lock.
+    Verifying,
     Downloading {
         file: String,
         downloaded: u64,
@@ -100,7 +158,7 @@ impl Phase {
         match self {
             Self::Disabled => "unsupported",
             Self::NotDownloaded => "not_installed",
-            Self::Downloading { .. } | Self::Loading => "warming",
+            Self::Downloading { .. } | Self::Verifying | Self::Loading => "warming",
             Self::Ready => "ready",
             Self::Failed(_) => "failed",
         }
@@ -111,7 +169,7 @@ impl Phase {
     pub fn message(&self) -> String {
         match self {
             Self::Disabled => UNSUPPORTED_MESSAGE.to_string(),
-            Self::NotDownloaded => "The speech model has not been downloaded yet.".to_string(),
+            Self::NotDownloaded => "The speech model is not on this host yet.".to_string(),
             Self::Downloading {
                 file,
                 downloaded,
@@ -120,6 +178,7 @@ impl Phase {
                 Some(pct) => format!("Downloading the speech model ({file}) — {pct}%."),
                 None => format!("Downloading the speech model ({file})."),
             },
+            Self::Verifying => "Checking the speech model against its recorded hashes.".to_string(),
             Self::Loading => "Loading the speech model into memory.".to_string(),
             Self::Ready => "The speech model is loaded.".to_string(),
             Self::Failed(err) => format!("The speech model could not be prepared: {err}"),
@@ -181,17 +240,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_model_is_in_the_catalog() {
-        assert!(repo_for(DEFAULT_MODEL).is_some());
-        assert!(model_ids().contains(&DEFAULT_MODEL.to_string()));
+    fn the_default_model_is_the_one_the_lock_pins() {
+        assert_eq!(model_lock().model, DEFAULT_MODEL);
+        assert!(is_known_model(DEFAULT_MODEL));
+        assert_eq!(model_ids(), vec![DEFAULT_MODEL.to_string()]);
+    }
+
+    // The weights are stored half-precision and converted on load; a lock that
+    // drifted back to f32 would double the release tarball without anyone
+    // noticing until it was published.
+    #[test]
+    fn the_lock_pins_three_f16_files_with_real_hashes() {
+        let lock = model_lock();
+        assert_eq!(
+            model_files(),
+            vec!["config.json", "model.safetensors", "tokenizer.json"]
+        );
+        for (name, file) in &lock.files {
+            assert_eq!(file.sha256.len(), 64, "{name}");
+            assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+            assert!(file.bytes > 0, "{name}");
+        }
+        assert!(
+            lock.files["model.safetensors"].bytes < 100 * 1024 * 1024,
+            "f16 tiny.en is ~75 MB; anything near 150 MB is f32"
+        );
     }
 
     #[test]
-    fn every_catalog_model_maps_to_an_openai_whisper_repo() {
-        for id in model_ids() {
-            let repo = repo_for(&id).expect("catalog entry has a repo");
-            assert!(repo.starts_with("openai/whisper-"), "{id} -> {repo}");
-        }
+    fn both_published_architectures_have_an_asset_to_pull_the_model_from() {
+        assert!(release_asset_name().is_some_and(|a| a.ends_with(".tar.gz")));
+        assert!(asset_base_url().starts_with("http"));
+        assert_eq!(asset_model_prefix("tiny.en"), "stt-models/tiny.en/");
     }
 
     // A DB written by the container-backed provider still carries its
@@ -205,22 +285,39 @@ mod tests {
     }
 
     #[test]
-    fn a_known_model_is_kept() {
-        assert_eq!(resolve_model("small.en"), "small.en");
-        assert_eq!(resolve_model(" base.en "), "base.en");
+    fn the_vendored_model_is_kept() {
+        assert_eq!(resolve_model(DEFAULT_MODEL), DEFAULT_MODEL);
+        assert_eq!(resolve_model(" tiny.en "), DEFAULT_MODEL);
+    }
+
+    fn write_model_files(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for name in model_files() {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
     }
 
     #[test]
     fn model_files_are_reported_missing_until_all_three_exist() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!model_files_present(dir.path(), "tiny.en"));
-        let model = model_dir(dir.path(), "tiny.en");
+        assert!(!model_files_present(dir.path(), DEFAULT_MODEL));
+        let model = model_dir(dir.path(), DEFAULT_MODEL);
         std::fs::create_dir_all(&model).unwrap();
         std::fs::write(model.join("config.json"), b"{}").unwrap();
         std::fs::write(model.join("tokenizer.json"), b"{}").unwrap();
-        assert!(!model_files_present(dir.path(), "tiny.en"));
+        assert!(!model_files_present(dir.path(), DEFAULT_MODEL));
         std::fs::write(model.join("model.safetensors"), b"x").unwrap();
-        assert!(model_files_present(dir.path(), "tiny.en"));
+        assert!(model_files_present(dir.path(), DEFAULT_MODEL));
+    }
+
+    // The unpacked cache is what install.sh leaves behind, and finding it is
+    // what keeps that path from ever reaching the network.
+    #[test]
+    fn a_directory_counts_as_present_only_once_it_holds_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!files_present(dir.path()));
+        write_model_files(dir.path());
+        assert!(files_present(dir.path()));
     }
 
     #[test]
@@ -228,6 +325,7 @@ mod tests {
         assert_eq!(Phase::Ready.state(), "ready");
         assert_eq!(Phase::NotDownloaded.state(), "not_installed");
         assert_eq!(Phase::Loading.state(), "warming");
+        assert_eq!(Phase::Verifying.state(), "warming");
         assert_eq!(
             Phase::Downloading {
                 file: "model.safetensors".to_string(),

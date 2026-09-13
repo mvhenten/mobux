@@ -5,8 +5,9 @@ import { u } from "./base.js";
 
 export const FALLBACK_MODELS = {
   openai: ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
-  // The checkpoints the in-process engine can run (src/local_stt.rs).
-  local: ["tiny.en", "base.en", "small.en"],
+  // The vendored checkpoint (src/local_stt/model.lock.json). Other weights go
+  // in through MOBUX_STT_MODEL_DIR, not through this list.
+  local: ["tiny.en"],
   network: [
     "Systran/faster-whisper-base.en",
     "Systran/faster-whisper-small.en",

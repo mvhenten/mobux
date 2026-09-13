@@ -287,7 +287,7 @@ impl Db {
         let Some(model) = local else {
             return Ok(());
         };
-        if crate::local_stt::repo_for(model.trim()).is_some() {
+        if crate::local_stt::is_known_model(&model) {
             return Ok(());
         }
         conn.execute(
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(leftovers, 0, "no container command survives the upgrade");
     }
 
-    // Re-opening must not undo a model the user picked after the upgrade.
+    // Re-opening must not churn a row the migration has already fixed.
     #[test]
     fn the_migration_leaves_a_model_the_engine_can_run_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1319,10 +1319,10 @@ mod tests {
                 kind: LOCAL_KIND.to_string(),
                 host: String::new(),
                 port: String::new(),
-                model: "small.en".to_string(),
+                model: crate::local_stt::DEFAULT_MODEL.to_string(),
                 api_key: None,
             })
-            .expect("pick a bigger model");
+            .expect("write the migrated row back");
         }
         let db = Db::open(&path).expect("second open");
         assert_eq!(
@@ -1330,7 +1330,7 @@ mod tests {
                 .expect("read local")
                 .expect("local row")
                 .model,
-            "small.en"
+            crate::local_stt::DEFAULT_MODEL
         );
     }
 }
