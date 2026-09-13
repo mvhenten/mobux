@@ -2893,11 +2893,20 @@ async fn api_set_stt_config(
     State(state): State<AppState>,
     Json(req): Json<SttConfigPutJson>,
 ) -> Result<StatusCode, AppError> {
+    // The local kind runs a fixed catalog, so a model it cannot run is stored
+    // as the one it will actually load. Otherwise the picker keeps offering a
+    // value nothing honours — which is how faster-whisper ids outlived the
+    // container-backed provider.
+    let model = if req.kind == transcribe::LOCAL_KIND {
+        local_stt::resolve_model(&req.model).to_string()
+    } else {
+        req.model
+    };
     let row = db::SttProviderRow {
         kind: req.kind.clone(),
         host: req.host,
         port: req.port,
-        model: req.model,
+        model,
         // Empty string means "keep existing" — set_stt_provider handles this.
         api_key: req.api_key,
     };
@@ -3354,11 +3363,19 @@ async fn api_stt_models(
         };
         (base, api_key, k)
     } else {
-        // No explicit host — use the active kind's stored settings.
+        // No explicit host. Answer for the kind that was asked about, falling
+        // back to the active one only when the caller named none: the settings
+        // card asks about the kind the user just picked, which it has not
+        // saved yet, and answering about the active kind handed it another
+        // provider's catalog.
+        let requested = q.kind.clone().filter(|k| !k.is_empty());
         tokio::task::spawn_blocking({
             let db = state.db.clone();
             move || -> anyhow::Result<_> {
-                let kind = db.stt_active_kind()?;
+                let kind = match requested {
+                    Some(kind) => kind,
+                    None => db.stt_active_kind()?,
+                };
                 let row = db
                     .stt_provider(&kind)?
                     .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
@@ -4421,6 +4438,159 @@ mod tests {
         let Json(val) = result.expect("handler should not error");
         let models = val["models"].as_array().expect("models array");
         assert!(!models.is_empty(), "fallback models must not be empty");
+    }
+
+    // Regression: the endpoint used the ACTIVE kind whenever no host was
+    // supplied, so the settings card — which asks about the kind the user just
+    // picked, before the debounced save lands — got the previous provider's
+    // catalog. Picking the local engine offered faster-whisper ids it cannot
+    // run.
+    #[tokio::test]
+    async fn stt_models_answers_for_the_kind_that_was_asked_about() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .set_stt_active_kind("network")
+            .expect("a self-hosted endpoint is active");
+
+        let Json(val) = api_stt_models(
+            State(state.clone()),
+            Query(SttModelsQuery {
+                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                host: None,
+                port: None,
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        let models: Vec<String> = val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert_eq!(models, local_stt::model_ids());
+
+        // And the reverse, so the fix is not "always answer local".
+        state
+            .db
+            .set_stt_active_kind(transcribe::LOCAL_KIND)
+            .expect("switch the active kind");
+        let Json(val) = api_stt_models(
+            State(state),
+            Query(SttModelsQuery {
+                kind: Some("network".to_string()),
+                host: None,
+                port: None,
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        assert!(val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|m| m.as_str().is_some_and(|m| m.starts_with("Systran/"))));
+    }
+
+    // A model the engine cannot run is never stored against the local kind,
+    // so nothing downstream — the picker included — can offer it back.
+    #[tokio::test]
+    async fn saving_a_local_model_the_engine_cannot_run_stores_the_one_it_will_load() {
+        let (state, _dir) = test_state(false);
+        api_set_stt_config(
+            State(state.clone()),
+            Json(SttConfigPutJson {
+                kind: transcribe::LOCAL_KIND.to_string(),
+                host: String::new(),
+                port: String::new(),
+                model: "Systran/faster-whisper-small".to_string(),
+                api_key: None,
+            }),
+        )
+        .await
+        .expect("saving must not error");
+
+        assert_eq!(
+            state
+                .db
+                .stt_provider(transcribe::LOCAL_KIND)
+                .expect("read local")
+                .expect("local row")
+                .model,
+            local_stt::DEFAULT_MODEL
+        );
+    }
+
+    // Picking one the engine does run is stored as given.
+    #[tokio::test]
+    async fn saving_a_local_model_from_the_catalog_keeps_it() {
+        let (state, _dir) = test_state(false);
+        api_set_stt_config(
+            State(state.clone()),
+            Json(SttConfigPutJson {
+                kind: transcribe::LOCAL_KIND.to_string(),
+                host: String::new(),
+                port: String::new(),
+                model: "small.en".to_string(),
+                api_key: None,
+            }),
+        )
+        .await
+        .expect("saving must not error");
+
+        assert_eq!(
+            state
+                .db
+                .stt_provider(transcribe::LOCAL_KIND)
+                .expect("read local")
+                .expect("local row")
+                .model,
+            "small.en"
+        );
+    }
+
+    // The in-process engine runs the checkpoints in model.lock.json and
+    // nothing else. A faster-whisper id offered for the local kind is an id
+    // the engine will silently swap for the default — so it must never reach
+    // the picker, from the catalog or from a stale stored row.
+    #[tokio::test]
+    async fn the_local_model_list_never_offers_a_checkpoint_the_engine_cannot_run() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .set_stt_provider(db::SttProviderRow {
+                kind: transcribe::LOCAL_KIND.to_string(),
+                host: "http://127.0.0.1".to_string(),
+                port: "5200".to_string(),
+                model: "Systran/faster-whisper-small".to_string(),
+                api_key: None,
+            })
+            .expect("a row left over from the container-backed provider");
+
+        let Json(val) = api_stt_models(
+            State(state),
+            Query(SttModelsQuery {
+                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                host: Some("http://127.0.0.1".to_string()),
+                port: Some("5200".to_string()),
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        let models: Vec<String> = val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert_eq!(models, local_stt::model_ids());
+        for model in &models {
+            assert!(
+                local_stt::is_known_model(model),
+                "the local picker offered {model}, which the engine cannot run"
+            );
+        }
     }
 
     #[tokio::test]
