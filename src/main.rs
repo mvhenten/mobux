@@ -1205,6 +1205,7 @@ struct ConversationHistoryQuery {
     cursor: Option<String>,
     limit: Option<usize>,
     tail: Option<usize>,
+    before: Option<String>,
 }
 
 /// GET /api/sessions/{name}/conversation — the OSC 133-segmented
@@ -1215,17 +1216,21 @@ struct ConversationHistoryQuery {
 /// ```text
 /// GET /api/sessions/{name}/conversation
 ///       ?cursor=<opaque>    resume forward from a previous page (exclusive)
-///       ?limit=<n>          max entries in a forward page
+///       ?before=<opaque>    the page of entries older than a cursor
+///       ?limit=<n>          max entries in a forward or backward page
 ///       ?tail=<n>           the newest n entries
-/// → 200 { "entries": [ … ], "nextCursor": "<opaque>" }
+/// → 200 { "entries": [ … ], "nextCursor": "<opaque>",
+///         "prevCursor": "<opaque>", "hasOlder": <bool> }
 /// ```
 ///
-/// The three modes are mutually exclusive: neither parameter gives a
-/// forward page from the oldest retained entry; `cursor` (optionally with
-/// `limit`) resumes forward from it, exclusive; `tail` gives the newest
-/// entries. `tail` alongside `cursor` or `limit` is a 400 — `tail` carries
-/// its own count, so a second one is ambiguous. `limit` defaults to 50;
-/// both it and `tail` clamp to 1..500 rather than rejecting.
+/// The modes are mutually exclusive: no parameter gives a forward page from
+/// the oldest retained entry; `cursor` (optionally with `limit`) resumes
+/// forward from it, exclusive; `before` (optionally with `limit`) gives the
+/// page immediately older than it; `tail` gives the newest entries. `tail`
+/// alongside any other parameter is a 400 — `tail` carries its own count,
+/// so a second one is ambiguous — and so is `cursor` with `before`, which
+/// name opposite directions. `limit` defaults to 50; both it and `tail`
+/// clamp to 1..500 rather than rejecting.
 ///
 /// `output` is truncated for transport to the last
 /// `MAX_WIRE_OUTPUT_BYTES`, and a truncated entry carries
@@ -1241,6 +1246,12 @@ struct ConversationHistoryQuery {
 /// history. An empty page echoes the supplied cursor; an empty or absent
 /// file gives the zero cursor. `v1:<seq>` cursors still decode, with the
 /// offset unknown, so no client holding one breaks.
+///
+/// `prevCursor` is its mirror: the entry just before the page's oldest and
+/// the byte offset of that oldest line, which is what a client walking
+/// backwards passes as the next `before`. `hasOlder` says whether the
+/// record continues past it, so reaching the start of what is retained is a
+/// fact the client is told rather than one it infers from an empty page.
 ///
 /// An unparseable cursor and a malformed session name are both a 400. A
 /// well-formed name with no history is an empty page with the zero cursor.
@@ -1261,6 +1272,16 @@ async fn api_session_conversation(
             "tail carries its own count; limit is ambiguous alongside it"
         )));
     }
+    if q.tail.is_some() && q.before.is_some() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "tail and before are mutually exclusive"
+        )));
+    }
+    if q.cursor.is_some() && q.before.is_some() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "cursor and before name opposite directions"
+        )));
+    }
 
     let cursor = match q.cursor {
         Some(raw) => Some(
@@ -1270,17 +1291,29 @@ async fn api_session_conversation(
         None => None,
     };
 
+    let before = match q.before {
+        Some(raw) => Some(
+            session_history::decode_cursor(&raw)
+                .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("invalid cursor")))?,
+        ),
+        None => None,
+    };
+
+    let limit = q
+        .limit
+        .unwrap_or(session_history::DEFAULT_LIMIT)
+        .clamp(1, session_history::MAX_LIMIT);
+
     let history = state.session_history.clone();
-    let page = match q.tail {
-        Some(tail) => {
+    let page = match (q.tail, before) {
+        (Some(tail), _) => {
             let count = tail.clamp(1, session_history::MAX_LIMIT);
             tokio::task::spawn_blocking(move || history.read_tail(&name, count)).await
         }
-        None => {
-            let limit = q
-                .limit
-                .unwrap_or(session_history::DEFAULT_LIMIT)
-                .clamp(1, session_history::MAX_LIMIT);
+        (None, Some(before)) => {
+            tokio::task::spawn_blocking(move || history.read_before(&name, before, limit)).await
+        }
+        (None, None) => {
             tokio::task::spawn_blocking(move || history.read_page(&name, cursor, limit)).await
         }
     }
@@ -1290,6 +1323,8 @@ async fn api_session_conversation(
     Ok(Json(json!({
         "entries": page.entries,
         "nextCursor": session_history::encode_cursor(page.next_seq, page.next_offset),
+        "prevCursor": session_history::encode_cursor(page.prev_seq, page.prev_offset),
+        "hasOlder": page.has_older,
     })))
 }
 

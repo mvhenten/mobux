@@ -747,6 +747,9 @@ impl SessionHistoryStore {
             entries: Vec::new(),
             next_seq: 0,
             next_offset: 0,
+            prev_seq: 0,
+            prev_offset: 0,
+            has_older: false,
         };
         let Ok(file) = File::open(&path) else {
             return Ok(zero);
@@ -763,6 +766,9 @@ impl SessionHistoryStore {
                     entries: Vec::new(),
                     next_seq: floor,
                     next_offset: offset,
+                    prev_seq: floor,
+                    prev_offset: offset,
+                    has_older: offset > 0,
                 })
             }
             Some(offset) if offset < file_len && resumes_at_seq(&mut reader, offset, floor)? => {
@@ -780,13 +786,62 @@ impl SessionHistoryStore {
     /// newest entries always survive.
     pub fn read_tail(&self, session: &str, count: usize) -> anyhow::Result<Page> {
         let path = self.file_path(session);
+        self.collect_backwards(BackwardLines::open(&path)?, u64::MAX, count, 0)
+    }
+
+    /// Returns up to `limit` entries *older* than `cursor` — those whose
+    /// `seq` is at or below `cursor.seq` — oldest of the page first. This
+    /// is the other direction of [`Self::read_page`]: a client holding the
+    /// newest turns walks back through the retained record by feeding the
+    /// previous page's `prev_*` cursor in here, which is what makes the
+    /// whole history reachable rather than only the tail it mounted with.
+    ///
+    /// The cursor's offset is the start of the oldest entry the caller
+    /// already holds, so a trusted one turns the walk into a seek. It is
+    /// trusted only when the line at that offset is `cursor.seq + 1`, the
+    /// same check the forward read makes; a stale one (the file was trimmed
+    /// under the client) falls back to walking from the end and skipping
+    /// what the caller already has, which costs a scan and returns the same
+    /// page.
+    pub fn read_before(
+        &self,
+        session: &str,
+        cursor: PageCursor,
+        limit: usize,
+    ) -> anyhow::Result<Page> {
+        let path = self.file_path(session);
+        let trusted = match cursor.offset {
+            Some(offset) => offset_resumes_at_seq(&path, offset, cursor.seq)?,
+            None => None,
+        };
+        let lines = match trusted {
+            Some(offset) => BackwardLines::open_at(&path, offset)?,
+            None => BackwardLines::open(&path)?,
+        };
+        let fallback_offset = trusted.unwrap_or(0);
+        self.collect_backwards(lines, cursor.seq, limit, fallback_offset)
+    }
+
+    /// The shared backward walk behind `read_tail` and `read_before`.
+    /// `ceiling` skips entries the caller already holds; `empty_offset` is
+    /// the position an empty page echoes back.
+    fn collect_backwards(
+        &self,
+        lines: Option<BackwardLines>,
+        ceiling: u64,
+        count: usize,
+        empty_offset: u64,
+    ) -> anyhow::Result<Page> {
         let mut entries: Vec<serde_json::Value> = Vec::new();
         let mut next_seq = 0u64;
         let mut next_offset = 0u64;
+        let mut oldest_seq = 0u64;
+        let mut oldest_start = empty_offset;
+        let mut has_older = false;
         let mut used = 0usize;
 
-        if let Some(mut lines) = BackwardLines::open(&path)? {
-            while entries.len() < count {
+        if let Some(mut lines) = lines {
+            loop {
                 let Some((start, bytes)) = lines.next_line()? else {
                     break;
                 };
@@ -798,9 +853,19 @@ impl SessionHistoryStore {
                     continue;
                 };
                 let seq = value.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
+                if seq > ceiling {
+                    continue;
+                }
+                // Reached past the page: a line was there to read, so the
+                // record continues older than what this page carries.
+                if entries.len() >= count {
+                    has_older = true;
+                    break;
+                }
                 cap_output_for_wire(&mut value);
                 let size = serde_json::to_string(&value)?.len();
                 if !entries.is_empty() && used + size > MAX_PAGE_BYTES {
+                    has_older = true;
                     break;
                 }
                 used += size;
@@ -808,8 +873,21 @@ impl SessionHistoryStore {
                     next_seq = seq;
                     next_offset = start + bytes.len() as u64 + 1;
                 }
+                oldest_seq = seq;
+                oldest_start = start;
                 entries.push(value);
             }
+        }
+
+        if entries.is_empty() {
+            return Ok(Page {
+                entries,
+                next_seq,
+                next_offset,
+                prev_seq: 0,
+                prev_offset: empty_offset,
+                has_older: false,
+            });
         }
 
         entries.reverse();
@@ -817,16 +895,27 @@ impl SessionHistoryStore {
             entries,
             next_seq,
             next_offset,
+            prev_seq: oldest_seq.saturating_sub(1),
+            prev_offset: oldest_start,
+            has_older,
         })
     }
 }
 
 /// One page of the conversation record: the entries themselves plus the
-/// cursor position they resume from.
+/// cursor positions on either side of them. `next_*` resumes forward from
+/// the page's newest entry; `prev_*` resumes forward from the entry just
+/// before its oldest, which is what a caller walking backwards passes as the
+/// next `before`. `has_older` says whether a complete older entry exists
+/// beyond the page, so a client knows when it has reached the start of the
+/// retained record rather than inferring it from an empty page.
 pub struct Page {
     pub entries: Vec<serde_json::Value>,
     pub next_seq: u64,
     pub next_offset: u64,
+    pub prev_seq: u64,
+    pub prev_offset: u64,
+    pub has_older: bool,
 }
 
 /// Truncates `output` for transport to the last `MAX_WIRE_OUTPUT_BYTES`,
@@ -852,6 +941,25 @@ fn cap_output_for_wire(value: &mut serde_json::Value) {
         "outputTruncatedBytes".to_string(),
         serde_json::Value::from(dropped),
     );
+}
+
+/// The offset, when the line starting there is `cursor_seq + 1` — the same
+/// trust check the forward read makes, on its own handle because the
+/// backward walk opens the file itself. `None` means the offset is stale
+/// (the record was trimmed under the client) and the caller must fall back
+/// to a scan.
+fn offset_resumes_at_seq(path: &Path, offset: u64, cursor_seq: u64) -> anyhow::Result<Option<u64>> {
+    let Ok(file) = File::open(path) else {
+        return Ok(None);
+    };
+    if offset >= file.metadata()?.len() {
+        return Ok(None);
+    }
+    let mut reader = BufReader::new(file);
+    if resumes_at_seq(&mut reader, offset, cursor_seq)? {
+        return Ok(Some(offset));
+    }
+    Ok(None)
 }
 
 /// Whether a cursor's byte offset resumes at `cursor_seq + 1`. Seqs are
@@ -897,6 +1005,8 @@ fn scan_forward(
     let mut entries: Vec<serde_json::Value> = Vec::new();
     let mut next_seq = floor;
     let mut next_offset = from_offset;
+    let mut prev_seq = floor;
+    let mut prev_offset = from_offset;
     let mut used = 0usize;
 
     reader.seek(SeekFrom::Start(from_offset))?;
@@ -909,6 +1019,7 @@ fn scan_forward(
         if read == 0 || !line.ends_with(b"\n") {
             break;
         }
+        let line_start = position;
         position += read as u64;
         let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&line) else {
             next_offset = position;
@@ -927,6 +1038,10 @@ fn scan_forward(
         used += size;
         next_seq = seq;
         next_offset = position;
+        if entries.is_empty() {
+            prev_seq = seq.saturating_sub(1);
+            prev_offset = line_start;
+        }
         entries.push(value);
         if entries.len() >= limit {
             break;
@@ -937,6 +1052,9 @@ fn scan_forward(
         entries,
         next_seq,
         next_offset,
+        prev_seq,
+        prev_offset,
+        has_older: prev_offset > 0,
     })
 }
 
@@ -952,10 +1070,27 @@ impl BackwardLines {
     /// Opens `path` positioned just past its last complete line. `None`
     /// when the file is missing or holds no complete line at all.
     fn open(path: &Path) -> anyhow::Result<Option<Self>> {
-        let Ok(mut file) = File::open(path) else {
+        let Ok(file) = File::open(path) else {
             return Ok(None);
         };
-        let mut scan_end = file.metadata()?.len();
+        let end = file.metadata()?.len();
+        Self::from_end(file, end)
+    }
+
+    /// Opens `path` positioned at `end` instead of at the file's end, so a
+    /// backward walk can resume where an earlier one stopped rather than
+    /// re-reading everything newer than it. An `end` past the file is
+    /// clamped, which makes a stale offset a slow read, never a wrong one.
+    fn open_at(path: &Path, end: u64) -> anyhow::Result<Option<Self>> {
+        let Ok(file) = File::open(path) else {
+            return Ok(None);
+        };
+        let len = file.metadata()?.len();
+        Self::from_end(file, end.min(len))
+    }
+
+    fn from_end(mut file: File, end: u64) -> anyhow::Result<Option<Self>> {
+        let mut scan_end = end;
         while scan_end > 0 {
             let start = scan_end.saturating_sub(BACKWARD_CHUNK as u64);
             let mut chunk = vec![0u8; (scan_end - start) as usize];
@@ -2038,5 +2173,154 @@ mod tests {
         drop(first);
         let third = store.try_acquire_feeder("s1");
         assert!(third.is_some(), "freed once the first attach disconnects");
+    }
+
+    // ── Backward paging (the scrollback half) ──────────────────────
+    // A client mounts on the newest turns and walks back from there, so
+    // `read_before` is what makes anything older than that first page
+    // reachable at all. These tests hold the whole walk: every retained
+    // entry arrives exactly once, in order, and the walk stops because the
+    // record says it is done rather than because a page came back empty.
+
+    fn back_cursor(page: &Page) -> PageCursor {
+        PageCursor {
+            seq: page.prev_seq,
+            offset: Some(page.prev_offset),
+        }
+    }
+
+    fn seqs_of(page: &Page) -> Vec<u64> {
+        page.entries
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn read_before_walks_back_over_the_whole_record() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 500);
+
+        let tail = store.read_tail("s1", 100).unwrap();
+        assert_eq!(seqs_of(&tail).first().copied(), Some(401));
+        assert!(tail.has_older);
+
+        let mut seen: Vec<u64> = seqs_of(&tail);
+        let mut page = tail;
+        while page.has_older {
+            page = store.read_before("s1", back_cursor(&page), 100).unwrap();
+            let mut batch = seqs_of(&page);
+            assert!(
+                !batch.is_empty(),
+                "a page claiming older entries must carry some"
+            );
+            batch.extend(seen);
+            seen = batch;
+        }
+
+        assert_eq!(seen, (1..=500).collect::<Vec<u64>>());
+    }
+
+    #[test]
+    fn read_before_stops_at_the_oldest_retained_entry() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 5);
+
+        let tail = store.read_tail("s1", 2).unwrap();
+        assert!(tail.has_older);
+
+        let older = store.read_before("s1", back_cursor(&tail), 10).unwrap();
+        assert_eq!(seqs_of(&older), vec![1, 2, 3]);
+        assert!(!older.has_older);
+
+        let past_the_start = store.read_before("s1", back_cursor(&older), 10).unwrap();
+        assert!(past_the_start.entries.is_empty());
+        assert!(!past_the_start.has_older);
+    }
+
+    #[test]
+    fn read_before_falls_back_to_a_scan_on_a_stale_offset() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 20);
+
+        let tail = store.read_tail("s1", 5).unwrap();
+        let honest = store.read_before("s1", back_cursor(&tail), 5).unwrap();
+
+        // Same seq, an offset that no longer lands on that entry's line.
+        let stale = PageCursor {
+            seq: tail.prev_seq,
+            offset: Some(tail.prev_offset + 3),
+        };
+        let recovered = store.read_before("s1", stale, 5).unwrap();
+        assert_eq!(seqs_of(&recovered), seqs_of(&honest));
+        assert_eq!(seqs_of(&recovered), vec![11, 12, 13, 14, 15]);
+
+        // A v1 cursor carries no offset at all and must recover the same way.
+        let offsetless = PageCursor {
+            seq: tail.prev_seq,
+            offset: None,
+        };
+        let from_v1 = store.read_before("s1", offsetless, 5).unwrap();
+        assert_eq!(seqs_of(&from_v1), seqs_of(&honest));
+    }
+
+    #[test]
+    fn read_before_reaches_the_start_of_a_trimmed_record() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", TRIGGER);
+        let oldest_retained = TRIM_MARGIN + 2;
+
+        let mut page = store.read_tail("s1", MAX_LIMIT).unwrap();
+        let mut oldest_seen = *seqs_of(&page).first().unwrap();
+        while page.has_older {
+            page = store
+                .read_before("s1", back_cursor(&page), MAX_LIMIT)
+                .unwrap();
+            let first = *seqs_of(&page).first().unwrap();
+            assert!(first < oldest_seen);
+            oldest_seen = first;
+        }
+        assert_eq!(oldest_seen, oldest_retained);
+    }
+
+    #[test]
+    fn read_before_drops_from_its_oldest_end_when_the_budget_bites() {
+        let (_dir, store) = temp_store();
+        for _ in 0..64 {
+            append_output(&store, "s1", "x".repeat(MAX_WIRE_OUTPUT_BYTES));
+        }
+        let tail = store.read_tail("s1", 1).unwrap();
+        let page = store.read_before("s1", back_cursor(&tail), 64).unwrap();
+        assert!(page.entries.len() < 63);
+        // The newest of the requested range survives; the walk continues
+        // from the page's own oldest end.
+        assert_eq!(page.entries.last().unwrap()["seq"], 63);
+        assert!(page.has_older);
+    }
+
+    #[test]
+    fn tail_reports_whether_the_record_continues_past_it() {
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 10);
+
+        let partial = store.read_tail("s1", 3).unwrap();
+        assert!(partial.has_older);
+        let older = store.read_before("s1", back_cursor(&partial), 3).unwrap();
+        assert_eq!(seqs_of(&older), vec![5, 6, 7]);
+
+        let whole = store.read_tail("s1", 50).unwrap();
+        assert!(!whole.has_older);
+    }
+
+    #[test]
+    fn an_empty_record_has_nothing_older() {
+        let (_dir, store) = temp_store();
+        let tail = store.read_tail("s1", 50).unwrap();
+        assert!(tail.entries.is_empty());
+        assert!(!tail.has_older);
+
+        let older = store.read_before("s1", back_cursor(&tail), 50).unwrap();
+        assert!(older.entries.is_empty());
+        assert!(!older.has_older);
     }
 }
