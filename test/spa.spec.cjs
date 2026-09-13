@@ -1534,9 +1534,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -1938,9 +1938,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -2019,9 +2019,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -2105,9 +2105,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -2238,24 +2238,29 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
       state: "warming",
       reachable: false,
       installed: true,
-      local_process_running: true,
-      podman_missing: false,
+      message: "Downloading the speech model (model.safetensors) — 40%.",
+      progress: {
+        file: "model.safetensors",
+        downloaded: 60000000,
+        total: 150000000,
+      },
     });
 
     const hint = page.locator("#mobux-mic-overlay .mo-install-hint");
     await expect(hint).toBeVisible();
     await expect(hint).toContainText("Downloading the speech model");
+    await expect(hint).toContainText("40%");
 
-    // The install/start buttons are the wrong answer here — nothing is
-    // missing and nothing is stopped. ("Record anyway", the fault escape
-    // hatch, shares their class and is fine to keep.)
+    // The download button is the wrong answer here — the download is already
+    // running. ("Record anyway", the fault escape hatch, shares their class
+    // and is fine to keep.)
     expect(
       await page
         .locator("#mobux-mic-overlay .mo-install-btn", {
-          hasText: /Install local speech server|Start speech server/,
+          hasText: /Download the speech model/,
         })
         .count(),
-      "warm-up must not offer install or start",
+      "warm-up must not offer the download it is already doing",
     ).toBe(0);
 
     // And it must not give up on a 30 s clock: still counting well past it.
@@ -2263,32 +2268,49 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     await expect(hint).toContainText("Downloading the speech model");
   });
 
-  test("a host without podman is told so, with the command that installs it", async ({
+  test("a build without the in-process engine is told so, with the command that installs one", async ({
     page,
   }) => {
     await openModelFault(page, {
       kind: "local",
-      state: "podman_missing",
+      state: "unsupported",
       reachable: false,
       installed: false,
-      local_process_running: false,
-      podman_missing: true,
-      podman_install_command: "sudo apt-get install -y podman",
-      podman_message:
-        "podman is not installed. The local speech server runs in a podman container — install it with `sudo apt-get install -y podman`, then try again.",
+      engine_available: false,
+      message:
+        "This build has no in-process speech engine. Reinstall with `cargo install mobux --locked --features local-stt`, or point the provider at an OpenAI-compatible endpoint.",
     });
 
     const actionArea = page.locator("#mobux-mic-overlay .mo-action-area");
-    await expect(actionArea).toContainText("podman is not installed");
-    await expect(actionArea).toContainText("sudo apt-get install -y podman");
+    await expect(actionArea).toContainText("no in-process speech engine");
+    await expect(actionArea).toContainText("--features local-stt");
     expect(
       await page
         .locator("#mobux-mic-overlay .mo-install-btn", {
-          hasText: /Install local speech server|Start speech server/,
+          hasText: /Download the speech model/,
         })
         .count(),
       "a button that cannot work is worse than the sentence that explains why",
     ).toBe(0);
+  });
+
+  test("a model that has never been downloaded offers to fetch it", async ({
+    page,
+  }) => {
+    await openModelFault(page, {
+      kind: "local",
+      state: "not_installed",
+      reachable: false,
+      installed: false,
+      engine_available: true,
+      message: "The speech model has not been downloaded yet.",
+    });
+
+    await expect(
+      page.locator("#mobux-mic-overlay .mo-install-btn", {
+        hasText: "Download the speech model",
+      }),
+    ).toBeVisible();
   });
 
   // ── regression: a /transcribe that never responds must still fault loud ──

@@ -5,11 +5,8 @@ import { u } from "./base.js";
 
 export const FALLBACK_MODELS = {
   openai: ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
-  local: [
-    "Systran/faster-whisper-small",
-    "Systran/faster-whisper-small.en",
-    "Systran/faster-whisper-medium.en",
-  ],
+  // The checkpoints the in-process engine can run (src/local_stt.rs).
+  local: ["tiny.en", "base.en", "small.en"],
   network: [
     "Systran/faster-whisper-base.en",
     "Systran/faster-whisper-small.en",
@@ -19,12 +16,9 @@ export const FALLBACK_MODELS = {
 
 // Defaults a kind falls back to when it has no stored provider row.
 export function kindDefaults(kind) {
+  // The local provider runs in this process: no host, no port.
   if (kind === "local")
-    return {
-      host: "http://127.0.0.1",
-      port: "5200",
-      model: FALLBACK_MODELS.local[0],
-    };
+    return { host: "", port: "", model: FALLBACK_MODELS.local[0] };
   if (kind === "openai")
     return { host: "https://api.openai.com", port: "443", model: "whisper-1" };
   return { host: "", port: "", model: FALLBACK_MODELS.network[0] };

@@ -1,31 +1,52 @@
-//! STT provider abstraction — forwards audio to an OpenAI-compatible endpoint.
+//! STT provider selection.
 //!
-//! No model is loaded in-process. The active provider is read from db config
-//! on each request (no restart needed after config change).
+//! Two providers, one seam. The "local" kind runs whisper inside this process
+//! (`crate::local_stt`); every other kind forwards the clip to an
+//! OpenAI-compatible `/v1/audio/transcriptions` endpoint the user configured.
+//! The active provider is read from db config on each request, so a config
+//! change needs no restart.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::multipart;
 
-/// Provider configuration stored in db (mirrors db::SttConfig).
-#[derive(Debug, Clone)]
+/// Endpoint configuration for a remote provider (mirrors db::SttProviderRow).
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderConfig {
     pub url: String,
     pub model: String,
     pub api_key: Option<String>,
 }
 
-impl ProviderConfig {
-    /// Default local config — points at a faster-whisper server on port 5200.
-    #[cfg(test)]
-    pub fn default_local() -> Self {
-        Self {
-            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
-            model: "Systran/faster-whisper-small".to_string(),
-            api_key: None,
-        }
+/// The provider kind that runs in-process instead of over HTTP.
+pub const LOCAL_KIND: &str = "local";
+
+/// Where a transcription runs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Provider {
+    /// Whisper loaded into this process.
+    InProcess { model: String },
+    /// An OpenAI-compatible endpoint the user configured.
+    Remote(ProviderConfig),
+}
+
+/// Pick the provider for a configured kind.
+///
+/// Only the local kind runs in-process; every other kind — including one this
+/// build has never heard of — is a user-configured endpoint, so an unknown
+/// kind keeps forwarding rather than silently switching to local inference.
+pub fn select_provider(kind: &str, url: &str, model: &str, api_key: Option<&str>) -> Provider {
+    if kind == LOCAL_KIND {
+        return Provider::InProcess {
+            model: crate::local_stt::resolve_model(model).to_string(),
+        };
     }
+    Provider::Remote(ProviderConfig {
+        url: url.to_string(),
+        model: model.to_string(),
+        api_key: api_key.filter(|k| !k.is_empty()).map(str::to_string),
+    })
 }
 
 #[derive(Debug)]
@@ -127,13 +148,6 @@ pub async fn transcribe_with_provider(
 // instead of leaving the "reachable" poll itself looking dead.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
-// Warm-up timeout. The local backend downloads its whisper model on the first
-// transcription request, not at container start, so this one request has to
-// outlive a multi-gigabyte download on a slow line. Nobody is waiting on it —
-// it runs detached so the probe stays fast — and a short timeout would abort
-// the download the whole flow is waiting for.
-const WARMUP_TIMEOUT: Duration = Duration::from_secs(45 * 60);
-
 /// 10 ms of 16 kHz mono silence, WAV-encoded — just enough audio for a real
 /// provider to round-trip through its actual transcription pipeline.
 fn probe_audio_bytes() -> Vec<u8> {
@@ -169,14 +183,6 @@ pub async fn probe_transcribe(config: &ProviderConfig) -> bool {
     transcribe_round_trip(config, PROBE_TIMEOUT).await
 }
 
-/// Send one real transcription so the backend does its first-request work now
-/// — for the local server, downloading the whisper model into its volume —
-/// instead of on the first thing the user dictates. Nothing reads the result;
-/// what matters is that the request is allowed to run to completion.
-pub async fn warm_up(config: &ProviderConfig) {
-    transcribe_round_trip(config, WARMUP_TIMEOUT).await;
-}
-
 async fn transcribe_round_trip(config: &ProviderConfig, timeout: Duration) -> bool {
     let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
@@ -205,17 +211,94 @@ async fn transcribe_round_trip(config: &ProviderConfig, timeout: Duration) -> bo
 mod tests {
     use super::*;
 
+    fn remote_config() -> ProviderConfig {
+        ProviderConfig {
+            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
+            model: "Systran/faster-whisper-small".to_string(),
+            api_key: None,
+        }
+    }
+
     #[test]
-    fn default_local_config_has_expected_url() {
-        let cfg = ProviderConfig::default_local();
-        assert!(cfg.url.contains("5200"));
-        assert!(cfg.api_key.is_none());
+    fn the_local_kind_runs_in_process() {
+        assert_eq!(
+            select_provider("local", "http://127.0.0.1:5200", "tiny.en", None),
+            Provider::InProcess {
+                model: "tiny.en".to_string()
+            }
+        );
+    }
+
+    // An install carried over from the container provider still has that
+    // provider stt model id stored against the local kind.
+    #[test]
+    fn a_stale_local_model_resolves_to_one_the_engine_can_run() {
+        let Provider::InProcess { model } = select_provider(
+            "local",
+            "http://127.0.0.1:5200/v1/audio/transcriptions",
+            "Systran/faster-whisper-small",
+            None,
+        ) else {
+            panic!("the local kind must run in-process");
+        };
+        assert_eq!(model, crate::local_stt::DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn a_configured_endpoint_is_forwarded_to_unchanged() {
+        let provider = select_provider(
+            "openai",
+            "https://api.openai.com:443/v1/audio/transcriptions",
+            "whisper-1",
+            Some("sk-test"),
+        );
+        assert_eq!(
+            provider,
+            Provider::Remote(ProviderConfig {
+                url: "https://api.openai.com:443/v1/audio/transcriptions".to_string(),
+                model: "whisper-1".to_string(),
+                api_key: Some("sk-test".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_self_hosted_endpoint_keeps_its_own_model_id() {
+        let provider = select_provider(
+            "network",
+            "http://lab:8081/v1/audio/transcriptions",
+            "Systran/faster-whisper-medium.en",
+            Some(""),
+        );
+        assert_eq!(
+            provider,
+            Provider::Remote(ProviderConfig {
+                url: "http://lab:8081/v1/audio/transcriptions".to_string(),
+                model: "Systran/faster-whisper-medium.en".to_string(),
+                api_key: None,
+            })
+        );
+    }
+
+    // A kind this build does not know is still a configured endpoint, never a
+    // silent switch to in-process inference.
+    #[test]
+    fn an_unknown_kind_stays_a_remote_endpoint() {
+        assert!(matches!(
+            select_provider(
+                "groq",
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                "whisper-large-v3",
+                None
+            ),
+            Provider::Remote(_)
+        ));
     }
 
     #[tokio::test]
     async fn transcribe_with_empty_bytes_returns_empty_string() {
         // Should short-circuit without making any network call
-        let cfg = ProviderConfig::default_local();
+        let cfg = remote_config();
         let result = transcribe_with_provider(&cfg, vec![], "speech.wav").await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
@@ -223,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_unreachable_provider_returns_unavailable() {
-        let mut cfg = ProviderConfig::default_local();
+        let mut cfg = remote_config();
         cfg.url = "http://127.0.0.1:19999/v1/audio/transcriptions".to_string();
         // tiny audio bytes just to get past the empty check
         let result = transcribe_with_provider(&cfg, vec![0u8; 100], "speech.wav").await;
@@ -250,7 +333,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let mut cfg = ProviderConfig::default_local();
+        let mut cfg = remote_config();
         cfg.url = format!("http://{addr}/v1/audio/transcriptions");
         // Provide minimal WAV header bytes (44 bytes)
         let audio = vec![0u8; 100];
@@ -275,7 +358,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let mut cfg = ProviderConfig::default_local();
+        let mut cfg = remote_config();
         cfg.url = format!("http://{addr}/v1/audio/transcriptions");
         assert!(
             probe_transcribe(&cfg).await,
@@ -285,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn probe_transcribe_false_when_unreachable() {
-        let mut cfg = ProviderConfig::default_local();
+        let mut cfg = remote_config();
         cfg.url = "http://127.0.0.1:19999/v1/audio/transcriptions".to_string();
         assert!(
             !probe_transcribe(&cfg).await,
@@ -314,7 +397,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
-        let mut cfg = ProviderConfig::default_local();
+        let mut cfg = remote_config();
         cfg.url = format!("http://{addr}/v1/audio/transcriptions");
 
         let started = std::time::Instant::now();

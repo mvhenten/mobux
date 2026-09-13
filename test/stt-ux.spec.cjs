@@ -39,18 +39,24 @@ async function expectVisible(page, selector) {
   ).toBeGreaterThan(0);
 }
 
-// 1. Local kind hides model picker and custom-model row.
-test("local kind hides model row and custom-model row", async ({ page }) => {
+// 1. Local runs in-process: a model to pick, but no endpoint and no free-text
+// model id — the engine runs a fixed catalog.
+test("local kind offers the engine catalog and no endpoint fields", async ({
+  page,
+}) => {
   await openSettings(page);
   await selectKind(page, "local");
 
-  // SPA conditionally renders these — not in DOM when kind=local.
-  await expectHidden(page, "#sttModelRow");
+  await expectVisible(page, "#sttModelRow");
   await expectHidden(page, "#sttCustomModelRow");
-
-  // Host and port rows also not rendered for local.
   await expectHidden(page, "#sttHostRow");
   await expectHidden(page, "#sttPortRow");
+
+  const options = await page.$eval("#sttModel option", (els) =>
+    els.map((o) => o.value),
+  );
+  expect(options).toContain("tiny.en");
+  expect(options).not.toContain("__custom__");
 });
 
 // 2. Network kind shows model dropdown (not hidden).
@@ -143,7 +149,7 @@ test.fixme("reset button restores defaults for current kind", async ({
   await expect(page.locator("#sttStatus")).toBeVisible({ timeout: 2000 });
 });
 
-// 5b. Reset for local kind restores 127.0.0.1:5200.
+// 5b. Reset for local kind restores the default checkpoint.
 test.fixme("reset on local kind restores local defaults", async ({ page }) => {
   // PARITY GAP: SPA Stt.jsx has no #sttResetBtn — same gap as test 5.
   await openSettings(page);
@@ -151,11 +157,8 @@ test.fixme("reset on local kind restores local defaults", async ({ page }) => {
   await page.click("#sttResetBtn");
   await page.waitForTimeout(400);
 
-  // Even though host/port rows are hidden, the values should be the defaults.
-  const host = await page.$eval("#sttHost", (el) => el.value);
-  const port = await page.$eval("#sttPort", (el) => el.value);
-  expect(host).toBe("http://127.0.0.1");
-  expect(port).toBe("5200");
+  const model = await page.$eval("#sttModel", (el) => el.value);
+  expect(model).toBe("tiny.en");
 });
 
 // 6. Saved model not in discovered list appears as selectable option (not "custom…").

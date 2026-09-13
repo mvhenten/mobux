@@ -10,5 +10,15 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-args=-Wl,-rpath,$ORIGIN"]
 
+# +fp16 on aarch64: gemm-common 0.19 (pulled by candle, behind the local-stt
+# feature) emits ARMv8.2 half-precision instructions from inline asm without
+# declaring the target feature, so the assembler rejects them. Every aarch64
+# host that can run whisper has FEAT_FP16. A `cargo install` does not read this
+# file — see README for the flag to pass there.
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "link-args=-Wl,-rpath,$ORIGIN"]
+rustflags = [
+    "-C",
+    "link-args=-Wl,-rpath,$ORIGIN",
+    "-C",
+    "target-feature=+fp16",
+]

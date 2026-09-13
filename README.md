@@ -22,7 +22,14 @@ mobux closes that gap. It puts your tmux sessions on the phone in a form built f
 - **Built for reading on a phone.** A dedicated reader view renders scrollback with smooth, synthetic scrolling tuned for mobile WebViews, so long output is actually browsable. Pinch to zoom, swipe to switch windows.
 - **Gestures, not chords.** Swipe a session to rename or kill it. Swipe the terminal to move between tmux windows. Long-press for tmux commands. The things you'd reach for a key combo for become a gesture.
 - **Notified when it matters.** A long job finishing rings the terminal bell; mobux turns that into a Web Push notification on your phone — even with the screen locked — deep-linked back to the exact session. It hooks tmux's own bell event, so a notification means a real bell fired, not a guess scraped off the screen.
-- **Voice capture.** Record a voice note from the input bar; mobux uploads the audio and transcribes it through a speech-to-text backend you run on your own network. The backend speaks the OpenAI audio API, so it can be self-hosted whisper.cpp on your tailnet, a fully offline local transcriber, or OpenAI's own endpoint — your choice. A ready-to-run, tailnet-only whisper.cpp recipe ships in [`deploy/stt/`](deploy/stt/README.md).
+- **Voice capture.** Record a voice note from the input bar and mobux transcribes it. Two providers: whisper running inside the mobux process (build with `--features local-stt`; pure Rust, no container runtime, weights fetched once into `<data_dir>/stt-models/`), or any endpoint that speaks the OpenAI audio API — self-hosted whisper.cpp on your tailnet, or OpenAI's own. A ready-to-run, tailnet-only whisper.cpp recipe ships in [`deploy/stt/`](deploy/stt/README.md).
+
+  ```bash
+  cargo install mobux --locked --features local-stt
+  # on aarch64, add: RUSTFLAGS="-C target-feature=+fp16"
+  ```
+
+  The default build ships without the in-process engine and only talks to a configured endpoint.
 - **Reads output aloud.** An optional listen mode speaks terminal output through the device's voice, with selectable voice, rate, and pitch — useful when you're not looking at the screen.
 - **Themed for night use.** Muted, low-contrast color themes (Gruvbox Soft, Tomorrow Night Soft, Nord, Solarized, and more) chosen for a phone screen in a dark room, not a desktop in daylight.
 - **Shell integration, one tap.** Install OSC 133 prompt markers for bash, zsh, or fish from the settings page, so mobux can tell prompts from output and mark command boundaries cleanly under tmux.
