@@ -49,6 +49,9 @@ jobs:
         run: node scripts/stt-model.mjs ensure .tmp/stt-model ${{ steps.model.outputs.id }}
       - run: cargo clippy --features local-stt --all-targets -- -D warnings
       - run: cargo build --release --features local-stt
+      # The default job compiles the crate without the feature, so without this
+      # every test under src/local_stt/ is built here and never run.
+      - run: cargo test --features local-stt
       # Real weights, real inference, on the bundled sample clip — the one
       # thing the default suite cannot cover. The bundled checkpoint only: the
       # download-on-demand ones are covered by the fetch-path tests.

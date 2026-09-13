@@ -46,8 +46,18 @@ pub const MODEL_DIR_ENV: &str = "MOBUX_STT_MODEL_DIR";
 /// Where the release assets are fetched from. Mirrors `MOBUX_INSTALL_BASE_URL`
 /// in install.sh, and exists for the same reasons: tests and mirrors.
 pub const ASSET_BASE_URL_ENV: &str = "MOBUX_STT_ASSET_BASE_URL";
-pub const DEFAULT_ASSET_BASE_URL: &str =
-    "https://github.com/mvhenten/mobux/releases/latest/download";
+
+/// This build's own release, not `latest`. The hashes are compiled in, so the
+/// moment a later release refreshes a checkpoint every older binary would
+/// download the new asset, hash it, and refuse it forever. A source build
+/// carries the last committed version rather than a released one, so its fetch
+/// 404s — set `MOBUX_STT_ASSET_BASE_URL` or `MOBUX_STT_MODEL_DIR` for that.
+pub fn default_asset_base_url() -> String {
+    format!(
+        "https://github.com/mvhenten/mobux/releases/download/v{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// Path inside a release asset that a checkpoint is packed at. The same
 /// layout in the platform tarball and in a per-model asset, so one unpacker
@@ -168,14 +178,41 @@ pub fn asset_base_url() -> String {
     std::env::var(ASSET_BASE_URL_ENV)
         .ok()
         .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| DEFAULT_ASSET_BASE_URL.to_string())
+        .unwrap_or_else(default_asset_base_url)
 }
+
+/// Why this host cannot run the in-process engine, if it cannot.
+///
+/// aarch64 builds are compiled with ARMv8.2 half-precision enabled because
+/// gemm 0.19 — which candle-core pins at `^0.19`, and 0.19.0 is the newest
+/// published — emits those instructions from inline asm without declaring the
+/// target feature, so the assembler rejects the build without it. A core
+/// without FEAT_FP16 (Cortex-A72, so a Raspberry Pi 4) traps on the first one,
+/// which took the whole web UI down mid-dictation with no message. Refuse to
+/// load instead, and say why.
+#[cfg(all(feature = "local-stt", target_arch = "aarch64"))]
+pub fn unsupported_cpu() -> Option<String> {
+    if std::arch::is_aarch64_feature_detected!("fp16") {
+        return None;
+    }
+    Some(CPU_UNSUPPORTED_MESSAGE.to_string())
+}
+
+#[cfg(not(all(feature = "local-stt", target_arch = "aarch64")))]
+pub fn unsupported_cpu() -> Option<String> {
+    None
+}
+
+pub const CPU_UNSUPPORTED_MESSAGE: &str =
+    "This CPU has no ARMv8.2 half-precision support (FEAT_FP16), which the in-process speech engine needs — a Raspberry Pi 4 and other ARMv8.0 cores do not have it. Point the provider at an OpenAI-compatible endpoint instead.";
 
 /// What the local engine is doing, as the status endpoint reports it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
     /// Built without the `local-stt` feature.
     Disabled,
+    /// Built with the engine, on a CPU that cannot execute it.
+    UnsupportedCpu(String),
     /// Weights are not on disk yet and nothing is fetching them.
     NotDownloaded,
     /// Checking unpacked weights against the hashes in the lock.
@@ -195,7 +232,7 @@ impl Phase {
     /// The one word the settings card and the mic overlay render.
     pub fn state(&self) -> &'static str {
         match self {
-            Self::Disabled => "unsupported",
+            Self::Disabled | Self::UnsupportedCpu(_) => "unsupported",
             Self::NotDownloaded => "not_installed",
             Self::Downloading { .. } | Self::Verifying | Self::Loading => "warming",
             Self::Ready => "ready",
@@ -208,6 +245,7 @@ impl Phase {
     pub fn message(&self) -> String {
         match self {
             Self::Disabled => UNSUPPORTED_MESSAGE.to_string(),
+            Self::UnsupportedCpu(why) => why.clone(),
             Self::NotDownloaded => "The speech model is not on this host yet.".to_string(),
             Self::Downloading {
                 file,
@@ -237,6 +275,9 @@ fn percent(downloaded: u64, total: u64) -> Option<u64> {
 
 #[cfg(feature = "local-stt")]
 pub fn phase(data_dir: &Path, model: &str) -> Phase {
+    if let Some(why) = unsupported_cpu() {
+        return Phase::UnsupportedCpu(why);
+    }
     engine::phase(data_dir, model)
 }
 
@@ -251,6 +292,9 @@ pub fn phase(_data_dir: &Path, _model: &str) -> Phase {
 /// rather than starting a second download.
 #[cfg(feature = "local-stt")]
 pub async fn ensure_ready(data_dir: PathBuf, model: String) -> Result<(), String> {
+    if let Some(why) = unsupported_cpu() {
+        return Err(why);
+    }
     engine::ensure_ready(data_dir, model).await
 }
 
@@ -262,6 +306,9 @@ pub async fn ensure_ready(_data_dir: PathBuf, _model: String) -> Result<(), Stri
 /// Transcribe a 16-bit PCM WAV clip. Waits out a first-run download.
 #[cfg(feature = "local-stt")]
 pub async fn transcribe(data_dir: PathBuf, model: String, wav: Vec<u8>) -> Result<String, String> {
+    if let Some(why) = unsupported_cpu() {
+        return Err(why);
+    }
     engine::transcribe(data_dir, model, wav).await
 }
 
@@ -342,6 +389,32 @@ mod tests {
             asset_for("small.en").as_deref(),
             Some("mobux-stt-small.en.tar.gz")
         );
+    }
+
+    // The hashes are compiled in, so the asset has to come from the release
+    // that was built with them. Following `latest` breaks every older binary
+    // the moment a checkpoint is refreshed.
+    #[test]
+    fn the_asset_url_is_pinned_to_this_builds_own_release() {
+        let url = default_asset_base_url();
+        assert!(
+            url.ends_with(&format!(
+                "/releases/download/v{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{url}"
+        );
+        assert!(!url.contains("latest"), "{url}");
+    }
+
+    // A CPU that cannot execute the engine must be named, not discovered by
+    // the process dying mid-dictation.
+    #[test]
+    fn a_cpu_that_cannot_run_the_engine_reads_as_unsupported_with_a_reason() {
+        let phase = Phase::UnsupportedCpu(CPU_UNSUPPORTED_MESSAGE.to_string());
+        assert_eq!(phase.state(), "unsupported");
+        assert!(phase.message().contains("FEAT_FP16"));
+        assert!(phase.message().contains("OpenAI-compatible"));
     }
 
     #[test]
@@ -438,6 +511,10 @@ mod tests {
         );
         assert_eq!(Phase::Failed("boom".to_string()).state(), "failed");
         assert_eq!(Phase::Disabled.state(), "unsupported");
+        assert_eq!(
+            Phase::UnsupportedCpu(CPU_UNSUPPORTED_MESSAGE.to_string()).state(),
+            "unsupported"
+        );
 
         let msg = Phase::Downloading {
             file: "model.safetensors".to_string(),

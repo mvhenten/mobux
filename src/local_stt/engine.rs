@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::ops::softmax;
@@ -29,6 +30,27 @@ use super::Phase;
 const MEL_FILTERS_80: &[u8] = include_bytes!("melfilters.bytes");
 
 const DOWNLOAD_PROGRESS_STEP: u64 = 4 * 1024 * 1024;
+
+/// How long a download may go without delivering a chunk. A host that stalls
+/// mid-stream used to hang the transcription that started it, with the mutex
+/// below held, until the process was restarted.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The sidecar is a single line, so it gets a short budget of its own.
+const SIDECAR_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Room the asset may take beyond the weights it carries: the binary, the tar
+/// headers, and whatever a future release adds. A download past this is not a
+/// slow mirror, it is the wrong URL — stop rather than fill the disk.
+const DOWNLOAD_SLACK: u64 = 256 * 1024 * 1024;
+
+/// The most we will write for one asset, from the sizes the lock pins.
+fn download_budget(model: &str) -> u64 {
+    let weights: u64 = super::locked_model(model)
+        .map(|m| m.files.values().map(|f| f.bytes).sum())
+        .unwrap_or(0);
+    weights + DOWNLOAD_SLACK
+}
 
 struct Engine {
     /// The model the reported phase belongs to, and the phase itself.
@@ -125,6 +147,12 @@ pub async fn transcribe(data_dir: PathBuf, model: String, clip: Vec<u8>) -> Resu
     ensure_ready(data_dir, model.to_string()).await?;
 
     let mut guard = engine().loaded.lock().await;
+    // A model switch racing this request can have swapped the slot between
+    // ensure_ready and here; transcribing with the other checkpoint would
+    // silently answer from weights nobody asked for.
+    if !matches!(&*guard, Some(l) if l.model == model) {
+        return Err(format!("{model} is no longer the loaded speech model"));
+    }
     let mut loaded = guard
         .take()
         .ok_or_else(|| "the speech model is not loaded".to_string())?;
@@ -140,9 +168,12 @@ pub async fn transcribe(data_dir: PathBuf, model: String, clip: Vec<u8>) -> Resu
             text
         }
         Err(e) => {
-            let err = format!("transcription panicked: {e}");
-            set_phase(model, Phase::Failed(err.clone()));
-            Err(err)
+            // The model went down with the panicking task. Leaving the phase
+            // Failed wedged the card until someone pressed a button; the
+            // weights are still on disk, so say "loading" and let the next
+            // status poll rebuild it.
+            set_phase(model, Phase::Loading);
+            Err(format!("transcription panicked: {e}"))
         }
     }
 }
@@ -191,6 +222,16 @@ async fn unpack_release_asset(data_dir: &Path, model: &str) -> Result<PathBuf, S
 }
 
 async fn unpack_from(base: &str, data_dir: &Path, model: &str) -> Result<PathBuf, String> {
+    unpack_with(base, data_dir, model, download_budget(model), READ_TIMEOUT).await
+}
+
+async fn unpack_with(
+    base: &str,
+    data_dir: &Path,
+    model: &str,
+    budget: u64,
+    read_timeout: Duration,
+) -> Result<PathBuf, String> {
     let asset = super::asset_for(model).ok_or_else(|| {
         format!(
             "no prebuilt mobux release for {}/{}, so {model} cannot be fetched — point {} at a directory holding the weights",
@@ -209,21 +250,57 @@ async fn unpack_from(base: &str, data_dir: &Path, model: &str) -> Result<PathBuf
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
+    // Everything from here on runs inside one block whose result the cleanup
+    // follows: a download that fails partway used to return early and leave
+    // its .part file — up to half a gigabyte — in the data dir forever.
     let tarball = dir.join(format!("{asset}.part"));
+    let result = fetch_and_unpack(
+        &client,
+        base,
+        &asset,
+        &tarball,
+        &dir,
+        model,
+        budget,
+        read_timeout,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&tarball).await;
+    result.map(|()| dir)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_and_unpack(
+    client: &reqwest::Client,
+    base: &str,
+    asset: &str,
+    tarball: &Path,
+    dir: &Path,
+    model: &str,
+    budget: u64,
+    read_timeout: Duration,
+) -> Result<(), String> {
     set_phase(
         model,
         Phase::Downloading {
-            file: asset.clone(),
+            file: asset.to_string(),
             downloaded: 0,
             total: 0,
         },
     );
-    let digest = download(&client, &format!("{base}/{asset}"), &tarball, model, &asset).await?;
+    let digest = download(
+        client,
+        &format!("{base}/{asset}"),
+        tarball,
+        model,
+        asset,
+        budget,
+        read_timeout,
+    )
+    .await?;
 
     set_phase(model, Phase::Verifying);
-    let result = verify_and_unpack(&client, base, &asset, &digest, &tarball, &dir, model).await;
-    let _ = tokio::fs::remove_file(&tarball).await;
-    result.map(|()| dir)
+    verify_and_unpack(client, base, asset, &digest, tarball, dir, model).await
 }
 
 async fn verify_and_unpack(
@@ -259,6 +336,7 @@ async fn fetch_published_digest(
 ) -> Result<String, String> {
     let body = client
         .get(format!("{base}/{asset}.sha256"))
+        .timeout(SIDECAR_TIMEOUT)
         .send()
         .await
         .and_then(|r| r.error_for_status())
@@ -301,6 +379,13 @@ fn extract_model(tarball: &Path, dir: &Path, model: &str) -> Result<(), String> 
             continue;
         };
         if !wanted.contains(&name) {
+            continue;
+        }
+        // Regular files only. A symlink or hardlink entry named like a model
+        // file extracts cleanly and verification then reads straight through
+        // it, reporting the size and digest of whatever it points at. Skipping
+        // it means an archive carrying no regular file yields no model.
+        if !entry.header().entry_type().is_file() {
             continue;
         }
         entry
@@ -357,16 +442,22 @@ async fn download(
     target: &Path,
     model: &str,
     file: &str,
+    budget: u64,
+    read_timeout: Duration,
 ) -> Result<String, String> {
-    let response = client
-        .get(url)
-        .send()
+    let response = tokio::time::timeout(read_timeout, client.get(url).send())
         .await
+        .map_err(|_| format!("fetching {file}: no response within {read_timeout:?}"))?
         .map_err(|e| format!("fetching {file}: {e}"))?;
     let response = response
         .error_for_status()
         .map_err(|e| format!("fetching {file}: {e}"))?;
     let total = response.content_length().unwrap_or(0);
+    if total > budget {
+        return Err(format!(
+            "{file} is {total} bytes, more than the {budget} this build expects to download"
+        ));
+    }
 
     let mut out = tokio::fs::File::create(target)
         .await
@@ -376,9 +467,20 @@ async fn download(
     let mut stream = response.bytes_stream();
     let mut downloaded = 0u64;
     let mut reported = 0u64;
-    while let Some(chunk) = stream.next().await {
+    // A host that answers and then stops sending is the case that hung the
+    // whole engine: every chunk gets a clock of its own, and the total gets a
+    // ceiling, so a stall or a wrong URL fails instead of running forever.
+    while let Some(chunk) = tokio::time::timeout(read_timeout, stream.next())
+        .await
+        .map_err(|_| format!("downloading {file}: stalled for {read_timeout:?}"))?
+    {
         let chunk = chunk.map_err(|e| format!("downloading {file}: {e}"))?;
         downloaded += chunk.len() as u64;
+        if downloaded > budget {
+            return Err(format!(
+                "{file} passed {budget} bytes without ending — refusing to fill the disk"
+            ));
+        }
         hasher.update(&chunk);
         out.write_all(&chunk)
             .await
@@ -857,6 +959,167 @@ mod tests {
             .await
             .expect_err("a tampered asset must not be unpacked");
         assert!(err.contains("sha256 mismatch"), "{err}");
+    }
+
+    // A host that answers and then stops sending used to hang the
+    // transcription that started it — with the engine mutex held, so every
+    // later dictation queued behind it — until the process was restarted.
+    #[tokio::test]
+    async fn a_stalled_download_gives_up_instead_of_hanging() {
+        use axum::{routing::get, Router};
+
+        let app = Router::new().route(
+            "/stalls.tar.gz",
+            get(|| async {
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<axum::body::Bytes, std::io::Error>,
+                >())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("stalls.part");
+        let started = std::time::Instant::now();
+        let err = download(
+            &reqwest::Client::new(),
+            &format!("http://{addr}/stalls.tar.gz"),
+            &target,
+            "base.en",
+            "stalls.tar.gz",
+            u64::MAX,
+            Duration::from_millis(300),
+        )
+        .await
+        .expect_err("a stalled host must not be waited on forever");
+        assert!(err.contains("stalled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(10), "gave up late");
+    }
+
+    // No budget meant a wrong base URL could write until the disk filled.
+    #[tokio::test]
+    async fn a_download_past_its_budget_is_refused_and_leaves_nothing_behind() {
+        let model = super::super::DEFAULT_MODEL;
+        let asset = super::super::asset_for(model).unwrap();
+        let body = tarball(model, b"more bytes than the budget allows");
+        let sidecar = format!("{}  {asset}\n", sha256_hex(&body));
+        let base = serve_asset(asset.clone(), body, sidecar).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = unpack_with(&base, dir.path(), model, 8, READ_TIMEOUT)
+            .await
+            .expect_err("a download past its budget must stop");
+        assert!(err.contains("budget") || err.contains("expects"), "{err}");
+
+        // The fix for the leak: the part-file is removed on the download path
+        // too, not only after a failed verification.
+        let cached = super::super::model_dir(dir.path(), model);
+        assert!(
+            !cached.join(format!("{asset}.part")).exists(),
+            "a failed download must not leave its part-file behind"
+        );
+    }
+
+    // Only regular files are unpacked. A link entry named like a model file
+    // and pointing outside the directory otherwise extracts cleanly, and
+    // verification then reads straight through it — reporting the size and
+    // digest of whatever it points at. The invariant: an archive carrying no
+    // regular file yields no model.
+    fn link_only_archive(model: &str, kind: tar::EntryType) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_entry_type(kind);
+        header.set_cksum();
+        builder
+            .append_link(
+                &mut header,
+                format!("{}config.json", super::super::asset_model_prefix(model)),
+                "/etc/hostname",
+            )
+            .unwrap();
+        let tar = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_archive_of_links_rather_than_files_yields_no_model() {
+        let model = super::super::DEFAULT_MODEL;
+        for kind in [tar::EntryType::Symlink, tar::EntryType::Link] {
+            let asset = super::super::asset_for(model).unwrap();
+            let body = link_only_archive(model, kind);
+            let sidecar = format!("{}  {asset}\n", sha256_hex(&body));
+            let base = serve_asset(asset, body, sidecar).await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let err = unpack_from(&base, dir.path(), model)
+                .await
+                .expect_err("{kind:?} entries carry no model");
+            assert!(err.contains("no usable config.json"), "{kind:?}: {err}");
+            assert!(
+                !super::super::model_dir(dir.path(), model)
+                    .join("config.json")
+                    .exists(),
+                "{kind:?}: nothing may be created for a link entry"
+            );
+        }
+    }
+
+    // And the guard must not reject the archive we actually publish, which
+    // scripts/build-release-asset.sh builds with the system tar.
+    #[tokio::test]
+    async fn an_archive_built_by_the_system_tar_still_unpacks() {
+        let model = super::super::DEFAULT_MODEL;
+        let stage = tempfile::tempdir().unwrap();
+        let packed = stage.path().join("stt-models").join(model);
+        std::fs::create_dir_all(&packed).unwrap();
+        for name in super::super::model_files(model) {
+            std::fs::write(packed.join(name), b"stand-in weights").unwrap();
+        }
+        let archive = stage.path().join("asset.tar.gz");
+        let status = std::process::Command::new("tar")
+            .arg("-C")
+            .arg(stage.path())
+            .arg("-czf")
+            .arg(&archive)
+            .arg("stt-models")
+            .status()
+            .expect("the system tar builds the release assets");
+        assert!(status.success());
+        let body = std::fs::read(&archive).unwrap();
+
+        let asset = super::super::asset_for(model).unwrap();
+        let sidecar = format!("{}  {asset}\n", sha256_hex(&body));
+        let base = serve_asset(asset, body, sidecar).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = unpack_from(&base, dir.path(), model)
+            .await
+            .expect_err("stand-in weights cannot match the lock");
+        assert!(
+            err.contains("expects"),
+            "the entries must reach the hash check, not be skipped: {err}"
+        );
+    }
+
+    #[test]
+    fn the_download_budget_covers_the_weights_and_no_more_than_the_slack() {
+        for model in super::super::model_ids() {
+            let weights: u64 = super::super::locked_model(&model)
+                .unwrap()
+                .files
+                .values()
+                .map(|f| f.bytes)
+                .sum();
+            assert_eq!(download_budget(&model), weights + DOWNLOAD_SLACK);
+        }
     }
 
     #[tokio::test]

@@ -372,6 +372,16 @@ export function SttCard() {
         </div>
       </div>
 
+      {/* Weights are stored half-precision and run at full precision, so a
+          checkpoint costs about twice its download once loaded — the number
+          that decides whether a box can run it. */}
+      {isLocal.value && (
+        <div class="settings-status" id="sttModelCost">
+          Runs at full precision: base.en needs ~290 MB of memory, tiny.en ~150
+          MB, small.en ~970 MB. Bigger transcribes better and slower.
+        </div>
+      )}
+
       {/* Custom model free-text: only when "custom…" is picked. The local
           engine runs a fixed catalog, so there is nothing to type. */}
       {!isLocal.value && isCustomModel.value && (

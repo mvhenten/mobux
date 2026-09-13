@@ -52,7 +52,7 @@ test("local kind offers the engine catalog and no endpoint fields", async ({
   await expectHidden(page, "#sttHostRow");
   await expectHidden(page, "#sttPortRow");
 
-  const options = await page.$eval("#sttModel option", (els) =>
+  const options = await page.$$eval("#sttModel option", (els) =>
     els.map((o) => o.value),
   );
   expect(options).toContain("tiny.en");

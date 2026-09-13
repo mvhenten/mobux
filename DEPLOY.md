@@ -40,6 +40,7 @@ curl -fsSLO "https://github.com/mvhenten/mobux/releases/latest/download/$ASSET"
 curl -fsSLO "https://github.com/mvhenten/mobux/releases/latest/download/$ASSET.sha256"
 sha256sum -c "$ASSET.sha256"
 tar -xzf "$ASSET" -C ~/.cargo/bin mobux
+mkdir -p ~/.local/share/mobux
 tar -xzf "$ASSET" -C ~/.local/share/mobux stt-models   # the speech model
 ```
 
@@ -53,8 +54,19 @@ cargo install mobux --locked --features local-stt
 # on aarch64, add: RUSTFLAGS="-C target-feature=+fp16"
 ```
 
-Switching model in settings downloads that checkpoint's asset and verifies it
-against `src/local_stt/model.lock.json` before loading it. For an airgapped
+Switching model in settings downloads that checkpoint's asset — from the
+release matching the running version, not `latest`, because the hashes are
+compiled into the binary — and verifies it against
+`src/local_stt/model.lock.json` before loading it. Weights are stored f16 and
+run f32, so resident memory is about twice the download: ~290 MB for base.en,
+~150 MB for tiny.en, ~970 MB for small.en.
+
+On arm64 the engine needs ARMv8.2 half-precision (FEAT_FP16). candle's gemm
+emits those instructions without declaring the target feature, so the build
+enables it for the whole binary (`.cargo/config.toml`); an ARMv8.0 core
+(Cortex-A72, so a Raspberry Pi 4) cannot execute them, and mobux checks for the
+feature before loading anything and reports the local provider as unavailable
+instead of taking the process down. For an airgapped
 host, or to run a checkpoint mobux does not publish, point
 `MOBUX_STT_MODEL_DIR` at a directory holding `config.json`, `tokenizer.json`
 and `model.safetensors`. A directory named there is used as given and never

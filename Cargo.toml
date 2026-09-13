@@ -2,6 +2,9 @@
 name = "mobux"
 version = "0.1.5"
 edition = "2021"
+# slice::as_chunks (src/local_stt/wav.rs, engine.rs) stabilised here; an older
+# toolchain fails to compile with an error that names neither.
+rust-version = "1.88"
 description = "A touch-friendly tmux web UI for unhinged people who run terminal sessions from their phone while walking the dog"
 license = "MIT"
 repository = "https://github.com/mvhenten/mobux"

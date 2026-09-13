@@ -12,9 +12,16 @@ rustflags = ["-C", "link-args=-Wl,-rpath,$ORIGIN"]
 
 # +fp16 on aarch64: gemm-common 0.19 (pulled by candle, behind the local-stt
 # feature) emits ARMv8.2 half-precision instructions from inline asm without
-# declaring the target feature, so the assembler rejects them. Every aarch64
-# host that can run whisper has FEAT_FP16. A `cargo install` does not read this
-# file — see README for the flag to pass there.
+# declaring the target feature, so the assembler rejects them without this.
+# 0.19.0 is the newest published gemm and candle-core pins `^0.19`, so there is
+# no version to upgrade to.
+#
+# It applies to the whole binary, and an ARMv8.0 core (Cortex-A72, so a
+# Raspberry Pi 4) traps on those instructions. local_stt::unsupported_cpu()
+# checks for FEAT_FP16 before anything in candle runs and refuses the engine
+# with a sentence, rather than letting the process die mid-dictation. A
+# `cargo install` does not read this file — see README for the flag to pass
+# there.
 [target.aarch64-unknown-linux-gnu]
 rustflags = [
     "-C",

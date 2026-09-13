@@ -32,6 +32,8 @@ mobux closes that gap. It puts your tmux sessions on the phone in a form built f
   ```
 
   The default build has no engine and only talks to a configured endpoint. For an airgapped host, point `MOBUX_STT_MODEL_DIR` at a directory holding `config.json`, `tokenizer.json` and `model.safetensors`. Nothing contacts a model host at runtime.
+
+  On arm64 the engine needs ARMv8.2 half-precision (FEAT_FP16) — a Raspberry Pi 4 and other ARMv8.0 cores do not have it, and mobux says so and refuses the local provider rather than crashing. Weights run at full precision, so a checkpoint costs about twice its download in memory: ~290 MB for base.en, ~150 MB for tiny.en, ~970 MB for small.en.
 - **Reads output aloud.** An optional listen mode speaks terminal output through the device's voice, with selectable voice, rate, and pitch — useful when you're not looking at the screen.
 - **Themed for night use.** Muted, low-contrast color themes (Gruvbox Soft, Tomorrow Night Soft, Nord, Solarized, and more) chosen for a phone screen in a dark room, not a desktop in daylight.
 - **Shell integration, one tap.** Install OSC 133 prompt markers for bash, zsh, or fish from the settings page, so mobux can tell prompts from output and mark command boundaries cleanly under tmux.

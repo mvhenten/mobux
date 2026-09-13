@@ -2929,11 +2929,13 @@ async fn api_set_stt_config(
 //
 // The local provider is whisper running inside this process. There is no
 // container, no port and no second service — but there is a first run, and it
-// is the whole reason this block exists: the weights are ~150 MB and arrive
-// from Hugging Face the first time anyone dictates. Reporting that as "backend
-// unreachable" sent the user back to an install button that was never the
-// problem, so a download in flight is its own state, with the byte counts
-// behind it.
+// is the whole reason this block exists. A prebuilt install already has the
+// default checkpoint, unpacked by install.sh out of the release tarball;
+// anything else is fetched from the matching mobux release and checked against
+// the hashes compiled into this binary. Either way that takes minutes the
+// first time. Reporting it as "backend unreachable" sent the user back to an
+// install button that was never the problem, so a download in flight is its
+// own state, with the byte counts behind it.
 //
 // A build without the `local-stt` feature has no engine at all. That is named
 // too, with the command that installs one that has.
@@ -2974,7 +2976,10 @@ impl SttStatus {
             "state": state,
             "reachable": ready,
             "installed": !matches!(self.local, Some(local_stt::Phase::NotDownloaded)),
-            "engine_available": !matches!(self.local, Some(local_stt::Phase::Disabled)),
+            "engine_available": !matches!(
+                self.local,
+                Some(local_stt::Phase::Disabled | local_stt::Phase::UnsupportedCpu(_))
+            ),
         });
         match &self.local {
             Some(phase) => {
@@ -3160,6 +3165,7 @@ fn install_status_json(phase: &local_stt::Phase) -> serde_json::Value {
         | local_stt::Phase::Loading => ("running", None),
         local_stt::Phase::NotDownloaded => ("idle", None),
         local_stt::Phase::Disabled => ("failed", Some(local_stt::UNSUPPORTED_MESSAGE.to_string())),
+        local_stt::Phase::UnsupportedCpu(why) => ("failed", Some(why.clone())),
         local_stt::Phase::Failed(err) => ("failed", Some(err.clone())),
     };
     json!({
@@ -4122,6 +4128,25 @@ mod tests {
             StatusCode::PRECONDITION_FAILED
         };
         assert_eq!(resp.status(), expected);
+    }
+
+    // A host that cannot execute the engine is named the same way a build
+    // without one is, so the card renders a sentence instead of a button.
+    #[test]
+    fn a_cpu_that_cannot_run_the_engine_reports_as_unavailable() {
+        let body = local_status(local_stt::Phase::UnsupportedCpu(
+            "no FEAT_FP16 here".to_string(),
+        ))
+        .into_json();
+        assert_eq!(body["state"], "unsupported");
+        assert_eq!(body["engine_available"], false);
+        assert_eq!(body["message"], "no FEAT_FP16 here");
+
+        let install = install_status_json(&local_stt::Phase::UnsupportedCpu(
+            "no FEAT_FP16 here".to_string(),
+        ));
+        assert_eq!(install["phase"], "failed");
+        assert_eq!(install["error"], "no FEAT_FP16 here");
     }
 
     // A configured endpoint downloads nothing — refuse rather than pretend.

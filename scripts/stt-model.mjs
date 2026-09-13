@@ -14,7 +14,9 @@
 //   node scripts/stt-model.mjs ensure <dir> [model]  verify, fetch only if it fails
 //
 // Weights are stored f16. candle converts them to f32 as it loads, so
-// inference is unchanged and every payload halves.
+// inference is unchanged and every download and on-disk copy halves — resident
+// memory does not: a checkpoint still costs about twice its file size once
+// loaded.
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
