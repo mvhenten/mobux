@@ -203,6 +203,11 @@ pub fn unsupported_cpu() -> Option<String> {
     None
 }
 
+// Gated exactly like the branch that reads it: on every other architecture
+// the check compiles out, and an unread constant is an error under
+// `-D warnings`. The test build keeps it so the rendering is covered wherever
+// CI happens to run.
+#[cfg(any(all(feature = "local-stt", target_arch = "aarch64"), test))]
 pub const CPU_UNSUPPORTED_MESSAGE: &str =
     "This CPU has no ARMv8.2 half-precision support (FEAT_FP16), which the in-process speech engine needs — a Raspberry Pi 4 and other ARMv8.0 cores do not have it. Point the provider at an OpenAI-compatible endpoint instead.";
 

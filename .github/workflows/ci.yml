@@ -100,6 +100,14 @@ jobs:
         env:
           CI: true
           MOBUX_URL: http://localhost:8281
+      - name: Run STT settings UX tests
+        run: make test-stt-ux
+        env:
+          CI: true
+      - name: Run STT per-kind persistence tests
+        run: make test-stt-per-kind
+        env:
+          CI: true
 
   fleet:
     runs-on: ubuntu-latest
