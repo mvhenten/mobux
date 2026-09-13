@@ -330,13 +330,29 @@ export function createReadMode({
       olderInflight = null;
       handle(value);
     };
-    const request = fetchPage(olderPath()).then(
-      settle((older) => applyOlderPage(older)),
-      settle(() => {
-        showError();
-        restripOlder();
-      }),
-    );
+    const request = fetchPage(olderPath())
+      .then(
+        settle((older) => applyOlderPage(older)),
+        settle(() => {
+          showError();
+          restripOlder();
+        }),
+      )
+      // A throw from applying the page is a bug here, not an unreachable
+      // server, so it is not swallowed into the error strip. The promise a
+      // caller holds still has to settle — this one is handed out through
+      // the SPA's test surface — and the strip must not be left on its
+      // loading line, so clear both and let the fault surface as an
+      // ordinary uncaught error rather than an unhandled rejection.
+      .catch((error) => {
+        if (gen === generation) {
+          olderInflight = null;
+          restripOlder();
+        }
+        window.setTimeout(() => {
+          throw error;
+        }, 0);
+      });
     olderInflight = request;
     restripOlder();
     return request;
@@ -496,6 +512,9 @@ export function createReadMode({
     },
   };
 }
+
+// Exposed for unit tests.
+export const _internals = { isMonoLine };
 
 // ── Escape stripping ───────────────────────────────────────────────
 // Escape sequences are stripped, not interpreted. Colour is not preserved:
@@ -734,14 +753,33 @@ function buildOutput(entry) {
 }
 
 // ── Shape classification ───────────────────────────────────────────
-// Whether a line needs a fixed-width grid to stay readable. Indentation,
-// interior column gaps, box drawing and diff markers all mean the same
-// thing: the horizontal positions are the content.
+// Whether a line needs a fixed-width grid to stay readable — whether its
+// horizontal positions are part of what it says. Both directions of this
+// call cost something: a table reflowed proportionally loses its columns,
+// and a sentence set in monospace is just harder to read. So the signals
+// are narrow and anchored. Prose is full of incidental punctuation, and a
+// line that merely contains a bracket is still a line of prose.
+
+// Leading indentation — a tab, or a gap wide enough to be deliberate.
 const INDENTED_RE = /^(?: {2,}|\t)/;
+// An interior gap wide enough to be a column boundary rather than spacing.
 const COLUMNED_RE = /\S {2,}\S/;
-const BOX_DRAWN_RE = /[\u2500-\u257F\u2580-\u259F\u25A0-\u25FF]/;
-const DIFF_RE = /^(?:[+-]{1,3}[ \t]|@@ )/;
-const CODEY_RE = /[{}[\]();]|=>|::|\|\||&&|^\s*[$#>]\s/;
+// Box drawing and block elements. Geometric shapes are excluded: bullets
+// and arrows turn up in ordinary prose.
+const BOX_DRAWN_RE = /[\u2500-\u257F\u2580-\u259F]/;
+// A pipe-table row — `| name | status |`, what docker, mysql and psql
+// print. Needs two separators, so a sentence with one pipe in it is safe.
+const PIPE_TABLE_RE = /^\s*\|[^|]*\|/;
+// An ASCII rule, alone on its line: a run of dashes or equals, or the
+// `+------+` joints that fence a table.
+const ASCII_RULE_RE = /^\s*(?:[-=_*]{4,}|\+[-=+]{2,}\+[-=+\s]*)\s*$/;
+// Unified diff: a hunk header, a file header, a body line whose marker is
+// flush against its content, or one carrying the original's indentation.
+// `- item one` is a bullet in prose, and stays one.
+const DIFF_RE = /^(?:@@ |\+\+\+ |--- |[+-](?=\S)|[+-] {2,})/;
+// Code, at the anchors code puts it. No bare brackets: they belong to
+// prose at least as often.
+const CODEY_RE = /[{};]\s*$|^\s*[$#] \S|=>|::|\|\||&&/;
 
 function isMonoLine(text) {
   if (text === "") return false;
@@ -749,6 +787,8 @@ function isMonoLine(text) {
     INDENTED_RE.test(text) ||
     COLUMNED_RE.test(text) ||
     BOX_DRAWN_RE.test(text) ||
+    PIPE_TABLE_RE.test(text) ||
+    ASCII_RULE_RE.test(text) ||
     DIFF_RE.test(text) ||
     CODEY_RE.test(text)
   );
@@ -758,6 +798,11 @@ function isMonoLine(text) {
 // whatever block it sits in rather than splitting it, so a code listing
 // with a gap in it stays one listing.
 function groupByShape(lines) {
+  // Output that is nothing but blank lines is still output: it renders as
+  // the blank lines it is rather than as an empty card body.
+  if (lines.every((line) => line === "")) {
+    return lines.length > 0 ? [{ mono: false, lines: lines.slice() }] : [];
+  }
   const groups = [];
   for (const line of lines) {
     const last = groups[groups.length - 1];

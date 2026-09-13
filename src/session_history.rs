@@ -852,8 +852,16 @@ impl SessionHistoryStore {
                 let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
                     continue;
                 };
-                let seq = value.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
-                if seq > ceiling {
+                // A line with no usable `seq` cannot be positioned in the
+                // record, and admitting it as seq 0 would end the walk on
+                // the spot: it would become the page's oldest, `prev_seq`
+                // would go to 0, and everything genuinely older would be
+                // unreachable. The forward scan already skips these; so does
+                // this one.
+                let Some(seq) = value.get("seq").and_then(|s| s.as_u64()) else {
+                    continue;
+                };
+                if seq == 0 || seq > ceiling {
                     continue;
                 }
                 // Reached past the page: a line was there to read, so the
@@ -2189,10 +2197,12 @@ mod tests {
         }
     }
 
+    // A missing `seq` maps to 0 rather than panicking, so a test that admits
+    // an unpositionable entry fails on the vector it asserts, not in here.
     fn seqs_of(page: &Page) -> Vec<u64> {
         page.entries
             .iter()
-            .map(|e| e["seq"].as_u64().unwrap())
+            .map(|e| e["seq"].as_u64().unwrap_or(0))
             .collect()
     }
 
@@ -2310,6 +2320,39 @@ mod tests {
 
         let whole = store.read_tail("s1", 50).unwrap();
         assert!(!whole.has_older);
+    }
+
+    #[test]
+    fn a_line_without_a_seq_does_not_end_the_walk() {
+        // A record can hold a line this build cannot position: an older
+        // format, a hand-edited file. Admitting it as seq 0 would make it
+        // the page's oldest, drive `prev_seq` to 0 and strand everything
+        // genuinely older — the exact failure backward paging exists to fix.
+        let (_dir, store) = temp_store();
+        fill(&store, "s1", 10);
+        let path = store.file_path("s1");
+        let mut lines: Vec<String> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| l.to_string())
+            .collect();
+        lines.insert(5, r#"{"kind":"raw","raw":"legacy"}"#.to_string());
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let mut page = store.read_tail("s1", 3).unwrap();
+        let mut seen = seqs_of(&page);
+        let mut guard = 0;
+        while page.has_older {
+            assert!(guard < 20, "the walk must terminate");
+            guard += 1;
+            page = store.read_before("s1", back_cursor(&page), 3).unwrap();
+            let mut batch = seqs_of(&page);
+            assert!(!batch.is_empty());
+            batch.extend(seen);
+            seen = batch;
+        }
+
+        assert_eq!(seen, (1..=10).collect::<Vec<u64>>());
     }
 
     #[test]

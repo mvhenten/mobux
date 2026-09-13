@@ -1221,6 +1221,7 @@ struct ConversationHistoryQuery {
 ///       ?tail=<n>           the newest n entries
 /// → 200 { "entries": [ … ], "nextCursor": "<opaque>",
 ///         "prevCursor": "<opaque>", "hasOlder": <bool> }
+///   (a `before` page carries no `nextCursor`)
 /// ```
 ///
 /// The modes are mutually exclusive: no parameter gives a forward page from
@@ -1240,12 +1241,15 @@ struct ConversationHistoryQuery {
 /// from its oldest end so the newest survive — but always at least one
 /// entry, so a page can never stall.
 ///
-/// `nextCursor` is always present and decodes to `v2:<seq>:<offset>`: the
+/// `nextCursor` decodes to `v2:<seq>:<offset>`: the
 /// last entry in the page and the byte offset just past its line, which is
 /// what makes a steady-state poll a seek rather than a scan of the whole
 /// history. An empty page echoes the supplied cursor; an empty or absent
 /// file gives the zero cursor. `v1:<seq>` cursors still decode, with the
-/// offset unknown, so no client holding one breaks.
+/// offset unknown, so no client holding one breaks. It is absent from a
+/// `before` page: that page's newest entry is older than everything the
+/// caller already holds, so a cursor built from it would walk a client that
+/// follows `nextCursor` uniformly back over history it has already seen.
 ///
 /// `prevCursor` is its mirror: the entry just before the page's oldest and
 /// the byte offset of that oldest line, which is what a client walking
@@ -1305,6 +1309,7 @@ async fn api_session_conversation(
         .clamp(1, session_history::MAX_LIMIT);
 
     let history = state.session_history.clone();
+    let walking_back = before.is_some() && q.tail.is_none();
     let page = match (q.tail, before) {
         (Some(tail), _) => {
             let count = tail.clamp(1, session_history::MAX_LIMIT);
@@ -1320,12 +1325,23 @@ async fn api_session_conversation(
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
 
-    Ok(Json(json!({
+    let mut body = json!({
         "entries": page.entries,
-        "nextCursor": session_history::encode_cursor(page.next_seq, page.next_offset),
         "prevCursor": session_history::encode_cursor(page.prev_seq, page.prev_offset),
         "hasOlder": page.has_older,
-    })))
+    });
+    // A backward page's newest entry is older than everything the caller
+    // already holds, so a `nextCursor` built from it would rewind a client
+    // that follows `nextCursor` uniformly and re-deliver the history from
+    // there. A page walking backwards does not advance the forward cursor,
+    // so it does not carry one.
+    if !walking_back {
+        body["nextCursor"] = json!(session_history::encode_cursor(
+            page.next_seq,
+            page.next_offset
+        ));
+    }
+    Ok(Json(body))
 }
 
 #[derive(Deserialize)]

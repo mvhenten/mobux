@@ -314,6 +314,118 @@ test("output splits into prose and monospace blocks", async ({ page }) => {
   expect(result.codeTag).toBe("PRE");
 });
 
+// Both directions of the shape call cost something: a table reflowed
+// proportionally loses its columns, and a sentence set in monospace is just
+// harder to read. The table names real output either way.
+test("the shape classifier reads real output both ways", async ({ page }) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+
+  const table = [
+    // Grids, tables and rules keep their columns.
+    ["| NAME    | STATUS  |", true],
+    ["+---------+---------+", true],
+    ["=================", true],
+    ["CONTAINER ID   IMAGE          STATUS", true],
+    ["  indented continuation", true],
+    ["\tleading tab", true],
+    ["│ boxed │", true],
+    ["@@ -1,4 +1,6 @@", true],
+    ["-let removed = 1;", true],
+    ["+  const added = 2", true],
+    ["  return value;", true],
+    ["$ make build", true],
+    // Prose stays prose, incidental punctuation and all.
+    ["Compiling serde v1.0.1 (registry)", false],
+    ["error[E0308]: mismatched types", false],
+    ["found 9 vulnerabilities (2 low, 6 high, 1 critical)", false],
+    ["Run `npm audit` for details.", false],
+    ["warning: unused variable [deny(warnings)]", false],
+    ["- item one in a bullet list", false],
+    ["Done in 4.21s.", false],
+    ["", false],
+  ];
+
+  const got = await page.evaluate(async (rows) => {
+    const { _internals } = await import("/static/read-mode.js");
+    return rows.map(([text]) => _internals.isMonoLine(text));
+  }, table);
+
+  expect(got).toEqual(table.map(([, expected]) => expected));
+});
+
+test("output of nothing but blank lines still renders them", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const result = await page.evaluate(async () => {
+    const { createReadMode } = await import("/static/read-mode.js");
+    const host = document.createElement("div");
+    host.style.width = "380px";
+    host.style.height = "480px";
+    document.body.appendChild(host);
+    const readMode = createReadMode({ host, session: "spec" });
+    readMode.mount();
+    readMode.setEntries([
+      { seq: 1, command: "echo", output: "\n\n", exitCode: 0 },
+    ]);
+    const out = host.querySelector(".cv-out");
+    return {
+      hasOutput: !!out,
+      lines: out ? out.querySelectorAll(".cv-line").length : 0,
+      height: out ? out.getBoundingClientRect().height : 0,
+    };
+  });
+
+  expect(result.hasOutput).toBe(true);
+  expect(result.lines).toBe(2);
+  expect(result.height).toBeGreaterThan(0);
+});
+
+// R2: scrolling away drops the follow, and it stays dropped. On a
+// conversation shorter than the viewport every position is also the bottom,
+// so a prepend that re-measured would quietly re-engage it.
+test("paging older turns in does not re-engage bottom-follow", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const result = await page.evaluate(async () => {
+    const { createSyntheticScroller } =
+      await import("/static/synthetic-scroll.js");
+    const host = document.createElement("div");
+    host.style.width = "380px";
+    host.style.height = "480px";
+    host.style.overflow = "hidden";
+    host.style.position = "relative";
+    const inner = document.createElement("div");
+    host.appendChild(inner);
+    document.body.appendChild(host);
+
+    const line = (text) => {
+      const el = document.createElement("div");
+      el.style.height = "20px";
+      el.textContent = text;
+      return el;
+    };
+    inner.appendChild(line("only turn"));
+
+    const scroller = createSyntheticScroller({ host, inner });
+    scroller.contentChanged(() => {});
+    scroller.scrollToTop();
+    const droppedFollow = scroller.atBottom;
+
+    scroller.contentPrepended(() => {
+      inner.insertBefore(line("older turn"), inner.firstChild);
+    });
+    const after = scroller.atBottom;
+    scroller.dispose();
+    host.remove();
+    return { droppedFollow, after };
+  });
+
+  expect(result.droppedFollow).toBe(false);
+  expect(result.after).toBe(false);
+});
+
 // ── e2e level ──────────────────────────────────────────────────────
 // The real endpoint, the real cursors, a record the server itself reads.
 
@@ -359,6 +471,10 @@ test.describe("against the real endpoint", () => {
       expect(res.ok()).toBe(true);
       body = await res.json();
       expect(body.entries.length).toBeGreaterThan(0);
+      // A backward page's newest entry is older than everything the caller
+      // holds, so it carries no forward cursor for a client following
+      // nextCursor uniformly to rewind itself onto.
+      expect(body.nextCursor).toBeUndefined();
       seqs = body.entries.map((entry) => entry.seq).concat(seqs);
     }
 

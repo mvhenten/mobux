@@ -99,11 +99,17 @@ export function createSyntheticScroller({ host, inner, footerEl = null } = {}) {
     // the scroll position with it, so paging older content in leaves the
     // reader on the same line rather than somewhere further back.
     contentPrepended(mutate) {
+      // Whether the viewport was following live output is preserved, never
+      // re-derived: on content shorter than the viewport every position is
+      // the bottom, so measuring would silently re-engage the follow that
+      // scrolling away deliberately dropped (R2).
+      const wasAtBottom = atBottom;
       const heightBefore = inner.scrollHeight;
       mutate();
       recomputeBounds();
       const grew = inner.scrollHeight - heightBefore;
-      setScroll(scrollY + grew);
+      scrollY = Math.max(0, Math.min(maxScroll, scrollY + grew));
+      atBottom = wasAtBottom;
       applyTransform();
     },
     scrollBy(dy) {
