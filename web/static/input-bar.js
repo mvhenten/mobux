@@ -10,6 +10,21 @@
 import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
 
+// How far below the window height the visual viewport may sit and still count
+// as "keyboard gone". Covers browser chrome that overlays the visual viewport
+// (URL bar, accessory strip) without reaching any keyboard-sized panel.
+const KEYBOARD_GONE_SLACK = 100;
+
+// Auto-hide is an absolute question — "is the keyboard gone?" — never a
+// relative one. A delta test ("the viewport grew back") also fires when the
+// keyboard is REPLACED by something shorter: Gboard's voice-typing panel is
+// shorter than the full keyboard, so starting voice typing grows
+// visualViewport.height, and the old delta test read that as a dismissal,
+// hid the bar and blurred the editor mid-utterance.
+export function shouldAutoHide(vvHeight, innerHeight) {
+  return vvHeight >= innerHeight - KEYBOARD_GONE_SLACK;
+}
+
 export function createInputBar(engine, send, node = '') {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
@@ -128,19 +143,22 @@ export function createInputBar(engine, send, node = '') {
   // visualViewport.height when the soft keyboard opens) is owned by
   // terminal.js's renderer-agnostic visualViewport handler — it must
   // work whether or not the input bar is mounted. This listener only
-  // handles bar UX: when the keyboard dismisses (viewport grows back
-  // by > 50px), tuck the bar away too so the user gets terminal-full
-  // space back.
+  // handles bar UX: when the keyboard is gone (the visual viewport is
+  // back to roughly the full window height), tuck the bar away too so
+  // the user gets terminal-full space back.
   let removeViewportListeners = null;
   if (window.visualViewport) {
     const vv = window.visualViewport;
-    let lastHeight = vv.height;
+    // Latched on the keyboard actually being up, so a viewport event with no
+    // keyboard in the picture (a scroll, the URL bar sliding) can't hide a bar
+    // the user just revealed by tapping.
+    let keyboardWasUp = false;
     const onViewportChange = () => {
-      const h = vv.height;
-      if (h > lastHeight + 50 && !bar.classList.contains('hidden')) {
+      const gone = shouldAutoHide(vv.height, window.innerHeight);
+      if (keyboardWasUp && gone && !bar.classList.contains('hidden')) {
         hide();
       }
-      lastHeight = h;
+      keyboardWasUp = !gone;
     };
     vv.addEventListener('resize', onViewportChange);
     vv.addEventListener('scroll', onViewportChange);
@@ -218,6 +236,7 @@ export function createInputBar(engine, send, node = '') {
   // ── Public API ────────────────────────────────────────────────────
   return {
     _computeKeyboardOffset: computeKeyboardOffset,
+    _shouldAutoHide: shouldAutoHide,
     // show() — show the bar AND focus the text input (the double-tap /
     // engagement path — see terminal.js's `onDoubleTap` handlers, #201).
     show: activateInput,

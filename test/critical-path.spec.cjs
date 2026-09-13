@@ -904,6 +904,8 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
         inputBottom: inputRect.bottom,
         termBottom: termRect.bottom,
         markerBottom,
+        inputType: input.getAttribute("type"),
+        inputMode: input.getAttribute("inputmode"),
       };
     }, marker);
 
@@ -934,6 +936,57 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
     geo.markerBottom,
     `last output row (bottom ${geo.markerBottom}) must sit above the input bar (top ${geo.barTop}); screenshot: ${screenshotPath}`,
   ).toBeLessThanOrEqual(geo.barTop + 2);
+
+  // Gboard only offers its voice key on a plain text field. These inputmode
+  // values provably suppress it, and `type` must stay `text` for the same
+  // reason.
+  expect(geo.inputType, "#inputText must stay a plain text field").toBe("text");
+  expect(
+    ["email", "url", "tel", "none"],
+    "#inputText must not carry an inputmode that hides the voice key",
+  ).not.toContain(geo.inputMode);
+
+  assertNoFailures(captured);
+});
+
+// Regression for "Gboard voice typing dies the instant it starts".
+//
+// The auto-hide listener used to compare the visual viewport against its own
+// previous height and treat any growth over 50px as "keyboard dismissed" —
+// which hid the bar and blurred the editor. Gboard's voice panel is SHORTER
+// than the full keyboard, so starting voice typing grows the viewport and
+// tripped exactly that test, ending the voice session on its first frame.
+// The decision is now absolute: hide only once the viewport is back to
+// roughly the full window height.
+test("auto-hide fires only when the keyboard is gone, not when a shorter voice panel replaces it", async ({
+  page,
+}) => {
+  const captured = seedErrorCapture(page);
+  await bootTerminal(page);
+
+  const verdicts = await page.evaluate(async () => {
+    const { shouldAutoHide } = await import("/static/input-bar.js");
+    const INNER = 800;
+    return {
+      keyboardUp: shouldAutoHide(445, INNER),
+      voicePanel: shouldAutoHide(620, INNER),
+      keyboardGone: shouldAutoHide(INNER, INNER),
+      chromeOverlay: shouldAutoHide(INNER - 60, INNER),
+    };
+  });
+
+  expect(verdicts.keyboardUp, "full keyboard up must not auto-hide").toBe(
+    false,
+  );
+  expect(
+    verdicts.voicePanel,
+    "a shorter voice panel replacing the keyboard must not auto-hide",
+  ).toBe(false);
+  expect(verdicts.keyboardGone, "keyboard gone must auto-hide").toBe(true);
+  expect(
+    verdicts.chromeOverlay,
+    "browser chrome overlaying the viewport must still count as keyboard gone",
+  ).toBe(true);
 
   assertNoFailures(captured);
 });
