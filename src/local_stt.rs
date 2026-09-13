@@ -4,13 +4,14 @@
 //! pure Rust, so `cargo install mobux --features local-stt` needs no cmake, no
 //! C++ toolchain and no container runtime.
 //!
-//! The weights are vendored, not fetched from a model host. They ride in the
-//! release tarball `install.sh` already downloads and sha256-verifies, so that
-//! path never reaches the network for a model at all. A `cargo install` build
-//! has no weights beside it, so it pulls that same release asset and checks
-//! every file against `model.lock.json` — the hashes this source tree was
-//! built against. `scripts/stt-model.mjs` is the only thing that talks to
-//! Hugging Face, and only when a maintainer refreshes the vendored model.
+//! The weights come from mobux's own releases, never from a model host. The
+//! default checkpoint rides in the release tarball `install.sh` already
+//! downloads and sha256-verifies, so a prebuilt install transcribes offline out
+//! of the box. The other checkpoints are their own release assets, fetched on
+//! demand when someone picks one. Every file, on every path, is checked against
+//! `model.lock.json` — the hashes this source tree was built against.
+//! `scripts/stt-model.mjs` is the only thing that talks to Hugging Face, and
+//! only when a maintainer refreshes a checkpoint.
 //!
 //! The engine itself is behind the `local-stt` feature so the default build
 //! stays small. Without it every entry point here still exists and reports
@@ -29,16 +30,17 @@ mod wav;
 /// Whether this binary was built with the in-process engine.
 pub const ENABLED: bool = cfg!(feature = "local-stt");
 
-/// The vendored checkpoint. Small enough that a phone-length clip finishes in
-/// a second or two on a CPU, and small enough to ride in the release tarball.
-/// English-only: the decoder here does not detect language, so a multilingual
-/// checkpoint would silently transcribe into the wrong one.
-pub const DEFAULT_MODEL: &str = "tiny.en";
+/// The checkpoint the release tarball carries and the settings card starts on.
+/// The whole catalog is English-only: the decoder here does not detect
+/// language, so a multilingual checkpoint would silently transcribe into the
+/// wrong one.
+pub const DEFAULT_MODEL: &str = "base.en";
 
 /// Point this at a directory holding `config.json`, `tokenizer.json` and
 /// `model.safetensors` to run weights this host already has — an airgapped
-/// install, or a checkpoint other than the vendored one. A directory named
-/// here is used as given and never checked against the lock.
+/// install, or a checkpoint mobux does not publish. A directory named here is
+/// used for whichever model is selected, as given, and never checked against
+/// the lock.
 pub const MODEL_DIR_ENV: &str = "MOBUX_STT_MODEL_DIR";
 
 /// Where the release assets are fetched from. Mirrors `MOBUX_INSTALL_BASE_URL`
@@ -47,13 +49,15 @@ pub const ASSET_BASE_URL_ENV: &str = "MOBUX_STT_ASSET_BASE_URL";
 pub const DEFAULT_ASSET_BASE_URL: &str =
     "https://github.com/mvhenten/mobux/releases/latest/download";
 
-/// Path inside the release tarball that the weights are packed at.
+/// Path inside a release asset that a checkpoint is packed at. The same
+/// layout in the platform tarball and in a per-model asset, so one unpacker
+/// serves both.
 pub fn asset_model_prefix(model: &str) -> String {
     format!("stt-models/{model}/")
 }
 
-/// The model this source tree was built against, pinned by content hash.
-/// Rewritten only by `scripts/stt-model.mjs`.
+/// The catalog this source tree was built against, every file pinned by
+/// content hash. Rewritten only by `scripts/stt-model.mjs`.
 const MODEL_LOCK_JSON: &str = include_str!("local_stt/model.lock.json");
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -63,9 +67,20 @@ pub struct LockedFile {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct ModelLock {
-    pub model: String,
+pub struct LockedModel {
+    pub id: String,
     pub files: std::collections::BTreeMap<String, LockedFile>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelLock {
+    #[serde(rename = "default")]
+    pub default_model: String,
+    /// The checkpoint packed into the per-platform release tarball.
+    pub vendored: String,
+    /// Every checkpoint mobux publishes, in the order the settings card
+    /// offers them.
+    pub models: Vec<LockedModel>,
 }
 
 pub fn model_lock() -> &'static ModelLock {
@@ -75,24 +90,33 @@ pub fn model_lock() -> &'static ModelLock {
     })
 }
 
-/// The files the engine loads, in the order they are unpacked.
-pub fn model_files() -> Vec<&'static str> {
-    model_lock().files.keys().map(String::as_str).collect()
+pub fn locked_model(model: &str) -> Option<&'static LockedModel> {
+    let model = model.trim();
+    model_lock().models.iter().find(|m| m.id == model)
+}
+
+/// The files a checkpoint is made of, in the order they are unpacked.
+pub fn model_files(model: &str) -> Vec<&'static str> {
+    locked_model(model)
+        .map(|m| m.files.keys().map(String::as_str).collect())
+        .unwrap_or_default()
 }
 
 pub fn model_ids() -> Vec<String> {
-    vec![model_lock().model.clone()]
+    model_lock().models.iter().map(|m| m.id.clone()).collect()
 }
 
 pub fn is_known_model(model: &str) -> bool {
-    model_lock().model == model.trim()
+    locked_model(model).is_some()
 }
 
-/// Resolve a configured model name to the one the engine can run. A value left
+/// Resolve a configured model name to one the engine can run. A value left
 /// over from another provider (a `Systran/faster-whisper-*` id, say) falls back
-/// to the vendored model rather than failing the transcription.
-pub fn resolve_model(_configured: &str) -> &'static str {
-    DEFAULT_MODEL
+/// to the default rather than failing the transcription.
+pub fn resolve_model(configured: &str) -> &'static str {
+    locked_model(configured)
+        .map(|m| m.id.as_str())
+        .unwrap_or(model_lock().default_model.as_str())
 }
 
 pub fn cache_dir(data_dir: &Path) -> PathBuf {
@@ -103,17 +127,18 @@ pub fn model_dir(data_dir: &Path, model: &str) -> PathBuf {
     cache_dir(data_dir).join(model)
 }
 
-/// True once every file the engine loads is in `dir`.
-pub fn files_present(dir: &Path) -> bool {
-    model_files().iter().all(|f| dir.join(f).is_file())
+/// True once every file a checkpoint is made of is in `dir`.
+pub fn files_present(dir: &Path, model: &str) -> bool {
+    let files = model_files(model);
+    !files.is_empty() && files.iter().all(|f| dir.join(f).is_file())
 }
 
 pub fn model_files_present(data_dir: &Path, model: &str) -> bool {
-    files_present(&model_dir(data_dir, model))
+    files_present(&model_dir(data_dir, model), model)
 }
 
-/// The release tarball carrying the weights for this host, or None on an
-/// architecture mobux publishes no prebuilt asset for.
+/// The per-platform release tarball for this host, or None on an architecture
+/// mobux publishes no prebuilt binary for.
 pub fn release_asset_name() -> Option<&'static str> {
     if !cfg!(target_os = "linux") {
         return None;
@@ -123,6 +148,20 @@ pub fn release_asset_name() -> Option<&'static str> {
         "aarch64" => Some("mobux-aarch64-unknown-linux-gnu.tar.gz"),
         _ => None,
     }
+}
+
+/// The release asset a checkpoint comes out of.
+///
+/// The vendored one is inside the platform tarball, because that is what makes
+/// a prebuilt install transcribe with nothing downloaded. The others are their
+/// own assets: weights are platform-independent, so one upload serves every
+/// target, and nobody pays for a checkpoint they did not pick.
+pub fn asset_for(model: &str) -> Option<String> {
+    let model = resolve_model(model);
+    if model == model_lock().vendored {
+        return release_asset_name().map(str::to_string);
+    }
+    Some(format!("mobux-stt-{model}.tar.gz"))
 }
 
 pub fn asset_base_url() -> String {
@@ -240,38 +279,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_model_is_the_one_the_lock_pins() {
-        assert_eq!(model_lock().model, DEFAULT_MODEL);
+    fn the_default_is_the_vendored_model_and_the_card_offers_it_first() {
+        let lock = model_lock();
+        assert_eq!(lock.default_model, DEFAULT_MODEL);
+        assert_eq!(lock.vendored, DEFAULT_MODEL);
         assert!(is_known_model(DEFAULT_MODEL));
-        assert_eq!(model_ids(), vec![DEFAULT_MODEL.to_string()]);
+        assert_eq!(model_ids().first().map(String::as_str), Some(DEFAULT_MODEL));
+    }
+
+    #[test]
+    fn the_catalog_is_the_three_english_checkpoints() {
+        assert_eq!(model_ids(), vec!["base.en", "tiny.en", "small.en"]);
     }
 
     // The weights are stored half-precision and converted on load; a lock that
-    // drifted back to f32 would double the release tarball without anyone
-    // noticing until it was published.
+    // drifted back to f32 would double every published asset without anyone
+    // noticing until it shipped.
     #[test]
-    fn the_lock_pins_three_f16_files_with_real_hashes() {
-        let lock = model_lock();
-        assert_eq!(
-            model_files(),
-            vec!["config.json", "model.safetensors", "tokenizer.json"]
-        );
-        for (name, file) in &lock.files {
-            assert_eq!(file.sha256.len(), 64, "{name}");
-            assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
-            assert!(file.bytes > 0, "{name}");
+    fn every_locked_checkpoint_pins_three_f16_files_with_real_hashes() {
+        // Half-precision whisper: base.en is ~145 MB and small.en ~484 MB, so
+        // anything past this is a checkpoint that was never converted.
+        const F32_WOULD_EXCEED: u64 = 600 * 1024 * 1024;
+        for model in model_lock().models.iter() {
+            assert_eq!(
+                model_files(&model.id),
+                vec!["config.json", "model.safetensors", "tokenizer.json"],
+                "{}",
+                model.id
+            );
+            for (name, file) in &model.files {
+                assert_eq!(file.sha256.len(), 64, "{}/{name}", model.id);
+                assert!(
+                    file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{}/{name}",
+                    model.id
+                );
+                assert!(file.bytes > 0, "{}/{name}", model.id);
+            }
+            assert!(
+                model.files["model.safetensors"].bytes < F32_WOULD_EXCEED,
+                "{} is {} bytes — not converted to f16?",
+                model.id,
+                model.files["model.safetensors"].bytes
+            );
         }
-        assert!(
-            lock.files["model.safetensors"].bytes < 100 * 1024 * 1024,
-            "f16 tiny.en is ~75 MB; anything near 150 MB is f32"
+    }
+
+    // The vendored checkpoint comes out of the platform tarball, which is what
+    // lets install.sh land a host that dictates with nothing downloaded. Every
+    // other checkpoint is its own asset, so picking one pulls only that one.
+    #[test]
+    fn the_vendored_model_comes_from_the_platform_tarball_and_the_rest_from_their_own() {
+        assert_eq!(
+            asset_for(DEFAULT_MODEL),
+            release_asset_name().map(str::to_string)
+        );
+        assert_eq!(
+            asset_for("tiny.en").as_deref(),
+            Some("mobux-stt-tiny.en.tar.gz")
+        );
+        assert_eq!(
+            asset_for("small.en").as_deref(),
+            Some("mobux-stt-small.en.tar.gz")
         );
     }
 
     #[test]
-    fn both_published_architectures_have_an_asset_to_pull_the_model_from() {
-        assert!(release_asset_name().is_some_and(|a| a.ends_with(".tar.gz")));
+    fn every_catalog_model_has_an_asset_and_a_path_inside_it() {
         assert!(asset_base_url().starts_with("http"));
-        assert_eq!(asset_model_prefix("tiny.en"), "stt-models/tiny.en/");
+        for id in model_ids() {
+            assert!(
+                asset_for(&id).is_some_and(|a| a.ends_with(".tar.gz")),
+                "{id}"
+            );
+            assert_eq!(asset_model_prefix(&id), format!("stt-models/{id}/"));
+        }
     }
 
     // A DB written by the container-backed provider still carries its
@@ -285,14 +367,15 @@ mod tests {
     }
 
     #[test]
-    fn the_vendored_model_is_kept() {
+    fn a_model_in_the_catalog_is_kept() {
         assert_eq!(resolve_model(DEFAULT_MODEL), DEFAULT_MODEL);
-        assert_eq!(resolve_model(" tiny.en "), DEFAULT_MODEL);
+        assert_eq!(resolve_model(" small.en "), "small.en");
+        assert_eq!(resolve_model("tiny.en"), "tiny.en");
     }
 
-    fn write_model_files(dir: &Path) {
+    fn write_model_files(dir: &Path, model: &str) {
         std::fs::create_dir_all(dir).unwrap();
-        for name in model_files() {
+        for name in model_files(model) {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
     }
@@ -315,9 +398,27 @@ mod tests {
     #[test]
     fn a_directory_counts_as_present_only_once_it_holds_every_file() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!files_present(dir.path()));
-        write_model_files(dir.path());
-        assert!(files_present(dir.path()));
+        assert!(!files_present(dir.path(), DEFAULT_MODEL));
+        write_model_files(dir.path(), DEFAULT_MODEL);
+        assert!(files_present(dir.path(), DEFAULT_MODEL));
+    }
+
+    // Each checkpoint caches under its own name, so downloading one never
+    // makes another look present.
+    #[test]
+    fn each_model_caches_in_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_model_files(&model_dir(dir.path(), "small.en"), "small.en");
+        assert!(model_files_present(dir.path(), "small.en"));
+        assert!(!model_files_present(dir.path(), DEFAULT_MODEL));
+        assert!(!model_files_present(dir.path(), "tiny.en"));
+    }
+
+    #[test]
+    fn a_model_outside_the_catalog_has_no_files_to_look_for() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(model_files("medium.en").is_empty());
+        assert!(!files_present(dir.path(), "medium.en"));
     }
 
     #[test]

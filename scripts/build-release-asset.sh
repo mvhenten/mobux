@@ -11,18 +11,22 @@
 # gcc-aarch64-linux-gnu toolchain the workflow installs; on a native aarch64
 # host the same target builds without it.
 #
-# Each asset carries the binary plus the vendored speech model, so install.sh
-# lands a host that can dictate without fetching a model from anywhere. The
-# weights come from scripts/stt-model.mjs, the only thing that talks to Hugging
-# Face, and are checked against src/local_stt/model.lock.json before packing.
+# Each platform asset carries the binary plus the vendored speech model, so
+# install.sh lands a host that can dictate without fetching a model from
+# anywhere. Every other checkpoint in the catalog gets its own asset: weights
+# are platform-independent, so one upload serves both targets and nobody pays
+# for a checkpoint they did not pick. The weights come from
+# scripts/stt-model.mjs, the only thing that talks to Hugging Face, and are
+# checked against src/local_stt/model.lock.json before packing.
 #
 # Output (uploaded by @semantic-release/github, see .releaserc.json):
 #   target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz[.sha256]
 #   target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz[.sha256]
+#   target/dist/mobux-stt-<model>.tar.gz[.sha256]   (one per non-vendored model)
 #
-# Tarball layout:
-#   mobux
-#   stt-models/<model>/{config.json,tokenizer.json,model.safetensors}
+# Platform tarball layout:        Model asset layout:
+#   mobux                           stt-models/<model>/…
+#   stt-models/<vendored>/…
 
 set -euo pipefail
 
@@ -62,11 +66,24 @@ setup_cross() {
 
 mkdir -p "$OUT_DIR"
 
-# The weights ride along, so the model has to be on disk and matching the lock
-# before anything is packed. `ensure` is a no-op once it is.
-MODEL_DIR="target/stt-model"
-MODEL_ID="$(node -e 'process.stdout.write(require("./src/local_stt/model.lock.json").model)')"
-node scripts/stt-model.mjs ensure "$MODEL_DIR"
+# The weights ride along, so every checkpoint has to be on disk and matching
+# the lock before anything is packed. `ensure` is a no-op once it is.
+MODEL_ROOT="target/stt-model"
+VENDORED="$(node scripts/stt-model.mjs vendored)"
+for model in $(node scripts/stt-model.mjs models); do
+  node scripts/stt-model.mjs ensure "${MODEL_ROOT}/${model}" "$model"
+done
+
+# pack_models <staging dir> <model>... — lay checkpoints out the way both kinds
+# of asset carry them, so one unpacker in the binary serves both.
+pack_models() {
+  local stage="$1" model
+  shift
+  for model in "$@"; do
+    mkdir -p "${stage}/stt-models/${model}"
+    cp "${MODEL_ROOT}/${model}"/* "${stage}/stt-models/${model}/"
+  done
+}
 
 for target in $TARGETS; do
   setup_cross "$target"
@@ -75,12 +92,26 @@ for target in $TARGETS; do
 
   stage="${OUT_DIR}/stage-${target}"
   rm -rf "$stage"
-  mkdir -p "${stage}/stt-models/${MODEL_ID}"
+  mkdir -p "$stage"
   cp "target/${target}/release/${CRATE}" "${stage}/${CRATE}"
-  cp "${MODEL_DIR}"/* "${stage}/stt-models/${MODEL_ID}/"
+  pack_models "$stage" "$VENDORED"
 
   tar -C "$stage" -czf "${OUT_DIR}/${asset}" "$CRATE" "stt-models"
   rm -rf "$stage"
   (cd "$OUT_DIR" && sha256sum "$asset" > "${asset}.sha256")
-  echo "built ${OUT_DIR}/${asset} (version ${VERSION}, model ${MODEL_ID})"
+  echo "built ${OUT_DIR}/${asset} (version ${VERSION}, model ${VENDORED})"
+done
+
+# Every checkpoint the tarballs do not carry, as its own asset.
+for model in $(node scripts/stt-model.mjs models); do
+  if [ "$model" = "$VENDORED" ]; then continue; fi
+  asset="${CRATE}-stt-${model}.tar.gz"
+  stage="${OUT_DIR}/stage-stt-${model}"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  pack_models "$stage" "$model"
+  tar -C "$stage" -czf "${OUT_DIR}/${asset}" "stt-models"
+  rm -rf "$stage"
+  (cd "$OUT_DIR" && sha256sum "$asset" > "${asset}.sha256")
+  echo "built ${OUT_DIR}/${asset} (model ${model})"
 done

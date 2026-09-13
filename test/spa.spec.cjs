@@ -2826,13 +2826,13 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   await page.waitForSelector("#stt-provider");
   const kind = page.locator("#sttKind");
 
-  // network: Host + Port + Model; no API key, no install.
+  // network: Host + Port + Model; no API key, nothing to download.
   await kind.selectOption("network");
   await expect(page.locator("#sttHost")).toBeVisible();
   await expect(page.locator("#sttPort")).toBeVisible();
   await expect(page.locator("#sttModelRow")).toBeVisible();
   await expect(page.locator("#sttApiKey")).toHaveCount(0);
-  await expect(page.locator("#sttInstallBtn")).toHaveCount(0);
+  await expect(page.locator("#sttDownloadBtn")).toHaveCount(0);
 
   // openai: API key + Model; no Host/Port.
   await kind.selectOption("openai");
@@ -2841,11 +2841,30 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   await expect(page.locator("#sttHost")).toHaveCount(0);
   await expect(page.locator("#sttPort")).toHaveCount(0);
 
-  // local: install + run toggle; nothing else.
+  // local: the engine runs in this process, so there is a checkpoint to pick
+  // and a button that fetches it — and no endpoint to point anywhere.
   await kind.selectOption("local");
-  await expect(page.locator("#sttInstallBtn")).toBeVisible();
-  await expect(page.locator("#sttToggleBtn")).toBeVisible();
+  await expect(page.locator("#sttModelRow")).toBeVisible();
+  await expect(page.locator("#sttDownloadBtn")).toBeVisible();
   await expect(page.locator("#sttHost")).toHaveCount(0);
+  await expect(page.locator("#sttPort")).toHaveCount(0);
+  await expect(page.locator("#sttApiKey")).toHaveCount(0);
+
+  // The catalog is the published one, default first, and the engine runs a
+  // fixed set — so no free-text model id.
+  const localModels = await page.locator("#sttModel option").allTextContents();
+  expect(localModels).toEqual(["base.en", "tiny.en", "small.en"]);
+  await expect(page.locator("#sttCustomModelRow")).toHaveCount(0);
+
+  // Picking a different checkpoint persists like any other field.
+  await page.locator("#sttModel").selectOption("small.en");
+  await expect(page.locator("#sttStatus")).toContainText("Saved", {
+    timeout: 6000,
+  });
+  const local = await page.evaluate(async () =>
+    (await fetch("/api/settings/stt")).json(),
+  );
+  expect(local.providers.local.model).toBe("small.en");
 
   // auto-save: switch to network, change the port, NO Save tap.
   await kind.selectOption("network");

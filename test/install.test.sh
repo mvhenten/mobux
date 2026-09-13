@@ -58,7 +58,7 @@ payload_script() {
 #
 # MODEL_IN_ASSET=0 builds an asset from before the weights shipped, which the
 # installer still has to handle.
-MODEL_ID="tiny.en"
+MODEL_ID="base.en"
 MODEL_FILES="config.json tokenizer.json model.safetensors"
 make_assets() {
   local dir="$1" body="$2" checksum="$3"

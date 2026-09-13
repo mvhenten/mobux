@@ -20,10 +20,13 @@ deliberately `cargo install` a new version and restart the service.
 Prebuilt Linux binary from the GitHub release (seconds, no compile; every
 release ships `mobux-x86_64-unknown-linux-gnu.tar.gz` and
 `mobux-aarch64-unknown-linux-gnu.tar.gz`, each with a `.sha256` checksum file,
-as assets). Each asset is ~90 MB: the binary plus the speech model
-(`stt-models/<model>/`, f16 weights), so a fresh install dictates without
-fetching a model from anywhere. `install.sh` picks the one matching
-`uname -m`:
+as assets). Each is ~137 MB: the binary plus the default speech model
+(`stt-models/base.en/`, f16 weights), so a fresh install dictates without
+fetching a model from anywhere. The other two checkpoints ship as their own
+platform-independent assets, downloaded only if someone picks them —
+`mobux-stt-tiny.en.tar.gz` (~67 MB) and `mobux-stt-small.en.tar.gz`
+(~424 MB), each with a `.sha256`. `install.sh` picks the platform asset
+matching `uname -m`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | bash
@@ -50,16 +53,19 @@ cargo install mobux --locked --features local-stt
 # on aarch64, add: RUSTFLAGS="-C target-feature=+fp16"
 ```
 
-For an airgapped host, or to run a checkpoint other than the vendored one,
-point `MOBUX_STT_MODEL_DIR` at a directory holding `config.json`,
-`tokenizer.json` and `model.safetensors`. A directory named there is used as
-given and never checked against the lock.
+Switching model in settings downloads that checkpoint's asset and verifies it
+against `src/local_stt/model.lock.json` before loading it. For an airgapped
+host, or to run a checkpoint mobux does not publish, point
+`MOBUX_STT_MODEL_DIR` at a directory holding `config.json`, `tokenizer.json`
+and `model.safetensors`. A directory named there is used as given and never
+checked against the lock.
 
-The vendored model is refreshed by a maintainer with
-`node scripts/stt-model.mjs fetch <dir>` followed by
-`node scripts/stt-model.mjs lock <dir>`, which rewrites
-`src/local_stt/model.lock.json`. That script is the only thing in the repo that
-contacts Hugging Face; nothing does at runtime.
+A maintainer refreshes a checkpoint with
+`node scripts/stt-model.mjs fetch <dir> <model>` followed by
+`node scripts/stt-model.mjs lock <dir> <model>`, which rewrites
+`src/local_stt/model.lock.json` (`models` lists the catalog, `vendored` names
+the one the platform tarball carries). That script is the only thing in the
+repo that contacts Hugging Face; nothing does at runtime.
 
 Straight from GitHub (latest `main`, including unreleased commits):
 
@@ -308,9 +314,11 @@ and **no commit back to `main`** (branch protection forbids it). The pipeline is
    notes plus **prebuilt Linux x86_64 and aarch64 binaries**
    (`mobux-<triple>-unknown-linux-gnu.tar.gz` + `.sha256`, built by
    `scripts/build-release-asset.sh` after the version is patched in, with
-   `--features local-stt` and the vendored speech model packed alongside;
+   `--features local-stt` and the default speech model packed alongside;
    aarch64 is cross-compiled with the `gcc-aarch64-linux-gnu` toolchain the
-   workflow installs), and
+   workflow installs), **the two on-demand speech models**
+   (`mobux-stt-<model>.tar.gz` + `.sha256`, platform-independent, listed in
+   `.releaserc.json` like every other asset), and
    **publishes to crates.io**. The in-app self-updater consumes that asset, so
    updates take seconds instead of a 5-10 min compile.
 

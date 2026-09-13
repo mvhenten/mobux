@@ -40,17 +40,18 @@ jobs:
       # leaves the cache.
       - id: model
         run: |
-          echo "sha=$(node -e 'process.stdout.write(require("./src/local_stt/model.lock.json").files["model.safetensors"].sha256)')" >> "$GITHUB_OUTPUT"
+          node -e 'const l=require("./src/local_stt/model.lock.json");const m=l.models.find(m=>m.id===l.vendored);console.log("id="+m.id);console.log("sha="+m.files["model.safetensors"].sha256)' >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: .tmp/stt-model
           key: stt-model-${{ steps.model.outputs.sha }}
       - name: Fetch the speech model on a cache miss
-        run: node scripts/stt-model.mjs ensure .tmp/stt-model
+        run: node scripts/stt-model.mjs ensure .tmp/stt-model ${{ steps.model.outputs.id }}
       - run: cargo clippy --features local-stt --all-targets -- -D warnings
       - run: cargo build --release --features local-stt
       # Real weights, real inference, on the bundled sample clip — the one
-      # thing the default suite cannot cover.
+      # thing the default suite cannot cover. The bundled checkpoint only: the
+      # download-on-demand ones are covered by the fetch-path tests.
       - name: Transcribe the bundled sample
         run: cargo test --release --features local-stt -- --ignored transcribes_the_bundled_sample
         env:

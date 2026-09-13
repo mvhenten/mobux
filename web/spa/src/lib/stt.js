@@ -5,9 +5,9 @@ import { u } from "./base.js";
 
 export const FALLBACK_MODELS = {
   openai: ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
-  // The vendored checkpoint (src/local_stt/model.lock.json). Other weights go
-  // in through MOBUX_STT_MODEL_DIR, not through this list.
-  local: ["tiny.en"],
+  // The published catalog (src/local_stt/model.lock.json), default first.
+  // base.en rides in the release tarball; the other two download on demand.
+  local: ["base.en", "tiny.en", "small.en"],
   network: [
     "Systran/faster-whisper-base.en",
     "Systran/faster-whisper-small.en",

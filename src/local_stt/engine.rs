@@ -98,7 +98,8 @@ pub async fn ensure_ready(data_dir: PathBuf, model: String) -> Result<(), String
     };
 
     set_phase(model, Phase::Loading);
-    let loaded = tokio::task::spawn_blocking(move || Loaded::load(&dir))
+    let id = model.to_string();
+    let loaded = tokio::task::spawn_blocking(move || Loaded::load(&dir, &id))
         .await
         .map_err(|e| format!("loading the speech model panicked: {e}"));
     let loaded = match loaded.and_then(|inner| inner) {
@@ -172,12 +173,12 @@ fn existing_model_dir(data_dir: &Path, model: &str) -> Option<PathBuf> {
 
 fn resolve_existing(named: Option<&Path>, data_dir: &Path, model: &str) -> Option<PathBuf> {
     if let Some(named) = named {
-        if super::files_present(named) {
+        if super::files_present(named, model) {
             return Some(named.to_path_buf());
         }
     }
     let cached = super::model_dir(data_dir, model);
-    if super::files_present(&cached) && verify_against_lock(&cached).is_ok() {
+    if super::files_present(&cached, model) && verify_against_lock(&cached, model).is_ok() {
         return Some(cached);
     }
     None
@@ -190,9 +191,9 @@ async fn unpack_release_asset(data_dir: &Path, model: &str) -> Result<PathBuf, S
 }
 
 async fn unpack_from(base: &str, data_dir: &Path, model: &str) -> Result<PathBuf, String> {
-    let asset = super::release_asset_name().ok_or_else(|| {
+    let asset = super::asset_for(model).ok_or_else(|| {
         format!(
-            "no prebuilt mobux release for {}/{}, so the speech model cannot be fetched — point {} at a directory holding the weights",
+            "no prebuilt mobux release for {}/{}, so {model} cannot be fetched — point {} at a directory holding the weights",
             std::env::consts::OS,
             std::env::consts::ARCH,
             super::MODEL_DIR_ENV
@@ -212,15 +213,15 @@ async fn unpack_from(base: &str, data_dir: &Path, model: &str) -> Result<PathBuf
     set_phase(
         model,
         Phase::Downloading {
-            file: asset.to_string(),
+            file: asset.clone(),
             downloaded: 0,
             total: 0,
         },
     );
-    let digest = download(&client, &format!("{base}/{asset}"), &tarball, model, asset).await?;
+    let digest = download(&client, &format!("{base}/{asset}"), &tarball, model, &asset).await?;
 
     set_phase(model, Phase::Verifying);
-    let result = verify_and_unpack(&client, base, asset, &digest, &tarball, &dir, model).await;
+    let result = verify_and_unpack(&client, base, &asset, &digest, &tarball, &dir, model).await;
     let _ = tokio::fs::remove_file(&tarball).await;
     result.map(|()| dir)
 }
@@ -288,7 +289,7 @@ fn extract_model(tarball: &Path, dir: &Path, model: &str) -> Result<(), String> 
         .entries()
         .map_err(|e| format!("reading {}: {e}", tarball.display()))?;
 
-    let wanted = super::model_files();
+    let wanted = super::model_files(model);
     for entry in entries {
         let mut entry = entry.map_err(|e| format!("reading {}: {e}", tarball.display()))?;
         let path = entry
@@ -307,7 +308,7 @@ fn extract_model(tarball: &Path, dir: &Path, model: &str) -> Result<(), String> 
             .map_err(|e| format!("unpacking {name}: {e}"))?;
     }
 
-    if let Err(err) = verify_against_lock(dir) {
+    if let Err(err) = verify_against_lock(dir, model) {
         for name in &wanted {
             let _ = std::fs::remove_file(dir.join(name));
         }
@@ -316,8 +317,10 @@ fn extract_model(tarball: &Path, dir: &Path, model: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn verify_against_lock(dir: &Path) -> Result<(), String> {
-    for (name, locked) in &super::model_lock().files {
+fn verify_against_lock(dir: &Path, model: &str) -> Result<(), String> {
+    let locked_model = super::locked_model(model)
+        .ok_or_else(|| format!("{model} is not a checkpoint this build publishes"))?;
+    for (name, locked) in &locked_model.files {
         let bytes = std::fs::read(dir.join(name))
             .map_err(|e| format!("the release asset carries no usable {name}: {e}"))?;
         if bytes.len() as u64 != locked.bytes {
@@ -416,12 +419,8 @@ struct Loaded {
 }
 
 impl Loaded {
-    fn load(dir: &Path) -> Result<Self, String> {
-        let model = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
+    fn load(dir: &Path, model: &str) -> Result<Self, String> {
+        let model = model.to_string();
         let config: Config = serde_json::from_str(
             &std::fs::read_to_string(dir.join("config.json"))
                 .map_err(|e| format!("reading config.json: {e}"))?,
@@ -662,20 +661,36 @@ mod tests {
         assert_eq!(parse_sha256sum(&format!("{}  asset", &digest[..63])), None);
     }
 
+    fn write_files(dir: &Path, model: &str, bytes: &[u8]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for name in super::super::model_files(model) {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+    }
+
     // Weights whose bytes are not the ones this build was compiled against are
     // never loaded — extract_model deletes them rather than leave them for the
     // next start to pick up.
     #[test]
     fn unpacked_weights_that_do_not_match_the_lock_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in super::super::model_files() {
-            std::fs::write(dir.path().join(name), b"not the real weights").unwrap();
+        for model in super::super::model_ids() {
+            let dir = tempfile::tempdir().unwrap();
+            write_files(dir.path(), &model, b"not the real weights");
+            let err =
+                verify_against_lock(dir.path(), &model).expect_err("bad bytes must not verify");
+            assert!(
+                err.contains("config.json") && err.contains("expects"),
+                "{model}: {err}"
+            );
         }
-        let err = verify_against_lock(dir.path()).expect_err("bad bytes must not verify");
-        assert!(
-            err.contains("config.json") && err.contains("expects"),
-            "{err}"
-        );
+    }
+
+    #[test]
+    fn a_checkpoint_this_build_does_not_publish_is_named_rather_than_waved_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = verify_against_lock(dir.path(), "medium.en")
+            .expect_err("an unpublished checkpoint has no hashes to check");
+        assert!(err.contains("medium.en"), "{err}");
     }
 
     // An operator who names a directory gets that directory, whatever is in
@@ -684,12 +699,9 @@ mod tests {
     fn a_named_directory_wins_and_is_not_checked_against_the_lock() {
         let dir = tempfile::tempdir().unwrap();
         let named = dir.path().join("airgapped");
-        std::fs::create_dir_all(&named).unwrap();
-        for name in super::super::model_files() {
-            std::fs::write(named.join(name), b"someone else's weights").unwrap();
-        }
+        write_files(&named, "small.en", b"someone else's weights");
         assert_eq!(
-            resolve_existing(Some(&named), dir.path(), "tiny.en").as_deref(),
+            resolve_existing(Some(&named), dir.path(), "small.en").as_deref(),
             Some(named.as_path())
         );
     }
@@ -698,14 +710,19 @@ mod tests {
     // caller fetches instead.
     #[test]
     fn a_cache_that_does_not_match_the_lock_is_not_used() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(resolve_existing(None, dir.path(), "tiny.en").is_none());
-        let cached = super::super::model_dir(dir.path(), "tiny.en");
-        std::fs::create_dir_all(&cached).unwrap();
-        for name in super::super::model_files() {
-            std::fs::write(cached.join(name), b"weights from an older build").unwrap();
+        for model in super::super::model_ids() {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(resolve_existing(None, dir.path(), &model).is_none());
+            write_files(
+                &super::super::model_dir(dir.path(), &model),
+                &model,
+                b"weights from an older build",
+            );
+            assert!(
+                resolve_existing(None, dir.path(), &model).is_none(),
+                "{model}"
+            );
         }
-        assert!(resolve_existing(None, dir.path(), "tiny.en").is_none());
     }
 
     // An incomplete named directory is ignored rather than half-loaded.
@@ -715,23 +732,24 @@ mod tests {
         let named = dir.path().join("partial");
         std::fs::create_dir_all(&named).unwrap();
         std::fs::write(named.join("config.json"), b"{}").unwrap();
-        assert!(resolve_existing(Some(&named), dir.path(), "tiny.en").is_none());
+        assert!(resolve_existing(Some(&named), dir.path(), "base.en").is_none());
     }
 
     #[test]
     fn a_missing_file_is_named_rather_than_silently_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        let err = verify_against_lock(dir.path()).expect_err("nothing on disk cannot verify");
+        let err =
+            verify_against_lock(dir.path(), "base.en").expect_err("nothing on disk cannot verify");
         assert!(err.contains("config.json"), "{err}");
     }
 
-    // ── the cargo-install fetch path ────────────────────────────────────
+    // ── fetching a checkpoint from our own releases ─────────────────────
     //
-    // A source build has no weights beside it, so it pulls the published
-    // release asset. Nothing here reaches Hugging Face, and nothing loads
-    // weights the build was not compiled against.
+    // The vendored checkpoint comes out of the platform tarball; every other
+    // one out of its own asset. Same download, same sidecar check, same lock
+    // check — and nothing anywhere reaches Hugging Face.
 
-    fn tarball(model_bytes: &[u8]) -> Vec<u8> {
+    fn tarball(model: &str, model_bytes: &[u8]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         let mut add = |path: &str, bytes: &[u8]| {
             let mut header = tar::Header::new_gnu();
@@ -741,9 +759,9 @@ mod tests {
             builder.append_data(&mut header, path, bytes).unwrap();
         };
         add("mobux", b"the binary, which the model fetch must skip");
-        for name in super::super::model_files() {
+        for name in super::super::model_files(model) {
             add(
-                &format!("{}{name}", super::super::asset_model_prefix("tiny.en")),
+                &format!("{}{name}", super::super::asset_model_prefix(model)),
                 model_bytes,
             );
         }
@@ -753,12 +771,11 @@ mod tests {
         gz.finish().unwrap()
     }
 
-    /// Serve a release asset the way GitHub does: the tarball, and a
+    /// Serve one release asset the way GitHub does: the archive, and a
     /// `sha256sum`-format sidecar beside it.
-    async fn serve_asset(body: Vec<u8>, sidecar: String) -> String {
+    async fn serve_asset(asset: String, body: Vec<u8>, sidecar: String) -> String {
         use axum::{routing::get, Router};
 
-        let asset = super::super::release_asset_name().expect("a published architecture");
         let app = Router::new()
             .route(&format!("/{asset}"), get(move || async move { body }))
             .route(
@@ -777,38 +794,66 @@ mod tests {
         hex(Sha256::digest(bytes))
     }
 
+    // One case per checkpoint: the fetch reaches the asset that checkpoint
+    // lives in, unpacks it, finds weights the build does not pin, and leaves
+    // nothing behind. The vendored one exercises the platform tarball, the
+    // others their own per-model assets.
     #[tokio::test]
-    async fn a_tarball_whose_weights_are_not_the_pinned_ones_is_refused() {
-        let body = tarball(b"weights from somewhere else");
-        let asset = super::super::release_asset_name().unwrap();
+    async fn weights_that_do_not_match_the_lock_are_refused_and_removed_for_every_model() {
+        for model in super::super::model_ids() {
+            let asset = super::super::asset_for(&model).expect("a published asset");
+            let body = tarball(&model, b"weights from somewhere else");
+            let sidecar = format!("{}  {asset}\n", sha256_hex(&body));
+            let base = serve_asset(asset.clone(), body, sidecar).await;
+
+            let dir = tempfile::tempdir().unwrap();
+            let err = unpack_from(&base, dir.path(), &model)
+                .await
+                .expect_err("unpinned weights must not be loaded");
+            assert!(err.contains("expects"), "{model}: {err}");
+
+            let cached = super::super::model_dir(dir.path(), &model);
+            assert!(
+                !super::super::files_present(&cached, &model),
+                "{model}: rejected weights must not be left on disk"
+            );
+            assert!(
+                !cached.join(format!("{asset}.part")).exists(),
+                "{model}: the download must not be left behind"
+            );
+        }
+    }
+
+    // The per-model assets are the point of this split: picking small.en must
+    // not drag down the platform tarball, and vice versa.
+    #[tokio::test]
+    async fn a_non_vendored_model_is_fetched_from_its_own_asset() {
+        let model = "small.en";
+        let asset = super::super::asset_for(model).unwrap();
+        assert_eq!(asset, "mobux-stt-small.en.tar.gz");
+
+        // Only that asset is served; reaching for any other one 404s.
+        let body = tarball(model, b"weights from somewhere else");
         let sidecar = format!("{}  {asset}\n", sha256_hex(&body));
-        let base = serve_asset(body, sidecar).await;
+        let base = serve_asset(asset, body, sidecar).await;
 
         let dir = tempfile::tempdir().unwrap();
-        let err = unpack_from(&base, dir.path(), "tiny.en")
+        let err = unpack_from(&base, dir.path(), model)
             .await
             .expect_err("unpinned weights must not be loaded");
         assert!(err.contains("expects"), "{err}");
-
-        // Nothing usable is left for the next start to pick up, and the
-        // part-file is gone too.
-        let cached = super::super::model_dir(dir.path(), "tiny.en");
-        assert!(!super::super::files_present(&cached));
-        assert!(
-            !cached.join(format!("{asset}.part")).exists(),
-            "the download must not be left behind"
-        );
     }
 
     #[tokio::test]
     async fn a_tarball_that_does_not_match_its_published_sha256_is_refused() {
-        let body = tarball(b"anything");
-        let asset = super::super::release_asset_name().unwrap();
+        let model = super::super::DEFAULT_MODEL;
+        let asset = super::super::asset_for(model).unwrap();
+        let body = tarball(model, b"anything");
         let sidecar = format!("{}  {asset}\n", "0".repeat(64));
-        let base = serve_asset(body, sidecar).await;
+        let base = serve_asset(asset, body, sidecar).await;
 
         let dir = tempfile::tempdir().unwrap();
-        let err = unpack_from(&base, dir.path(), "tiny.en")
+        let err = unpack_from(&base, dir.path(), model)
             .await
             .expect_err("a tampered asset must not be unpacked");
         assert!(err.contains("sha256 mismatch"), "{err}");
@@ -824,19 +869,19 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let err = unpack_from(&format!("http://{addr}"), dir.path(), "tiny.en")
+        let err = unpack_from(&format!("http://{addr}"), dir.path(), "base.en")
             .await
             .expect_err("a 404 is not a model");
         assert!(err.contains("fetching"), "{err}");
     }
 
-    // The real thing: fetches ~78 MB (or reuses a prepared directory) and runs
-    // whisper on a bundled clip, so it never belongs in a normal
-    // `cargo test`. Run it by hand with:
+    // The real thing: loads the bundled checkpoint and runs whisper on a
+    // bundled clip, so it never belongs in a normal `cargo test`. Run it by
+    // hand with:
     //
-    //   node scripts/stt-model.mjs ensure .tmp/stt-model
+    //   node scripts/stt-model.mjs ensure .tmp/stt-model "$(node scripts/stt-model.mjs vendored)"
     //   MOBUX_STT_MODEL_TEST=1 MOBUX_STT_MODEL_DIR=.tmp/stt-model \
-    //     cargo test --features local-stt -- --ignored transcribes_the_bundled_sample
+    //     cargo test --release --features local-stt -- --ignored transcribes_the_bundled_sample
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "loads real whisper weights and runs real inference"]
     async fn transcribes_the_bundled_sample() {

@@ -24,7 +24,7 @@ mobux closes that gap. It puts your tmux sessions on the phone in a form built f
 - **Notified when it matters.** A long job finishing rings the terminal bell; mobux turns that into a Web Push notification on your phone — even with the screen locked — deep-linked back to the exact session. It hooks tmux's own bell event, so a notification means a real bell fired, not a guess scraped off the screen.
 - **Voice capture.** Record a voice note from the input bar and mobux transcribes it. Two providers: whisper running inside the mobux process (pure Rust, no container runtime), or any endpoint that speaks the OpenAI audio API — self-hosted whisper.cpp on your tailnet, or OpenAI's own. A ready-to-run, tailnet-only whisper.cpp recipe ships in [`deploy/stt/`](deploy/stt/README.md).
 
-  The prebuilt release asset carries the weights, so `install.sh` lands a host that dictates offline. A source build has to opt in, and pulls the same published asset on first use:
+  Three English checkpoints, picked in settings: **base.en** (the default) rides in the prebuilt release asset, so `install.sh` lands a host that dictates offline; **tiny.en** and **small.en** are their own release assets, downloaded on demand and checked against hashes compiled into the binary. A source build has to opt in, and pulls the same published assets on first use:
 
   ```bash
   cargo install mobux --locked --features local-stt
