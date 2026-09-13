@@ -2863,13 +2863,20 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   const savedConfig = () =>
     page.evaluate(async () => (await fetch("/api/settings/stt")).json());
 
-  // Picking a different checkpoint persists like any other field.
+  // Picking a different checkpoint persists like any other field. Wait for
+  // the active kind too: the card fires one save per change, so letting this
+  // one land before switching kinds is what keeps the writes in the order the
+  // assertions below read them in.
   await page.locator("#sttModel").selectOption("small.en");
   await expect
-    .poll(async () => (await savedConfig()).providers.local.model, {
-      timeout: 10000,
-    })
-    .toBe("small.en");
+    .poll(
+      async () => {
+        const saved = await savedConfig();
+        return `${saved.activeKind}:${saved.providers.local.model}`;
+      },
+      { timeout: 10000 },
+    )
+    .toBe("local:small.en");
 
   // auto-save: switch to network, change the port, NO Save tap.
   await kind.selectOption("network");
@@ -2878,13 +2885,18 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   await portEl.fill(probe);
   await portEl.blur();
 
-  // Persisted with no Save tap.
+  // Persisted with no Save tap. Switching kind and editing a field each queue
+  // their own debounced save, so settle on both facts rather than snapshotting
+  // between the two writes.
   await expect
-    .poll(async () => (await savedConfig()).providers.network.port, {
-      timeout: 10000,
-    })
-    .toBe(probe);
-  expect((await savedConfig()).activeKind).toBe("network");
+    .poll(
+      async () => {
+        const saved = await savedConfig();
+        return `${saved.activeKind}:${saved.providers.network.port}`;
+      },
+      { timeout: 15000 },
+    )
+    .toBe(`network:${probe}`);
   await expect(page.locator("#sttStatus")).toContainText("Saved");
 });
 

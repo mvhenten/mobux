@@ -58,18 +58,25 @@ function effectiveModel() {
   return model.value === CUSTOM ? customModel.value.trim() : model.value;
 }
 
+// Every kind switch starts a discovery round trip, and switching twice leaves
+// two in flight. They finish in whatever order the server answers — a provider
+// with a host to probe takes seconds to time out, a local one answers at once
+// — so the slowest write used to win and paint another provider's catalog over
+// the current one. Only the newest request may touch the list.
+let modelsRequest = 0;
+
 async function loadModels(selected) {
-  const list = await fetchModels(kind.value, host.value, port.value);
+  const ticket = ++modelsRequest;
+  const forKind = kind.value;
+  const list = await fetchModels(forKind, host.value, port.value);
+  if (ticket !== modelsRequest || forKind !== kind.value) return;
   // If the saved model isn't discovered, keep it selectable (don't silently
   // drop to custom) — same as populateModelSelect's insert.
   const withSaved =
     selected && !list.includes(selected) ? [selected, ...list] : list.slice();
   models.value = withSaved;
   if (selected) {
-    model.value =
-      list.includes(selected) || withSaved.includes(selected)
-        ? selected
-        : CUSTOM;
+    model.value = withSaved.includes(selected) ? selected : CUSTOM;
     if (model.value === CUSTOM) customModel.value = selected;
   }
 }
@@ -111,7 +118,14 @@ function populateFromProvider(k) {
   port.value = p.port || def.port;
   apiKey.value = "";
   hasKey.value = !!p.has_key;
-  loadModels(p.model || def.model);
+  // Render this kind's own catalog straight away. Waiting for discovery left
+  // the previous provider's models on screen — and pickable — for as long as
+  // the round trip took.
+  const selected = p.model || def.model;
+  const known = (FALLBACK_MODELS[k] || FALLBACK_MODELS.local).slice();
+  models.value = known.includes(selected) ? known : [selected, ...known];
+  model.value = selected;
+  loadModels(selected);
 }
 
 async function refreshSttStatus() {
