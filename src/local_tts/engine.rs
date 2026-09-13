@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ort::session::Session;
 use ort::value::Tensor;
@@ -29,6 +29,14 @@ use crate::speech_text::Speech;
 /// Silence between sentences, so a block does not run together into one
 /// breathless stretch.
 const SENTENCE_GAP_SECS: f32 = 0.14;
+
+/// The most phoneme ids one decode is given.
+///
+/// `speech_text::MAX_SENTENCE_CHARS` already bounds the text, but a sentence
+/// of that length in a dense script still encodes to more ids than a quadratic
+/// decode should be handed. This is the backstop: the run is cut short rather
+/// than allowed to pin a blocking thread and exhaust memory.
+const MAX_PHONEME_IDS: usize = 1024;
 
 /// Words the dictionary has never heard of but this terminal says constantly.
 /// Without them "tmux" comes out as nothing at all.
@@ -51,9 +59,21 @@ const GLOSSARY: &[(&str, &str)] = &[
     ("stt", "EH1 S T IY1 T IY1"),
 ];
 
-/// Letter names, so a word the dictionary does not carry is spelled instead of
-/// dropped. Silence in the middle of a sentence is worse than a spelled name.
+/// Character names, so a word the dictionary does not carry is spelled
+/// instead of dropped. Silence in the middle of a sentence is worse than a
+/// spelled name — and a half-spelled one, `sha256` read as "ess aitch ay", is
+/// worse than either.
 const LETTERS: &[(char, &str)] = &[
+    ('0', "zero"),
+    ('1', "one"),
+    ('2', "two"),
+    ('3', "three"),
+    ('4', "four"),
+    ('5', "five"),
+    ('6', "six"),
+    ('7', "seven"),
+    ('8', "eight"),
+    ('9', "nine"),
     ('a', "ay"),
     ('b', "bee"),
     ('c', "see"),
@@ -86,10 +106,50 @@ const LETTERS: &[(char, &str)] = &[
 /// the same ones keeps the spell-out from firing on every plural.
 const SUFFIXES: &[&str] = &["ing", "edly", "ed", "es", "s", "er", "est", "ly", "'s"];
 
+/// A loaded model in the engine's slot. The name sits outside the lock so
+/// "which voice is loaded" can be answered without waiting on a synthesis.
+struct Held<T> {
+    name: String,
+    value: Arc<Mutex<T>>,
+}
+
+/// Run `work` against the model in `slot`, on a blocking thread.
+///
+/// The model is lent by cloning the `Arc`; it is never taken out of the slot.
+/// Taking it meant a request future dropped mid-synthesis — a page navigation,
+/// a client that hung up — carried the 63 MB checkpoint away with it, leaving
+/// the phase reporting Ready over an empty slot and the next speak silently
+/// reloading from disk.
+async fn with_held<T, R>(
+    slot: &tokio::sync::Mutex<Option<Held<T>>>,
+    name: &str,
+    work: impl FnOnce(&mut T) -> R + Send + 'static,
+) -> Result<R, String>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+{
+    let model = {
+        let guard = slot.lock().await;
+        match guard.as_ref() {
+            Some(held) if held.name == name => held.value.clone(),
+            _ => return Err("the voice is not loaded".to_string()),
+        }
+    };
+    tokio::task::spawn_blocking(move || {
+        let mut guard = model
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        work(&mut guard)
+    })
+    .await
+    .map_err(|e| format!("synthesis panicked: {e}"))
+}
+
 struct Engine {
     /// The voice the reported phase belongs to, and the phase itself.
     phase: Mutex<(String, Phase)>,
-    loaded: tokio::sync::Mutex<Option<Loaded>>,
+    loaded: tokio::sync::Mutex<Option<Held<Loaded>>>,
     /// Held for the whole fetch-and-load, so a second caller joins the first
     /// rather than starting a second download of the same weights.
     preparing: tokio::sync::Mutex<()>,
@@ -110,8 +170,8 @@ fn set_phase(voice: &str, phase: Phase) {
     }
 }
 
-pub fn phase(data_dir: &Path, voice: &str) -> Phase {
-    let voice = super::resolve_voice(voice);
+pub fn phase(data_dir: &Path) -> Phase {
+    let voice = super::voice();
     if let Ok(slot) = engine().phase.lock() {
         if slot.0 == voice {
             return slot.1.clone();
@@ -130,8 +190,8 @@ fn manifest(voice: &str) -> Manifest<'static> {
     }
 }
 
-pub async fn ensure_ready(data_dir: PathBuf, voice: String) -> Result<(), String> {
-    let voice = super::resolve_voice(&voice);
+pub async fn ensure_ready(data_dir: PathBuf) -> Result<(), String> {
+    let voice = super::voice();
     if is_loaded(voice).await {
         return Ok(());
     }
@@ -161,8 +221,7 @@ pub async fn ensure_ready(data_dir: PathBuf, voice: String) -> Result<(), String
     };
 
     set_phase(voice, Phase::Loading);
-    let name = voice.to_string();
-    let loaded = tokio::task::spawn_blocking(move || Loaded::load(&name, &dir))
+    let loaded = tokio::task::spawn_blocking(move || Loaded::load(&dir))
         .await
         .map_err(|e| format!("loading the voice panicked: {e}"));
     let loaded = match loaded.and_then(|inner| inner) {
@@ -173,36 +232,25 @@ pub async fn ensure_ready(data_dir: PathBuf, voice: String) -> Result<(), String
         }
     };
 
-    *engine().loaded.lock().await = Some(loaded);
+    *engine().loaded.lock().await = Some(Held {
+        name: voice.to_string(),
+        value: Arc::new(Mutex::new(loaded)),
+    });
     set_phase(voice, Phase::Ready);
     Ok(())
 }
 
-pub async fn synthesize(
-    data_dir: PathBuf,
-    voice: String,
-    speech: Speech,
-) -> Result<Vec<u8>, String> {
-    let voice = super::resolve_voice(&voice);
-    ensure_ready(data_dir, voice.to_string()).await?;
+pub async fn synthesize(data_dir: PathBuf, speech: Speech) -> Result<Vec<u8>, String> {
+    let voice = super::voice();
+    ensure_ready(data_dir).await?;
 
-    let mut guard = engine().loaded.lock().await;
-    let mut loaded = guard
-        .take()
-        .ok_or_else(|| "the voice is not loaded".to_string())?;
-    let handed_back = tokio::task::spawn_blocking(move || {
-        let clip = loaded.run(&speech);
-        (loaded, clip)
+    match with_held(&engine().loaded, voice, move |loaded: &mut Loaded| {
+        loaded.run(&speech)
     })
-    .await;
-
-    match handed_back {
-        Ok((loaded, clip)) => {
-            *guard = Some(loaded);
-            clip
-        }
-        Err(e) => {
-            let err = format!("synthesis panicked: {e}");
+    .await
+    {
+        Ok(clip) => clip,
+        Err(err) => {
             set_phase(voice, Phase::Failed(err.clone()));
             Err(err)
         }
@@ -210,7 +258,7 @@ pub async fn synthesize(
 }
 
 async fn is_loaded(voice: &str) -> bool {
-    matches!(&*engine().loaded.lock().await, Some(l) if l.voice == voice)
+    matches!(&*engine().loaded.lock().await, Some(held) if held.name == voice)
 }
 
 // ── weights ───────────────────────────────────────────────────────────
@@ -263,7 +311,6 @@ async fn fetch_from(base: &str, data_dir: &Path, voice: &str) -> Result<PathBuf,
 // ── synthesis ─────────────────────────────────────────────────────────
 
 struct Loaded {
-    voice: String,
     session: Session,
     encoder: PiperEncoder,
     phonemizer: EnglishPhonemizer,
@@ -273,7 +320,7 @@ struct Loaded {
 }
 
 impl Loaded {
-    fn load(voice: &str, dir: &Path) -> Result<Self, String> {
+    fn load(dir: &Path) -> Result<Self, String> {
         let config: serde_json::Value = serde_json::from_slice(
             &std::fs::read(dir.join("voice.onnx.json"))
                 .map_err(|e| format!("reading voice.onnx.json: {e}"))?,
@@ -315,7 +362,6 @@ impl Loaded {
             .map_err(|e| format!("loading the voice checkpoint: {e}"))?;
 
         Ok(Self {
-            voice: voice.to_string(),
             session,
             encoder,
             phonemizer,
@@ -358,6 +404,7 @@ impl Loaded {
             return Ok(Vec::new());
         }
 
+        let ids = cap_ids(ids, MAX_PHONEME_IDS);
         let length = ids.len();
         let phonemes = Tensor::from_array((vec![1usize, length], ids))
             .map_err(|e| format!("building the phoneme tensor: {e}"))?;
@@ -417,27 +464,42 @@ impl Loaded {
     }
 }
 
+/// Trim a phoneme run to `max`, keeping the last id — the end-of-sentence
+/// marker the checkpoint needs to stop cleanly rather than trail off.
+fn cap_ids(mut ids: Vec<i64>, max: usize) -> Vec<i64> {
+    if ids.len() <= max || max == 0 {
+        return ids;
+    }
+    let eos = ids[ids.len() - 1];
+    ids.truncate(max);
+    let last = ids.len() - 1;
+    ids[last] = eos;
+    ids
+}
+
 fn open_session(path: &Path, threads: usize) -> ort::Result<Session> {
     Session::builder()?
         .with_intra_threads(threads)?
         .commit_from_file(path)
 }
 
-/// A word as its letters, the way a person reads out an unfamiliar name.
+/// A word as its characters, the way a person reads out an unfamiliar name.
+///
+/// A character with no name — an accent, a symbol — takes the whole word back
+/// to its written form rather than being skipped: dropping it spelled `café`
+/// as "see ay ef", which is a different word.
 fn spell(word: &str) -> String {
-    let letters: Vec<&str> = word
-        .chars()
-        .filter_map(|c| {
-            LETTERS
-                .iter()
-                .find(|(letter, _)| *letter == c)
-                .map(|(_, name)| *name)
-        })
-        .collect();
-    if letters.is_empty() {
+    let mut names = Vec::with_capacity(word.chars().count());
+    for ch in word.chars() {
+        match LETTERS.iter().find(|(named, _)| *named == ch) {
+            Some((_, name)) => names.push(*name),
+            None => return word.to_string(),
+        }
+    }
+    if names.is_empty() {
         return word.to_string();
     }
-    letters.join(" ")
+    names.join(" ")
 }
 
 /// The pronunciation dictionary, plus the terminal words it has never heard
@@ -469,7 +531,80 @@ mod tests {
     fn an_unknown_word_is_spelled_rather_than_dropped() {
         assert_eq!(spell("rs"), "ar ess");
         assert_eq!(spell("mobux"), "em oh bee you ex");
-        assert_eq!(spell("42"), "42");
+    }
+
+    // Digits used to be filtered out of the spelling entirely, so `sha256`
+    // came out as "ess aitch ay" and `x86` as "ex" — a different word from the
+    // one on the screen, said with confidence.
+    #[test]
+    fn a_spelled_word_keeps_its_digits() {
+        assert_eq!(spell("sha256"), "ess aitch ay two five six");
+        assert_eq!(spell("x86"), "ex eight six");
+        assert_eq!(spell("v0"), "vee zero");
+        assert_eq!(spell("42"), "four two");
+    }
+
+    // A character with no name takes the whole word back to its written form:
+    // skipping it spelled `café` as "see ay ef".
+    #[test]
+    fn a_word_with_an_unnameable_character_is_left_as_written() {
+        assert_eq!(spell("café"), "café");
+        assert_eq!(spell("naïve"), "naïve");
+        assert_eq!(spell(""), "");
+    }
+
+    #[test]
+    fn a_phoneme_run_is_cut_to_the_cap_and_keeps_its_end_marker() {
+        let ids: Vec<i64> = (0..3000).collect();
+        let capped = cap_ids(ids.clone(), MAX_PHONEME_IDS);
+        assert_eq!(capped.len(), MAX_PHONEME_IDS);
+        assert_eq!(capped[capped.len() - 1], 2999);
+        assert_eq!(capped[0], 0);
+
+        let short = vec![1i64, 2, 3];
+        assert_eq!(cap_ids(short.clone(), MAX_PHONEME_IDS), short);
+    }
+
+    // A request future dropped mid-synthesis — a page navigation, a client
+    // that hung up — must not carry the loaded checkpoint away with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_request_leaves_the_model_in_its_slot() {
+        let slot: tokio::sync::Mutex<Option<Held<u32>>> = tokio::sync::Mutex::new(Some(Held {
+            name: "voice".to_string(),
+            value: Arc::new(Mutex::new(1)),
+        }));
+
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            with_held(&slot, "voice", |n: &mut u32| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                *n += 1;
+                *n
+            }),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the request was meant to be dropped");
+
+        assert!(
+            slot.lock().await.is_some(),
+            "the model was taken out of the slot and lost"
+        );
+        let again = with_held(&slot, "voice", |n: &mut u32| *n)
+            .await
+            .expect("the model is still usable");
+        assert_eq!(again, 2, "the abandoned work still ran to completion");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slot_holding_another_voice_is_not_lent_out() {
+        let slot: tokio::sync::Mutex<Option<Held<u32>>> = tokio::sync::Mutex::new(Some(Held {
+            name: "other".to_string(),
+            value: Arc::new(Mutex::new(1)),
+        }));
+        let err = with_held(&slot, "voice", |n: &mut u32| *n)
+            .await
+            .expect_err("a different voice is not this one");
+        assert!(err.contains("not loaded"), "{err}");
     }
 
     #[test]
@@ -543,12 +678,10 @@ mod tests {
         // Warm up first: loading the checkpoint and the dictionary is a second
         // of work that happens once, and folding it into the measurement would
         // hide what a tap on a speaker icon actually costs.
-        ensure_ready(cache.clone(), super::super::DEFAULT_VOICE.to_string())
-            .await
-            .expect("the voice loads");
+        ensure_ready(cache.clone()).await.expect("the voice loads");
 
         let started = std::time::Instant::now();
-        let clip = synthesize(cache, super::super::DEFAULT_VOICE.to_string(), speech)
+        let clip = synthesize(cache, speech)
             .await
             .expect("the voice speaks the block");
         let elapsed = started.elapsed().as_secs_f64();

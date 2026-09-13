@@ -10,8 +10,8 @@
 //! The rewriting lives in the tables below rather than in the speak path, so
 //! the rules can be read as a list and tested as a list. Each entry names what
 //! it is for, the pattern it recognises, and what the listener hears instead:
-//! [`Say`] for a phrase, [`Drop`] to delete it, and the three shaping actions
-//! for matches that need their own capture rewritten.
+//! [`Say`] for a phrase, [`Erase`] and [`Drop`] to take it out, and the three
+//! shaping actions for matches that need their own capture rewritten.
 //!
 //! [`Kind`] is the reader's own classification, not a guess made here. With
 //! shell integration on, a prompt row and the output of the command it started
@@ -54,7 +54,12 @@ impl Kind {
 /// What the listener hears where a rule matched.
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
-    /// Delete the match. For things that carry no meaning out loud.
+    /// Delete the match, closing the gap. For bytes that were never part of
+    /// the text: `foo\x1b[0mbar` is the one word "foobar".
+    Erase,
+    /// Replace the match with a space. For a glyph that stood between words —
+    /// a box-drawing rule, a bullet — where closing the gap would run its
+    /// neighbours together.
     Drop,
     /// Replace the match with these words.
     Say(&'static str),
@@ -83,17 +88,17 @@ pub static ESCAPES: &[Rule] = &[
     Rule {
         what: "CSI sequences — colour, cursor moves, erase",
         pattern: r"\x1b\[[0-9;:?]*[ -/]*[@-~]",
-        action: Action::Drop,
+        action: Action::Erase,
     },
     Rule {
         what: "OSC sequences — window titles, hyperlinks, shell integration",
         pattern: r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)",
-        action: Action::Drop,
+        action: Action::Erase,
     },
     Rule {
         what: "single-character escapes left over from a partial sequence",
         pattern: r"\x1b[@-Z\\-_]",
-        action: Action::Drop,
+        action: Action::Erase,
     },
     Rule {
         what: "carriage returns from progress lines that rewrote themselves",
@@ -108,7 +113,7 @@ pub static ESCAPES: &[Rule] = &[
     Rule {
         what: "zero-width and bidi marks",
         pattern: "[\u{200b}-\u{200f}\u{2060}\u{feff}]",
-        action: Action::Drop,
+        action: Action::Erase,
     },
 ];
 
@@ -165,14 +170,26 @@ pub static NOISE: &[Rule] = &[
         pattern: r"\b[0-9a-f]{8,}\b",
         action: Action::Say(" a hash "),
     },
+    // Neither `-` nor `_` is in the class: with them a hyphenated English
+    // phrase is one long "word", and
+    // `feature-flag-rollout-configuration-service` would be announced as "a
+    // long token". An unbroken run of thirty-two alphanumerics is not English.
     Rule {
         what: "base64 blobs and bearer tokens",
-        pattern: r"\b[A-Za-z0-9+_-]{32,}={0,2}\b",
+        pattern: r"\b[A-Za-z0-9+]{32,}={0,2}\b",
         action: Action::Say(" a long token "),
     },
+    // Two rules, because a bare letter after a space is not a unit: `3 G` is a
+    // grade, a disk letter, a column header. A size either spells the B out or
+    // is written against the number.
     Rule {
-        what: "byte counts",
-        pattern: r"\b(\d+(?:\.\d+)?)\s?([KMGT])(?:i?B)?\b",
+        what: "byte counts written with their unit",
+        pattern: r"\b(\d+(?:\.\d+)?)[ \t]?([KMGT])i?B\b",
+        action: Action::Size,
+    },
+    Rule {
+        what: "byte counts abbreviated against the number",
+        pattern: r"\b(\d+(?:\.\d+)?)([KMGT])\b",
         action: Action::Size,
     },
     Rule {
@@ -232,13 +249,27 @@ pub static SYMBOLS: &[Rule] = &[
     },
 ];
 
-/// Prompt decoration, stripped from the command line only. The sigil a shell
-/// ends its prompt with is the last one on the row, so the strip runs to the
-/// last one there is. Redirects are deliberately not sigils: `echo a > b` is a
-/// command, not a prompt.
+/// Prompt decoration, stripped from the command line only.
+///
+/// The pattern describes the *shape* of a prompt rather than "anything up to a
+/// sigil": optional `(venv)` groups, an optional `user@host`, an optional
+/// working directory, then the sigil and the space after it. Matching `.*`
+/// instead would run to the last sigil on the row and eat the command —
+/// `npm test # run the suite` would be read as "run the suite", and
+/// `git commit -m "bump to 50% done"` as `done"`.
+///
+/// Redirects are deliberately not sigils: `echo a > b` is a command, not a
+/// prompt. Neither are quotes anywhere in the prefix, for the same reason.
 pub static PROMPTS: &[Rule] = &[Rule {
-    what: "everything up to and including the prompt sigil",
-    pattern: r"(?m)^.*[$#%❯➜›»⟩][ \t]+",
+    what: "a prompt-shaped prefix and its sigil",
+    pattern: concat!(
+        r"(?m)^[ \t]*",
+        r"(?:\([^()\n'\x22]{1,30}\)[ \t]*){0,3}",
+        r"(?:[\w.+-]{1,40}@[\w.-]{1,60})?",
+        r"[ \t]*:?[ \t]*",
+        r"(?:[~/][^\s'\x22$#%]{0,80})?",
+        r"[ \t]*[$#%❯➜›»⟩][ \t]+",
+    ),
     action: Action::Drop,
 }];
 
@@ -319,6 +350,7 @@ fn apply(rules: &[Compiled], text: &str) -> String {
         out = rule
             .regex
             .replace_all(&out, |caps: &Captures| match rule.action {
+                Action::Erase => String::new(),
                 Action::Drop => " ".to_string(),
                 Action::Say(words) => words.to_string(),
                 Action::Squeeze => caps[0].chars().take(1).collect(),
@@ -534,7 +566,47 @@ pub fn split_sentences(text: &str) -> Vec<String> {
     if sentences.is_empty() && !text.trim().is_empty() {
         sentences.push(text.trim().to_string());
     }
-    sentences
+    sentences.into_iter().flat_map(hard_split).collect()
+}
+
+/// The longest run of characters handed to the synthesizer as one utterance.
+///
+/// Punctuation is not guaranteed: `cat`ting a minified bundle produces sixty
+/// thousand characters with no full stop and no newline in them. A VITS decode
+/// is quadratic in sequence length, so one such utterance pins a thread and
+/// exhausts memory. Past this length the text is broken at the last space
+/// before the limit — a worse breath than a full stop, and the only one there
+/// is.
+pub const MAX_SENTENCE_CHARS: usize = 280;
+
+fn hard_split(sentence: String) -> Vec<String> {
+    if sentence.chars().count() <= MAX_SENTENCE_CHARS {
+        return vec![sentence];
+    }
+    let chars: Vec<char> = sentence.chars().collect();
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let remaining = chars.len() - start;
+        if remaining <= MAX_SENTENCE_CHARS {
+            chunks.push(chars[start..].iter().collect());
+            break;
+        }
+        let limit = start + MAX_SENTENCE_CHARS;
+        let split = chars[start..limit]
+            .iter()
+            .rposition(|c| c.is_whitespace())
+            .map(|offset| start + offset + 1)
+            .filter(|end| *end > start)
+            .unwrap_or(limit);
+        let chunk: String = chars[start..split].iter().collect();
+        let chunk = chunk.trim();
+        if !chunk.is_empty() {
+            chunks.push(chunk.to_string());
+        }
+        start = split;
+    }
+    chunks
 }
 
 fn push_sentences(line: &str, out: &mut Vec<String>) {
@@ -632,6 +704,10 @@ mod tests {
             ("one\rtwo", "one two"),
             ("keep \u{200b}this", "keep this"),
             ("\x1b[38;2;255;0;0mtruecolour\x1b[0m", "truecolour"),
+            // A reset in the middle of a word was never a word break: the
+            // escape has to close the gap, not leave a space in it.
+            ("foo\x1b[0mbar", "foobar"),
+            ("re\x1b[1mcon\x1b[0mnect", "reconnect"),
         ];
         for (input, want) in cases {
             assert_eq!(&spoken(Kind::Prose, input), want, "{input:?}");
@@ -675,6 +751,29 @@ mod tests {
         }
     }
 
+    // A sigil inside a command is not a prompt. Matching to the LAST one on
+    // the row ate the command itself, so the listener heard only its own
+    // trailing arguments read back.
+    #[test]
+    fn a_sigil_inside_a_command_is_not_prompt_decoration() {
+        let cases: &[(&str, &str)] = &[
+            ("npm ci # install first", "Command: npm ci # install first"),
+            (
+                "git commit -m \"bump to 50% done\"",
+                "Command: git commit -m \"bump to 50% done\"",
+            ),
+            ("echo $ 5", "Command: echo $ 5"),
+            (
+                "awk '{print $1}' build.log",
+                "Command: awk '{print $1}' build.log",
+            ),
+            ("grep -c '%' report.csv", "Command: grep -c '%' report.csv"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(&spoken(Kind::Command, input), want, "{input:?}");
+        }
+    }
+
     #[test]
     fn opaque_strings_are_named_rather_than_spelled() {
         let cases: &[(&str, &str)] = &[
@@ -688,6 +787,21 @@ mod tests {
             ),
             ("wow!!!!! really????", "wow! really?"),
             ("freed 1.4G of 512M", "freed 1.4 gigabytes of 512 megabytes"),
+            (
+                "wrote 512 MB and 2 GiB",
+                "wrote 512 megabytes and 2 gigabytes",
+            ),
+            // A hyphenated name is English, however long, and a lone letter
+            // after a number is not a unit.
+            (
+                "the feature-flag-rollout-configuration-service is down",
+                "the feature-flag-rollout-configuration-service is down",
+            ),
+            ("graded 3 G and 4 T", "graded 3 G and 4 T"),
+            (
+                "token c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0 sent",
+                "token a long token sent",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(&spoken(Kind::Output, input), want, "{input:?}");
@@ -812,6 +926,42 @@ mod tests {
         for (input, want) in cases {
             assert_eq!(split_sentences(input), *want, "{input:?}");
         }
+    }
+
+    // A minified bundle is one line with no punctuation in it. Left whole it
+    // became a single utterance, and a VITS decode is quadratic in its length.
+    #[test]
+    fn a_sentence_with_no_punctuation_is_broken_up_anyway() {
+        let long = "alpha ".repeat(400);
+        let sentences = split_sentences(&long);
+        assert!(sentences.len() > 1, "got {} chunks", sentences.len());
+        for chunk in &sentences {
+            assert!(
+                chunk.chars().count() <= MAX_SENTENCE_CHARS,
+                "{} chars",
+                chunk.chars().count()
+            );
+        }
+        assert_eq!(sentences.join(" ").split_whitespace().count(), 400);
+    }
+
+    // No spaces either — a base64 wall, a checksum dump. The break has to
+    // happen mid-token rather than not at all.
+    #[test]
+    fn an_unbroken_run_is_split_even_without_a_space_to_split_on() {
+        let wall = "x".repeat(MAX_SENTENCE_CHARS * 3 + 7);
+        let sentences = split_sentences(&wall);
+        assert_eq!(sentences.len(), 4);
+        for chunk in &sentences {
+            assert!(chunk.chars().count() <= MAX_SENTENCE_CHARS);
+        }
+        assert_eq!(sentences.concat(), wall);
+    }
+
+    #[test]
+    fn a_sentence_inside_the_limit_is_left_whole() {
+        let sentence = "alpha ".repeat(20);
+        assert_eq!(split_sentences(&sentence), vec![sentence.trim()]);
     }
 
     #[test]

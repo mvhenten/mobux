@@ -1,7 +1,7 @@
 {
   "voice": "en_US-lessac-medium",
   "repo": "rhasspy/piper-voices",
-  "revision": "main",
+  "revision": "1162a9173d0ce503555aed757976b7a9912eae4c",
   "sources": {
     "voice.onnx": "en/en_US/lessac/medium/en_US-lessac-medium.onnx",
     "voice.onnx.json": "en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"

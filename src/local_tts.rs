@@ -32,9 +32,11 @@ mod wav;
 /// Whether this binary was built with the in-process engine.
 pub const ENABLED: bool = cfg!(feature = "local-tts");
 
-/// The vendored voice. A medium-quality Piper checkpoint: 60 MB, and an order
-/// of magnitude faster than realtime on the kind of CPU that runs a terminal
-/// for a phone, which is what makes a tap-to-listen feel immediate.
+/// The vendored voice, as the lock had better still name it. A
+/// medium-quality Piper checkpoint: 60 MB, and an order of magnitude faster
+/// than realtime on the kind of CPU that runs a terminal for a phone, which is
+/// what makes a tap-to-listen feel immediate.
+#[cfg(test)]
 pub const DEFAULT_VOICE: &str = "en_US-lessac-medium";
 
 /// Point this at a directory holding the voice files to run weights this host
@@ -75,18 +77,10 @@ pub fn voice_files() -> Vec<&'static str> {
     voice_lock().files.keys().map(String::as_str).collect()
 }
 
-pub fn is_known_voice(voice: &str) -> bool {
-    voice_lock().voice == voice.trim()
-}
-
-/// Resolve a configured voice name to the one the engine can run. A value left
-/// over from the browser voice list (a `Google UK English Male`, say) falls
-/// back to the vendored voice rather than failing the synthesis.
-pub fn resolve_voice(configured: &str) -> &'static str {
-    if is_known_voice(configured) {
-        return &voice_lock().voice;
-    }
-    DEFAULT_VOICE
+/// The voice this build speaks with. One binary carries one checkpoint, and
+/// the lock is what names it.
+pub fn voice() -> &'static str {
+    &voice_lock().voice
 }
 
 pub fn cache_dir(data_dir: &Path) -> PathBuf {
@@ -173,12 +167,12 @@ fn percent(downloaded: u64, total: u64) -> Option<u64> {
 }
 
 #[cfg(feature = "local-tts")]
-pub fn phase(data_dir: &Path, voice: &str) -> Phase {
-    engine::phase(data_dir, voice)
+pub fn phase(data_dir: &Path) -> Phase {
+    engine::phase(data_dir)
 }
 
 #[cfg(not(feature = "local-tts"))]
-pub fn phase(_data_dir: &Path, _voice: &str) -> Phase {
+pub fn phase(_data_dir: &Path) -> Phase {
     Phase::Disabled
 }
 
@@ -186,12 +180,12 @@ pub fn phase(_data_dir: &Path, _voice: &str) -> Phase {
 /// second call while one is running joins it rather than starting a second
 /// download.
 #[cfg(feature = "local-tts")]
-pub async fn ensure_ready(data_dir: PathBuf, voice: String) -> Result<(), String> {
-    engine::ensure_ready(data_dir, voice).await
+pub async fn ensure_ready(data_dir: PathBuf) -> Result<(), String> {
+    engine::ensure_ready(data_dir).await
 }
 
 #[cfg(not(feature = "local-tts"))]
-pub async fn ensure_ready(_data_dir: PathBuf, _voice: String) -> Result<(), String> {
+pub async fn ensure_ready(_data_dir: PathBuf) -> Result<(), String> {
     Err(UNSUPPORTED_MESSAGE.to_string())
 }
 
@@ -200,16 +194,14 @@ pub async fn ensure_ready(_data_dir: PathBuf, _voice: String) -> Result<(), Stri
 #[cfg(feature = "local-tts")]
 pub async fn synthesize(
     data_dir: PathBuf,
-    voice: String,
     speech: crate::speech_text::Speech,
 ) -> Result<Vec<u8>, String> {
-    engine::synthesize(data_dir, voice, speech).await
+    engine::synthesize(data_dir, speech).await
 }
 
 #[cfg(not(feature = "local-tts"))]
 pub async fn synthesize(
     _data_dir: PathBuf,
-    _voice: String,
     _speech: crate::speech_text::Speech,
 ) -> Result<Vec<u8>, String> {
     Err(UNSUPPORTED_MESSAGE.to_string())
@@ -222,8 +214,7 @@ mod tests {
     #[test]
     fn the_default_voice_is_the_one_the_lock_pins() {
         assert_eq!(voice_lock().voice, DEFAULT_VOICE);
-        assert!(is_known_voice(DEFAULT_VOICE));
-        assert!(!is_known_voice("Google UK English Male"));
+        assert_eq!(voice(), DEFAULT_VOICE);
     }
 
     // The three files are the checkpoint, the phoneme map it was trained with,
@@ -254,16 +245,6 @@ mod tests {
             "tts-voices/en_US-lessac-medium/"
         );
         assert!(asset_base_url().starts_with("http"));
-    }
-
-    // A pref written by the browser-voice picker still names a system voice.
-    // Falling back keeps that install reading aloud instead of failing on a
-    // name the engine has never heard of.
-    #[test]
-    fn a_voice_the_engine_cannot_run_falls_back_to_the_default() {
-        assert_eq!(resolve_voice("Google UK English Male"), DEFAULT_VOICE);
-        assert_eq!(resolve_voice(""), DEFAULT_VOICE);
-        assert_eq!(resolve_voice(DEFAULT_VOICE), DEFAULT_VOICE);
     }
 
     #[test]

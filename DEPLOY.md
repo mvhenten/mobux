@@ -36,6 +36,12 @@ checks every file against `src/local_tts/voice.lock.json`. Point
 which is what an airgapped host wants. Without the feature the reader falls
 back to the browser's own speech synthesis.
 
+`install.sh` only reads `MOBUX_DATA_DIR` from the environment, so an instance
+whose data dir comes from `paths.data_dir` in `config.json` looks elsewhere for
+the voice and fetches its own copy on first use. Run the installer with the
+same directory the server uses — `MOBUX_DATA_DIR=… curl … | bash` — or point
+`MOBUX_TTS_MODEL_DIR` at where the installer put it.
+
 By hand, naming the triple for your architecture:
 
 ```bash

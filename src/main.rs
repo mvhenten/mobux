@@ -3490,14 +3490,9 @@ struct SpeakRequest {
     language: String,
 }
 
-fn tts_voice(state: &AppState) -> String {
-    let _ = state;
-    local_tts::DEFAULT_VOICE.to_string()
-}
-
 async fn api_tts_status(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let voice = tts_voice(&state);
-    let phase = local_tts::phase(&state.data_dir, &voice);
+    let voice = local_tts::voice();
+    let phase = local_tts::phase(&state.data_dir);
     Json(json!({
         "enabled": local_tts::ENABLED,
         "voice": voice,
@@ -3512,11 +3507,11 @@ async fn api_tts_status(State(state): State<AppState>) -> Json<serde_json::Value
 async fn api_tts_prepare(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let voice = tts_voice(&state);
-    local_tts::ensure_ready(state.data_dir.clone(), voice.clone())
+    let voice = local_tts::voice();
+    local_tts::ensure_ready(state.data_dir.clone())
         .await
         .map_err(|e| AppError::precondition(anyhow::anyhow!(e)))?;
-    let phase = local_tts::phase(&state.data_dir, &voice);
+    let phase = local_tts::phase(&state.data_dir);
     Ok(Json(json!({
         "voice": voice,
         "state": phase.state(),
@@ -3550,8 +3545,7 @@ async fn api_tts_speak(
         ));
     }
 
-    let voice = tts_voice(&state);
-    match local_tts::synthesize(state.data_dir.clone(), voice, speech.clone()).await {
+    match local_tts::synthesize(state.data_dir.clone(), speech.clone()).await {
         Ok(clip) => Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], clip).into_response()),
         Err(err) => Ok(browser_speech(&speech, &err)),
     }

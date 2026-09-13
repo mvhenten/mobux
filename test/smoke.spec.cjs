@@ -2919,6 +2919,61 @@ test("speak endpoint announces a code block and reads it only when asked", async
   }
 });
 
+// When /api/tts/speak fails there is nothing on this side but the raw
+// terminal bytes — normalization is server-side. Reading those aloud is what
+// the endpoint exists to prevent, so a failure says so instead of speaking.
+test("a failed speak says so rather than reading the raw block", async ({
+  page,
+}) => {
+  await page.route("**/api/tts/speak", (route) =>
+    route.fulfill({ status: 500, body: "boom" }),
+  );
+
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.__mobuxView.swap("reader"));
+  await page.waitForTimeout(150);
+
+  // Every utterance the browser is asked for, so the test can prove the raw
+  // block was never one of them.
+  await page.evaluate(() => {
+    window.__spoken = [];
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.speak = (utterance) => {
+        window.__spoken.push(utterance.text);
+      };
+    }
+  });
+
+  await injectRaw(page, "\u001b[31mnoisy line\u001b[0m 4b5c1d3a9f2e8c7d\n");
+  await page.waitForTimeout(300);
+
+  await page.evaluate(() => {
+    const icon = document.querySelector(".rb-speaker");
+    if (icon) icon.click();
+  });
+
+  await page.waitForFunction(
+    () => {
+      const notice = document.querySelector(".reader-speech-notice");
+      return notice && !notice.hidden && notice.textContent.length > 0;
+    },
+    { timeout: 5000 },
+  );
+
+  const spoken = await page.evaluate(() => window.__spoken || []);
+  expect(spoken.join(" ")).not.toContain("4b5c1d3a9f2e8c7d");
+  expect(spoken.join(" ")).not.toContain("\u001b");
+
+  const notice = await page.evaluate(
+    () => document.querySelector(".reader-speech-notice").textContent,
+  );
+  expect(notice).toContain("Nothing was read");
+});
+
 test("listen settings visible in settings page when speechSynthesis available", async ({
   page,
 }) => {

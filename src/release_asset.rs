@@ -27,6 +27,34 @@ use tokio::io::AsyncWriteExt;
 #[cfg(feature = "local-tts")]
 const DOWNLOAD_PROGRESS_STEP: u64 = 4 * 1024 * 1024;
 
+/// How long a download may go without a byte arriving before it is abandoned.
+///
+/// A connect timeout alone only covers the handshake: a peer that accepts the
+/// connection and then stalls, or dribbles, holds the fetch open for as long
+/// as it likes — with the prepare lock held and a part file growing in the
+/// data dir.
+#[cfg(feature = "local-tts")]
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(feature = "local-tts")]
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The sidecar is one line; it never needs a streaming budget.
+#[cfg(feature = "local-tts")]
+const SIDECAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The most the asset may weigh before the download is abandoned.
+///
+/// The lock knows what the model files weigh, but the tarball carries the
+/// mobux binary as well, so the budget is a multiple of the locked payload
+/// plus room for a release binary. Without one, a wrong or hostile base URL
+/// streams until the disk is full.
+#[cfg(feature = "local-tts")]
+pub fn download_budget(manifest: &Manifest<'_>) -> u64 {
+    let locked: u64 = manifest.files.values().map(|f| f.bytes).sum();
+    locked.saturating_mul(3).saturating_add(64 * 1024 * 1024)
+}
+
 /// One file, pinned by content. Rewritten only by the maintainer script that
 /// refreshes the model.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -123,7 +151,8 @@ pub async fn fetch_into(
         .map_err(|e| format!("creating {}: {e}", dir.display()))?;
 
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
@@ -150,7 +179,15 @@ async fn download_and_unpack(
     manifest: &Manifest<'_>,
     report: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<(), String> {
-    let digest = download(client, &format!("{base}/{asset}"), tarball, asset, report).await?;
+    let digest = download(
+        client,
+        &format!("{base}/{asset}"),
+        tarball,
+        asset,
+        download_budget(manifest),
+        report,
+    )
+    .await?;
 
     report(Progress::Verifying);
     let published = fetch_published_digest(client, base, asset).await?;
@@ -229,6 +266,7 @@ async fn fetch_published_digest(
 ) -> Result<String, String> {
     let body = client
         .get(format!("{base}/{asset}.sha256"))
+        .timeout(SIDECAR_TIMEOUT)
         .send()
         .await
         .and_then(|r| r.error_for_status())
@@ -256,6 +294,7 @@ async fn download(
     url: &str,
     target: &Path,
     file: &str,
+    budget: u64,
     report: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<String, String> {
     let response = client
@@ -266,6 +305,9 @@ async fn download(
         .error_for_status()
         .map_err(|e| format!("fetching {file}: {e}"))?;
     let total = response.content_length().unwrap_or(0);
+    if total > budget {
+        return Err(over_budget(file, total, budget));
+    }
 
     let mut out = tokio::fs::File::create(target)
         .await
@@ -278,6 +320,9 @@ async fn download(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("downloading {file}: {e}"))?;
         downloaded += chunk.len() as u64;
+        if downloaded > budget {
+            return Err(over_budget(file, downloaded, budget));
+        }
         hasher.update(&chunk);
         out.write_all(&chunk)
             .await
@@ -295,6 +340,15 @@ async fn download(
         .await
         .map_err(|e| format!("writing {}: {e}", target.display()))?;
     Ok(hex(hasher.finalize()))
+}
+
+#[cfg(feature = "local-tts")]
+#[cfg(feature = "local-tts")]
+fn over_budget(file: &str, got: u64, budget: u64) -> String {
+    format!(
+        "{file} is at least {got} bytes, past the {budget} this build will accept — \
+         the release asset does not weigh that, so this is the wrong URL"
+    )
 }
 
 #[cfg(feature = "local-tts")]
@@ -353,6 +407,52 @@ mod tests {
         assert_eq!(parse_sha256sum(&digest.to_uppercase()), Some(digest));
         assert_eq!(parse_sha256sum("not a digest"), None);
         assert_eq!(parse_sha256sum(""), None);
+    }
+
+    // A base URL that answers with something enormous — the wrong file, a
+    // hostile mirror, a proxy error page that never ends — filled the disk,
+    // because only the connect had a timeout and nothing had a size.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_past_its_budget_is_abandoned() {
+        use axum::routing::get;
+        use axum::Router;
+
+        let asset = release_asset_name().expect("a linux asset name");
+        let app = Router::new().route(
+            &format!("/{asset}"),
+            get(|| async { "x".repeat(64 * 1024).repeat(64) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // A budget small enough that the served body blows straight through it.
+        let client = reqwest::Client::new();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("asset.part");
+        let err = download(
+            &client,
+            &format!("http://{addr}/{asset}"),
+            &target,
+            asset,
+            4096,
+            &|_| {},
+        )
+        .await
+        .expect_err("a body past the budget is not an asset");
+        assert!(err.contains("past the"), "{err}");
+    }
+
+    #[test]
+    fn the_budget_leaves_room_for_the_binary_riding_along() {
+        let files = manifest_files(100 * 1024 * 1024, &"0".repeat(64));
+        let manifest = Manifest {
+            prefix: "tts-voices/x/".to_string(),
+            files: &files,
+        };
+        let budget = download_budget(&manifest);
+        assert!(budget > 100 * 1024 * 1024, "{budget}");
+        assert!(budget < 1024 * 1024 * 1024, "{budget}");
     }
 
     #[test]

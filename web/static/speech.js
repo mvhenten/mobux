@@ -26,6 +26,11 @@ export function speechAvailable() {
 // What /api/tts/status last said. Seeded optimistically: the reader renders
 // before the first status poll lands, and a build with the voice is the case
 // where hiding the icons would be wrong.
+//
+// Only refreshEngineState() writes it. A single speak answering with the
+// browser fallback used to latch it to "unsupported" for the life of the page,
+// so one blip while the voice was still warming made the client stop believing
+// the host had a voice at all.
 let localEngineReported = "unknown";
 
 let current = null;
@@ -86,11 +91,12 @@ export function speak(request, { onEnd, onError } = {}) {
     })
     .catch((err) => {
       if (current !== token) return;
-      if (!BROWSER_AVAILABLE) {
-        fail(`The voice is unreachable: ${err.message}`);
-        return;
-      }
-      speakInBrowser([request.text], token, finish, fail);
+      // Deliberately not falling back to the raw block here. Normalization is
+      // server-side, so the only text this side holds is the terminal bytes
+      // themselves — escape codes, hashes, box drawing. Reading those aloud is
+      // the thing this endpoint exists to prevent, and a failed request is
+      // exactly when nobody is watching the screen to notice.
+      fail(`Nothing was read: the voice could not be reached (${err.message}).`);
     });
 
   return token;
@@ -111,11 +117,9 @@ async function requestSpeech(request) {
 
   const type = resp.headers.get("content-type") || "";
   if (type.startsWith("audio/")) {
-    localEngineReported = "ready";
     return { kind: "audio", clip: await resp.blob() };
   }
   const body = await resp.json();
-  localEngineReported = "unsupported";
   return { kind: "browser", sentences: body.sentences || [body.text || ""] };
 }
 
