@@ -231,6 +231,17 @@ fn extract(
 
     for entry in entries {
         let mut entry = entry.map_err(|e| format!("reading {}: {e}", tarball.display()))?;
+        // Regular files only. `unpack` validates no entry type of its own —
+        // only `unpack_in` does — so a Symlink or Link entry was created in the
+        // target directory pointing at any absolute path the archive named, and
+        // the lock check that follows then read through it: the "sha256
+        // mismatch" rendered in the settings card described whatever file the
+        // link resolved to. tar's own unlink-before-create stops a later entry
+        // writing through such a link today, but that is the crate's choice and
+        // not a guarantee this code should rest on.
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let path = entry
             .path()
             .map_err(|e| format!("reading {}: {e}", tarball.display()))?
@@ -441,6 +452,160 @@ mod tests {
         .await
         .expect_err("a body past the budget is not an asset");
         assert!(err.contains("past the"), "{err}");
+    }
+
+    // Build a .tar.gz holding the given entries: a regular file, or a link of
+    // either kind pointing at an absolute path.
+    enum Entry<'a> {
+        File(&'a str, &'a [u8]),
+        Link(&'a str, &'a Path, tar::EntryType),
+    }
+
+    fn tarball(path: &Path, entries: &[Entry<'_>]) {
+        let out = std::fs::File::create(path).unwrap();
+        let gz = flate2::write::GzEncoder::new(out, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(gz);
+        for entry in entries {
+            match entry {
+                Entry::File(name, bytes) => {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(bytes.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_entry_type(tar::EntryType::Regular);
+                    header.set_cksum();
+                    builder.append_data(&mut header, name, *bytes).unwrap();
+                }
+                Entry::Link(name, target, kind) => {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(0);
+                    header.set_mode(0o777);
+                    header.set_entry_type(*kind);
+                    builder.append_link(&mut header, name, target).unwrap();
+                }
+            }
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
+    // Nothing an archive says may put bytes outside the directory being
+    // unpacked into, and nothing it says may leave a link inside one. tar's own
+    // unlink-before-create happens to stop the write-through half in the
+    // version pinned today; this pins the invariant rather than that detail.
+    #[test]
+    fn a_symlink_entry_never_becomes_a_write_outside_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let victim = elsewhere.path().join("authorized_keys");
+        std::fs::write(&victim, b"original").unwrap();
+
+        let archive = dir.path().join("asset.tar.gz");
+        let unpack_to = dir.path().join("voice");
+        std::fs::create_dir_all(&unpack_to).unwrap();
+        tarball(
+            &archive,
+            &[
+                Entry::Link("tts-voices/x/voice.onnx", &victim, tar::EntryType::Symlink),
+                Entry::File("tts-voices/x/voice.onnx", b"pwned"),
+            ],
+        );
+
+        // The lock matches the payload, so nothing but the symlink decides
+        // where those bytes land.
+        let files = manifest_files(5, &hex(Sha256::digest(b"pwned")));
+        let manifest = Manifest {
+            prefix: "tts-voices/x/".to_string(),
+            files: &files,
+        };
+        let wanted = vec!["voice.onnx".to_string()];
+        extract(&archive, &unpack_to, &manifest, &wanted).unwrap();
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"original",
+            "the archive wrote through a symlink and outside its directory"
+        );
+        let landed = unpack_to.join("voice.onnx");
+        assert!(
+            !landed.symlink_metadata().unwrap().file_type().is_symlink(),
+            "a symlink was created in the target directory"
+        );
+        assert_eq!(std::fs::read(&landed).unwrap(), b"pwned");
+    }
+
+    // The disclosure half. A link entry named as one of the wanted files used
+    // to be created, and the lock check then read straight through it — so the
+    // "sha256 mismatch" the settings card renders described a file the archive
+    // merely pointed at. Both link kinds, because both resolve on read.
+    #[test]
+    fn an_archive_of_nothing_but_links_extracts_nothing_and_refuses() {
+        for kind in [tar::EntryType::Symlink, tar::EntryType::Link] {
+            let dir = tempfile::tempdir().unwrap();
+            let secret = dir.path().join("secret");
+            std::fs::write(&secret, b"classified").unwrap();
+
+            let archive = dir.path().join("asset.tar.gz");
+            let unpack_to = dir.path().join("voice");
+            std::fs::create_dir_all(&unpack_to).unwrap();
+            tarball(
+                &archive,
+                &[Entry::Link("tts-voices/x/voice.onnx", &secret, kind)],
+            );
+
+            let files = manifest_files(10, &hex(Sha256::digest(b"classified")));
+            let manifest = Manifest {
+                prefix: "tts-voices/x/".to_string(),
+                files: &files,
+            };
+            let wanted = vec!["voice.onnx".to_string()];
+            let err = extract(&archive, &unpack_to, &manifest, &wanted)
+                .expect_err("an archive carrying no file carries no voice");
+            assert!(
+                err.contains("carries no usable"),
+                "{kind:?} leaked through the lock check: {err}"
+            );
+
+            assert!(
+                unpack_to.join("voice.onnx").symlink_metadata().is_err(),
+                "a {kind:?} was left behind in the target directory"
+            );
+            assert_eq!(std::fs::read(&secret).unwrap(), b"classified");
+        }
+    }
+
+    // The guard must not reject what the release actually ships: GNU tar
+    // types a regular file as '0', and scripts/build-release-asset.sh builds
+    // the asset with the system tar.
+    #[test]
+    fn an_archive_built_by_the_system_tar_still_extracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage/tts-voices/x");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("voice.onnx"), b"weights").unwrap();
+
+        let archive = dir.path().join("asset.tar.gz");
+        let built = std::process::Command::new("tar")
+            .arg("-C")
+            .arg(dir.path().join("stage"))
+            .arg("-czf")
+            .arg(&archive)
+            .arg("tts-voices")
+            .status()
+            .expect("the system tar runs");
+        assert!(built.success());
+
+        let unpack_to = dir.path().join("voice");
+        std::fs::create_dir_all(&unpack_to).unwrap();
+        let files = manifest_files(7, &hex(Sha256::digest(b"weights")));
+        let manifest = Manifest {
+            prefix: "tts-voices/x/".to_string(),
+            files: &files,
+        };
+        extract(&archive, &unpack_to, &manifest, &["voice.onnx".to_string()])
+            .expect("a release-shaped archive extracts");
+        assert_eq!(
+            std::fs::read(unpack_to.join("voice.onnx")).unwrap(),
+            b"weights"
+        );
     }
 
     #[test]
