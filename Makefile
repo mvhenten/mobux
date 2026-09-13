@@ -25,7 +25,7 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
         transcribe setup-transcribe \
         smoke-start smoke-stop smoke-logs smoke-status \
         test-smoke test-critical-path test-update-runner test-install test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
-        podman-build podman-run podman-stop podman-test stt-install
+        podman-build podman-run podman-stop podman-test
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
 PODMAN_PORT      ?= 8381
@@ -63,10 +63,6 @@ setup-transcribe:
 
 web:
 	node web/build.js
-
-# Speech-to-text provider setup. Installs a local OpenAI-compatible server.
-stt-install:
-	@bin/stt-install
 
 clean:
 	$(CARGO) clean -p mobux

@@ -1,0 +1,63 @@
+{
+  "default": "base.en",
+  "vendored": "base.en",
+  "models": [
+    {
+      "id": "base.en",
+      "repo": "openai/whisper-base.en",
+      "revision": "main",
+      "files": {
+        "config.json": {
+          "sha256": "160c1df40a60d4ef5a6014d536fd845c33aabfd1f318458ac7f87cfe91ebbe76",
+          "bytes": 1937
+        },
+        "tokenizer.json": {
+          "sha256": "5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0",
+          "bytes": 2405679
+        },
+        "model.safetensors": {
+          "sha256": "034b4906ffd5b904b85a8a7a6cdc49a3a5660dc493ac33f1042af9160ebfd9a5",
+          "bytes": 145214800
+        }
+      }
+    },
+    {
+      "id": "tiny.en",
+      "repo": "openai/whisper-tiny.en",
+      "revision": "main",
+      "files": {
+        "config.json": {
+          "sha256": "b5366317df280f79e6cc366f259f379674f81a8721d458acf2e00680ccb10b1d",
+          "bytes": 1937
+        },
+        "tokenizer.json": {
+          "sha256": "5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0",
+          "bytes": 2405679
+        },
+        "model.safetensors": {
+          "sha256": "27e6cbbc03132b9e95bc2ff4fe1a8c4ccb207f77998cc7567a3945b626b733f7",
+          "bytes": 75539400
+        }
+      }
+    },
+    {
+      "id": "small.en",
+      "repo": "openai/whisper-small.en",
+      "revision": "main",
+      "files": {
+        "config.json": {
+          "sha256": "3441094addfb2a31ef62ea117e95bd6e437bbad8e93d3697fe420a4a6d3603a5",
+          "bytes": 1943
+        },
+        "tokenizer.json": {
+          "sha256": "5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0",
+          "bytes": 2405679
+        },
+        "model.safetensors": {
+          "sha256": "7251ec1ab3e4a2faef8b8fdfd473e9eace9e3619ec78afa2e41684bbae14709d",
+          "bytes": 483523664
+        }
+      }
+    }
+  ]
+}

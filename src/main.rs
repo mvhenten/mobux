@@ -3,10 +3,7 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
@@ -49,6 +46,7 @@ mod config;
 mod configure;
 mod db;
 mod host_suggestions;
+mod local_stt;
 mod nodes;
 mod push;
 mod service;
@@ -56,7 +54,6 @@ mod session_history;
 mod shell_integration;
 mod ssl;
 mod stt_debug;
-mod stt_scripts;
 mod terminal_cursor;
 mod tmux;
 mod transcribe;
@@ -319,11 +316,6 @@ struct AppState {
     /// wherever they run. Injected into the settings page so operators can
     /// verify whether the bundle matches what the browser has loaded.
     build_hash: String,
-    /// Tracks background STT install state (phase + rolling output tail).
-    stt_install: Arc<tokio::sync::Mutex<BackgroundJobState>>,
-    /// Set while a warm-up transcription is in flight, so the status poll can
-    /// keep nudging a warming backend without piling up one request per poll.
-    stt_warmup: Arc<AtomicBool>,
     /// Tracks the background TWA/APK build behind the install page's
     /// "Generate package" button. One build at a time.
     twa_build: Arc<tokio::sync::Mutex<BackgroundJobState>>,
@@ -433,8 +425,6 @@ async fn main() -> Result<()> {
         config_dir: config_dir.clone(),
         update: update_state,
         build_hash,
-        stt_install: BackgroundJobState::idle(),
-        stt_warmup: Arc::new(AtomicBool::new(false)),
         twa_build: BackgroundJobState::idle(),
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
     };
@@ -533,8 +523,6 @@ async fn main() -> Result<()> {
         .route("/api/stt/install/status", get(api_stt_install_status))
         .route("/api/install/apk/build", post(api_install_apk_build))
         .route("/api/install/apk/status", get(api_install_apk_status))
-        .route("/api/stt/start", post(api_stt_start))
-        .route("/api/stt/stop", post(api_stt_stop))
         .route(
             "/api/shell-integration/status",
             get(api_shell_integration_status),
@@ -1425,8 +1413,9 @@ async fn api_upload(
 
 // ── Speech-to-text: POST /transcribe ──────────────────────────────────
 //
-// Accepts audio as multipart/form-data (field name `audio`) and forwards it
-// to the configured OpenAI-compatible STT provider. Returns `{ "text": "..." }`.
+// Accepts audio as multipart/form-data (field name `audio`) and runs it
+// through the active provider — whisper in this process, or the
+// OpenAI-compatible endpoint the user configured. Returns `{ "text": "..." }`.
 // Provider config is read from db on each request — no restart needed after change.
 async fn api_transcribe(
     State(state): State<AppState>,
@@ -1463,27 +1452,9 @@ async fn api_transcribe(
 
     // Read config per-request — no restart needed after config change.
     // Use the active kind's per-kind settings.
-    let (provider_cfg, debug_ctx) = tokio::task::spawn_blocking({
+    let (provider, debug_ctx) = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || -> anyhow::Result<(transcribe::ProviderConfig, stt_debug::ProviderContext)> {
-            let kind = db.stt_active_kind()?;
-            let row = db
-                .stt_provider(&kind)?
-                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-            let debug_ctx = stt_debug::ProviderContext {
-                kind: row.kind.clone(),
-                model: row.model.clone(),
-                host: row.host.clone(),
-                port: row.port.clone(),
-                url: row.transcription_url(),
-            };
-            let provider_cfg = transcribe::ProviderConfig {
-                url: row.transcription_url(),
-                model: row.model,
-                api_key: row.api_key,
-            };
-            Ok((provider_cfg, debug_ctx))
-        }
+        move || active_provider(&db)
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -1493,7 +1464,16 @@ async fn api_transcribe(
     let debug_filename = filename.clone();
     let data_dir = state.data_dir.clone();
     let started = std::time::Instant::now();
-    let result = transcribe::transcribe_with_provider(&provider_cfg, audio, &filename).await;
+    let result = match &provider {
+        transcribe::Provider::InProcess { model } => {
+            local_stt::transcribe(state.data_dir.clone(), model.clone(), audio)
+                .await
+                .map_err(transcribe::TranscribeError::ProviderUnavailable)
+        }
+        transcribe::Provider::Remote(cfg) => {
+            transcribe::transcribe_with_provider(cfg, audio, &filename).await
+        }
+    };
     let elapsed = started.elapsed();
 
     let debug_outcome = match &result {
@@ -2855,13 +2835,10 @@ struct SttConfigGetJson {
     #[serde(rename = "activeKind")]
     active_kind: String,
     providers: std::collections::HashMap<String, SttProviderJson>,
-    // Legacy/install fields still forwarded for local kind only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    install_cmd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    start_cmd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop_cmd: Option<String>,
+    /// Whether this build carries the in-process engine, so the card can say
+    /// so instead of offering a local provider that cannot run.
+    #[serde(rename = "localEngine")]
+    local_engine: bool,
 }
 
 /// Shape accepted by PUT /api/settings/stt.
@@ -2880,13 +2857,12 @@ struct SttConfigPutJson {
 async fn api_get_stt_config(
     State(state): State<AppState>,
 ) -> Result<Json<SttConfigGetJson>, AppError> {
-    let (active_kind, providers, legacy) = tokio::task::spawn_blocking({
+    let (active_kind, providers) = tokio::task::spawn_blocking({
         let db = state.db.clone();
         move || -> anyhow::Result<_> {
             let active_kind = db.stt_active_kind()?;
             let rows = db.stt_all_providers()?;
-            let legacy = db.stt_config()?;
-            Ok((active_kind, rows, legacy))
+            Ok((active_kind, rows))
         }
     })
     .await
@@ -2909,9 +2885,7 @@ async fn api_get_stt_config(
     Ok(Json(SttConfigGetJson {
         active_kind,
         providers: map,
-        install_cmd: legacy.install_cmd,
-        start_cmd: legacy.start_cmd,
-        stop_cmd: legacy.stop_cmd,
+        local_engine: local_stt::ENABLED,
     }))
 }
 
@@ -2919,11 +2893,20 @@ async fn api_set_stt_config(
     State(state): State<AppState>,
     Json(req): Json<SttConfigPutJson>,
 ) -> Result<StatusCode, AppError> {
+    // The local kind runs a fixed catalog, so a model it cannot run is stored
+    // as the one it will actually load. Otherwise the picker keeps offering a
+    // value nothing honours — which is how faster-whisper ids outlived the
+    // container-backed provider.
+    let model = if req.kind == transcribe::LOCAL_KIND {
+        local_stt::resolve_model(&req.model).to_string()
+    } else {
+        req.model
+    };
     let row = db::SttProviderRow {
         kind: req.kind.clone(),
         host: req.host,
         port: req.port,
-        model: req.model,
+        model,
         // Empty string means "keep existing" — set_stt_provider handles this.
         api_key: req.api_key,
     };
@@ -2933,21 +2916,6 @@ async fn api_set_stt_config(
         move || -> anyhow::Result<()> {
             db.set_stt_provider(row)?;
             db.set_stt_active_kind(&kind)?;
-            // Also update the legacy stt_config row so install/start/stop handlers
-            // continue to work without migration.
-            let provider = db
-                .stt_provider(&kind)?
-                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-            let legacy = db.stt_config()?;
-            db.set_stt_config(db::SttConfig {
-                kind: kind.clone(),
-                url: provider.transcription_url(),
-                model: provider.model,
-                api_key: provider.api_key,
-                install_cmd: legacy.install_cmd,
-                start_cmd: legacy.start_cmd,
-                stop_cmd: legacy.stop_cmd,
-            })?;
             Ok(())
         }
     })
@@ -2957,303 +2925,254 @@ async fn api_set_stt_config(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── local speech server: podman, and the wait for its first model ─────
+// ── local speech: the in-process engine and its first-run download ────
 //
-// The local backend is a speaches container. Two things about it decide what
-// the UI can honestly say, and neither is visible from a transcribe probe
-// alone.
+// The local provider is whisper running inside this process. There is no
+// container, no port and no second service — but there is a first run, and it
+// is the whole reason this block exists. A prebuilt install already has the
+// default checkpoint, unpacked by install.sh out of the release tarball;
+// anything else is fetched from the matching mobux release and checked against
+// the hashes compiled into this binary. Either way that takes minutes the
+// first time. Reporting it as "backend unreachable" sent the user back to an
+// install button that was never the problem, so a download in flight is its
+// own state, with the byte counts behind it.
 //
-// It downloads its whisper model on the first transcription request, not at
-// container start, so a freshly started server fails the probe for as long as
-// that download takes — minutes on a slow line. Reporting that as "backend
-// unreachable" sent the user back to an install button that was never the
-// problem. A running container plus a failing probe is warm-up, and the UI
-// waits it out rather than declaring failure.
-//
-// And podman may simply not be on the host. Every script here is a podman
-// wrapper, so its absence is the one gap mobux cannot close for the user — it
-// gets named, with the command that closes it, the same way the APK build
-// reports a missing host package.
-
-/// What the host can tell us about the local speech server's container.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum LocalRuntime {
-    PodmanMissing,
-    ContainerRunning,
-    ContainerStopped,
-}
-
-/// The one OS package the local speech server needs and mobux cannot install.
-const PODMAN_PACKAGE: &str = "podman";
-
-async fn local_runtime() -> LocalRuntime {
-    let output = tokio::process::Command::new("podman")
-        .args([
-            "ps",
-            "--filter",
-            "name=^mobux-stt$",
-            "--filter",
-            "status=running",
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .await;
-    match output {
-        Ok(o) if !o.stdout.trim_ascii().is_empty() => LocalRuntime::ContainerRunning,
-        Ok(_) => LocalRuntime::ContainerStopped,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LocalRuntime::PodmanMissing,
-        Err(_) => LocalRuntime::ContainerStopped,
-    }
-}
-
-fn podman_install_command(present: impl Fn(&str) -> bool) -> Option<String> {
-    twa::PackageManager::detect(present).map(|m| m.install_command(&[PODMAN_PACKAGE]))
-}
-
-fn podman_missing_message(install_command: Option<&str>) -> String {
-    match install_command {
-        Some(cmd) => format!(
-            "podman is not installed. The local speech server runs in a podman container — install it with `{cmd}`, then try again."
-        ),
-        None => "podman is not installed. The local speech server runs in a podman container, and this host has no package manager mobux recognises — install podman yourself, then try again.".to_string(),
-    }
-}
+// A build without the `local-stt` feature has no engine at all. That is named
+// too, with the command that installs one that has.
 
 /// The facts `/api/stt/status` reports, resolved once so the JSON shape is
 /// built from plain data rather than from three awaits.
 struct SttStatus {
     kind: String,
     url: String,
-    reachable: bool,
-    runtime: LocalRuntime,
-    installed: bool,
-    install_phase: &'static str,
-    install_error: Option<String>,
-    install_output: Vec<String>,
+    model: String,
+    /// The in-process engine's phase; None for a remote provider.
+    local: Option<local_stt::Phase>,
+    /// Whether a remote provider answered a real transcription request.
+    remote_reachable: bool,
 }
 
 impl SttStatus {
-    fn is_local(&self) -> bool {
-        self.kind == "local"
-    }
-
-    /// One word for what the UI should render. `warming` is the whole point:
-    /// the container answers `podman ps` but not yet a transcription, which
-    /// is progress, not a fault.
+    /// One word for what the UI should render.
     fn state(&self) -> &'static str {
-        if self.reachable {
-            return "ready";
-        }
-        if !self.is_local() {
-            return "unreachable";
-        }
-        match self.runtime {
-            LocalRuntime::PodmanMissing => "podman_missing",
-            LocalRuntime::ContainerRunning => "warming",
-            LocalRuntime::ContainerStopped if self.installed => "stopped",
-            LocalRuntime::ContainerStopped => "not_installed",
+        match &self.local {
+            Some(phase) => phase.state(),
+            None if self.remote_reachable => "ready",
+            None => "unreachable",
         }
     }
 
-    fn into_json(self, podman_install_command: Option<String>) -> serde_json::Value {
+    fn ready(&self) -> bool {
+        self.state() == "ready"
+    }
+
+    fn into_json(self) -> serde_json::Value {
         let state = self.state();
-        let podman_missing = self.runtime == LocalRuntime::PodmanMissing;
+        let ready = self.ready();
         let mut body = json!({
             "kind": self.kind,
             "url": self.url,
+            "model": self.model,
             "state": state,
-            "reachable": self.reachable,
-            "local_process_running": self.runtime == LocalRuntime::ContainerRunning,
-            "installed": self.installed,
-            "podman_missing": podman_missing,
-            "install_phase": self.install_phase,
-            "install_output": self.install_output,
+            "reachable": ready,
+            "installed": !matches!(self.local, Some(local_stt::Phase::NotDownloaded)),
+            "engine_available": !matches!(
+                self.local,
+                Some(local_stt::Phase::Disabled | local_stt::Phase::UnsupportedCpu(_))
+            ),
         });
-        if let Some(err) = self.install_error {
-            body["install_error"] = serde_json::Value::String(err);
-        }
-        if podman_missing {
-            body["podman_install_command"] = match &podman_install_command {
-                Some(cmd) => serde_json::Value::String(cmd.clone()),
-                None => serde_json::Value::Null,
-            };
-            body["podman_message"] = serde_json::Value::String(podman_missing_message(
-                podman_install_command.as_deref(),
-            ));
+        match &self.local {
+            Some(phase) => {
+                body["message"] = serde_json::Value::String(phase.message());
+                if let local_stt::Phase::Downloading {
+                    file,
+                    downloaded,
+                    total,
+                } = phase
+                {
+                    body["progress"] = json!({
+                        "file": file,
+                        "downloaded": downloaded,
+                        "total": total,
+                    });
+                }
+                if let local_stt::Phase::Failed(err) = phase {
+                    body["error"] = serde_json::Value::String(err.clone());
+                }
+            }
+            None if !ready => {
+                body["message"] = serde_json::Value::String(format!(
+                    "The endpoint at {} did not answer.",
+                    self.url
+                ));
+            }
+            None => {}
         }
         body
     }
 }
 
-/// Start a warm-up transcription unless one is already running. Fire and
-/// forget: it outlives the request that triggered it, because the download it
-/// starts is the thing the user is waiting for.
-fn spawn_warmup(flag: Arc<AtomicBool>, provider_cfg: transcribe::ProviderConfig) {
-    if flag
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
+/// Resolve the active provider and the context the debug clip store records
+/// alongside it.
+fn active_provider(
+    db: &db::Db,
+) -> anyhow::Result<(transcribe::Provider, stt_debug::ProviderContext)> {
+    let kind = db.stt_active_kind()?;
+    let row = db
+        .stt_provider(&kind)?
+        .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
+    let url = row.transcription_url();
+    let provider = transcribe::select_provider(&kind, &url, &row.model, row.api_key.as_deref());
+    let model = match &provider {
+        transcribe::Provider::InProcess { model } => model.clone(),
+        transcribe::Provider::Remote(cfg) => cfg.model.clone(),
+    };
+    let debug_ctx = stt_debug::ProviderContext {
+        kind,
+        model,
+        host: row.host,
+        port: row.port,
+        url,
+    };
+    Ok((provider, debug_ctx))
+}
+
+/// Start the fetch-and-load in the background. The engine joins a run already
+/// in flight rather than starting a second download, so this is safe to call
+/// from every status poll.
+fn spawn_model_preparation(data_dir: PathBuf, model: String) {
     tokio::spawn(async move {
-        transcribe::warm_up(&provider_cfg).await;
-        flag.store(false, Ordering::SeqCst);
+        if let Err(e) = local_stt::ensure_ready(data_dir, model).await {
+            eprintln!("[stt] preparing the speech model failed: {e}");
+        }
     });
 }
 
 async fn api_stt_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let (cfg, provider_cfg, active_kind_str) = tokio::task::spawn_blocking({
+    let (provider, ctx) = tokio::task::spawn_blocking({
         let db = state.db.clone();
-        move || -> anyhow::Result<_> {
-            let cfg = db.stt_config()?;
-            let kind = db.stt_active_kind()?;
-            let row = db
-                .stt_provider(&kind)?
-                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-            let provider_cfg = transcribe::ProviderConfig {
-                url: row.transcription_url(),
-                model: row.model,
-                api_key: row.api_key,
-            };
-            Ok((cfg, provider_cfg, kind))
-        }
+        move || active_provider(&db)
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
 
-    // Probes the real transcribe endpoint, not just /health — see
-    // transcribe::probe_transcribe for why a health ping alone is a false
-    // green.
-    let reachable = transcribe::probe_transcribe(&provider_cfg).await;
-    let runtime = local_runtime().await;
-    let installed = state.data_dir.join("stt").join(".installed").exists();
-
-    let (install_phase, install_error, install_output) = {
-        let guard = state.stt_install.lock().await;
-        let (phase_str, error) = phase_parts(&guard.phase);
-        (phase_str, error, guard.output_tail.clone())
+    let status = match &provider {
+        transcribe::Provider::InProcess { model } => {
+            let phase = local_stt::phase(&state.data_dir, model);
+            // Every poll that sees unfinished work keeps the download running
+            // behind it; otherwise nothing ever finishes the first run except
+            // a dictation the user has to abandon.
+            if matches!(
+                phase,
+                local_stt::Phase::NotDownloaded
+                    | local_stt::Phase::Downloading { .. }
+                    | local_stt::Phase::Loading
+            ) {
+                spawn_model_preparation(state.data_dir.clone(), model.clone());
+            }
+            SttStatus {
+                kind: ctx.kind,
+                url: String::new(),
+                model: model.clone(),
+                local: Some(phase),
+                remote_reachable: false,
+            }
+        }
+        transcribe::Provider::Remote(cfg) => {
+            // Probes the real transcribe endpoint, not just /health — see
+            // transcribe::probe_transcribe for why a health ping alone is a
+            // false green.
+            let reachable = transcribe::probe_transcribe(cfg).await;
+            SttStatus {
+                kind: ctx.kind,
+                url: cfg.url.clone(),
+                model: cfg.model.clone(),
+                local: None,
+                remote_reachable: reachable,
+            }
+        }
     };
 
-    let status = SttStatus {
-        kind: active_kind_str,
-        url: provider_cfg.url.clone(),
-        reachable,
-        runtime,
-        installed,
-        install_phase,
-        install_error,
-        install_output,
-    };
-
-    // A warming backend only downloads its model while a transcription
-    // request is open, and the probe's own request is aborted after four
-    // seconds. So every poll that sees warm-up keeps one long-lived request
-    // alive behind it — otherwise the download restarts forever and never
-    // finishes.
-    if status.state() == "warming" {
-        spawn_warmup(state.stt_warmup.clone(), provider_cfg);
-    }
-
-    let _ = cfg; // kept for install_cmd/start_cmd/stop_cmd indirectly; suppress unused
-    Ok(Json(status.into_json(podman_install_command(twa::on_path))))
+    Ok(Json(status.into_json()))
 }
 
+/// Fetch the local model now, rather than in the middle of a dictation.
+/// Answers immediately; `/api/stt/install/status` carries the progress.
 async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    {
-        let mut guard = state.stt_install.lock().await;
-        if guard.phase.is_active() {
-            return Ok((
-                StatusCode::CONFLICT,
-                Json(json!({"status": "already_running"})),
-            ));
-        }
-        guard.phase = InstallPhase::Running;
-        guard.output_tail.clear();
-        guard.missing_host_packages = None;
-    }
+    let (provider, _) = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || active_provider(&db)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
 
-    // The install script is `podman pull`. Without podman it dies on exit
-    // 127 minutes of polling later, with the shell's "not found" as the only
-    // clue, so say it up front and hand back the command that fixes it.
-    if local_runtime().await == LocalRuntime::PodmanMissing {
-        let command = podman_install_command(twa::on_path);
-        let message = podman_missing_message(command.as_deref());
-        record_host_package_gap(
-            &state.stt_install,
-            twa::HostPackageGap {
-                packages: vec![PODMAN_PACKAGE.to_string()],
-                install_command: command.clone(),
-                message: message.clone(),
-            },
-        )
-        .await;
+    let transcribe::Provider::InProcess { model } = provider else {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
             Json(json!({
-                "status": "podman_missing",
-                "error": message,
-                "podman_install_command": command,
+                "status": "not_local",
+                "error": "Only the local provider has a model to download.",
+            })),
+        ));
+    };
+
+    if !local_stt::ENABLED {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({
+                "status": "unsupported",
+                "error": local_stt::UNSUPPORTED_MESSAGE,
             })),
         ));
     }
 
-    let install_state = state.stt_install.clone();
-    let db = state.db.clone();
-
-    tokio::spawn(async move {
-        // Read install_cmd from db.
-        let cfg = tokio::task::spawn_blocking({
-            let db = db.clone();
-            move || db.stt_config()
-        })
-        .await;
-
-        let cmd_str = match cfg {
-            Ok(Ok(c)) => match c.install_cmd {
-                Some(s) => stt_scripts::resolve(&s, stt_scripts::INSTALL_SCRIPT),
-                None => {
-                    let mut guard = install_state.lock().await;
-                    guard.phase = InstallPhase::Failed("no install_cmd configured".to_string());
-                    return;
-                }
-            },
-            Ok(Err(e)) => {
-                let mut guard = install_state.lock().await;
-                guard.phase = InstallPhase::Failed(format!("db error: {e}"));
-                return;
-            }
-            Err(e) => {
-                let mut guard = install_state.lock().await;
-                guard.phase = InstallPhase::Failed(format!("spawn_blocking error: {e}"));
-                return;
-            }
-        };
-
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg(&cmd_str);
-        run_streaming_job(install_state, command).await;
-    });
-
-    Ok((StatusCode::ACCEPTED, Json(json!({"status": "started"}))))
+    spawn_model_preparation(state.data_dir.clone(), model.clone());
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"status": "started", "model": model})),
+    ))
 }
 
 async fn api_stt_install_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let guard = state.stt_install.lock().await;
-    let (phase_str, error) = phase_parts(&guard.phase);
-    let gap = guard.missing_host_packages.as_ref();
-    Ok(Json(json!({
-        "phase": phase_str,
-        "output": guard.output_tail,
+    let (provider, _) = tokio::task::spawn_blocking({
+        let db = state.db.clone();
+        move || active_provider(&db)
+    })
+    .await
+    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+    .map_err(AppError::internal)?;
+
+    let phase = match &provider {
+        transcribe::Provider::InProcess { model } => local_stt::phase(&state.data_dir, model),
+        transcribe::Provider::Remote(_) => local_stt::Phase::Disabled,
+    };
+    Ok(Json(install_status_json(&phase)))
+}
+
+/// Map the engine phase onto the phase/output/error shape the install poller
+/// already speaks.
+fn install_status_json(phase: &local_stt::Phase) -> serde_json::Value {
+    let (name, error) = match phase {
+        local_stt::Phase::Ready => ("success", None),
+        local_stt::Phase::Downloading { .. }
+        | local_stt::Phase::Verifying
+        | local_stt::Phase::Loading => ("running", None),
+        local_stt::Phase::NotDownloaded => ("idle", None),
+        local_stt::Phase::Disabled => ("failed", Some(local_stt::UNSUPPORTED_MESSAGE.to_string())),
+        local_stt::Phase::UnsupportedCpu(why) => ("failed", Some(why.clone())),
+        local_stt::Phase::Failed(err) => ("failed", Some(err.clone())),
+    };
+    json!({
+        "phase": name,
+        "output": [phase.message()],
         "error": error,
-        "missing_host_packages": gap.map(|g| g.packages.clone()),
-        "install_command": gap.map(|g| g.install_command.clone()),
-    })))
+    })
 }
 
 // ── /api/install/apk: build the Android package from the UI ───────────
@@ -3395,103 +3314,6 @@ async fn api_install_apk_status(
     })))
 }
 
-/// Run the start script, refusing up front on a host with no podman and
-/// failing loudly on a script that exits non-zero. The old version discarded
-/// the exit status, so `podman: not found` was answered with 204 and the UI
-/// went on to poll a server that was never going to appear.
-async fn run_stt_start(runtime: LocalRuntime, cmd: &str) -> Result<(), AppError> {
-    if runtime == LocalRuntime::PodmanMissing {
-        return Err(AppError::precondition(anyhow::anyhow!(
-            "{}",
-            podman_missing_message(podman_install_command(twa::on_path).as_deref())
-        )));
-    }
-
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn start: {e}")))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr);
-    let detail = detail.trim();
-    let detail = detail.rsplit('\n').next().unwrap_or_default();
-    Err(AppError::internal(anyhow::anyhow!(
-        "the speech server did not start (exit {}){}{}",
-        output.status.code().unwrap_or(-1),
-        if detail.is_empty() { "" } else { ": " },
-        detail
-    )))
-}
-
-async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppError> {
-    let (cfg, provider_cfg, kind) = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || -> anyhow::Result<_> {
-            let cfg = db.stt_config()?;
-            let kind = db.stt_active_kind()?;
-            let row = db
-                .stt_provider(&kind)?
-                .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-            let provider_cfg = transcribe::ProviderConfig {
-                url: row.transcription_url(),
-                model: row.model,
-                api_key: row.api_key,
-            };
-            Ok((cfg, provider_cfg, kind))
-        }
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
-
-    let cmd_str = cfg
-        .start_cmd
-        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no start_cmd configured")))?;
-    let cmd_str = stt_scripts::resolve(&cmd_str, stt_scripts::SERVE_SCRIPT);
-
-    run_stt_start(local_runtime().await, &cmd_str).await?;
-
-    // The container is up but has no model yet. Pull it now, in the
-    // background, so the wait happens while the user watches a progress line
-    // rather than in the middle of their first dictation.
-    if kind == "local" {
-        spawn_warmup(state.stt_warmup.clone(), provider_cfg);
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppError> {
-    let cfg = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || db.stt_config()
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
-
-    let cmd_str = cfg
-        .stop_cmd
-        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("no stop_cmd configured")))?;
-    let cmd_str = stt_scripts::resolve(&cmd_str, stt_scripts::STOP_SCRIPT);
-
-    tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd_str)
-        .spawn()
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn stop: {e}")))?
-        .wait()
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("stop cmd failed: {e}")))?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn api_stt_models(
     State(state): State<AppState>,
     Query(q): Query<SttModelsQuery>,
@@ -3499,18 +3321,18 @@ async fn api_stt_models(
     use std::time::Duration;
 
     let fallback_for_kind = |kind: &str| -> Vec<String> {
-        if kind == "openai" {
-            vec![
+        match kind {
+            transcribe::LOCAL_KIND => local_stt::model_ids(),
+            "openai" => vec![
                 "whisper-1".to_string(),
                 "gpt-4o-transcribe".to_string(),
                 "gpt-4o-mini-transcribe".to_string(),
-            ]
-        } else {
-            vec![
-                "Systran/faster-whisper-small".to_string(),
+            ],
+            _ => vec![
+                "Systran/faster-whisper-base.en".to_string(),
                 "Systran/faster-whisper-small.en".to_string(),
                 "Systran/faster-whisper-medium.en".to_string(),
-            ]
+            ],
         }
     };
 
@@ -3547,11 +3369,19 @@ async fn api_stt_models(
         };
         (base, api_key, k)
     } else {
-        // No explicit host — use the active kind's stored settings.
+        // No explicit host. Answer for the kind that was asked about, falling
+        // back to the active one only when the caller named none: the settings
+        // card asks about the kind the user just picked, which it has not
+        // saved yet, and answering about the active kind handed it another
+        // provider's catalog.
+        let requested = q.kind.clone().filter(|k| !k.is_empty());
         tokio::task::spawn_blocking({
             let db = state.db.clone();
             move || -> anyhow::Result<_> {
-                let kind = db.stt_active_kind()?;
+                let kind = match requested {
+                    Some(kind) => kind,
+                    None => db.stt_active_kind()?,
+                };
                 let row = db
                     .stt_provider(&kind)?
                     .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
@@ -3578,7 +3408,9 @@ async fn api_stt_models(
         .map_err(AppError::internal)?
     };
 
-    if base_url.is_empty() {
+    // The local kind has no endpoint to enumerate — its catalog is whatever
+    // the in-process engine can run.
+    if base_url.is_empty() || kind == transcribe::LOCAL_KIND {
         return Ok(Json(serde_json::json!({
             "models": fallback_for_kind(&kind)
         })));
@@ -3639,16 +3471,6 @@ impl AppError {
     fn internal(err: anyhow::Error) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: err.to_string(),
-        }
-    }
-
-    /// The host is missing something only the user can supply. Distinct from a
-    /// bad request so the UI can tell "you asked for the wrong thing" apart
-    /// from "this machine can't do it yet".
-    fn precondition(err: anyhow::Error) -> Self {
-        Self {
-            status: StatusCode::PRECONDITION_FAILED,
             message: err.to_string(),
         }
     }
@@ -4052,8 +3874,7 @@ mod tests {
             config_dir: dir.path().to_path_buf(),
             update: update::UpdateState::new(String::new()),
             build_hash: "test".to_string(),
-            stt_install: BackgroundJobState::idle(),
-            stt_warmup: Arc::new(AtomicBool::new(false)),
+
             twa_build: BackgroundJobState::idle(),
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
         };
@@ -4294,21 +4115,50 @@ mod tests {
         }
     }
 
+    // Asking the local provider to fetch its model is safe to repeat: the
+    // engine joins a run already in flight rather than starting a second
+    // download of the same weights.
     #[tokio::test]
-    async fn stt_install_returns_409_when_already_running() {
+    async fn stt_install_starts_the_local_model_fetch() {
         let (state, _dir) = test_state(false);
-        {
-            let mut guard = state.stt_install.lock().await;
-            guard.phase = InstallPhase::Running;
-        }
-        let result = api_stt_install(State(state)).await;
-        match result {
-            Ok(resp) => {
-                let resp = resp.into_response();
-                assert_eq!(resp.status(), StatusCode::CONFLICT);
-            }
-            Err(_) => panic!("expected Ok with 409"),
-        }
+        let resp = api_stt_install(State(state)).await.unwrap().into_response();
+        let expected = if local_stt::ENABLED {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::PRECONDITION_FAILED
+        };
+        assert_eq!(resp.status(), expected);
+    }
+
+    // A host that cannot execute the engine is named the same way a build
+    // without one is, so the card renders a sentence instead of a button.
+    #[test]
+    fn a_cpu_that_cannot_run_the_engine_reports_as_unavailable() {
+        let body = local_status(local_stt::Phase::UnsupportedCpu(
+            "no FEAT_FP16 here".to_string(),
+        ))
+        .into_json();
+        assert_eq!(body["state"], "unsupported");
+        assert_eq!(body["engine_available"], false);
+        assert_eq!(body["message"], "no FEAT_FP16 here");
+
+        let install = install_status_json(&local_stt::Phase::UnsupportedCpu(
+            "no FEAT_FP16 here".to_string(),
+        ));
+        assert_eq!(install["phase"], "failed");
+        assert_eq!(install["error"], "no FEAT_FP16 here");
+    }
+
+    // A configured endpoint downloads nothing — refuse rather than pretend.
+    #[tokio::test]
+    async fn stt_install_refuses_a_remote_provider() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .set_stt_active_kind("openai")
+            .expect("switch to a configured endpoint");
+        let resp = api_stt_install(State(state)).await.unwrap().into_response();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
     }
 
     // ── /api/install/apk state machine ───────────────────────────────────
@@ -4392,187 +4242,152 @@ mod tests {
         assert_eq!(resp.0["apk_available"], true);
     }
 
-    #[tokio::test]
-    async fn stt_status_installed_reflects_sentinel() {
-        let (state, dir) = test_state(false);
-        let resp = api_stt_status(State(state.clone())).await.unwrap();
-        assert_eq!(resp.0["installed"], false);
-
-        let stt_dir = dir.path().join("stt");
-        std::fs::create_dir_all(&stt_dir).unwrap();
-        std::fs::File::create(stt_dir.join(".installed")).unwrap();
-        let resp2 = api_stt_status(State(state)).await.unwrap();
-        assert_eq!(resp2.0["installed"], true);
-    }
-
-    // ── the first-run model download (issue #302) ────────────────────────
+    // ── the local engine and its first run ──────────────────────────────
     //
-    // The local backend pulls its whisper model on the first transcription
-    // request, so a freshly started container fails the four-second probe for
-    // as long as that download runs. Reporting that as "backend unreachable"
-    // pointed the user back at an install button and gave up after 30 s.
-    // A running container with a failing probe is warm-up, and it is the one
-    // state the UI must render as progress.
+    // Nothing about the local provider is reachable over HTTP any more, so
+    // every state the UI renders comes from the engine phase. The first run
+    // fetches ~150 MB of weights; that is progress, and reporting it as an
+    // unreachable backend was the bug that sent people back to a button which
+    // was never the problem.
 
-    fn local_status(reachable: bool, runtime: LocalRuntime, installed: bool) -> SttStatus {
+    fn local_status(phase: local_stt::Phase) -> SttStatus {
         SttStatus {
-            kind: "local".to_string(),
-            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
-            reachable,
-            runtime,
-            installed,
-            install_phase: "idle",
-            install_error: None,
-            install_output: vec![],
+            kind: transcribe::LOCAL_KIND.to_string(),
+            url: String::new(),
+            model: local_stt::DEFAULT_MODEL.to_string(),
+            local: Some(phase),
+            remote_reachable: false,
         }
     }
 
     #[test]
-    fn stt_status_reports_warming_while_a_running_container_fails_the_probe() {
-        let status = local_status(false, LocalRuntime::ContainerRunning, true);
+    fn stt_status_reports_a_download_in_flight_as_progress() {
+        let status = local_status(local_stt::Phase::Downloading {
+            file: "model.safetensors".to_string(),
+            downloaded: 40_000_000,
+            total: 160_000_000,
+        });
         assert_eq!(status.state(), "warming");
 
-        let body = status.into_json(None);
+        let body = status.into_json();
         assert_eq!(body["state"], "warming");
         assert_eq!(body["reachable"], false);
-        assert_eq!(
-            body["local_process_running"], true,
-            "warm-up is only distinguishable from a dead backend by the container being up"
-        );
-        assert_eq!(body["podman_missing"], false);
+        assert_eq!(body["progress"]["downloaded"], 40_000_000u64);
+        assert_eq!(body["progress"]["total"], 160_000_000u64);
+        assert_eq!(body["progress"]["file"], "model.safetensors");
+        assert!(body["message"].as_str().unwrap().contains("25%"));
     }
 
     #[test]
-    fn stt_status_separates_ready_stopped_and_never_installed() {
+    fn stt_status_separates_ready_loading_and_never_downloaded() {
+        assert_eq!(local_status(local_stt::Phase::Ready).state(), "ready");
+        assert_eq!(local_status(local_stt::Phase::Loading).state(), "warming");
         assert_eq!(
-            local_status(true, LocalRuntime::ContainerRunning, true).state(),
-            "ready"
-        );
-        assert_eq!(
-            local_status(false, LocalRuntime::ContainerStopped, true).state(),
-            "stopped"
-        );
-        assert_eq!(
-            local_status(false, LocalRuntime::ContainerStopped, false).state(),
+            local_status(local_stt::Phase::NotDownloaded).state(),
             "not_installed"
+        );
+        assert_eq!(
+            local_status(local_stt::Phase::Failed("disk full".to_string())).state(),
+            "failed"
         );
     }
 
-    // A remote provider has no container to warm up, so a failing probe there
+    // A build without the feature has no engine to start. Say so, with the
+    // command that installs one that has — a button that cannot work is worse
+    // than the sentence explaining why.
+    #[test]
+    fn stt_status_names_a_build_without_the_in_process_engine() {
+        let status = local_status(local_stt::Phase::Disabled);
+        assert_eq!(status.state(), "unsupported");
+
+        let body = status.into_json();
+        assert_eq!(body["engine_available"], false);
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("--features local-stt"),
+            "the message must carry the fix, not just the fault: {}",
+            body["message"]
+        );
+    }
+
+    #[test]
+    fn stt_status_surfaces_a_failed_download() {
+        let body = local_status(local_stt::Phase::Failed("404 Not Found".to_string())).into_json();
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error"], "404 Not Found");
+    }
+
+    // A configured endpoint has no engine phase, so a failing probe there
     // means what it always meant.
     #[test]
     fn stt_status_keeps_calling_a_remote_provider_unreachable() {
-        let mut status = local_status(false, LocalRuntime::ContainerStopped, false);
-        status.kind = "openai".to_string();
+        let status = SttStatus {
+            kind: "openai".to_string(),
+            url: "https://api.openai.com:443/v1/audio/transcriptions".to_string(),
+            model: "whisper-1".to_string(),
+            local: None,
+            remote_reachable: false,
+        };
         assert_eq!(status.state(), "unreachable");
+        let body = status.into_json();
+        assert_eq!(body["state"], "unreachable");
+        assert!(body["progress"].is_null());
     }
 
     #[test]
-    fn stt_status_names_missing_podman_with_the_command_that_installs_it() {
-        let status = local_status(false, LocalRuntime::PodmanMissing, false);
-        assert_eq!(status.state(), "podman_missing");
+    fn stt_status_calls_a_responding_remote_provider_ready() {
+        let status = SttStatus {
+            kind: "network".to_string(),
+            url: "http://lab:8081/v1/audio/transcriptions".to_string(),
+            model: "Systran/faster-whisper-base.en".to_string(),
+            local: None,
+            remote_reachable: true,
+        };
+        assert_eq!(status.state(), "ready");
+        assert_eq!(status.into_json()["reachable"], true);
+    }
 
-        let body = status.into_json(Some("sudo apt-get install -y podman".to_string()));
-        assert_eq!(body["podman_missing"], true);
+    // The install poller speaks phase/output/error; the engine has to answer
+    // in that vocabulary or the settings card reads a blank line.
+    #[test]
+    fn install_status_maps_every_engine_phase_onto_the_poller_shape() {
         assert_eq!(
-            body["podman_install_command"],
-            "sudo apt-get install -y podman"
+            install_status_json(&local_stt::Phase::Ready)["phase"],
+            "success"
         );
-        assert!(
-            body["podman_message"]
-                .as_str()
+        assert_eq!(
+            install_status_json(&local_stt::Phase::Loading)["phase"],
+            "running"
+        );
+        assert_eq!(
+            install_status_json(&local_stt::Phase::NotDownloaded)["phase"],
+            "idle"
+        );
+        let failed = install_status_json(&local_stt::Phase::Failed("no space left".to_string()));
+        assert_eq!(failed["phase"], "failed");
+        assert_eq!(failed["error"], "no space left");
+        assert_eq!(
+            install_status_json(&local_stt::Phase::Loading)["output"]
+                .as_array()
                 .unwrap()
-                .contains("sudo apt-get install -y podman"),
-            "the message must carry the fix, not just the fault: {}",
-            body["podman_message"]
+                .len(),
+            1
         );
     }
 
-    // No package manager mobux recognises: still named, still not an opaque
-    // failure — there is just no command to hand over.
-    #[test]
-    fn stt_status_reports_missing_podman_on_a_host_with_no_known_package_manager() {
-        let body = local_status(false, LocalRuntime::PodmanMissing, false).into_json(None);
-        assert_eq!(body["podman_missing"], true);
-        assert_eq!(body["podman_install_command"], serde_json::Value::Null);
-        assert!(body["podman_message"]
-            .as_str()
-            .unwrap()
-            .contains("podman is not installed"));
-    }
-
-    #[test]
-    fn podman_install_command_follows_the_host_package_manager() {
-        assert_eq!(
-            podman_install_command(|tool| tool == "apt-get").as_deref(),
-            Some("sudo apt-get install -y podman")
-        );
-        assert_eq!(podman_install_command(|_| false), None);
-    }
-
-    // Regression: the start handler discarded the script's exit status, so a
-    // host without podman got a 204 and the UI polled for a server that was
-    // never coming.
+    // A fresh data dir has no weights on disk, so the status endpoint must
+    // report the first run rather than a dead backend.
     #[tokio::test]
-    async fn stt_start_refuses_up_front_when_podman_is_missing() {
-        let err = run_stt_start(LocalRuntime::PodmanMissing, "true")
-            .await
-            .expect_err("a host without podman cannot start the speech server");
-        assert_eq!(err.status, StatusCode::PRECONDITION_FAILED);
-        assert!(
-            err.message.contains("podman is not installed"),
-            "the failure must name podman: {}",
-            err.message
-        );
-    }
-
-    #[tokio::test]
-    async fn stt_start_surfaces_a_start_script_that_exits_non_zero() {
-        let err = run_stt_start(
-            LocalRuntime::ContainerStopped,
-            "echo 'podman: command not found' >&2; exit 127",
-        )
-        .await
-        .expect_err("a failing start script must not answer 204");
-        assert!(
-            err.message.contains("127") && err.message.contains("command not found"),
-            "the failure must carry the script's own words: {}",
-            err.message
-        );
-    }
-
-    #[tokio::test]
-    async fn stt_start_accepts_a_start_script_that_succeeds() {
-        run_stt_start(LocalRuntime::ContainerStopped, "true")
-            .await
-            .expect("a clean exit is a started server");
-    }
-
-    // An install that stops on a missing podman must reach the page that
-    // started it. It used to end as an exit-127 line buried in the output
-    // tail, or as nothing at all.
-    #[tokio::test]
-    async fn stt_install_status_hands_the_missing_podman_gap_to_the_ui() {
+    async fn stt_status_on_a_fresh_install_reports_the_local_engine() {
         let (state, _dir) = test_state(false);
-        let command = "sudo apt-get install -y podman".to_string();
-        record_host_package_gap(
-            &state.stt_install,
-            twa::HostPackageGap {
-                packages: vec![PODMAN_PACKAGE.to_string()],
-                install_command: Some(command.clone()),
-                message: podman_missing_message(Some(&command)),
-            },
-        )
-        .await;
-
-        let resp = api_stt_install_status(State(state)).await.unwrap();
-        assert_eq!(resp.0["phase"], "failed");
-        assert!(resp.0["error"]
-            .as_str()
-            .unwrap()
-            .contains("podman is not installed"));
-        assert_eq!(resp.0["missing_host_packages"], json!(["podman"]));
-        assert_eq!(resp.0["install_command"], command);
+        let resp = api_stt_status(State(state)).await.unwrap();
+        assert_eq!(resp.0["kind"], transcribe::LOCAL_KIND);
+        assert_eq!(resp.0["model"], local_stt::DEFAULT_MODEL);
+        assert_eq!(resp.0["url"], "");
+        assert_eq!(resp.0["engine_available"], local_stt::ENABLED);
+        assert_eq!(resp.0["reachable"], false);
     }
 
     // Regression: a node's stored ssh target starting with `-` (e.g.
@@ -4648,6 +4463,159 @@ mod tests {
         let Json(val) = result.expect("handler should not error");
         let models = val["models"].as_array().expect("models array");
         assert!(!models.is_empty(), "fallback models must not be empty");
+    }
+
+    // Regression: the endpoint used the ACTIVE kind whenever no host was
+    // supplied, so the settings card — which asks about the kind the user just
+    // picked, before the debounced save lands — got the previous provider's
+    // catalog. Picking the local engine offered faster-whisper ids it cannot
+    // run.
+    #[tokio::test]
+    async fn stt_models_answers_for_the_kind_that_was_asked_about() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .set_stt_active_kind("network")
+            .expect("a self-hosted endpoint is active");
+
+        let Json(val) = api_stt_models(
+            State(state.clone()),
+            Query(SttModelsQuery {
+                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                host: None,
+                port: None,
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        let models: Vec<String> = val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert_eq!(models, local_stt::model_ids());
+
+        // And the reverse, so the fix is not "always answer local".
+        state
+            .db
+            .set_stt_active_kind(transcribe::LOCAL_KIND)
+            .expect("switch the active kind");
+        let Json(val) = api_stt_models(
+            State(state),
+            Query(SttModelsQuery {
+                kind: Some("network".to_string()),
+                host: None,
+                port: None,
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        assert!(val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .any(|m| m.as_str().is_some_and(|m| m.starts_with("Systran/"))));
+    }
+
+    // A model the engine cannot run is never stored against the local kind,
+    // so nothing downstream — the picker included — can offer it back.
+    #[tokio::test]
+    async fn saving_a_local_model_the_engine_cannot_run_stores_the_one_it_will_load() {
+        let (state, _dir) = test_state(false);
+        api_set_stt_config(
+            State(state.clone()),
+            Json(SttConfigPutJson {
+                kind: transcribe::LOCAL_KIND.to_string(),
+                host: String::new(),
+                port: String::new(),
+                model: "Systran/faster-whisper-small".to_string(),
+                api_key: None,
+            }),
+        )
+        .await
+        .expect("saving must not error");
+
+        assert_eq!(
+            state
+                .db
+                .stt_provider(transcribe::LOCAL_KIND)
+                .expect("read local")
+                .expect("local row")
+                .model,
+            local_stt::DEFAULT_MODEL
+        );
+    }
+
+    // Picking one the engine does run is stored as given.
+    #[tokio::test]
+    async fn saving_a_local_model_from_the_catalog_keeps_it() {
+        let (state, _dir) = test_state(false);
+        api_set_stt_config(
+            State(state.clone()),
+            Json(SttConfigPutJson {
+                kind: transcribe::LOCAL_KIND.to_string(),
+                host: String::new(),
+                port: String::new(),
+                model: "small.en".to_string(),
+                api_key: None,
+            }),
+        )
+        .await
+        .expect("saving must not error");
+
+        assert_eq!(
+            state
+                .db
+                .stt_provider(transcribe::LOCAL_KIND)
+                .expect("read local")
+                .expect("local row")
+                .model,
+            "small.en"
+        );
+    }
+
+    // The in-process engine runs the checkpoints in model.lock.json and
+    // nothing else. A faster-whisper id offered for the local kind is an id
+    // the engine will silently swap for the default — so it must never reach
+    // the picker, from the catalog or from a stale stored row.
+    #[tokio::test]
+    async fn the_local_model_list_never_offers_a_checkpoint_the_engine_cannot_run() {
+        let (state, _dir) = test_state(false);
+        state
+            .db
+            .set_stt_provider(db::SttProviderRow {
+                kind: transcribe::LOCAL_KIND.to_string(),
+                host: "http://127.0.0.1".to_string(),
+                port: "5200".to_string(),
+                model: "Systran/faster-whisper-small".to_string(),
+                api_key: None,
+            })
+            .expect("a row left over from the container-backed provider");
+
+        let Json(val) = api_stt_models(
+            State(state),
+            Query(SttModelsQuery {
+                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                host: Some("http://127.0.0.1".to_string()),
+                port: Some("5200".to_string()),
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        let models: Vec<String> = val["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert_eq!(models, local_stt::model_ids());
+        for model in &models {
+            assert!(
+                local_stt::is_known_model(model),
+                "the local picker offered {model}, which the engine cannot run"
+            );
+        }
     }
 
     #[tokio::test]
