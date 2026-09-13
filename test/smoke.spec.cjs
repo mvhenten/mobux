@@ -2787,16 +2787,21 @@ test("speaker icons appear on text and prompt bubbles, not code bubbles", async 
     const prompts = document.querySelectorAll(".rb-prompt .rb-speaker");
     const texts = document.querySelectorAll(".rb-text .rb-speaker");
     const codes = document.querySelectorAll(".rb-code .rb-speaker");
+    const codeFull = document.querySelectorAll(".rb-code .rb-speaker-full");
     return {
       prompt: prompts.length,
       text: texts.length,
       code: codes.length,
+      codeFull: codeFull.length,
     };
   });
 
   expect(iconCounts.prompt).toBeGreaterThan(0);
   expect(iconCounts.text).toBeGreaterThan(0);
-  expect(iconCounts.code).toBe(0);
+  // A code block carries two: one that announces what it is, one that reads
+  // it in full.
+  expect(iconCounts.code).toBe(2);
+  expect(iconCounts.codeFull).toBe(1);
 });
 
 test("clicking speaker icon toggles rb-speaking class", async ({ page }) => {
@@ -2854,13 +2859,64 @@ test("clicking speaker icon toggles rb-speaking class", async ({ page }) => {
   });
   expect(hasSpeakingClass).toBe(true);
 
-  await page.waitForTimeout(100);
+  // The class clears on the utterance ending, which now waits on a round trip
+  // to /api/tts/speak before the first utterance is even spoken.
+  await page.waitForFunction(
+    () => {
+      const icon = document.querySelector(".rb-speaker");
+      return icon && !icon.classList.contains("rb-speaking");
+    },
+    { timeout: 5000 },
+  );
+});
 
-  const speakingGone = await page.evaluate(() => {
-    const icon = document.querySelector(".rb-speaker");
-    return icon && !icon.classList.contains("rb-speaking");
+// The reader never speaks raw terminal bytes: /api/tts/speak rewrites a block
+// first, and the same rewritten text is what the browser voice reads when the
+// host has no voice of its own.
+test("speak endpoint rewrites a noisy block before anything says it", async ({
+  request,
+}) => {
+  const resp = await request.post(`${BASE}/api/tts/speak`, {
+    data: {
+      kind: "output",
+      text:
+        "\u001b[32m\u2713\u001b[0m built 4b5c1d3a9f2e8c7d6b5a4f3e2d1c0b9a in " +
+        "/home/control/mobux/target/debug \u2502",
+    },
   });
-  expect(speakingGone).toBe(true);
+  expect(resp.ok()).toBeTruthy();
+
+  const type = resp.headers()["content-type"] || "";
+  if (type.startsWith("audio/")) {
+    // A build with the local voice answers with the clip itself.
+    expect((await resp.body()).slice(0, 4).toString()).toBe("RIFF");
+    return;
+  }
+
+  const body = await resp.json();
+  expect(body.engine).toBe("browser");
+  expect(body.text).toBe("built a hash in debug in target");
+  expect(body.sentences).toEqual(["built a hash in debug in target"]);
+});
+
+test("speak endpoint announces a code block and reads it only when asked", async ({
+  request,
+}) => {
+  const code = { kind: "code", language: "bash", text: "set -e\nmake build" };
+
+  const brief = await request.post(`${BASE}/api/tts/speak`, { data: code });
+  expect(brief.ok()).toBeTruthy();
+  if (!(brief.headers()["content-type"] || "").startsWith("audio/")) {
+    expect((await brief.json()).text).toBe("bash, two lines");
+  }
+
+  const full = await request.post(`${BASE}/api/tts/speak`, {
+    data: { ...code, expand: true },
+  });
+  expect(full.ok()).toBeTruthy();
+  if (!(full.headers()["content-type"] || "").startsWith("audio/")) {
+    expect((await full.json()).text).toContain("make build");
+  }
 });
 
 test("listen settings visible in settings page when speechSynthesis available", async ({
@@ -2889,6 +2945,9 @@ test("listen settings visible in settings page when speechSynthesis available", 
     });
     expect(unavailableHidden).toBe(true);
 
+    // The host voice row renders whether or not the browser has a voice of
+    // its own, because it is the one the reader prefers.
+    await expect(page.locator("#listenLocalVoice")).toBeVisible();
     await expect(page.locator("#listenVoice")).toBeVisible();
     await expect(page.locator("#listenRate")).toBeVisible();
     await expect(page.locator("#listenPitch")).toBeVisible();

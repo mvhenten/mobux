@@ -49,11 +49,14 @@ mod config;
 mod configure;
 mod db;
 mod host_suggestions;
+mod local_tts;
 mod nodes;
 mod push;
+mod release_asset;
 mod service;
 mod session_history;
 mod shell_integration;
+mod speech_text;
 mod ssl;
 mod stt_debug;
 mod stt_scripts;
@@ -533,6 +536,12 @@ async fn main() -> Result<()> {
         .route("/api/stt/install/status", get(api_stt_install_status))
         .route("/api/install/apk/build", post(api_install_apk_build))
         .route("/api/install/apk/status", get(api_install_apk_status))
+        .route("/api/tts/status", get(api_tts_status))
+        .route("/api/tts/prepare", post(api_tts_prepare))
+        .route(
+            "/api/tts/speak",
+            post(api_tts_speak).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/api/stt/start", post(api_stt_start))
         .route("/api/stt/stop", post(api_stt_stop))
         .route(
@@ -3464,6 +3473,101 @@ async fn api_stt_start(State(state): State<AppState>) -> Result<StatusCode, AppE
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What the reader asks to have read out. `kind` is the reader's own block
+/// classification, deterministic wherever shell integration is on, and
+/// `expand` is the explicit "read the whole code block" the UI sends.
+#[derive(Debug, Deserialize)]
+struct SpeakRequest {
+    text: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    expand: bool,
+    /// The fence language the reader tokenizer parsed, for a code block.
+    #[serde(default)]
+    language: String,
+}
+
+fn tts_voice(state: &AppState) -> String {
+    let _ = state;
+    local_tts::DEFAULT_VOICE.to_string()
+}
+
+async fn api_tts_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let voice = tts_voice(&state);
+    let phase = local_tts::phase(&state.data_dir, &voice);
+    Json(json!({
+        "enabled": local_tts::ENABLED,
+        "voice": voice,
+        "state": phase.state(),
+        "message": phase.message(),
+    }))
+}
+
+/// Fetch and load the voice. Separate from speaking because the first run
+/// pulls the release asset, and a listener who tapped a speaker icon should
+/// not be the one waiting on it without being told.
+async fn api_tts_prepare(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let voice = tts_voice(&state);
+    local_tts::ensure_ready(state.data_dir.clone(), voice.clone())
+        .await
+        .map_err(|e| AppError::precondition(anyhow::anyhow!(e)))?;
+    let phase = local_tts::phase(&state.data_dir, &voice);
+    Ok(Json(json!({
+        "voice": voice,
+        "state": phase.state(),
+        "message": phase.message(),
+    })))
+}
+
+/// Normalize a block and speak it.
+///
+/// Normalization runs whether or not this build has a voice, so the browser
+/// fallback reads the same rewritten text rather than the raw terminal bytes.
+/// A ready local voice answers with audio; anything else answers with the
+/// words, and the reader hands them to `speechSynthesis`.
+async fn api_tts_speak(
+    State(state): State<AppState>,
+    Json(req): Json<SpeakRequest>,
+) -> Result<Response, AppError> {
+    let speech = speech_text::normalize(
+        speech_text::Kind::parse(&req.kind),
+        &req.text,
+        &speech_text::Options {
+            expand: req.expand,
+            language: req.language,
+        },
+    );
+
+    if !local_tts::ENABLED {
+        return Ok(browser_speech(
+            &speech,
+            &local_tts::Phase::Disabled.message(),
+        ));
+    }
+
+    let voice = tts_voice(&state);
+    match local_tts::synthesize(state.data_dir.clone(), voice, speech.clone()).await {
+        Ok(clip) => Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], clip).into_response()),
+        Err(err) => Ok(browser_speech(&speech, &err)),
+    }
+}
+
+/// The words for the browser to say, and why it is saying them. Never an
+/// error status: the listener wants the text read, and a silent speaker button
+/// is indistinguishable from a broken one.
+fn browser_speech(speech: &speech_text::Speech, why: &str) -> Response {
+    Json(json!({
+        "engine": "browser",
+        "reason": why,
+        "text": speech.text,
+        "sentences": speech.sentences,
+    }))
+    .into_response()
 }
 
 async fn api_stt_stop(State(state): State<AppState>) -> Result<StatusCode, AppError> {

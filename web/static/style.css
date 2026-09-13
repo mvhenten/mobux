@@ -658,6 +658,21 @@ h1, h2, h3 { margin: 0; }
   color: #c8cdd6;
 }
 .reader-osc-hint a { color: var(--panel-link); }
+/* Why nothing is being read. A speaker that goes quiet without a word is
+   indistinguishable from a broken one. */
+.reader-speech-notice {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 6px 10px;
+  background: rgba(20, 24, 32, 0.94);
+  border: 1px solid rgba(200, 140, 100, 0.45);
+  border-radius: 6px;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  color: #e0d2c4;
+}
 .reader-osc-dismiss {
   background: transparent;
   border: 0;
@@ -877,8 +892,15 @@ h1, h2, h3 { margin: 0; }
   color: #d8eaea;
 }
 
+/* A code block carries two: the speaker announces what it is, the second
+   button reads it in full. The pair sits side by side, so the read-in-full
+   one clears the width of the first. */
 .rb-code .rb-speaker {
-  display: none;
+  top: 4px;
+}
+
+.rb-speaker-full {
+  right: 44px;
 }
 
 /* ── Read mode ────────────────────────────────────────────────

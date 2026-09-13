@@ -2,8 +2,14 @@ import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { getPref, setPref } from "../../lib/prefs.js";
 
-// Listen card. Voice/rate/pitch are the server-held `listen_*` preferences,
-// global across devices. Uses the Web Speech API for playback.
+// Listen card. Rate and pitch are the server-held `listen_*` preferences,
+// global across devices.
+//
+// Two voices can read the terminal. The local one runs a neural checkpoint in
+// the mobux process and is what the reader uses whenever it is ready; the
+// browser's Web Speech voice is the fallback, and its voice list and pitch
+// dial only apply there. Test speaks through the same endpoint the reader
+// does, so what it plays is what a tap on a speaker icon plays.
 
 const RATE_MIN = 0.5;
 const RATE_MAX = 2.0;
@@ -42,10 +48,26 @@ const voices = signal([]);
 // the time ListenCard mounts, App has already rendered, which only happens
 // after hydrate() resolved.
 const prefs = signal({ voice: "", rate: 1.0, pitch: 1.0 });
+const localVoice = signal({ enabled: false, state: "unknown", message: "" });
+const preparing = signal(false);
+
+async function loadLocalVoice() {
+  const resp = await fetch("/api/tts/status").catch(() => null);
+  if (!resp || !resp.ok) {
+    localVoice.value = {
+      enabled: false,
+      state: "unsupported",
+      message: "The voice status is unreachable.",
+    };
+    return;
+  }
+  localVoice.value = await resp.json();
+}
 
 export function ListenCard() {
   useEffect(() => {
     prefs.value = loadPrefs();
+    loadLocalVoice();
   }, []);
 
   // Populate voice list; Chrome fires voiceschanged asynchronously.
@@ -79,12 +101,55 @@ export function ListenCard() {
     savePrefs(next);
   }
 
-  function test() {
-    window.speechSynthesis.cancel();
-    const current = loadPrefs();
-    const utt = new SpeechSynthesisUtterance(
-      "Mobux listen mode test, one two three",
+  async function prepare() {
+    preparing.value = true;
+    const resp = await fetch("/api/tts/prepare", { method: "POST" }).catch(
+      () => null,
     );
+    preparing.value = false;
+    if (!resp || !resp.ok) {
+      localVoice.value = {
+        ...localVoice.value,
+        state: "failed",
+        message: resp
+          ? await resp.text()
+          : "The voice could not be prepared: the server did not answer.",
+      };
+      return;
+    }
+    await loadLocalVoice();
+  }
+
+  async function test() {
+    if (available.value) window.speechSynthesis.cancel();
+    const line = "Mobux listen mode test, one two three.";
+    const resp = await fetch("/api/tts/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: line, kind: "prose" }),
+    }).catch(() => null);
+
+    const current = loadPrefs();
+    if (
+      resp &&
+      resp.ok &&
+      (resp.headers.get("content-type") || "").startsWith("audio/")
+    ) {
+      const audio = new Audio(URL.createObjectURL(await resp.blob()));
+      audio.playbackRate = current.rate;
+      audio.play();
+      loadLocalVoice();
+      return;
+    }
+    if (!available.value) {
+      localVoice.value = {
+        ...localVoice.value,
+        state: "failed",
+        message: "Nothing on this host or in this browser can read text aloud.",
+      };
+      return;
+    }
+    const utt = new SpeechSynthesisUtterance(line);
     if (current.voice) {
       const found = window.speechSynthesis
         .getVoices()
@@ -94,11 +159,33 @@ export function ListenCard() {
     utt.rate = current.rate;
     utt.pitch = current.pitch;
     window.speechSynthesis.speak(utt);
+    loadLocalVoice();
   }
 
   return (
     <section class="settings-group" id="listen-settings">
       <h2>Listen</h2>
+      <div class="settings-row settings-row--field" id="listenLocalVoice">
+        <span class="settings-label">Voice on this host</span>
+        <span class="settings-row-control">
+          <span class="listen-value" data-state={localVoice.value.state}>
+            {localVoice.value.state}
+          </span>
+          {localVoice.value.enabled && localVoice.value.state !== "ready" ? (
+            <button
+              type="button"
+              id="listenPrepare"
+              disabled={preparing.value}
+              onClick={prepare}
+            >
+              {preparing.value ? "Preparing…" : "Prepare"}
+            </button>
+          ) : null}
+        </span>
+      </div>
+      <p class="listen-unavailable" id="listenLocalVoiceMessage">
+        {localVoice.value.message}
+      </p>
       {available.value ? (
         <div id="listenCapable">
           <label class="settings-row settings-row--field">
@@ -159,7 +246,10 @@ export function ListenCard() {
         </div>
       ) : (
         <div id="listenUnavailable" class="listen-unavailable">
-          <p>Web Speech synthesis is not available in this browser.</p>
+          <p>
+            This browser has no Web Speech synthesis, so the voice on this host
+            is the only one that can read the terminal aloud.
+          </p>
         </div>
       )}
     </section>

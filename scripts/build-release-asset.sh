@@ -11,9 +11,19 @@
 # gcc-aarch64-linux-gnu toolchain the workflow installs; on a native aarch64
 # host the same target builds without it.
 #
+# Each asset carries the binary plus the vendored voice, so install.sh lands a
+# host that can read the terminal aloud without fetching a model from anywhere.
+# The voice comes from scripts/tts-voice.mjs, the only thing that talks to
+# Hugging Face, and is checked against src/local_tts/voice.lock.json before
+# packing.
+#
 # Output (uploaded by @semantic-release/github, see .releaserc.json):
 #   target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz[.sha256]
 #   target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz[.sha256]
+#
+# Tarball layout:
+#   mobux
+#   tts-voices/<voice>/{voice.onnx,voice.onnx.json,cmudict.json}
 
 set -euo pipefail
 
@@ -53,11 +63,25 @@ setup_cross() {
 
 mkdir -p "$OUT_DIR"
 
+# The voice rides along, so it has to be on disk and matching the lock before
+# anything is packed. `ensure` is a no-op once it is.
+VOICE_DIR="target/tts-voice"
+VOICE_ID="$(node -e 'process.stdout.write(require("./src/local_tts/voice.lock.json").voice)')"
+node scripts/tts-voice.mjs ensure "$VOICE_DIR"
+
 for target in $TARGETS; do
   setup_cross "$target"
   asset="${CRATE}-${target}.tar.gz"
-  cargo build --release --target "$target"
-  tar -C "target/${target}/release" -czf "${OUT_DIR}/${asset}" "$CRATE"
+  cargo build --release --target "$target" --features local-tts
+
+  stage="${OUT_DIR}/stage-${target}"
+  rm -rf "$stage"
+  mkdir -p "${stage}/tts-voices/${VOICE_ID}"
+  cp "target/${target}/release/${CRATE}" "${stage}/${CRATE}"
+  cp "${VOICE_DIR}"/* "${stage}/tts-voices/${VOICE_ID}/"
+
+  tar -C "$stage" -czf "${OUT_DIR}/${asset}" "$CRATE" "tts-voices"
+  rm -rf "$stage"
   (cd "$OUT_DIR" && sha256sum "$asset" > "${asset}.sha256")
-  echo "built ${OUT_DIR}/${asset} (version ${VERSION})"
+  echo "built ${OUT_DIR}/${asset} (version ${VERSION}, voice ${VOICE_ID})"
 done

@@ -1,0 +1,24 @@
+{
+  "voice": "en_US-lessac-medium",
+  "repo": "rhasspy/piper-voices",
+  "revision": "main",
+  "sources": {
+    "voice.onnx": "en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+    "voice.onnx.json": "en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+  },
+  "cmudict_revision": "74790861f652b15e4ac49015a90074ad62a27690",
+  "files": {
+    "cmudict.json": {
+      "sha256": "95a7b40b12624147d0ccc2bec03f8df9a82104c9b2d529eb5540b9f8565aaaf5",
+      "bytes": 3834298
+    },
+    "voice.onnx": {
+      "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+      "bytes": 63201294
+    },
+    "voice.onnx.json": {
+      "sha256": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+      "bytes": 4885
+    }
+  }
+}

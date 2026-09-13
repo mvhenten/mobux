@@ -5,22 +5,26 @@
 #
 # Downloads the latest GitHub release asset for the running architecture (Linux
 # x86_64 and aarch64) built by scripts/build-release-asset.sh, verifies its
-# sha256, and drops the binary in ~/.local/bin. User-local only: no writes
-# outside $HOME, no stdin.
+# sha256, and drops the binary in ~/.local/bin. The asset also carries the
+# voice that reads the terminal aloud, which lands in the data dir so the
+# reader never fetches one. User-local only: no writes outside $HOME, no stdin.
 #
 # Overridable for tests and mirrors:
 #   MOBUX_INSTALL_BASE_URL  where to fetch <asset> and <asset>.sha256 from
 #                           (default: the GitHub "latest release" download URL;
 #                           tests point this at a file:// directory)
 #   MOBUX_INSTALL_DIR       install destination (default ~/.local/bin)
+#   MOBUX_DATA_DIR          where the voice lands
+#                           (default ~/.local/share/mobux)
 
 set -euo pipefail
 
 CRATE="mobux"
 BASE_URL="${MOBUX_INSTALL_BASE_URL:-https://github.com/mvhenten/mobux/releases/latest/download}"
 INSTALL_DIR="${MOBUX_INSTALL_DIR:-$HOME/.local/bin}"
+DATA_DIR="${MOBUX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mobux}"
 
-say()  { printf '%s\n' "$*"; }
+say() { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -54,8 +58,9 @@ if ! (cd "$WORK" && sha256sum -c "${ASSET}.sha256" >/dev/null 2>&1); then
 fi
 say "sha256 verified"
 
-tar -xzf "${WORK}/${ASSET}" -C "$WORK" "$CRATE" \
-  || die "could not extract ${CRATE} from ${ASSET}"
+tar -xzf "${WORK}/${ASSET}" -C "$WORK" \
+  || die "could not extract ${ASSET}"
+[ -f "${WORK}/${CRATE}" ] || die "${ASSET} carries no ${CRATE} binary"
 
 mkdir -p "$INSTALL_DIR"
 # Stage inside the destination dir so the final move is an atomic rename and
@@ -65,6 +70,18 @@ mv -f "${WORK}/${CRATE}" "${INSTALL_DIR}/.${CRATE}.new" \
 chmod 755 "${INSTALL_DIR}/.${CRATE}.new"
 mv -f "${INSTALL_DIR}/.${CRATE}.new" "${INSTALL_DIR}/${CRATE}"
 say "installed ${INSTALL_DIR}/${CRATE}"
+
+# The voice rides in the same asset, already covered by the sha256 above. Put
+# it where mobux looks so the first tap on a speaker icon reads aloud instead
+# of downloading. Assets from before the voice shipped simply have no
+# tts-voices.
+if [ -d "${WORK}/tts-voices" ]; then
+  mkdir -p "${DATA_DIR}/tts-voices" \
+    || die "could not create ${DATA_DIR}/tts-voices for the voice"
+  cp -R "${WORK}/tts-voices/." "${DATA_DIR}/tts-voices/" \
+    || die "could not write the voice to ${DATA_DIR}/tts-voices"
+  say "installed the voice in ${DATA_DIR}/tts-voices"
+fi
 
 # A wrong-architecture asset, or one built against a newer glibc than this host
 # has, downloads and verifies cleanly and then fails on every invocation. Prove
