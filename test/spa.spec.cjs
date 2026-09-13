@@ -2856,15 +2856,20 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   expect(localModels).toEqual(["base.en", "tiny.en", "small.en"]);
   await expect(page.locator("#sttCustomModelRow")).toHaveCount(0);
 
+  // Every save the card makes is debounced, and #sttStatus keeps the last
+  // one's "Saved ✓" on screen — so waiting on that text passes instantly on a
+  // stale line and reads the config before the write it is waiting for lands.
+  // Poll the config itself, which is the thing being asserted anyway.
+  const savedConfig = () =>
+    page.evaluate(async () => (await fetch("/api/settings/stt")).json());
+
   // Picking a different checkpoint persists like any other field.
   await page.locator("#sttModel").selectOption("small.en");
-  await expect(page.locator("#sttStatus")).toContainText("Saved", {
-    timeout: 6000,
-  });
-  const local = await page.evaluate(async () =>
-    (await fetch("/api/settings/stt")).json(),
-  );
-  expect(local.providers.local.model).toBe("small.en");
+  await expect
+    .poll(async () => (await savedConfig()).providers.local.model, {
+      timeout: 10000,
+    })
+    .toBe("small.en");
 
   // auto-save: switch to network, change the port, NO Save tap.
   await kind.selectOption("network");
@@ -2872,16 +2877,15 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   const portEl = page.locator("#sttPort");
   await portEl.fill(probe);
   await portEl.blur();
-  await expect(page.locator("#sttStatus")).toContainText("Saved", {
-    timeout: 6000,
-  });
 
   // Persisted with no Save tap.
-  const cfg = await page.evaluate(async () =>
-    (await fetch("/api/settings/stt")).json(),
-  );
-  expect(cfg.activeKind).toBe("network");
-  expect(cfg.providers.network.port).toBe(probe);
+  await expect
+    .poll(async () => (await savedConfig()).providers.network.port, {
+      timeout: 10000,
+    })
+    .toBe(probe);
+  expect((await savedConfig()).activeKind).toBe("network");
+  await expect(page.locator("#sttStatus")).toContainText("Saved");
 });
 
 // ── build-info card ─────────────────────────────────────────────────────────
