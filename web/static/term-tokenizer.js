@@ -16,7 +16,7 @@
 //              it: one block per command + its output + its exit status
 //              (issue #219). Only produced when C/D markers are present.
 //   header   — a single line like `[Section]` or `## Title`
-//   code     — inside triple-backtick fences
+//   code     — inside triple-backtick fences, carrying the fence language
 //   text     — default; consecutive text lines coalesce into one block
 
 // ── Classifiers ────────────────────────────────────────────────────
@@ -28,7 +28,10 @@ const HEADER_HASH_RE = /^\s*#{1,4}\s+\S/;
 // Box-drawing: U+2500..257F, plus = and -. Need length >= 8 and >=70% of
 // non-space chars to be box-drawing.
 const BOX_DRAW_RE = /[\u2500-\u257F=\u2500\u2501\u2550]/g;
-const FENCE_RE = /^\s*```/;
+// The fence, and the language written on it. The language is kept on the
+// block: the reader announces a code block rather than reading it, and
+// "bash, twelve lines" needs the word the fence carried.
+const FENCE_RE = /^\s*(?:```|~~~)\s*([A-Za-z0-9_+-]*)/;
 
 function isRule(text) {
   const trimmed = text.trim();
@@ -146,12 +149,14 @@ export function tokenize(lines) {
   const blocks = [];
   let inFence = false;
   let codeLines = [];
+  let fenceLanguage = "";
   let i = 0;
 
   function flushCode() {
     if (codeLines.length === 0) return;
-    blocks.push({ type: "code", lines: codeLines });
+    blocks.push({ type: "code", lines: codeLines, language: fenceLanguage });
     codeLines = [];
+    fenceLanguage = "";
   }
 
   function pushTextLine(line) {
@@ -163,11 +168,15 @@ export function tokenize(lines) {
   while (i < lines.length) {
     const { runs, text, osc } = lines[i];
 
-    if (FENCE_RE.test(text)) {
+    const fence = FENCE_RE.exec(text);
+    if (fence) {
       if (inFence) {
         flushCode();
         inFence = false;
-      } else inFence = true;
+      } else {
+        inFence = true;
+        fenceLanguage = (fence[1] || "").toLowerCase();
+      }
       i++;
       continue;
     }

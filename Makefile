@@ -22,7 +22,7 @@ PID              := $(shell lsof -ti :$(MOBUX_PORT) 2>/dev/null)
 SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
-        transcribe setup-transcribe \
+        transcribe setup-transcribe tts-voice \
         smoke-start smoke-stop smoke-logs smoke-status \
         test-smoke test-critical-path test-update-runner test-install test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
         podman-build podman-run podman-stop podman-test stt-install
@@ -63,6 +63,12 @@ setup-transcribe:
 
 web:
 	node web/build.js
+
+# Fetch the vendored voice into .tmp/tts-voice and check it against
+# src/local_tts/voice.lock.json. Needed to run the real-voice test or to build
+# a release asset by hand; a normal build does not want it.
+tts-voice:
+	@node scripts/tts-voice.mjs ensure .tmp/tts-voice
 
 # Speech-to-text provider setup. Installs a local OpenAI-compatible server.
 stt-install:
