@@ -1,5 +1,6 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
+import { u } from "../../lib/base.js";
 import { getPref, setPref } from "../../lib/prefs.js";
 
 // Listen card. Rate and pitch are the server-held `listen_*` preferences,
@@ -52,7 +53,7 @@ const localVoice = signal({ enabled: false, state: "unknown", message: "" });
 const preparing = signal(false);
 
 async function loadLocalVoice() {
-  const resp = await fetch("/api/tts/status").catch(() => null);
+  const resp = await fetch(u("/api/tts/status")).catch(() => null);
   if (!resp || !resp.ok) {
     localVoice.value = {
       enabled: false,
@@ -103,7 +104,7 @@ export function ListenCard() {
 
   async function prepare() {
     preparing.value = true;
-    const resp = await fetch("/api/tts/prepare", { method: "POST" }).catch(
+    const resp = await fetch(u("/api/tts/prepare"), { method: "POST" }).catch(
       () => null,
     );
     preparing.value = false;
@@ -123,7 +124,7 @@ export function ListenCard() {
   async function test() {
     if (available.value) window.speechSynthesis.cancel();
     const line = "Mobux listen mode test, one two three.";
-    const resp = await fetch("/api/tts/speak", {
+    const resp = await fetch(u("/api/tts/speak"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: line, kind: "prose" }),

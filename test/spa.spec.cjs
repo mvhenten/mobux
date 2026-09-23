@@ -4034,4 +4034,32 @@ test.describe("behind a prefix-adding proxy", () => {
       .allTextContents();
     expect(names.some((n) => n.trim() === SEED)).toBeTruthy();
   });
+
+  // Read-aloud used to call /api/tts/* root-absolute, so under a mount every
+  // request left it and hit the proxy root: the settings card reported the
+  // voice unreachable and the reader spoke nothing.
+  test("read-aloud asks for the voice inside the mount", async ({ page }) => {
+    const tts = [];
+    page.on("request", (req) => {
+      const { pathname } = new URL(req.url());
+      if (pathname.includes("/api/tts/")) tts.push(pathname);
+    });
+
+    await page.goto(`${proxy.mount}/app#/settings`, {
+      waitUntil: "networkidle",
+    });
+    await expect.poll(() => tts.length).toBeGreaterThan(0);
+
+    const settingsCalls = tts.length;
+    await page.evaluate(async (mount) => {
+      const speech = await import(`${mount}/static/speech.js`);
+      await speech.refreshEngineState();
+    }, proxy.mount);
+
+    expect(tts).toContain(`${PREFIX}/api/tts/status`);
+    expect(tts.filter((p) => p === `${PREFIX}/api/tts/status`).length).toBe(
+      tts.length,
+    );
+    expect(tts.length).toBeGreaterThan(settingsCalls);
+  });
 });

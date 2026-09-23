@@ -11,6 +11,7 @@
 // rate. Pitch only means something to the browser voice; a neural checkpoint
 // has no pitch dial.
 
+import { u } from "./base.js";
 import { loadPrefs } from "./listen-prefs.js";
 
 const BROWSER_AVAILABLE =
@@ -36,10 +37,13 @@ let localEngineReported = "unknown";
 let current = null;
 
 export async function refreshEngineState() {
-  const resp = await fetch("/api/tts/status").catch(() => null);
+  const resp = await fetch(u("api/tts/status")).catch(() => null);
   if (!resp || !resp.ok) {
     localEngineReported = "unsupported";
-    return { state: "unsupported", message: "The voice status is unreachable." };
+    return {
+      state: "unsupported",
+      message: "The voice status is unreachable.",
+    };
   }
   const status = await resp.json();
   localEngineReported = status.enabled ? status.state : "unsupported";
@@ -96,14 +100,16 @@ export function speak(request, { onEnd, onError } = {}) {
       // themselves — escape codes, hashes, box drawing. Reading those aloud is
       // the thing this endpoint exists to prevent, and a failed request is
       // exactly when nobody is watching the screen to notice.
-      fail(`Nothing was read: the voice could not be reached (${err.message}).`);
+      fail(
+        `Nothing was read: the voice could not be reached (${err.message}).`,
+      );
     });
 
   return token;
 }
 
 async function requestSpeech(request) {
-  const resp = await fetch("/api/tts/speak", {
+  const resp = await fetch(u("api/tts/speak"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
