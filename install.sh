@@ -48,7 +48,8 @@ WORK="$(mktemp -d "${CACHE_DIR}/mobux-install.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 say "downloading ${BASE_URL}/${ASSET}"
-curl -fsSL --retry 2 --max-time 300 -o "${WORK}/${ASSET}" "${BASE_URL}/${ASSET}" \
+curl -fsSL --retry 2 --max-time 3600 --speed-limit 1024 --speed-time 60 \
+  -o "${WORK}/${ASSET}" "${BASE_URL}/${ASSET}" \
   || die "could not download ${ASSET} from ${BASE_URL}"
 curl -fsSL --retry 2 --max-time 60 -o "${WORK}/${ASSET}.sha256" "${BASE_URL}/${ASSET}.sha256" \
   || die "could not download ${ASSET}.sha256 from ${BASE_URL}"

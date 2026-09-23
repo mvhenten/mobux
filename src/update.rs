@@ -574,6 +574,7 @@ pub fn spawn_updater(
         .env("MOBUX_UPDATE_SCHEME", scheme)
         .env("MOBUX_UPDATE_LOG", &log_path)
         .env("MOBUX_UPDATE_RESULT", &result_path)
+        .env("MOBUX_UPDATE_DATA_DIR", data_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err));

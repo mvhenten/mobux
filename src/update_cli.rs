@@ -160,7 +160,8 @@ fn install(settings: &crate::config::Config, version: &str) -> Result<PathBuf, S
         .arg("--install-only")
         .env("MOBUX_UPDATE_VERSION", version)
         .env("MOBUX_UPDATE_BIN", &bin)
-        .env("MOBUX_UPDATE_ROOT", update::cargo_root(&bin));
+        .env("MOBUX_UPDATE_ROOT", update::cargo_root(&bin))
+        .env("MOBUX_UPDATE_DATA_DIR", &dir);
     if let Some(asset) = &asset {
         cmd.env("MOBUX_UPDATE_ASSET", asset);
     }
