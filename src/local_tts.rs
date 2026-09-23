@@ -47,8 +47,18 @@ pub const MODEL_DIR_ENV: &str = "MOBUX_TTS_MODEL_DIR";
 /// Where the release assets are fetched from. Mirrors `MOBUX_INSTALL_BASE_URL`
 /// in install.sh, and exists for the same reasons: tests and mirrors.
 pub const ASSET_BASE_URL_ENV: &str = "MOBUX_TTS_ASSET_BASE_URL";
-pub const DEFAULT_ASSET_BASE_URL: &str =
-    "https://github.com/mvhenten/mobux/releases/latest/download";
+
+/// This build's own release, not `latest`. The hashes are compiled in, so the
+/// moment a later release refreshes the voice every older binary would reject
+/// the download forever. A build from an unreleased checkout carries the last
+/// committed version rather than a released one, so its fetch 404s — set
+/// `MOBUX_TTS_ASSET_BASE_URL` or `MOBUX_TTS_MODEL_DIR` for that.
+pub fn default_asset_base_url() -> String {
+    format!(
+        "https://github.com/mvhenten/mobux/releases/download/v{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// Path inside the release tarball that the voice is packed at.
 pub fn asset_voice_prefix(voice: &str) -> String {
@@ -99,7 +109,7 @@ pub fn asset_base_url() -> String {
     std::env::var(ASSET_BASE_URL_ENV)
         .ok()
         .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| DEFAULT_ASSET_BASE_URL.to_string())
+        .unwrap_or_else(default_asset_base_url)
 }
 
 /// What the local engine is doing, as the status endpoint reports it.
@@ -245,6 +255,22 @@ mod tests {
             "tts-voices/en_US-lessac-medium/"
         );
         assert!(asset_base_url().starts_with("http"));
+    }
+
+    // The hashes are compiled in, so the asset has to come from the release
+    // this binary was cut from: `latest` rejects every older binary the moment
+    // a newer release refreshes the voice.
+    #[test]
+    fn the_asset_url_is_pinned_to_this_builds_own_release() {
+        let url = default_asset_base_url();
+        assert!(
+            url.ends_with(&format!(
+                "/releases/download/v{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{url}"
+        );
+        assert!(!url.contains("latest"), "{url}");
     }
 
     #[test]
