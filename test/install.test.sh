@@ -50,22 +50,36 @@ payload_script() {
   printf '%s\n' "#!/bin/sh" "printf '%s' $1"
 }
 
-# Build a release-shaped asset dir: the tarball holds a single `mobux` at the
-# root, next to a `sha256sum`-format checksum file — exactly what
-# scripts/build-release-asset.sh uploads. A release carries one asset per
-# architecture, so make_assets writes both unless a case names just one — which
-# is how the arch cases prove the installer picks by name.
+# Build a release-shaped asset dir: the tarball holds `mobux` at the root next
+# to `stt-models/<model>/`, with a `sha256sum`-format checksum file beside it —
+# exactly what scripts/build-release-asset.sh uploads. A release carries one
+# asset per architecture, so make_assets writes both unless a case names just
+# one — which is how the arch cases prove the installer picks by name.
+#
+# MODEL_IN_ASSET=0 builds an asset from before the weights shipped, which the
+# installer still has to handle.
+MODEL_ID="base.en"
+MODEL_FILES="config.json tokenizer.json model.safetensors"
 make_assets() {
   local dir="$1" body="$2" checksum="$3"
   shift 3
   local assets=("$@")
   [ "${#assets[@]}" -gt 0 ] || assets=("$ASSET" "$ASSET_ARM64")
-  local pay="$dir/payload" asset
+  local pay="$dir/payload" asset member f
   mkdir -p "$dir" "$pay"
   payload_script "$body" > "$pay/mobux"
   chmod 755 "$pay/mobux"
+  member="mobux"
+  if [ "${MODEL_IN_ASSET:-1}" = "1" ]; then
+    mkdir -p "$pay/stt-models/$MODEL_ID"
+    for f in $MODEL_FILES; do
+      printf '%s-%s' "$body" "$f" > "$pay/stt-models/$MODEL_ID/$f"
+    done
+    member="mobux stt-models"
+  fi
   for asset in "${assets[@]}"; do
-    tar -C "$pay" -czf "$dir/$asset" mobux
+    # shellcheck disable=SC2086 — $member is a deliberate two-word list.
+    tar -C "$pay" -czf "$dir/$asset" $member
     if [ "$checksum" = "good" ]; then
       (cd "$dir" && sha256sum "$asset" > "$asset.sha256")
     else
@@ -129,6 +143,29 @@ contains "happy: quick start points at the boot service" "$OUT1" "mobux service 
 # TLS is off by default, so the URL is http:// and the opt-in is named.
 contains "happy: quick start links a plain-HTTP URL" "$OUT1" "http://"
 contains "happy: quick start names the TLS opt-in" "$OUT1" "--tls"
+
+# The weights ride in the same verified asset, so a fresh install can dictate
+# without reaching a model host at all. Before this they were downloaded on
+# first use, which is exactly what this change removes.
+D1M="$WORK/data1"
+OUT1M="$(run_installer "$A1" "$WORK/dest1m" MOBUX_DATA_DIR="$D1M")"
+contains "model: said where the model landed" "$OUT1M" "installed the speech model"
+check "model: config.json landed in the data dir" \
+  test -f "$D1M/stt-models/$MODEL_ID/config.json"
+check "model: weights landed in the data dir" \
+  test -f "$D1M/stt-models/$MODEL_ID/model.safetensors"
+check "model: tokenizer landed in the data dir" \
+  test -f "$D1M/stt-models/$MODEL_ID/tokenizer.json"
+
+# An asset published before the weights shipped must still install cleanly.
+A1N="$WORK/assets-nomodel"; D1N="$WORK/dest1n"; D1ND="$WORK/data1n"
+MODEL_IN_ASSET=0 make_assets "$A1N" "MOBUX-BINARY-NOMODEL" good
+OUT1N="$(run_installer "$A1N" "$D1N" MOBUX_DATA_DIR="$D1ND")"
+rc=$?
+check "no-model asset: exit 0" test "$rc" -eq 0
+check "no-model asset: binary installed" \
+  test "$(installed_body "$D1N")" = "MOBUX-BINARY-NOMODEL"
+check "no-model asset: no empty model dir left behind" test ! -d "$D1ND/stt-models"
 
 # ── Test 2: a tampered asset is refused and nothing is installed ────────────
 A2="$WORK/assets-bad"; D2="$WORK/dest2"

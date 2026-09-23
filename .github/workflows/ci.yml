@@ -57,6 +57,45 @@ jobs:
           MOBUX_TTS_MODEL_TEST: "1"
           MOBUX_TTS_MODEL_DIR: ${{ github.workspace }}/.tmp/tts-voice
 
+  local-stt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: local-stt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The model is pinned by content, so its own hash is the cache key: a
+      # refreshed model misses the cache and is fetched, an unchanged one never
+      # leaves the cache.
+      - id: model
+        run: |
+          node -e 'const l=require("./src/local_stt/model.lock.json");const m=l.models.find(m=>m.id===l.vendored);console.log("id="+m.id);console.log("sha="+m.files["model.safetensors"].sha256)' >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .tmp/stt-model
+          key: stt-model-${{ steps.model.outputs.sha }}
+      - name: Fetch the speech model on a cache miss
+        run: node scripts/stt-model.mjs ensure .tmp/stt-model ${{ steps.model.outputs.id }}
+      - run: cargo clippy --features local-stt --all-targets -- -D warnings
+      - run: cargo build --release --features local-stt
+      # The default job compiles the crate without the feature, so without this
+      # every test under src/local_stt/ is built here and never run.
+      - run: cargo test --features local-stt
+      # Real weights, real inference, on the bundled sample clip — the one
+      # thing the default suite cannot cover. The bundled checkpoint only: the
+      # download-on-demand ones are covered by the fetch-path tests.
+      - name: Transcribe the bundled sample
+        run: cargo test --release --features local-stt -- --ignored transcribes_the_bundled_sample
+        env:
+          MOBUX_STT_MODEL_TEST: "1"
+          MOBUX_STT_MODEL_DIR: ${{ github.workspace }}/.tmp/stt-model
+
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -96,6 +135,14 @@ jobs:
         env:
           CI: true
           MOBUX_URL: http://localhost:8281
+      - name: Run STT settings UX tests
+        run: make test-stt-ux
+        env:
+          CI: true
+      - name: Run STT per-kind persistence tests
+        run: make test-stt-per-kind
+        env:
+          CI: true
 
   fleet:
     runs-on: ubuntu-latest

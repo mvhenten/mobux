@@ -6,15 +6,16 @@
 # Downloads the latest GitHub release asset for the running architecture (Linux
 # x86_64 and aarch64) built by scripts/build-release-asset.sh, verifies its
 # sha256, and drops the binary in ~/.local/bin. The asset also carries the
-# voice that reads the terminal aloud, which lands in the data dir so the
-# reader never fetches one. User-local only: no writes outside $HOME, no stdin.
+# speech model and the voice that reads the terminal aloud, which land in the
+# data dir so neither dictation nor the reader fetches one. User-local only: no
+# writes outside $HOME, no stdin.
 #
 # Overridable for tests and mirrors:
 #   MOBUX_INSTALL_BASE_URL  where to fetch <asset> and <asset>.sha256 from
 #                           (default: the GitHub "latest release" download URL;
 #                           tests point this at a file:// directory)
 #   MOBUX_INSTALL_DIR       install destination (default ~/.local/bin)
-#   MOBUX_DATA_DIR          where the voice lands
+#   MOBUX_DATA_DIR          where the speech model and the voice land
 #                           (default ~/.local/share/mobux)
 
 set -euo pipefail
@@ -48,7 +49,8 @@ WORK="$(mktemp -d "${CACHE_DIR}/mobux-install.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 say "downloading ${BASE_URL}/${ASSET}"
-curl -fsSL --retry 2 --max-time 300 -o "${WORK}/${ASSET}" "${BASE_URL}/${ASSET}" \
+curl -fsSL --retry 2 --max-time 3600 --speed-limit 1024 --speed-time 60 \
+  -o "${WORK}/${ASSET}" "${BASE_URL}/${ASSET}" \
   || die "could not download ${ASSET} from ${BASE_URL}"
 curl -fsSL --retry 2 --max-time 60 -o "${WORK}/${ASSET}.sha256" "${BASE_URL}/${ASSET}.sha256" \
   || die "could not download ${ASSET}.sha256 from ${BASE_URL}"
@@ -70,6 +72,17 @@ mv -f "${WORK}/${CRATE}" "${INSTALL_DIR}/.${CRATE}.new" \
 chmod 755 "${INSTALL_DIR}/.${CRATE}.new"
 mv -f "${INSTALL_DIR}/.${CRATE}.new" "${INSTALL_DIR}/${CRATE}"
 say "installed ${INSTALL_DIR}/${CRATE}"
+
+# The speech model rides in the same asset, already covered by the sha256 above.
+# Put it where mobux looks so the first dictation transcribes instead of
+# downloading. Assets from before the model shipped simply have no stt-models.
+if [ -d "${WORK}/stt-models" ]; then
+  mkdir -p "${DATA_DIR}/stt-models" \
+    || die "could not create ${DATA_DIR}/stt-models for the speech model"
+  cp -R "${WORK}/stt-models/." "${DATA_DIR}/stt-models/" \
+    || die "could not write the speech model to ${DATA_DIR}/stt-models"
+  say "installed the speech model in ${DATA_DIR}/stt-models"
+fi
 
 # The voice rides in the same asset, already covered by the sha256 above. Put
 # it where mobux looks so the first tap on a speaker icon reads aloud instead

@@ -304,15 +304,19 @@ async fn fetch_from(base: &str, data_dir: &Path, voice: &str) -> Result<PathBuf,
             },
         );
     };
-    release_asset::fetch_into(base, &dir, &manifest(voice), &report)
-        .await
-        .map_err(|err| match release_asset::release_asset_name() {
-            Some(_) => err,
-            None => format!(
-                "{err}, so the voice cannot be fetched — point {} at a directory holding it",
-                super::MODEL_DIR_ENV
-            ),
-        })?;
+    let asset = release_asset::platform_asset().map_err(|err| {
+        format!(
+            "{err}, so the voice cannot be fetched — point {} at a directory holding it",
+            super::MODEL_DIR_ENV
+        )
+    })?;
+    let source = release_asset::Source {
+        base,
+        asset,
+        budget: release_asset::DOWNLOAD_BUDGET,
+        read_timeout: release_asset::READ_TIMEOUT,
+    };
+    release_asset::fetch_into(&source, &dir, &manifest(voice), &report).await?;
     Ok(dir)
 }
 

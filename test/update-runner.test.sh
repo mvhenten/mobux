@@ -482,6 +482,58 @@ case "$(cat "$RESULT15" 2>/dev/null)" in
   *) bad "no-cargo: reason missing or unhelpful ($(cat "$RESULT15" 2>/dev/null))" ;;
 esac
 
+# ── Test 16: the asset's speech model lands in the data dir, with a download
+# budget a ~140 MB asset can meet on a slow link ────────────────────────────
+# The asset carries stt-models/<model>/…; the runtime looks in
+# <data dir>/stt-models, so an update that drops the model makes the first
+# dictation download it again. A stale file already there is replaced.
+ROOT16="$WORK/root16"; mkdir -p "$ROOT16/bin"
+BIN16="$ROOT16/bin/mobux"
+printf 'OLD-V0' > "$BIN16"
+DATA16="$WORK/data16"; mkdir -p "$DATA16/stt-models/base.en"
+printf 'STALE' > "$DATA16/stt-models/base.en/model.safetensors"
+ASSETS16="$WORK/assets/v16.0.0"; mkdir -p "$ASSETS16"
+PAYDIR16="$WORK/pay16"; mkdir -p "$PAYDIR16/stt-models/base.en"
+printf 'NEW-V16-PREBUILT' > "$PAYDIR16/mobux"
+printf 'WEIGHTS-V16' > "$PAYDIR16/stt-models/base.en/model.safetensors"
+printf '{"vocab":16}' > "$PAYDIR16/stt-models/base.en/tokenizer.json"
+tar -C "$PAYDIR16" -czf "$ASSETS16/$ASSET_NAME" mobux stt-models
+( cd "$ASSETS16" && sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256" )
+printf '{"app":"mobux","version":"16.0.0"}' > "$WORK/identify.json"
+CARGO_FAIL16="$(make_stub_cargo fail "")"
+
+REAL_CURL="$(command -v curl)"
+CURL_SHIM="$WORK/curl-shim"; mkdir -p "$CURL_SHIM"
+CURL_ARGS16="$WORK/curl-args16"
+cat > "$CURL_SHIM/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$CURL_ARGS16"
+exec "$REAL_CURL" "\$@"
+EOF
+chmod +x "$CURL_SHIM/curl"
+
+PATH="$CURL_SHIM:$PATH" MOBUX_UPDATE_DATA_DIR="$DATA16" ASSET_BASE="file://$WORK/assets" \
+  run_updater "16.0.0" "$BIN16" "$ROOT16" "$CARGO_FAIL16" >/dev/null
+rc=$?
+[ "$rc" -eq 0 ] && ok "model: exit 0" || bad "model: exit $rc"
+[ "$(cat "$BIN16")" = "NEW-V16-PREBUILT" ] && ok "model: binary replaced from asset" || bad "model: binary not replaced ($(cat "$BIN16"))"
+[ "$(cat "$DATA16/stt-models/base.en/model.safetensors" 2>/dev/null)" = "WEIGHTS-V16" ] \
+  && ok "model: weights placed where the runtime looks" \
+  || bad "model: weights not placed ($(cat "$DATA16/stt-models/base.en/model.safetensors" 2>/dev/null))"
+[ -f "$DATA16/stt-models/base.en/tokenizer.json" ] && ok "model: every model file placed" || bad "model: tokenizer missing"
+ls -A "$DATA16/stt-models/base.en" | grep -q '\.new$' && bad "model: staging file left behind" || ok "model: no staging files left"
+
+# 137 MB at 1 Mbit/s takes about 1100 s.
+ASSET_CALL16="$(grep -F "/$ASSET_NAME " "$CURL_ARGS16" | grep -v '\.sha256' | head -1)"
+MAX16="$(printf '%s\n' "$ASSET_CALL16" | sed -n 's/.*--max-time \([0-9]*\).*/\1/p')"
+[ -n "$MAX16" ] && [ "$MAX16" -ge 1200 ] \
+  && ok "model: asset download allows ${MAX16}s" \
+  || bad "model: asset download capped at ${MAX16:-?}s, too short for a 137 MB asset on a slow link"
+case "$ASSET_CALL16" in
+  *"--speed-limit"*) ok "model: a stalled download is still caught" ;;
+  *) bad "model: no stall detection on the asset download" ;;
+esac
+
 echo "---"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

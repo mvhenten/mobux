@@ -41,7 +41,11 @@
           { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz" },
           { "path": "target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz.sha256" },
           { "path": "target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz" },
-          { "path": "target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz.sha256" }
+          { "path": "target/dist/mobux-aarch64-unknown-linux-gnu.tar.gz.sha256" },
+          { "path": "target/dist/mobux-stt-tiny.en.tar.gz" },
+          { "path": "target/dist/mobux-stt-tiny.en.tar.gz.sha256" },
+          { "path": "target/dist/mobux-stt-small.en.tar.gz" },
+          { "path": "target/dist/mobux-stt-small.en.tar.gz.sha256" }
         ]
       }
     ]

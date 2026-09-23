@@ -13,6 +13,8 @@ use p256::ecdsa::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
+use crate::transcribe::LOCAL_KIND;
+
 /// Raw VAPID keypair as stored in the database.
 ///
 /// `public_key` is the 65-byte uncompressed P-256 SEC1 point (`0x04 || X || Y`).
@@ -193,10 +195,7 @@ impl Db {
                 kind TEXT NOT NULL,
                 url TEXT NOT NULL,
                 model TEXT NOT NULL,
-                api_key TEXT,
-                install_cmd TEXT,
-                start_cmd TEXT,
-                stop_cmd TEXT
+                api_key TEXT
             );
 
             -- Per-kind STT provider settings (one row per kind).
@@ -228,12 +227,6 @@ impl Db {
         )
         .context("initializing sqlite schema")?;
 
-        // Additive migration: add stop_cmd column to existing DBs that
-        // were created before this field was introduced. SQLite ignores
-        // duplicate column errors only through IF NOT EXISTS on indexes,
-        // not columns, so we catch the error and treat it as a no-op.
-        let _ = conn.execute_batch("ALTER TABLE stt_config ADD COLUMN stop_cmd TEXT;");
-
         // Additive migration: the selected Home node moved from per-device
         // localStorage into this global row. Older DBs predate the column.
         let _ = conn.execute_batch(
@@ -251,7 +244,58 @@ impl Db {
         // Migrate legacy stt_config row into stt_providers + stt_active_kind
         // if not yet done (providers table empty).
         Self::migrate_stt_providers(conn)?;
+        Self::migrate_local_stt_in_process(conn)?;
 
+        Ok(())
+    }
+
+    /// Retire the container-backed local provider.
+    ///
+    /// The local kind now runs whisper in-process, so an install upgrading
+    /// into this version still carries the container installer scripts and a
+    /// faster-whisper model id pointed at a port nothing listens on. Clear the
+    /// scripts and reset the local row onto the in-process defaults; every
+    /// other kind is a user-configured endpoint and is left alone.
+    fn migrate_local_stt_in_process(conn: &Connection) -> Result<()> {
+        let cmd_columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(stt_config)")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| matches!(c.as_str(), "install_cmd" | "start_cmd" | "stop_cmd"))
+            .collect();
+        if !cmd_columns.is_empty() {
+            let assignments = cmd_columns
+                .iter()
+                .map(|c| format!("{c} = NULL"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = conn.execute(&format!("UPDATE stt_config SET {assignments}"), []);
+        }
+
+        let local: Option<String> = conn
+            .query_row(
+                "SELECT model FROM stt_providers WHERE kind = ?1",
+                params![LOCAL_KIND],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("reading the local stt provider")?;
+        let Some(model) = local else {
+            return Ok(());
+        };
+        if crate::local_stt::is_known_model(&model) {
+            return Ok(());
+        }
+        conn.execute(
+            "UPDATE stt_providers SET host = '', port = '', url = '', model = ?1
+             WHERE kind = ?2",
+            params![crate::local_stt::DEFAULT_MODEL, LOCAL_KIND],
+        )
+        .context("resetting the local stt provider onto the in-process engine")?;
         Ok(())
     }
 
@@ -586,97 +630,6 @@ impl Db {
         Ok(())
     }
 
-    /// Read STT provider config. Seeds defaults and persists them on first call.
-    pub fn stt_config(&self) -> Result<SttConfig> {
-        let conn = self.lock_conn()?;
-        type Row = (
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        // stop_cmd may not exist in older DBs (schema migration adds column
-        // lazily via ALTER TABLE on first write); use COALESCE-fallback select.
-        let row: Option<Row> = conn
-            .query_row(
-                "SELECT kind, url, model, api_key, install_cmd, start_cmd, stop_cmd FROM stt_config WHERE id = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                },
-            )
-            .optional()
-            .context("reading stt_config")?;
-
-        if let Some((kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)) = row {
-            return Ok(SttConfig {
-                kind,
-                url,
-                model,
-                api_key,
-                install_cmd,
-                start_cmd,
-                stop_cmd,
-            });
-        }
-
-        let defaults = SttConfig::default();
-        conn.execute(
-            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                defaults.kind,
-                defaults.url,
-                defaults.model,
-                defaults.api_key,
-                defaults.install_cmd,
-                defaults.start_cmd,
-                defaults.stop_cmd
-            ],
-        )
-        .context("inserting default stt_config")?;
-        Ok(defaults)
-    }
-
-    /// Overwrite STT provider config. Upserts the single row.
-    pub fn set_stt_config(&self, cfg: SttConfig) -> Result<()> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET
-                 kind = excluded.kind,
-                 url = excluded.url,
-                 model = excluded.model,
-                 api_key = excluded.api_key,
-                 install_cmd = excluded.install_cmd,
-                 start_cmd = excluded.start_cmd,
-                 stop_cmd = excluded.stop_cmd",
-            params![
-                cfg.kind,
-                cfg.url,
-                cfg.model,
-                cfg.api_key,
-                cfg.install_cmd,
-                cfg.start_cmd,
-                cfg.stop_cmd
-            ],
-        )
-        .context("upserting stt_config")?;
-        Ok(())
-    }
-
     /// Return the active STT kind ("local", "network", or "openai").
     /// Defaults to "local" if never set.
     pub fn stt_active_kind(&self) -> Result<String> {
@@ -798,32 +751,6 @@ impl Db {
     }
 }
 
-/// STT provider configuration. Single row, id=1.
-#[derive(Debug, Clone)]
-pub struct SttConfig {
-    pub kind: String, // "local", "network", "openai"
-    pub url: String,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub install_cmd: Option<String>,
-    pub start_cmd: Option<String>,
-    pub stop_cmd: Option<String>,
-}
-
-impl Default for SttConfig {
-    fn default() -> Self {
-        Self {
-            kind: "local".to_string(),
-            url: "http://127.0.0.1:5200/v1/audio/transcriptions".to_string(),
-            model: "Systran/faster-whisper-small".to_string(),
-            api_key: None,
-            install_cmd: Some(crate::stt_scripts::INSTALL_SCRIPT.to_string()),
-            start_cmd: Some(crate::stt_scripts::SERVE_SCRIPT.to_string()),
-            stop_cmd: Some(crate::stt_scripts::STOP_SCRIPT.to_string()),
-        }
-    }
-}
-
 /// Per-kind STT provider settings stored in `stt_providers`.
 #[derive(Debug, Clone)]
 pub struct SttProviderRow {
@@ -852,10 +779,11 @@ impl SttProviderRow {
                 api_key: None,
             },
             _ => Self {
-                kind: "local".to_string(),
-                host: "http://127.0.0.1".to_string(),
-                port: "5200".to_string(),
-                model: "Systran/faster-whisper-small".to_string(),
+                kind: LOCAL_KIND.to_string(),
+                // In-process whisper: no host, no port, just the checkpoint.
+                host: String::new(),
+                port: String::new(),
+                model: crate::local_stt::DEFAULT_MODEL.to_string(),
                 api_key: None,
             },
         }
@@ -1192,10 +1120,9 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT OR REPLACE INTO stt_config
-                 (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+                "INSERT OR REPLACE INTO stt_config (id, kind, url, model, api_key)
                  VALUES (1, 'network', 'http://lab.local:9090/v1/audio/transcriptions',
-                         'Systran/faster-whisper-small', 'oldkey', NULL, NULL, NULL)",
+                         'Systran/faster-whisper-small', 'oldkey')",
                 [],
             )
             .expect("insert legacy");
@@ -1287,16 +1214,123 @@ mod tests {
     }
 
     #[test]
-    fn default_stt_commands_are_self_contained() {
+    fn a_fresh_install_defaults_the_local_kind_to_the_in_process_engine() {
         let db = fresh_db();
-        let cfg = db.stt_config().expect("default stt_config");
-        for cmd in [&cfg.install_cmd, &cfg.start_cmd, &cfg.stop_cmd] {
-            let cmd = cmd.as_deref().expect("default command present");
-            assert!(cmd.contains("podman"), "expected podman in: {cmd}");
-            assert!(
-                !cmd.contains("bin/stt-"),
-                "default command must not reference a bin/stt- path: {cmd}"
+        assert_eq!(db.stt_active_kind().expect("active kind"), LOCAL_KIND);
+
+        let local = SttProviderRow::default_for(LOCAL_KIND);
+        assert_eq!(local.host, "");
+        assert_eq!(local.port, "");
+        assert_eq!(local.model, crate::local_stt::DEFAULT_MODEL);
+        assert_eq!(local.transcription_url(), "", "in-process: no endpoint");
+    }
+
+    // Upgrade path off the container-backed provider: a DB written by it
+    // carries the installer scripts and a faster-whisper model id aimed at
+    // port 5200. Opening it must land on the in-process engine instead of
+    // dictating into a port nothing listens on.
+    fn seed_container_era_db(path: &Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS stt_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                kind TEXT NOT NULL,
+                url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_key TEXT,
+                install_cmd TEXT,
+                start_cmd TEXT,
+                stop_cmd TEXT
             );
+            CREATE TABLE IF NOT EXISTS stt_providers (
+                kind TEXT PRIMARY KEY,
+                host TEXT NOT NULL DEFAULT '',
+                port TEXT NOT NULL DEFAULT '',
+                url  TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                api_key TEXT
+            );
+            INSERT INTO stt_config (id, kind, url, model, api_key, install_cmd, start_cmd, stop_cmd)
+            VALUES (1, 'local', 'http://127.0.0.1:5200/v1/audio/transcriptions',
+                    'Systran/faster-whisper-small', NULL,
+                    'podman pull ghcr.io/speaches-ai/speaches:latest-cpu',
+                    'podman run -d --name mobux-stt -p 5200:8000 speaches',
+                    'podman stop mobux-stt');
+            INSERT INTO stt_providers (kind, host, port, url, model, api_key)
+            VALUES ('local', 'http://127.0.0.1', '5200',
+                    'http://127.0.0.1:5200/v1/audio/transcriptions',
+                    'Systran/faster-whisper-small', NULL),
+                   ('openai', 'https://api.openai.com', '443',
+                    'https://api.openai.com:443/v1/audio/transcriptions',
+                    'whisper-1', 'sk-kept');",
+        )
+        .expect("seed container-era db");
+    }
+
+    #[test]
+    fn opening_a_container_era_db_resets_the_local_provider_and_keeps_the_remote_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mobux.sqlite");
+        seed_container_era_db(&path);
+
+        let db = Db::open(&path).expect("open a container-era db");
+
+        let local = db
+            .stt_provider(LOCAL_KIND)
+            .expect("read local")
+            .expect("local row");
+        assert_eq!(local.model, crate::local_stt::DEFAULT_MODEL);
+        assert_eq!(local.host, "");
+        assert_eq!(local.port, "");
+
+        let openai = db
+            .stt_provider("openai")
+            .expect("read openai")
+            .expect("openai row");
+        assert_eq!(openai.host, "https://api.openai.com");
+        assert_eq!(openai.model, "whisper-1");
+        assert_eq!(
+            openai.api_key.as_deref(),
+            Some("sk-kept"),
+            "a configured endpoint is not touched by the local migration"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let leftovers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stt_config
+                 WHERE install_cmd IS NOT NULL OR start_cmd IS NOT NULL OR stop_cmd IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0, "no container command survives the upgrade");
+    }
+
+    // Re-opening must not churn a row the migration has already fixed.
+    #[test]
+    fn the_migration_leaves_a_model_the_engine_can_run_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mobux.sqlite");
+        seed_container_era_db(&path);
+        {
+            let db = Db::open(&path).expect("first open");
+            db.set_stt_provider(SttProviderRow {
+                kind: LOCAL_KIND.to_string(),
+                host: String::new(),
+                port: String::new(),
+                model: crate::local_stt::DEFAULT_MODEL.to_string(),
+                api_key: None,
+            })
+            .expect("write the migrated row back");
         }
+        let db = Db::open(&path).expect("second open");
+        assert_eq!(
+            db.stt_provider(LOCAL_KIND)
+                .expect("read local")
+                .expect("local row")
+                .model,
+            crate::local_stt::DEFAULT_MODEL
+        );
     }
 }

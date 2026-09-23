@@ -10,21 +10,24 @@
 //! check it against what the release publishes, unpack one prefix out of it,
 //! and refuse anything whose bytes are not the bytes the lock names.
 
-#![cfg_attr(not(feature = "local-tts"), allow(dead_code))]
+#![cfg_attr(
+    not(any(feature = "local-tts", feature = "local-stt")),
+    allow(dead_code)
+)]
 
 use std::collections::BTreeMap;
 use std::path::Path;
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 use std::path::PathBuf;
 
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 use futures_util::StreamExt;
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 use sha2::{Digest, Sha256};
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 use tokio::io::AsyncWriteExt;
 
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 const DOWNLOAD_PROGRESS_STEP: u64 = 4 * 1024 * 1024;
 
 /// How long a download may go without a byte arriving before it is abandoned.
@@ -33,14 +36,14 @@ const DOWNLOAD_PROGRESS_STEP: u64 = 4 * 1024 * 1024;
 /// connection and then stalls, or dribbles, holds the fetch open for as long
 /// as it likes — with the prepare lock held and a part file growing in the
 /// data dir.
-#[cfg(feature = "local-tts")]
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
+pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The sidecar is one line; it never needs a streaming budget.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 const SIDECAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The most the asset may weigh before the download is abandoned. Without a
@@ -50,7 +53,7 @@ const SIDECAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// speech-to-text checkpoint — so the cap is sized to the whole asset, not to
 /// the one manifest being unpacked from it. Sized off a single manifest, the
 /// voice's download refused the combined asset outright.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 pub const DOWNLOAD_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// One file, pinned by content. Rewritten only by the maintainer script that
@@ -105,7 +108,7 @@ pub fn files_present(dir: &Path, names: &[&str]) -> bool {
 
 /// Check a directory against the lock. Size first, because a truncated
 /// download is the common case and hashing it is wasted work.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 pub fn verify(dir: &Path, manifest: &Manifest<'_>) -> Result<(), String> {
     for (name, locked) in manifest.files {
         let bytes = std::fs::read(dir.join(name))
@@ -128,61 +131,73 @@ pub fn verify(dir: &Path, manifest: &Manifest<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// Fetch the release tarball for this host and unpack the manifest's files out
-/// of it into `dir`.
+/// Where to fetch an asset from and how much of it to accept.
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
+pub struct Source<'a> {
+    pub base: &'a str,
+    pub asset: &'a str,
+    pub budget: u64,
+    pub read_timeout: std::time::Duration,
+}
+
+/// The platform tarball for this host, or a sentence saying there is none.
 #[cfg(feature = "local-tts")]
-pub async fn fetch_into(
-    base_url: &str,
-    dir: &Path,
-    manifest: &Manifest<'_>,
-    report: &(dyn Fn(Progress) + Send + Sync),
-) -> Result<(), String> {
-    let asset = release_asset_name().ok_or_else(|| {
+pub fn platform_asset() -> Result<&'static str, String> {
+    release_asset_name().ok_or_else(|| {
         format!(
             "no prebuilt mobux release for {}/{}",
             std::env::consts::OS,
             std::env::consts::ARCH,
         )
-    })?;
+    })
+}
+
+/// Fetch a release asset and unpack the manifest's files out of it into `dir`.
+/// The part file is removed however the fetch ends.
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
+pub async fn fetch_into(
+    source: &Source<'_>,
+    dir: &Path,
+    manifest: &Manifest<'_>,
+    report: &(dyn Fn(Progress) + Send + Sync),
+) -> Result<(), String> {
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("creating {}: {e}", dir.display()))?;
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let tarball = dir.join(format!("{asset}.part"));
+    let tarball = dir.join(format!("{}.part", source.asset));
     report(Progress::Downloading {
-        file: asset.to_string(),
+        file: source.asset.to_string(),
         downloaded: 0,
         total: 0,
     });
-    let result =
-        download_and_unpack(&client, base_url, asset, &tarball, dir, manifest, report).await;
+    let result = download_and_unpack(&client, source, &tarball, dir, manifest, report).await;
     let _ = tokio::fs::remove_file(&tarball).await;
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 async fn download_and_unpack(
     client: &reqwest::Client,
-    base: &str,
-    asset: &str,
+    source: &Source<'_>,
     tarball: &Path,
     dir: &Path,
     manifest: &Manifest<'_>,
     report: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<(), String> {
+    let (base, asset) = (source.base, source.asset);
     let digest = download(
         client,
         &format!("{base}/{asset}"),
         tarball,
         asset,
-        DOWNLOAD_BUDGET,
+        source.budget,
+        source.read_timeout,
         report,
     )
     .await?;
@@ -213,7 +228,7 @@ async fn download_and_unpack(
 
 /// Unpack just the manifest's files, then check them. A file that does not
 /// match is removed rather than left behind for the next start to load.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 fn extract(
     tarball: &Path,
     dir: &Path,
@@ -267,7 +282,7 @@ fn extract(
 
 /// Read the `<asset>.sha256` sidecar the release publishes beside the tarball —
 /// the same file install.sh checks, in `sha256sum` format.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 async fn fetch_published_digest(
     client: &reqwest::Client,
     base: &str,
@@ -286,7 +301,7 @@ async fn fetch_published_digest(
     parse_sha256sum(&body).ok_or_else(|| format!("{asset}.sha256 is not a sha256sum line"))
 }
 
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 pub fn parse_sha256sum(body: &str) -> Option<String> {
     let digest = body.split_whitespace().next()?;
     if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -297,19 +312,19 @@ pub fn parse_sha256sum(body: &str) -> Option<String> {
 
 /// Stream `url` to `target`, reporting progress, and return the sha256 of what
 /// landed — computed while writing, so nothing is read back to check it.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 async fn download(
     client: &reqwest::Client,
     url: &str,
     target: &Path,
     file: &str,
     budget: u64,
+    read_timeout: std::time::Duration,
     report: &(dyn Fn(Progress) + Send + Sync),
 ) -> Result<String, String> {
-    let response = client
-        .get(url)
-        .send()
+    let response = tokio::time::timeout(read_timeout, client.get(url).send())
         .await
+        .map_err(|_| format!("fetching {file}: no response within {read_timeout:?}"))?
         .map_err(|e| format!("fetching {file}: {e}"))?
         .error_for_status()
         .map_err(|e| format!("fetching {file}: {e}"))?;
@@ -326,7 +341,13 @@ async fn download(
     let mut stream = response.bytes_stream();
     let mut downloaded = 0u64;
     let mut reported = 0u64;
-    while let Some(chunk) = stream.next().await {
+    // Every chunk gets a clock of its own: a host that answers and then stops
+    // sending otherwise holds the fetch, and whatever lock its caller took,
+    // open for good.
+    while let Some(chunk) = tokio::time::timeout(read_timeout, stream.next())
+        .await
+        .map_err(|_| format!("downloading {file}: stalled for {read_timeout:?}"))?
+    {
         let chunk = chunk.map_err(|e| format!("downloading {file}: {e}"))?;
         downloaded += chunk.len() as u64;
         if downloaded > budget {
@@ -351,16 +372,15 @@ async fn download(
     Ok(hex(hasher.finalize()))
 }
 
-#[cfg(feature = "local-tts")]
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 fn over_budget(file: &str, got: u64, budget: u64) -> String {
     format!(
-        "{file} is at least {got} bytes, past the {budget} this build will accept — \
-         the release asset does not weigh that, so this is the wrong URL"
+        "{file} is at least {got} bytes, past the {budget}-byte budget this build will \
+         accept — the release asset does not weigh that, so this is the wrong URL"
     )
 }
 
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 pub fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
         .as_ref()
@@ -374,7 +394,7 @@ pub fn hex(bytes: impl AsRef<[u8]>) -> String {
 /// self-update can leave a binary whose pinned weights differ from what an
 /// earlier version wrote there, and loading those silently would be worse than
 /// fetching again.
-#[cfg(feature = "local-tts")]
+#[cfg(any(feature = "local-tts", feature = "local-stt"))]
 pub fn resolve_existing(
     named: Option<&Path>,
     cached: &Path,
@@ -392,7 +412,7 @@ pub fn resolve_existing(
     None
 }
 
-#[cfg(all(test, feature = "local-tts"))]
+#[cfg(all(test, any(feature = "local-tts", feature = "local-stt")))]
 mod tests {
     use super::*;
 
@@ -445,6 +465,7 @@ mod tests {
             &target,
             asset,
             4096,
+            READ_TIMEOUT,
             &|_| {},
         )
         .await
@@ -606,20 +627,25 @@ mod tests {
         );
     }
 
-    // The release tarball carries the binary, the voice and the vendored
-    // speech-to-text checkpoint (base.en: 147,622,416 bytes across its three
-    // files). A budget sized off the voice alone came to 256 MiB, under the
-    // roughly 270 MB the combined asset weighs.
+    // The platform tarball carries the binary, the voice and the vendored
+    // speech-to-text checkpoint. A budget sized off the voice alone came to
+    // 256 MiB, under the roughly 270 MB the combined asset weighs.
     #[test]
     fn the_budget_holds_the_whole_combined_asset_with_headroom() {
-        const STT_BASE_EN_BYTES: u64 = 147_622_416;
         const BINARY_ALLOWANCE: u64 = 64 * 1024 * 1024;
         let voice: u64 = crate::local_tts::voice_lock()
             .files
             .values()
             .map(|f| f.bytes)
             .sum();
-        let combined = voice + STT_BASE_EN_BYTES + BINARY_ALLOWANCE;
+        let vendored = &crate::local_stt::model_lock().vendored;
+        let speech: u64 = crate::local_stt::locked_model(vendored)
+            .expect("the vendored checkpoint is in the catalog")
+            .files
+            .values()
+            .map(|f| f.bytes)
+            .sum();
+        let combined = voice + speech + BINARY_ALLOWANCE;
         assert!(
             DOWNLOAD_BUDGET >= combined + combined / 2,
             "{DOWNLOAD_BUDGET} leaves no headroom over {combined}"

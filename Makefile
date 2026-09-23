@@ -7,6 +7,7 @@
 MOBUX_PORT       ?= 5151
 MOBUX_DEV_PORT   ?= 5152
 MOBUX_SMOKE_PORT ?= 8281
+MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
@@ -24,8 +25,8 @@ SMOKE_PID        := $(shell lsof -ti :$(MOBUX_SMOKE_PORT) 2>/dev/null)
 .PHONY: build run dev dev-watch _dev-bounce clean start stop restart status logs test web setup setup-twa twa twa-dev \
         transcribe setup-transcribe tts-voice \
         smoke-start smoke-stop smoke-logs smoke-status \
-        test-smoke test-critical-path test-update-runner test-install test-spa test-reader test-reader-grouping test-stt-ux test-stt-per-kind test-e2e \
-        podman-build podman-run podman-stop podman-test stt-install
+        test-smoke test-critical-path test-update-runner test-install test-spa test-reader test-reader-grouping test-read-mode-scrollback test-stt-ux test-stt-per-kind test-e2e \
+        podman-build podman-run podman-stop podman-test
 
 PODMAN_IMAGE     ?= localhost/mobux:dev
 PODMAN_PORT      ?= 8381
@@ -69,10 +70,6 @@ web:
 # a release asset by hand; a normal build does not want it.
 tts-voice:
 	@node scripts/tts-voice.mjs ensure .tmp/tts-voice
-
-# Speech-to-text provider setup. Installs a local OpenAI-compatible server.
-stt-install:
-	@bin/stt-install
 
 clean:
 	$(CARGO) clean -p mobux
@@ -181,25 +178,25 @@ logs:
 smoke-start: build
 	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke already running (pid $(SMOKE_PID)) on $(MOBUX_SMOKE_PORT)"; exit 1; fi
 	@if [ "$(MOBUX_SMOKE_PORT)" = "$(MOBUX_PORT)" ]; then echo "MOBUX_SMOKE_PORT must differ from MOBUX_PORT"; exit 1; fi
-	@mkdir -p /tmp/mobux-smoke/home
-	@nohup env MOBUX_DATA_DIR=/tmp/mobux-smoke MOBUX_TLS=0 \
-		HOME=/tmp/mobux-smoke/home HISTFILE=/dev/null \
+	@mkdir -p $(MOBUX_SMOKE_DATA)/home
+	@nohup env MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) MOBUX_TLS=0 \
+		HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
 		MOBUX_TMUX_SOCKET=mobux-test \
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
 		MOBUX_PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
-		./target/debug/mobux > /tmp/mobux-smoke/mobux.log 2>&1 < /dev/null &
+		./target/debug/mobux > $(MOBUX_SMOKE_DATA)/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
-		&& echo "smoke mobux running on port $(MOBUX_SMOKE_PORT) (data /tmp/mobux-smoke)" \
-		|| { echo "smoke FAILED to start"; tail /tmp/mobux-smoke/mobux.log; exit 1; }
+		&& echo "smoke mobux running on port $(MOBUX_SMOKE_PORT) (data $(MOBUX_SMOKE_DATA))" \
+		|| { echo "smoke FAILED to start"; tail $(MOBUX_SMOKE_DATA)/mobux.log; exit 1; }
 
 smoke-stop:
 	@if [ -n "$(SMOKE_PID)" ]; then kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"; else echo "smoke not running"; fi
 	@env -u TMUX -u TMUX_PANE tmux -L mobux-test kill-server 2>/dev/null || true
 
 smoke-logs:
-	@tail -f /tmp/mobux-smoke/mobux.log
+	@tail -f $(MOBUX_SMOKE_DATA)/mobux.log
 
 smoke-status:
 	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke running (pid $(SMOKE_PID)) on port $(MOBUX_SMOKE_PORT)"; else echo "smoke not running"; fi
@@ -217,6 +214,7 @@ test-smoke:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/smoke.spec.cjs
 
@@ -225,6 +223,7 @@ test-critical-path:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/critical-path.spec.cjs
 
@@ -270,7 +269,8 @@ test-stt-per-kind:
 #
 # Also runs reader-font.spec.cjs (issue #218), reader-command-grouping.
 # spec.cjs (issue #219), session-history.spec.cjs (issue #220),
-# read-mode-render.spec.cjs (issue #234) and read-mode.spec.cjs (issue #236):
+# read-mode-render.spec.cjs (issue #234), read-mode.spec.cjs (issue #236) and
+# read-mode-scrollback.spec.cjs:
 # all ride the same smoke instance rather than getting their own CI step.
 # `make test-reader` / `make test-reader-grouping` / `make
 # test-read-mode-render` / `make test-read-mode` still exist standalone for
@@ -280,8 +280,9 @@ test-spa:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/spa-base.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs
+		npx playwright test test/spa.spec.cjs test/spa-base.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs test/read-mode-scrollback.spec.cjs
 
 # URL base helper (web/spa/src/lib/base.js): pure Node, no browser and no
 # server, so it runs on its own. Rides `make test-spa` in CI.
@@ -298,6 +299,7 @@ test-reader:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/reader-font.spec.cjs
 
@@ -312,6 +314,7 @@ test-reader-grouping:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/reader-command-grouping.spec.cjs
 
@@ -325,8 +328,23 @@ test-read-mode-render:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/read-mode-render.spec.cjs
+
+# Read mode's scrollback: the backward page that makes everything before the
+# mount tail reachable, and the prose/monospace split in the output. Seeds a
+# record straight into the smoke instance's data dir, so no tmux session is
+# involved. Runs as part of `make test-spa`; standalone here for local
+# iteration.
+.PHONY: test-read-mode-scrollback
+test-read-mode-scrollback:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/read-mode-scrollback.spec.cjs
 
 # Read mode's live loop (issue #236): the mount fetch, the cursored refresh,
 # the hidden-tab stop, the single-flight guard and the error strip — driven
@@ -338,6 +356,7 @@ test-read-mode:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/read-mode.spec.cjs
 
@@ -350,6 +369,7 @@ test-session-history:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/session-history.spec.cjs
 
@@ -362,6 +382,7 @@ test-conformance:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/conformance.spec.cjs
 
@@ -382,6 +403,7 @@ test-e2e:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test
 

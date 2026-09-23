@@ -32,6 +32,13 @@
 #                          the asset is fetched from
 #                          <BASE>/v<VERSION>/<ASSET>). Tests point this at a
 #                          file:// dir to stay off the network.
+#   MOBUX_UPDATE_DATA_DIR  the instance's data dir. The asset carries the speech
+#                          model; it is placed in <DATA_DIR>/stt-models, where
+#                          the runtime looks, so the first dictation after an
+#                          update does not download it again. Unset skips it.
+#   MOBUX_UPDATE_DOWNLOAD_TIMEOUT  seconds the asset download may take
+#                          (default 3600). The asset carries the speech model,
+#                          so it is well over 100 MB.
 #   MOBUX_UPDATE_ASSET     asset file name (default: the asset for the running
 #                          architecture, mobux-<triple>.tar.gz, matching what
 #                          scripts/build-release-asset.sh uploads). Empty on an
@@ -81,6 +88,11 @@ else
   esac
 fi
 RESULT_FILE="${MOBUX_UPDATE_RESULT:-}"
+DATA_DIR="${MOBUX_UPDATE_DATA_DIR:-}"
+# The asset is ~140 MB with the speech model in it: at 1 Mbit/s that is close
+# to twenty minutes, so a flat five-minute cap failed every update on a slow
+# link. The cap is generous; a stalled transfer is caught by the speed floor.
+DOWNLOAD_TIMEOUT="${MOBUX_UPDATE_DOWNLOAD_TIMEOUT:-3600}"
 
 PREV="${BIN}.prev"
 # Why the new version was judged unhealthy. Set by health_check, turned into a
@@ -146,7 +158,8 @@ install_from_release() {
     return 1
   }
   log "downloading prebuilt binary ${url}"
-  if ! curl -fsSL --retry 2 --max-time 300 -o "${work}/${ASSET}" "$url"; then
+  if ! curl -fsSL --retry 2 --max-time "$DOWNLOAD_TIMEOUT" --speed-limit 1024 --speed-time 60 \
+      -o "${work}/${ASSET}" "$url"; then
     log "prebuilt asset unavailable for ${VERSION}; falling back to cargo install"
     rm -rf "$work"
     return 1
@@ -161,11 +174,12 @@ install_from_release() {
     rm -rf "$work"
     return 1
   fi
-  if ! tar -xzf "${work}/${ASSET}" -C "$work" "$CRATE"; then
+  if ! tar -xzf "${work}/${ASSET}" -C "$work" || [ ! -f "${work}/${CRATE}" ]; then
     log "could not extract ${CRATE} from ${ASSET}; falling back to cargo install"
     rm -rf "$work"
     return 1
   fi
+  install_model "${work}/stt-models"
   chmod +x "${work}/${CRATE}"
   if ! mv -f "${work}/${CRATE}" "$BIN"; then
     log "could not move new binary into place at ${BIN}; falling back to cargo install"
@@ -174,6 +188,37 @@ install_from_release() {
   fi
   rm -rf "$work"
   log "installed prebuilt binary ${VERSION} -> ${BIN} (sha256 verified)"
+}
+
+# Place the speech model the asset carries where the runtime looks for it.
+# Each file is staged beside its destination and renamed over it, so a running
+# server that has the old weights mapped keeps reading the old inode. A model
+# that cannot be placed is not an update failure: the runtime fetches it.
+install_model() {
+  local src="$1"
+  [ -n "$DATA_DIR" ] || return 0
+  [ -d "$src" ] || return 0
+  local model_src model dest f name
+  for model_src in "$src"/*/; do
+    [ -d "$model_src" ] || continue
+    model="$(basename "$model_src")"
+    dest="${DATA_DIR}/stt-models/${model}"
+    if ! mkdir -p "$dest"; then
+      log "WARN: could not create ${dest}; the speech model will be fetched on first use"
+      continue
+    fi
+    for f in "$model_src"*; do
+      [ -f "$f" ] || continue
+      name="$(basename "$f")"
+      if ! cp -f "$f" "${dest}/.${name}.new" \
+          || ! mv -f "${dest}/.${name}.new" "${dest}/${name}"; then
+        rm -f "${dest}/.${name}.new"
+        log "WARN: could not place ${name} in ${dest}; the speech model will be fetched on first use"
+        continue 2
+      fi
+    done
+    log "installed speech model ${model} -> ${dest}"
+  done
 }
 
 restart_service() {

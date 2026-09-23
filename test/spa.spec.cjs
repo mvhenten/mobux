@@ -1534,9 +1534,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -1938,9 +1938,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -2019,9 +2019,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -2105,9 +2105,9 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
         contentType: "application/json",
         body: JSON.stringify({
           kind: "local",
+          state: "ready",
           reachable: true,
           installed: true,
-          local_process_running: true,
         }),
       }),
     );
@@ -2238,24 +2238,29 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
       state: "warming",
       reachable: false,
       installed: true,
-      local_process_running: true,
-      podman_missing: false,
+      message: "Downloading the speech model (model.safetensors) — 40%.",
+      progress: {
+        file: "model.safetensors",
+        downloaded: 60000000,
+        total: 150000000,
+      },
     });
 
     const hint = page.locator("#mobux-mic-overlay .mo-install-hint");
     await expect(hint).toBeVisible();
     await expect(hint).toContainText("Downloading the speech model");
+    await expect(hint).toContainText("40%");
 
-    // The install/start buttons are the wrong answer here — nothing is
-    // missing and nothing is stopped. ("Record anyway", the fault escape
-    // hatch, shares their class and is fine to keep.)
+    // The download button is the wrong answer here — the download is already
+    // running. ("Record anyway", the fault escape hatch, shares their class
+    // and is fine to keep.)
     expect(
       await page
         .locator("#mobux-mic-overlay .mo-install-btn", {
-          hasText: /Install local speech server|Start speech server/,
+          hasText: /Download the speech model/,
         })
         .count(),
-      "warm-up must not offer install or start",
+      "warm-up must not offer the download it is already doing",
     ).toBe(0);
 
     // And it must not give up on a 30 s clock: still counting well past it.
@@ -2263,32 +2268,49 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     await expect(hint).toContainText("Downloading the speech model");
   });
 
-  test("a host without podman is told so, with the command that installs it", async ({
+  test("a build without the in-process engine is told so, with the command that installs one", async ({
     page,
   }) => {
     await openModelFault(page, {
       kind: "local",
-      state: "podman_missing",
+      state: "unsupported",
       reachable: false,
       installed: false,
-      local_process_running: false,
-      podman_missing: true,
-      podman_install_command: "sudo apt-get install -y podman",
-      podman_message:
-        "podman is not installed. The local speech server runs in a podman container — install it with `sudo apt-get install -y podman`, then try again.",
+      engine_available: false,
+      message:
+        "This build has no in-process speech engine. Reinstall with `cargo install mobux --locked --features local-stt`, or point the provider at an OpenAI-compatible endpoint.",
     });
 
     const actionArea = page.locator("#mobux-mic-overlay .mo-action-area");
-    await expect(actionArea).toContainText("podman is not installed");
-    await expect(actionArea).toContainText("sudo apt-get install -y podman");
+    await expect(actionArea).toContainText("no in-process speech engine");
+    await expect(actionArea).toContainText("--features local-stt");
     expect(
       await page
         .locator("#mobux-mic-overlay .mo-install-btn", {
-          hasText: /Install local speech server|Start speech server/,
+          hasText: /Download the speech model/,
         })
         .count(),
       "a button that cannot work is worse than the sentence that explains why",
     ).toBe(0);
+  });
+
+  test("a model that has never been downloaded offers to fetch it", async ({
+    page,
+  }) => {
+    await openModelFault(page, {
+      kind: "local",
+      state: "not_installed",
+      reachable: false,
+      installed: false,
+      engine_available: true,
+      message: "The speech model has not been downloaded yet.",
+    });
+
+    await expect(
+      page.locator("#mobux-mic-overlay .mo-install-btn", {
+        hasText: "Download the speech model",
+      }),
+    ).toBeVisible();
   });
 
   // ── regression: a /transcribe that never responds must still fault loud ──
@@ -2804,13 +2826,13 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   await page.waitForSelector("#stt-provider");
   const kind = page.locator("#sttKind");
 
-  // network: Host + Port + Model; no API key, no install.
+  // network: Host + Port + Model; no API key, nothing to download.
   await kind.selectOption("network");
   await expect(page.locator("#sttHost")).toBeVisible();
   await expect(page.locator("#sttPort")).toBeVisible();
   await expect(page.locator("#sttModelRow")).toBeVisible();
   await expect(page.locator("#sttApiKey")).toHaveCount(0);
-  await expect(page.locator("#sttInstallBtn")).toHaveCount(0);
+  await expect(page.locator("#sttDownloadBtn")).toHaveCount(0);
 
   // openai: API key + Model; no Host/Port.
   await kind.selectOption("openai");
@@ -2819,11 +2841,42 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   await expect(page.locator("#sttHost")).toHaveCount(0);
   await expect(page.locator("#sttPort")).toHaveCount(0);
 
-  // local: install + run toggle; nothing else.
+  // local: the engine runs in this process, so there is a checkpoint to pick
+  // and a button that fetches it — and no endpoint to point anywhere.
   await kind.selectOption("local");
-  await expect(page.locator("#sttInstallBtn")).toBeVisible();
-  await expect(page.locator("#sttToggleBtn")).toBeVisible();
+  await expect(page.locator("#sttModelRow")).toBeVisible();
+  await expect(page.locator("#sttDownloadBtn")).toBeVisible();
   await expect(page.locator("#sttHost")).toHaveCount(0);
+  await expect(page.locator("#sttPort")).toHaveCount(0);
+  await expect(page.locator("#sttApiKey")).toHaveCount(0);
+
+  // The catalog is the published one, default first, and the engine runs a
+  // fixed set — so no free-text model id.
+  const localModels = await page.locator("#sttModel option").allTextContents();
+  expect(localModels).toEqual(["base.en", "tiny.en", "small.en"]);
+  await expect(page.locator("#sttCustomModelRow")).toHaveCount(0);
+
+  // Every save the card makes is debounced, and #sttStatus keeps the last
+  // one's "Saved ✓" on screen — so waiting on that text passes instantly on a
+  // stale line and reads the config before the write it is waiting for lands.
+  // Poll the config itself, which is the thing being asserted anyway.
+  const savedConfig = () =>
+    page.evaluate(async () => (await fetch("/api/settings/stt")).json());
+
+  // Picking a different checkpoint persists like any other field. Wait for
+  // the active kind too: the card fires one save per change, so letting this
+  // one land before switching kinds is what keeps the writes in the order the
+  // assertions below read them in.
+  await page.locator("#sttModel").selectOption("small.en");
+  await expect
+    .poll(
+      async () => {
+        const saved = await savedConfig();
+        return `${saved.activeKind}:${saved.providers.local.model}`;
+      },
+      { timeout: 10000 },
+    )
+    .toBe("local:small.en");
 
   // auto-save: switch to network, change the port, NO Save tap.
   await kind.selectOption("network");
@@ -2831,16 +2884,20 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
   const portEl = page.locator("#sttPort");
   await portEl.fill(probe);
   await portEl.blur();
-  await expect(page.locator("#sttStatus")).toContainText("Saved", {
-    timeout: 6000,
-  });
 
-  // Persisted with no Save tap.
-  const cfg = await page.evaluate(async () =>
-    (await fetch("/api/settings/stt")).json(),
-  );
-  expect(cfg.activeKind).toBe("network");
-  expect(cfg.providers.network.port).toBe(probe);
+  // Persisted with no Save tap. Switching kind and editing a field each queue
+  // their own debounced save, so settle on both facts rather than snapshotting
+  // between the two writes.
+  await expect
+    .poll(
+      async () => {
+        const saved = await savedConfig();
+        return `${saved.activeKind}:${saved.providers.network.port}`;
+      },
+      { timeout: 15000 },
+    )
+    .toBe(`network:${probe}`);
+  await expect(page.locator("#sttStatus")).toContainText("Saved");
 });
 
 // ── build-info card ─────────────────────────────────────────────────────────
