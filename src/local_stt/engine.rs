@@ -5,7 +5,7 @@
 //! English-only checkpoint held in memory between requests.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use candle_core::{Device, IndexOp, Tensor};
@@ -52,10 +52,49 @@ fn download_budget(model: &str) -> u64 {
     weights + DOWNLOAD_SLACK
 }
 
+/// A loaded model in the engine's slot. The name sits outside the lock so
+/// "which model is loaded" can be answered without waiting on a transcription.
+struct Held<T> {
+    name: String,
+    value: Arc<Mutex<T>>,
+}
+
+/// Run `work` against the model in `slot`, on a blocking thread.
+///
+/// The model is lent by cloning the `Arc`; it is never taken out of the slot.
+/// Taking it meant a dictation dropped mid-run — a client that hung up — carried
+/// the checkpoint away with it, leaving the phase reporting Ready over an empty
+/// slot and the next dictation silently reloading a second copy from disk.
+async fn with_held<T, R>(
+    slot: &tokio::sync::Mutex<Option<Held<T>>>,
+    name: &str,
+    work: impl FnOnce(&mut T) -> R + Send + 'static,
+) -> Result<R, String>
+where
+    T: Send + 'static,
+    R: Send + 'static,
+{
+    let model = {
+        let guard = slot.lock().await;
+        match guard.as_ref() {
+            Some(held) if held.name == name => held.value.clone(),
+            _ => return Err(format!("{name} is no longer the loaded speech model")),
+        }
+    };
+    tokio::task::spawn_blocking(move || {
+        let mut guard = model
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        work(&mut guard)
+    })
+    .await
+    .map_err(|e| format!("transcription panicked: {e}"))
+}
+
 struct Engine {
     /// The model the reported phase belongs to, and the phase itself.
     phase: Mutex<(String, Phase)>,
-    loaded: tokio::sync::Mutex<Option<Loaded>>,
+    loaded: tokio::sync::Mutex<Option<Held<Loaded>>>,
     /// Held for the whole fetch-and-load, so a second caller joins the first
     /// rather than starting a second download of the same weights.
     preparing: tokio::sync::Mutex<()>,
@@ -120,8 +159,7 @@ pub async fn ensure_ready(data_dir: PathBuf, model: String) -> Result<(), String
     };
 
     set_phase(model, Phase::Loading);
-    let id = model.to_string();
-    let loaded = tokio::task::spawn_blocking(move || Loaded::load(&dir, &id))
+    let loaded = tokio::task::spawn_blocking(move || Loaded::load(&dir))
         .await
         .map_err(|e| format!("loading the speech model panicked: {e}"));
     let loaded = match loaded.and_then(|inner| inner) {
@@ -132,7 +170,10 @@ pub async fn ensure_ready(data_dir: PathBuf, model: String) -> Result<(), String
         }
     };
 
-    *engine().loaded.lock().await = Some(loaded);
+    *engine().loaded.lock().await = Some(Held {
+        name: model.to_string(),
+        value: Arc::new(Mutex::new(loaded)),
+    });
     set_phase(model, Phase::Ready);
     Ok(())
 }
@@ -146,40 +187,28 @@ pub async fn transcribe(data_dir: PathBuf, model: String, clip: Vec<u8>) -> Resu
 
     ensure_ready(data_dir, model.to_string()).await?;
 
-    let mut guard = engine().loaded.lock().await;
-    // A model switch racing this request can have swapped the slot between
-    // ensure_ready and here; transcribing with the other checkpoint would
-    // silently answer from weights nobody asked for.
-    if !matches!(&*guard, Some(l) if l.model == model) {
-        return Err(format!("{model} is no longer the loaded speech model"));
-    }
-    let mut loaded = guard
-        .take()
-        .ok_or_else(|| "the speech model is not loaded".to_string())?;
-    let handed_back = tokio::task::spawn_blocking(move || {
-        let text = loaded.run(&pcm);
-        (loaded, text)
+    match with_held(&engine().loaded, model, move |loaded: &mut Loaded| {
+        loaded.run(&pcm)
     })
-    .await;
-
-    match handed_back {
-        Ok((loaded, text)) => {
-            *guard = Some(loaded);
-            text
-        }
-        Err(e) => {
-            // The model went down with the panicking task. Leaving the phase
-            // Failed wedged the card until someone pressed a button; the
-            // weights are still on disk, so say "loading" and let the next
-            // status poll rebuild it.
-            set_phase(model, Phase::Loading);
-            Err(format!("transcription panicked: {e}"))
+    .await
+    {
+        Ok(text) => text,
+        Err(err) => {
+            // A panic mid-run can leave the decoder state half-written, so the
+            // model is dropped and rebuilt from the weights still on disk;
+            // "loading" lets the next status poll do that rather than wedging
+            // the card on Failed until someone presses a button.
+            if err.starts_with("transcription panicked") {
+                *engine().loaded.lock().await = None;
+                set_phase(model, Phase::Loading);
+            }
+            Err(err)
         }
     }
 }
 
 async fn is_loaded(model: &str) -> bool {
-    matches!(&*engine().loaded.lock().await, Some(l) if l.model == model)
+    matches!(&*engine().loaded.lock().await, Some(held) if held.name == model)
 }
 
 // ── weights ───────────────────────────────────────────────────────────
@@ -506,7 +535,6 @@ async fn download(
 // ── inference ─────────────────────────────────────────────────────────
 
 struct Loaded {
-    model: String,
     whisper: m::model::Whisper,
     tokenizer: Tokenizer,
     config: Config,
@@ -521,8 +549,7 @@ struct Loaded {
 }
 
 impl Loaded {
-    fn load(dir: &Path, model: &str) -> Result<Self, String> {
-        let model = model.to_string();
+    fn load(dir: &Path) -> Result<Self, String> {
         let config: Config = serde_json::from_str(
             &std::fs::read_to_string(dir.join("config.json"))
                 .map_err(|e| format!("reading config.json: {e}"))?,
@@ -571,7 +598,6 @@ impl Loaded {
             .ok_or_else(|| "tokenizer has no no-speech token".to_string())?;
 
         Ok(Self {
-            model,
             whisper,
             config,
             mel_filters,
@@ -734,6 +760,48 @@ mod tests {
     fn the_bundled_filterbank_is_a_whole_80_bin_bank() {
         assert_eq!(MEL_FILTERS_80.len() % 4, 0);
         assert_eq!(MEL_FILTERS_80.len() / 4, 80 * (m::N_FFT / 2 + 1));
+    }
+
+    // A dictation dropped mid-run — a client that hung up — must not carry the
+    // loaded checkpoint away with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_dictation_leaves_the_model_in_its_slot() {
+        let slot: tokio::sync::Mutex<Option<Held<u32>>> = tokio::sync::Mutex::new(Some(Held {
+            name: "tiny.en".to_string(),
+            value: Arc::new(Mutex::new(1)),
+        }));
+
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(20),
+            with_held(&slot, "tiny.en", |n: &mut u32| {
+                std::thread::sleep(Duration::from_millis(200));
+                *n += 1;
+                *n
+            }),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the dictation was meant to be dropped");
+
+        assert!(
+            slot.lock().await.is_some(),
+            "the model was taken out of the slot and lost"
+        );
+        let again = with_held(&slot, "tiny.en", |n: &mut u32| *n)
+            .await
+            .expect("the model is still usable");
+        assert_eq!(again, 2, "the abandoned run still went to completion");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slot_holding_another_model_is_not_lent_out() {
+        let slot: tokio::sync::Mutex<Option<Held<u32>>> = tokio::sync::Mutex::new(Some(Held {
+            name: "base.en".to_string(),
+            value: Arc::new(Mutex::new(1)),
+        }));
+        let err = with_held(&slot, "tiny.en", |n: &mut u32| *n)
+            .await
+            .expect_err("a different model is not this one");
+        assert!(err.contains("no longer the loaded"), "{err}");
     }
 
     #[tokio::test]
