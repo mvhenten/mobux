@@ -100,9 +100,7 @@ export function speak(request, { onEnd, onError } = {}) {
       // themselves — escape codes, hashes, box drawing. Reading those aloud is
       // the thing this endpoint exists to prevent, and a failed request is
       // exactly when nobody is watching the screen to notice.
-      fail(
-        `Nothing was read: the voice could not be reached (${err.message}).`,
-      );
+      fail(`Nothing was read: ${err.message}`);
     });
 
   return token;
@@ -118,8 +116,13 @@ async function requestSpeech(request) {
       expand: !!request.expand,
       language: request.language || "",
     }),
+  }).catch((err) => {
+    throw new Error(`the voice could not be reached (${err.message}).`);
   });
-  if (!resp.ok) throw new Error(`speak returned ${resp.status}`);
+  if (!resp.ok) {
+    const reason = await resp.text().catch(() => "");
+    throw new Error(reason || `the voice answered ${resp.status}`);
+  }
 
   const type = resp.headers.get("content-type") || "";
   if (type.startsWith("audio/")) {

@@ -2919,6 +2919,16 @@ test("speak endpoint announces a code block and reads it only when asked", async
   }
 });
 
+// A whole log handed to the voice used to become one synthesis that pinned a
+// blocking thread for minutes. Past the cap the endpoint refuses and says why.
+test("speak endpoint refuses a block too long to read", async ({ request }) => {
+  const resp = await request.post(`${BASE}/api/tts/speak`, {
+    data: { kind: "prose", text: "The build passed. ".repeat(400) },
+  });
+  expect(resp.status()).toBe(413);
+  expect(await resp.text()).toContain("Read a shorter block");
+});
+
 // When /api/tts/speak fails there is nothing on this side but the raw
 // terminal bytes — normalization is server-side. Reading those aloud is what
 // the endpoint exists to prevent, so a failure says so instead of speaking.

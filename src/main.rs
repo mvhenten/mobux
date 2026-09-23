@@ -3538,6 +3538,8 @@ async fn api_tts_speak(
         },
     );
 
+    check_speakable(&speech)?;
+
     if !local_tts::ENABLED {
         return Ok(browser_speech(
             &speech,
@@ -3549,6 +3551,25 @@ async fn api_tts_speak(
         Ok(clip) => Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], clip).into_response()),
         Err(err) => Ok(browser_speech(&speech, &err)),
     }
+}
+
+/// The most characters one speak request is spoken, after normalization.
+/// Synthesis holds a blocking thread for the whole block, and at this length
+/// it already runs to minutes of audio; past it one tap would pin a thread
+/// for as long as a whole log takes to read.
+const MAX_SPOKEN_CHARS: usize = 4000;
+
+fn check_speakable(speech: &speech_text::Speech) -> Result<(), AppError> {
+    let chars = speech.text.chars().count();
+    if chars <= MAX_SPOKEN_CHARS {
+        return Ok(());
+    }
+    Err(AppError {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        message: format!(
+            "This block is {chars} characters once cleaned up for speech; the voice reads at most {MAX_SPOKEN_CHARS} at a time. Read a shorter block."
+        ),
+    })
 }
 
 /// The words for the browser to say, and why it is saying them. Never an
@@ -3761,6 +3782,20 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_too_long_to_speak_is_refused_with_a_413() {
+        let speech = |text: String| speech_text::Speech {
+            sentences: vec![text.clone()],
+            text,
+        };
+        assert!(check_speakable(&speech("a".repeat(MAX_SPOKEN_CHARS))).is_ok());
+
+        let err = check_speakable(&speech("a".repeat(MAX_SPOKEN_CHARS + 1)))
+            .expect_err("past the cap is refused");
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(err.message.contains("at most 4000"), "{}", err.message);
+    }
 
     // ── ws attach log line: client-controlled fields are escaped/bounded ────
     //
