@@ -47,11 +47,14 @@ mod configure;
 mod db;
 mod host_suggestions;
 mod local_stt;
+mod local_tts;
 mod nodes;
 mod push;
+mod release_asset;
 mod service;
 mod session_history;
 mod shell_integration;
+mod speech_text;
 mod ssl;
 mod stt_debug;
 mod terminal_cursor;
@@ -523,6 +526,12 @@ async fn main() -> Result<()> {
         .route("/api/stt/install/status", get(api_stt_install_status))
         .route("/api/install/apk/build", post(api_install_apk_build))
         .route("/api/install/apk/status", get(api_install_apk_status))
+        .route("/api/tts/status", get(api_tts_status))
+        .route("/api/tts/prepare", post(api_tts_prepare))
+        .route(
+            "/api/tts/speak",
+            post(api_tts_speak).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/shell-integration/status",
             get(api_shell_integration_status),
@@ -3355,6 +3364,116 @@ async fn api_install_apk_status(
     })))
 }
 
+/// What the reader asks to have read out. `kind` is the reader's own block
+/// classification, deterministic wherever shell integration is on, and
+/// `expand` is the explicit "read the whole code block" the UI sends.
+#[derive(Debug, Deserialize)]
+struct SpeakRequest {
+    text: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    expand: bool,
+    /// The fence language the reader tokenizer parsed, for a code block.
+    #[serde(default)]
+    language: String,
+}
+
+async fn api_tts_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let voice = local_tts::voice();
+    let phase = local_tts::phase(&state.data_dir);
+    Json(json!({
+        "enabled": local_tts::ENABLED,
+        "voice": voice,
+        "state": phase.state(),
+        "message": phase.message(),
+    }))
+}
+
+/// Fetch and load the voice. Separate from speaking because the first run
+/// pulls the release asset, and a listener who tapped a speaker icon should
+/// not be the one waiting on it without being told.
+async fn api_tts_prepare(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let voice = local_tts::voice();
+    local_tts::ensure_ready(state.data_dir.clone())
+        .await
+        .map_err(|e| AppError::precondition(anyhow::anyhow!(e)))?;
+    let phase = local_tts::phase(&state.data_dir);
+    Ok(Json(json!({
+        "voice": voice,
+        "state": phase.state(),
+        "message": phase.message(),
+    })))
+}
+
+/// Normalize a block and speak it.
+///
+/// Normalization runs whether or not this build has a voice, so the browser
+/// fallback reads the same rewritten text rather than the raw terminal bytes.
+/// A ready local voice answers with audio; anything else answers with the
+/// words, and the reader hands them to `speechSynthesis`.
+async fn api_tts_speak(
+    State(state): State<AppState>,
+    Json(req): Json<SpeakRequest>,
+) -> Result<Response, AppError> {
+    let speech = speech_text::normalize(
+        speech_text::Kind::parse(&req.kind),
+        &req.text,
+        &speech_text::Options {
+            expand: req.expand,
+            language: req.language,
+        },
+    );
+
+    check_speakable(&speech)?;
+
+    if !local_tts::ENABLED {
+        return Ok(browser_speech(
+            &speech,
+            &local_tts::Phase::Disabled.message(),
+        ));
+    }
+
+    match local_tts::synthesize(state.data_dir.clone(), speech.clone()).await {
+        Ok(clip) => Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], clip).into_response()),
+        Err(err) => Ok(browser_speech(&speech, &err)),
+    }
+}
+
+/// The most characters one speak request is spoken, after normalization.
+/// Synthesis holds a blocking thread for the whole block, and at this length
+/// it already runs to minutes of audio; past it one tap would pin a thread
+/// for as long as a whole log takes to read.
+const MAX_SPOKEN_CHARS: usize = 4000;
+
+fn check_speakable(speech: &speech_text::Speech) -> Result<(), AppError> {
+    let chars = speech.text.chars().count();
+    if chars <= MAX_SPOKEN_CHARS {
+        return Ok(());
+    }
+    Err(AppError {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        message: format!(
+            "This block is {chars} characters once cleaned up for speech; the voice reads at most {MAX_SPOKEN_CHARS} at a time. Read a shorter block."
+        ),
+    })
+}
+
+/// The words for the browser to say, and why it is saying them. Never an
+/// error status: the listener wants the text read, and a silent speaker button
+/// is indistinguishable from a broken one.
+fn browser_speech(speech: &speech_text::Speech, why: &str) -> Response {
+    Json(json!({
+        "engine": "browser",
+        "reason": why,
+        "text": speech.text,
+        "sentences": speech.sentences,
+    }))
+    .into_response()
+}
+
 async fn api_stt_models(
     State(state): State<AppState>,
     Query(q): Query<SttModelsQuery>,
@@ -3515,6 +3634,16 @@ impl AppError {
             message: err.to_string(),
         }
     }
+
+    /// The host is missing something only the user can supply. Distinct from a
+    /// bad request so the UI can tell "you asked for the wrong thing" apart
+    /// from "this machine can't do it yet".
+    fn precondition(err: anyhow::Error) -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
+            message: err.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -3526,6 +3655,20 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_too_long_to_speak_is_refused_with_a_413() {
+        let speech = |text: String| speech_text::Speech {
+            sentences: vec![text.clone()],
+            text,
+        };
+        assert!(check_speakable(&speech("a".repeat(MAX_SPOKEN_CHARS))).is_ok());
+
+        let err = check_speakable(&speech("a".repeat(MAX_SPOKEN_CHARS + 1)))
+            .expect_err("past the cap is refused");
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(err.message.contains("at most 4000"), "{}", err.message);
+    }
 
     // ── ws attach log line: client-controlled fields are escaped/bounded ────
     //

@@ -16,6 +16,18 @@ exclude = ["target/"]
 
 [features]
 default = []
+# In-process neural text-to-speech. The runtime is onnxruntime through `ort`,
+# which links a prebuilt library rather than building one, and the
+# grapheme-to-phoneme step is pure Rust — so no cmake, no C++ toolchain and no
+# espeak-ng. It roughly doubles the binary, so it is opt-in.
+local-tts = [
+    "dep:ort",
+    "dep:piper-plus-g2p",
+    "dep:flate2",
+    "dep:tar",
+    "dep:sha2",
+]
+
 # In-process speech-to-text. Pure Rust (candle) — no cmake, no C++ toolchain —
 # but it roughly doubles the binary and the clean build, so it is opt-in.
 local-stt = [
@@ -63,6 +75,13 @@ vte = "0.15"
 serde_path_to_error = "0.1"
 schemars = "1"
 garde = { version = "0.22", features = ["derive"] }
+# Pinned exactly: ort 2 is still a prerelease, and its release candidates move
+# the session API. The prebuilt onnxruntime it links is downloaded by its build
+# script, so this needs no cmake and no C++ toolchain.
+ort = { version = "=2.0.0-rc.13", optional = true }
+# CMU-dictionary grapheme-to-phoneme, IPA out, Piper phoneme ids after it.
+# espeak-ng free, which is what keeps the C++ toolchain out of the build.
+piper-plus-g2p = { version = "0.4", default-features = false, features = ["english"], optional = true }
 candle-core = { version = "0.11", optional = true }
 candle-nn = { version = "0.11", optional = true }
 candle-transformers = { version = "0.11", optional = true }
@@ -70,7 +89,8 @@ candle-transformers = { version = "0.11", optional = true }
 # the tree carries one tokenizers rather than two.
 tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
 # Unpacking the release tarball the weights ride in, and checking it against
-# the hashes in src/local_stt/model.lock.json. miniz_oxide backend: no zlib.
+# the hashes in src/local_tts/voice.lock.json and src/local_stt/model.lock.json.
+# miniz_oxide backend: no zlib.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 tar = { version = "0.4", default-features = false, optional = true }
 sha2 = { version = "0.10", optional = true }

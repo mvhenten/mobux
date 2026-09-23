@@ -33,10 +33,13 @@
 import { tokenize } from "./term-tokenizer.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createSyntheticScroller } from "./synthetic-scroll.js";
-import { loadPrefs } from "./listen-prefs.js";
+import {
+  speak,
+  stopSpeech,
+  speechAvailable,
+  refreshEngineState,
+} from "./speech.js";
 import * as prefs from "./prefs.js";
-
-const SPEECH_AVAILABLE = "speechSynthesis" in window;
 
 const RENDER_THROTTLE_MS = 50;
 
@@ -44,16 +47,21 @@ const RENDER_THROTTLE_MS = 50;
 //
 // The render loop calls `_inner.replaceChildren(frag)` when the buffer
 // changes, which obliterates the speaker icon DOM. The new icon node has no
-// `rb-speaking` class even though `speechSynthesis` is still reading the same
+// `rb-speaking` class even though the voice is still reading the same
 // content. We keep the speaking key here (survives re-render), the matching
-// utterance-end callback clears it, and after every render we walk the freshly
+// speech-end callback clears it, and after every render we walk the freshly
 // built icons and re-apply the class to whichever one matches.
 //
-// Key: the verbatim `text` passed to `speakText()`. Stable across re-renders
-// as long as the underlying content hasn't changed, which is the only state we
-// care about preserving.
+// Key: the block kind, whether it was an expand request, and the verbatim
+// text. Stable across re-renders as long as the underlying content hasn't
+// changed, which is the only state we care about preserving.
 let speakingKey = null;
-let speakingOnEnd = null;
+
+// The strip that says why nothing is being read. A speaker that goes quiet
+// without a word is indistinguishable from a broken one, so every failure
+// lands here. Module-level for the same reason speakingKey is: one reader is
+// mounted at a time, and the render loop rebuilds the icons under it.
+let speechNotice = null;
 
 export function createReader({ host, document: doc, handlers = {} } = {}) {
   let mounted = false;
@@ -117,6 +125,14 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     return el;
   }
 
+  function buildSpeechNotice() {
+    const el = window.document.createElement("div");
+    el.className = "reader-speech-notice";
+    el.hidden = true;
+    el.setAttribute("role", "status");
+    return el;
+  }
+
   function refreshOscHint() {
     if (!oscHint) return;
     const dismissed = prefs.get("osc133_hint_dismissed") === true;
@@ -171,7 +187,8 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     statusBar = window.document.createElement("div");
     statusBar.className = "reader-statusbar";
     oscHint = buildOscHint();
-    host.replaceChildren(inner, oscHint, statusBar);
+    speechNotice = buildSpeechNotice();
+    host.replaceChildren(inner, oscHint, speechNotice, statusBar);
     refreshOscHint();
     // The hint can also disappear after the first OSC 133 marker arrives
     // mid-session (e.g. the user just enabled shell integration and reloaded).
@@ -186,6 +203,10 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
 
     mountGestures();
     render();
+
+    // Whether this host has a voice of its own decides whether the speaker
+    // icons are worth rendering at all; re-render once the answer lands.
+    refreshEngineState().then(() => scheduleRender());
   }
 
   function unmount() {
@@ -210,9 +231,11 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
       clearTimeout(renderTimer);
       renderTimer = null;
     }
+    stopAllSpeech();
     inner = null;
     statusBar = null;
     oscHint = null;
+    speechNotice = null;
   }
 
   function dispose() {
@@ -320,7 +343,7 @@ function renderInlineBlock(className, runs) {
   el.className = className;
   appendRuns(el, runs);
   if (className === "rb rb-prompt") {
-    addSpeakerIcon(el, "prompt", runs);
+    addSpeakerIcon(el, "command", runs);
   }
   return el;
 }
@@ -337,14 +360,14 @@ function renderCommandBlock(block) {
   const cmdEl = window.document.createElement("div");
   cmdEl.className = "rb-command-line";
   appendRuns(cmdEl, block.runs);
-  addSpeakerIcon(cmdEl, "prompt", block.runs);
+  addSpeakerIcon(cmdEl, "command", block.runs);
   wrap.appendChild(cmdEl);
 
   if (block.lines.length > 0) {
     const outputEl = window.document.createElement("div");
     outputEl.className = "rb-command-output";
     appendLinesWithBubbles(outputEl, block.lines, "rb-line");
-    addSpeakerIcons(outputEl, "text");
+    addSpeakerIcons(outputEl, "output");
     wrap.appendChild(outputEl);
   }
 
@@ -364,14 +387,29 @@ function renderTextBlock(block) {
   const el = window.document.createElement("div");
   el.className = "rb rb-text";
   appendLinesWithBubbles(el, block.lines, "rb-line");
-  addSpeakerIcons(el, "text", block);
+  addSpeakerIcons(el, "prose", block);
   return el;
 }
 
+// A code block gets two controls, because reading one aloud is almost never
+// what the listener wanted: the speaker announces what it is and how long it
+// is ("bash, twelve lines"), and the second button is the explicit request to
+// hear the whole thing.
 function renderCodeBlock(block) {
   const wrap = window.document.createElement("div");
   wrap.className = "rb rb-code";
   appendLinesWithBubbles(wrap, block.lines, "rb-codeline");
+
+  const text = block.lines.map((l) => l.text).join("\n");
+  const language = block.language || "";
+  addSpeakerIcon(wrap, "code", text, { label: "Say what this code is", language });
+  addSpeakerIcon(wrap, "code", text, {
+    label: "Read the code in full",
+    className: "rb-speaker rb-speaker-full",
+    glyph: "⤢",
+    expand: true,
+    language,
+  });
   return wrap;
 }
 
@@ -446,23 +484,34 @@ function makeEl(tag, className, text) {
   return el;
 }
 
-function addSpeakerIcon(el, kind, content) {
-  if (!SPEECH_AVAILABLE) return;
+// `kind` is the reader's own classification, and the server normalizes on it:
+// "command" and "output" come from OSC 133 where shell integration is on, so
+// the noisy-terminal rules run on output and never on prose.
+function addSpeakerIcon(el, kind, content, options = {}) {
+  if (!speechAvailable()) return;
 
-  const icon = window.document.createElement("button");
-  icon.className = "rb-speaker";
-  icon.type = "button";
-  icon.setAttribute("aria-label", "Speak");
-  icon.textContent = "▶";
-  icon.dataset.kind = kind;
-  // Stable key for matching across re-renders (see speakingKey docs).
   const text =
     typeof content === "string" ? content : extractTextFromRuns(content);
-  icon.dataset.speechKey = speechKeyFor(kind, text);
+  const request = {
+    text,
+    kind,
+    expand: !!options.expand,
+    language: options.language || "",
+  };
+
+  const icon = window.document.createElement("button");
+  icon.className = options.className || "rb-speaker";
+  icon.type = "button";
+  icon.setAttribute("aria-label", options.label || "Speak");
+  icon.textContent = options.glyph || "▶";
+  icon.dataset.kind = kind;
+  icon.dataset.idle = icon.textContent;
+  // Stable key for matching across re-renders (see speakingKey docs).
+  icon.dataset.speechKey = speechKeyFor(request);
 
   icon.addEventListener("click", (e) => {
     e.stopPropagation();
-    handleSpeakerClick(icon, kind, text);
+    handleSpeakerClick(icon, request);
   });
 
   el.appendChild(icon);
@@ -472,7 +521,7 @@ function addSpeakerIcon(el, kind, content) {
 // speaker icon on each — a single block can hold a mix when tokenization
 // assigns bubble backgrounds to some lines but not others.
 function addSpeakerIcons(el, kind) {
-  if (!SPEECH_AVAILABLE) return;
+  if (!speechAvailable()) return;
 
   const bubbles = el.querySelectorAll(":scope > .rb-bubble");
   bubbles.forEach((bubble) => {
@@ -495,52 +544,57 @@ function addSpeakerIcons(el, kind) {
   }
 }
 
-function speechKeyFor(kind, text) {
-  return `${kind}::${text}`;
+function speechKeyFor(request) {
+  return `${request.kind}:${request.expand ? "full" : "brief"}::${request.text}`;
 }
 
-function handleSpeakerClick(icon, kind, text) {
+function handleSpeakerClick(icon, request) {
   const isSpeaking = icon.classList.contains("rb-speaking");
 
   stopAllSpeech();
 
   if (isSpeaking) return;
 
-  const key = icon.dataset.speechKey || speechKeyFor(kind, text);
+  const key = icon.dataset.speechKey || speechKeyFor(request);
+  markSpeaking(icon);
+  speakingKey = key;
+  clearSpeechNotice();
+
+  speak(request, {
+    onEnd: () => {
+      // Clear the original icon (whether still attached or not) and any
+      // re-rendered icon currently wearing the class for the same key. Module
+      // state goes last so we can't race a render mid-clear.
+      if (icon.isConnected) markIdle(icon);
+      window.document.querySelectorAll(".rb-speaker.rb-speaking").forEach((other) => {
+        if (other.dataset.speechKey === key) markIdle(other);
+      });
+      if (speakingKey === key) speakingKey = null;
+    },
+    onError: (message) => showSpeechNotice(message),
+  });
+}
+
+function markSpeaking(icon) {
   icon.classList.add("rb-speaking");
   icon.textContent = "■";
+}
 
-  let utteranceText = text;
-  if (kind === "prompt") {
-    utteranceText = "command: " + utteranceText;
-  }
+function markIdle(icon) {
+  icon.classList.remove("rb-speaking");
+  icon.textContent = icon.dataset.idle || "▶";
+}
 
-  const onEnd = () => {
-    // Clear the original icon (whether still attached or not) and any
-    // re-rendered icon currently wearing the class for the same key. Module
-    // state goes last so we can't race a render mid-clear.
-    if (icon.isConnected) {
-      icon.classList.remove("rb-speaking");
-      icon.textContent = "▶";
-    }
-    window.document
-      .querySelectorAll(`.rb-speaker.rb-speaking`)
-      .forEach((other) => {
-        if (other.dataset.speechKey === key) {
-          other.classList.remove("rb-speaking");
-          other.textContent = "▶";
-        }
-      });
-    if (speakingOnEnd === onEnd) {
-      speakingKey = null;
-      speakingOnEnd = null;
-    }
-  };
+function showSpeechNotice(message) {
+  if (!speechNotice) return;
+  speechNotice.textContent = message;
+  speechNotice.hidden = false;
+}
 
-  speakingKey = key;
-  speakingOnEnd = onEnd;
-
-  speakText(utteranceText, onEnd);
+function clearSpeechNotice() {
+  if (!speechNotice) return;
+  speechNotice.textContent = "";
+  speechNotice.hidden = true;
 }
 
 function extractTextFromRuns(runs) {
@@ -556,15 +610,11 @@ function extractTextFromRuns(runs) {
 }
 
 function stopAllSpeech() {
-  window.speechSynthesis.cancel();
+  stopSpeech();
   speakingKey = null;
-  speakingOnEnd = null;
   window.document
     .querySelectorAll(".rb-speaker.rb-speaking")
-    .forEach((icon) => {
-      icon.classList.remove("rb-speaking");
-      icon.textContent = "▶";
-    });
+    .forEach((icon) => markIdle(icon));
 }
 
 // After a re-render, the freshly-built icons have no rb-speaking class. Walk
@@ -574,8 +624,7 @@ function reapplySpeakingState(root) {
   const icons = root.querySelectorAll(".rb-speaker");
   for (const icon of icons) {
     if (icon.dataset.speechKey === speakingKey) {
-      icon.classList.add("rb-speaking");
-      icon.textContent = "■";
+      markSpeaking(icon);
       // We deliberately do NOT rebind the onEnd callback to this fresh icon.
       // The original onEnd closes over the original icon node; when it fires
       // it'll check `isConnected` (false for the detached one) and skip.
@@ -584,51 +633,4 @@ function reapplySpeakingState(root) {
       return;
     }
   }
-}
-
-function splitIntoSentences(text) {
-  const chunks = text.split(/([.!?])\s+/);
-  const sentences = [];
-  for (let i = 0; i < chunks.length; i += 2) {
-    const base = chunks[i];
-    const punct = chunks[i + 1] || "";
-    if (base.trim()) sentences.push(base + punct);
-  }
-  return sentences.length > 0 ? sentences : [text];
-}
-
-function speakText(text, onEnd) {
-  const listenPrefs = loadPrefs();
-  const sentences = splitIntoSentences(text.trim());
-  let index = 0;
-
-  function speakNext() {
-    if (index >= sentences.length) {
-      if (onEnd) onEnd();
-      return;
-    }
-
-    const utterance = new SpeechSynthesisUtterance(sentences[index]);
-    utterance.rate = listenPrefs.rate;
-    utterance.pitch = listenPrefs.pitch;
-
-    if (listenPrefs.voice) {
-      const voices = window.speechSynthesis.getVoices();
-      const selected = voices.find((v) => v.name === listenPrefs.voice);
-      if (selected) utterance.voice = selected;
-    }
-
-    utterance.onend = () => {
-      index++;
-      speakNext();
-    };
-
-    utterance.onerror = () => {
-      if (onEnd) onEnd();
-    };
-
-    window.speechSynthesis.speak(utterance);
-  }
-
-  speakNext();
 }

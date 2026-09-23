@@ -11,13 +11,15 @@
 # gcc-aarch64-linux-gnu toolchain the workflow installs; on a native aarch64
 # host the same target builds without it.
 #
-# Each platform asset carries the binary plus the vendored speech model, so
-# install.sh lands a host that can dictate without fetching a model from
-# anywhere. Every other checkpoint in the catalog gets its own asset: weights
-# are platform-independent, so one upload serves both targets and nobody pays
-# for a checkpoint they did not pick. The weights come from
-# scripts/stt-model.mjs, the only thing that talks to Hugging Face, and are
-# checked against src/local_stt/model.lock.json before packing.
+# Each platform asset carries the binary plus the vendored speech model and
+# the vendored voice, so install.sh lands a host that can dictate and read the
+# terminal aloud without fetching a model from anywhere. Every other speech
+# checkpoint in the catalog gets its own asset: weights are
+# platform-independent, so one upload serves both targets and nobody pays for
+# a checkpoint they did not pick. The weights come from scripts/stt-model.mjs
+# and scripts/tts-voice.mjs, the only things that talk to Hugging Face, and
+# are checked against src/local_stt/model.lock.json and
+# src/local_tts/voice.lock.json before packing.
 #
 # Output (uploaded by @semantic-release/github, see .releaserc.json):
 #   target/dist/mobux-x86_64-unknown-linux-gnu.tar.gz[.sha256]
@@ -27,6 +29,7 @@
 # Platform tarball layout:        Model asset layout:
 #   mobux                           stt-models/<model>/…
 #   stt-models/<vendored>/…
+#   tts-voices/<voice>/{voice.onnx,voice.onnx.json,cmudict.json}
 
 set -euo pipefail
 
@@ -85,21 +88,28 @@ pack_models() {
   done
 }
 
+# The voice rides along, so it has to be on disk and matching the lock before
+# anything is packed. `ensure` is a no-op once it is.
+VOICE_DIR="target/tts-voice"
+VOICE_ID="$(node -e 'process.stdout.write(require("./src/local_tts/voice.lock.json").voice)')"
+node scripts/tts-voice.mjs ensure "$VOICE_DIR"
+
 for target in $TARGETS; do
   setup_cross "$target"
   asset="${CRATE}-${target}.tar.gz"
-  cargo build --release --target "$target" --features local-stt
+  cargo build --release --target "$target" --features local-stt,local-tts
 
   stage="${OUT_DIR}/stage-${target}"
   rm -rf "$stage"
-  mkdir -p "$stage"
+  mkdir -p "${stage}/tts-voices/${VOICE_ID}"
   cp "target/${target}/release/${CRATE}" "${stage}/${CRATE}"
   pack_models "$stage" "$VENDORED"
+  cp "${VOICE_DIR}"/* "${stage}/tts-voices/${VOICE_ID}/"
 
-  tar -C "$stage" -czf "${OUT_DIR}/${asset}" "$CRATE" "stt-models"
+  tar -C "$stage" -czf "${OUT_DIR}/${asset}" "$CRATE" "stt-models" "tts-voices"
   rm -rf "$stage"
   (cd "$OUT_DIR" && sha256sum "$asset" > "${asset}.sha256")
-  echo "built ${OUT_DIR}/${asset} (version ${VERSION}, model ${VENDORED})"
+  echo "built ${OUT_DIR}/${asset} (version ${VERSION}, model ${VENDORED}, voice ${VOICE_ID})"
 done
 
 # Every checkpoint the tarballs do not carry, as its own asset.

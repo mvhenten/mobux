@@ -72,11 +72,7 @@ pub fn asset_model_prefix(model: &str) -> String {
 /// content hash. Rewritten only by `scripts/stt-model.mjs`.
 const MODEL_LOCK_JSON: &str = include_str!("local_stt/model.lock.json");
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct LockedFile {
-    pub sha256: String,
-    pub bytes: u64,
-}
+pub use crate::release_asset::LockedFile;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LockedModel {
@@ -149,18 +145,7 @@ pub fn model_files_present(data_dir: &Path, model: &str) -> bool {
     files_present(&model_dir(data_dir, model), model)
 }
 
-/// The per-platform release tarball for this host, or None on an architecture
-/// mobux publishes no prebuilt binary for.
-pub fn release_asset_name() -> Option<&'static str> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    match std::env::consts::ARCH {
-        "x86_64" => Some("mobux-x86_64-unknown-linux-gnu.tar.gz"),
-        "aarch64" => Some("mobux-aarch64-unknown-linux-gnu.tar.gz"),
-        _ => None,
-    }
-}
+pub use crate::release_asset::release_asset_name;
 
 /// The release asset a checkpoint comes out of.
 ///

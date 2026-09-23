@@ -89,6 +89,25 @@ make_assets() {
   rm -rf "$pay"
 }
 
+# Repack every asset in a dir with tts-voices/ beside the binary, the way
+# scripts/build-release-asset.sh does, and re-sign them.
+add_voice() {
+  local dir="$1" stage="$1/voice-stage" asset
+  mkdir -p "$stage/tts-voices/en_US-lessac-medium"
+  printf 'ONNX' > "$stage/tts-voices/en_US-lessac-medium/voice.onnx"
+  printf '{}' > "$stage/tts-voices/en_US-lessac-medium/voice.onnx.json"
+  printf '{}' > "$stage/tts-voices/en_US-lessac-medium/cmudict.json"
+  for asset in "$ASSET" "$ASSET_ARM64"; do
+    [ -f "$dir/$asset" ] || continue
+    gunzip -c "$dir/$asset" > "$dir/repack.tar"
+    tar -C "$stage" -rf "$dir/repack.tar" tts-voices
+    gzip -c "$dir/repack.tar" > "$dir/$asset"
+    rm -f "$dir/repack.tar"
+    (cd "$dir" && sha256sum "$asset" > "$asset.sha256")
+  done
+  rm -rf "$stage"
+}
+
 run_installer() {
   local assets="$1" dest="$2"
   shift 2
@@ -247,6 +266,29 @@ run_installer "$A1" "$D8" >/dev/null
 check "cleanup: no staging dir left in the cache" test "$before" = "$(count_staging)"
 absent_in_file() { ! grep -q -e "$1" "$2"; }
 check "cleanup: installer never writes to /tmp" absent_in_file '/tmp' "$INSTALLER"
+
+# ── Test 8: the voice rides in the asset and lands in the data dir ─────────
+# A release built by scripts/build-release-asset.sh carries tts-voices/ beside
+# the binary, so a prebuilt install never fetches a model. An older asset has
+# no such directory, and installing one must still work.
+A9="$WORK/assets-voice"; D9="$WORK/dest9"; DATA9="$WORK/data9"
+make_assets "$A9" "MOBUX-BINARY-VOICE" good
+add_voice "$A9"
+OUT9="$(run_installer "$A9" "$D9" MOBUX_DATA_DIR="$DATA9")"
+rc=$?
+check "voice: exit 0" test "$rc" -eq 0
+check "voice: binary installed" test "$(installed_body "$D9")" = "MOBUX-BINARY-VOICE"
+check "voice: checkpoint landed in the data dir" \
+  test -f "$DATA9/tts-voices/en_US-lessac-medium/voice.onnx"
+check "voice: dictionary landed in the data dir" \
+  test -f "$DATA9/tts-voices/en_US-lessac-medium/cmudict.json"
+contains "voice: said where it put the voice" "$OUT9" "installed the voice in"
+
+D10="$WORK/dest10"; DATA10="$WORK/data10"
+run_installer "$A1" "$D10" MOBUX_DATA_DIR="$DATA10" >/dev/null
+rc=$?
+check "no voice: an asset without one still installs" test "$rc" -eq 0
+check "no voice: left no empty voice dir behind" test ! -d "$DATA10/tts-voices"
 
 echo "---"
 echo "passed: $PASS  failed: $FAIL"

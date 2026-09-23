@@ -22,6 +22,41 @@ jobs:
       - run: cargo test
       - run: cargo clippy -- -D warnings
 
+  local-tts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: local-tts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The voice is pinned by content, so its own hash is the cache key: a
+      # refreshed checkpoint misses the cache and is fetched, an unchanged one
+      # never leaves it.
+      - id: voice
+        run: |
+          echo "sha=$(node -e 'process.stdout.write(require("./src/local_tts/voice.lock.json").files["voice.onnx"].sha256)')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .tmp/tts-voice
+          key: tts-voice-${{ steps.voice.outputs.sha }}
+      - name: Fetch the voice on a cache miss
+        run: node scripts/tts-voice.mjs ensure .tmp/tts-voice
+      - run: cargo clippy --features local-tts --all-targets -- -D warnings
+      - run: cargo build --release --features local-tts
+      # Real weights, real synthesis — the one thing the default suite cannot
+      # cover, and the only place the realtime margin is measured.
+      - name: Speak a normalized block
+        run: cargo test --release --features local-tts -- --ignored speaks_a_normalized_block
+        env:
+          MOBUX_TTS_MODEL_TEST: "1"
+          MOBUX_TTS_MODEL_DIR: ${{ github.workspace }}/.tmp/tts-voice
+
   local-stt:
     runs-on: ubuntu-latest
     steps:
