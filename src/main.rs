@@ -1193,6 +1193,7 @@ struct ConversationHistoryQuery {
     cursor: Option<String>,
     limit: Option<usize>,
     tail: Option<usize>,
+    before: Option<String>,
 }
 
 /// GET /api/sessions/{name}/conversation — the OSC 133-segmented
@@ -1203,17 +1204,22 @@ struct ConversationHistoryQuery {
 /// ```text
 /// GET /api/sessions/{name}/conversation
 ///       ?cursor=<opaque>    resume forward from a previous page (exclusive)
-///       ?limit=<n>          max entries in a forward page
+///       ?before=<opaque>    the page of entries older than a cursor
+///       ?limit=<n>          max entries in a forward or backward page
 ///       ?tail=<n>           the newest n entries
-/// → 200 { "entries": [ … ], "nextCursor": "<opaque>" }
+/// → 200 { "entries": [ … ], "nextCursor": "<opaque>",
+///         "prevCursor": "<opaque>", "hasOlder": <bool> }
+///   (a `before` page carries no `nextCursor`)
 /// ```
 ///
-/// The three modes are mutually exclusive: neither parameter gives a
-/// forward page from the oldest retained entry; `cursor` (optionally with
-/// `limit`) resumes forward from it, exclusive; `tail` gives the newest
-/// entries. `tail` alongside `cursor` or `limit` is a 400 — `tail` carries
-/// its own count, so a second one is ambiguous. `limit` defaults to 50;
-/// both it and `tail` clamp to 1..500 rather than rejecting.
+/// The modes are mutually exclusive: no parameter gives a forward page from
+/// the oldest retained entry; `cursor` (optionally with `limit`) resumes
+/// forward from it, exclusive; `before` (optionally with `limit`) gives the
+/// page immediately older than it; `tail` gives the newest entries. `tail`
+/// alongside any other parameter is a 400 — `tail` carries its own count,
+/// so a second one is ambiguous — and so is `cursor` with `before`, which
+/// name opposite directions. `limit` defaults to 50; both it and `tail`
+/// clamp to 1..500 rather than rejecting.
 ///
 /// `output` is truncated for transport to the last
 /// `MAX_WIRE_OUTPUT_BYTES`, and a truncated entry carries
@@ -1223,12 +1229,21 @@ struct ConversationHistoryQuery {
 /// from its oldest end so the newest survive — but always at least one
 /// entry, so a page can never stall.
 ///
-/// `nextCursor` is always present and decodes to `v2:<seq>:<offset>`: the
+/// `nextCursor` decodes to `v2:<seq>:<offset>`: the
 /// last entry in the page and the byte offset just past its line, which is
 /// what makes a steady-state poll a seek rather than a scan of the whole
 /// history. An empty page echoes the supplied cursor; an empty or absent
 /// file gives the zero cursor. `v1:<seq>` cursors still decode, with the
-/// offset unknown, so no client holding one breaks.
+/// offset unknown, so no client holding one breaks. It is absent from a
+/// `before` page: that page's newest entry is older than everything the
+/// caller already holds, so a cursor built from it would walk a client that
+/// follows `nextCursor` uniformly back over history it has already seen.
+///
+/// `prevCursor` is its mirror: the entry just before the page's oldest and
+/// the byte offset of that oldest line, which is what a client walking
+/// backwards passes as the next `before`. `hasOlder` says whether the
+/// record continues past it, so reaching the start of what is retained is a
+/// fact the client is told rather than one it infers from an empty page.
 ///
 /// An unparseable cursor and a malformed session name are both a 400. A
 /// well-formed name with no history is an empty page with the zero cursor.
@@ -1249,6 +1264,16 @@ async fn api_session_conversation(
             "tail carries its own count; limit is ambiguous alongside it"
         )));
     }
+    if q.tail.is_some() && q.before.is_some() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "tail and before are mutually exclusive"
+        )));
+    }
+    if q.cursor.is_some() && q.before.is_some() {
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "cursor and before name opposite directions"
+        )));
+    }
 
     let cursor = match q.cursor {
         Some(raw) => Some(
@@ -1258,27 +1283,53 @@ async fn api_session_conversation(
         None => None,
     };
 
+    let before = match q.before {
+        Some(raw) => Some(
+            session_history::decode_cursor(&raw)
+                .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("invalid cursor")))?,
+        ),
+        None => None,
+    };
+
+    let limit = q
+        .limit
+        .unwrap_or(session_history::DEFAULT_LIMIT)
+        .clamp(1, session_history::MAX_LIMIT);
+
     let history = state.session_history.clone();
-    let page = match q.tail {
-        Some(tail) => {
+    let walking_back = before.is_some() && q.tail.is_none();
+    let page = match (q.tail, before) {
+        (Some(tail), _) => {
             let count = tail.clamp(1, session_history::MAX_LIMIT);
             tokio::task::spawn_blocking(move || history.read_tail(&name, count)).await
         }
-        None => {
-            let limit = q
-                .limit
-                .unwrap_or(session_history::DEFAULT_LIMIT)
-                .clamp(1, session_history::MAX_LIMIT);
+        (None, Some(before)) => {
+            tokio::task::spawn_blocking(move || history.read_before(&name, before, limit)).await
+        }
+        (None, None) => {
             tokio::task::spawn_blocking(move || history.read_page(&name, cursor, limit)).await
         }
     }
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
     .map_err(AppError::internal)?;
 
-    Ok(Json(json!({
+    let mut body = json!({
         "entries": page.entries,
-        "nextCursor": session_history::encode_cursor(page.next_seq, page.next_offset),
-    })))
+        "prevCursor": session_history::encode_cursor(page.prev_seq, page.prev_offset),
+        "hasOlder": page.has_older,
+    });
+    // A backward page's newest entry is older than everything the caller
+    // already holds, so a `nextCursor` built from it would rewind a client
+    // that follows `nextCursor` uniformly and re-deliver the history from
+    // there. A page walking backwards does not advance the forward cursor,
+    // so it does not carry one.
+    if !walking_back {
+        body["nextCursor"] = json!(session_history::encode_cursor(
+            page.next_seq,
+            page.next_offset
+        ));
+    }
+    Ok(Json(body))
 }
 
 #[derive(Deserialize)]

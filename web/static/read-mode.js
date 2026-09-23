@@ -1,10 +1,18 @@
 // createReadMode — the recorded conversation as a dialogue (issue #234).
 //
-// Read mode renders a session's recorded turns: the typed command on the
-// left, its output on the right, proportional and reflowed, with a muted
-// pass/fail chip. It is a third view alongside the terminal and the reader,
-// and it answers a different question than either — completed turns, not the
-// live screen.
+// Read mode renders a session's recorded turns as a conversation: each turn
+// is a card, the typed command in its header with a muted pass/fail chip,
+// what came back below it. It is a third view alongside the terminal and the
+// reader, and it answers a different question than either — completed turns,
+// not the live screen.
+//
+// Output is not one typeface. A line whose alignment carries meaning —
+// indented, columned, box-drawn, a diff — goes into a monospace block,
+// because proportional type would destroy the only thing that made it
+// readable. Everything else is prose and reads as prose: proportional, a
+// real line-height, and a measure that stops before the line gets too long
+// to track back to. Read mode is not a picture of a terminal, so it does
+// not wear one.
 //
 // The component never receives the terminal document, the engine core, or a
 // renderer handle. That absence is the design: reconciliation with the live
@@ -31,6 +39,17 @@
 // coming back visible restarts it with an immediate fetch. One request is in
 // flight at a time — a tick arriving on top of a pending one is dropped, and
 // the interval is the retry interval, so there is no backoff and no queue.
+//
+// ── Reaching what came before ───────────────────────────────────────────
+// That loop only ever moves forward, so on its own the mount page is also
+// the ceiling: whatever the server retains before it stays unreachable no
+// matter how far you scroll. Scrolling towards the top pulls the previous
+// page in through the endpoint's `before` cursor and prepends it, and the
+// scroller carries the viewport down by however tall the insertion turned
+// out to be so nothing jumps. Backward paging has its own in-flight slot —
+// the live refresh must never block a viewer reading history, and vice
+// versa — and it stops on the server saying the record has no more, never
+// on a page coming back empty.
 //
 // A failed fetch keeps the last good content and says so in a strip at the
 // bottom. It is caught here and never escalated to the SPA's fail-hard error
@@ -65,6 +84,17 @@ const ERROR_TEXT = "can't reach the server — retrying";
 const POLL_INTERVAL_MS = 3000;
 const MOUNT_TAIL = 200;
 const REFRESH_LIMIT = 500;
+// One backward page. Same order as the mount tail: enough that a viewer
+// scrolling steadily does not outrun it, small enough to stay one round
+// trip on a phone.
+const OLDER_LIMIT = 200;
+// How close to the top starts the next backward page. A screen or so of
+// lead time, so the content is usually there before the viewer arrives.
+const NEAR_TOP_PX = 800;
+
+const OLDER_BUTTON_TEXT = "Show earlier";
+const OLDER_LOADING_TEXT = "Loading earlier turns…";
+const RECORD_START_TEXT = "Start of the recorded conversation";
 
 export function createReadMode({
   host,
@@ -82,6 +112,12 @@ export function createReadMode({
   let inflight = null;
   let timer = null;
   let errorEl = null;
+  // The backward half: where the next older page resumes from, whether the
+  // server says one exists, and its own in-flight slot.
+  let olderCursor = null;
+  let hasOlder = false;
+  let olderInflight = null;
+  let olderEl = null;
   // Bumped on unmount so a response that lands after it can neither advance
   // the cursor nor paint into the next mount's DOM.
   let generation = 0;
@@ -110,6 +146,7 @@ export function createReadMode({
   function scrollBy(dy) {
     if (!mounted) return;
     scroller.scrollBy(dy);
+    maybeLoadOlder();
   }
 
   function stickToBottom() {
@@ -123,8 +160,50 @@ export function createReadMode({
       const frag = window.document.createDocumentFragment();
       if (entries.length === 0) frag.appendChild(buildEmptyState());
       else for (const entry of entries) frag.appendChild(buildEntry(entry));
-      inner.replaceChildren(frag);
+      inner.replaceChildren(olderEl, frag);
+      refreshOlderStrip();
     });
+  }
+
+  // The strip sits above everything on screen, so any change to it moves
+  // the content below by its own height difference — the same problem a
+  // prepended page has, and the same fix. Swapping the button for the
+  // loading line is otherwise a visible jump mid-scroll.
+  function restripOlder() {
+    if (!scroller) {
+      refreshOlderStrip();
+      return;
+    }
+    scroller.contentPrepended(() => refreshOlderStrip());
+  }
+
+  // The strip above the oldest turn on screen: what the viewer can still
+  // reach, or that there is nothing left to reach. It is a control as well
+  // as a status, because a conversation shorter than the viewport never
+  // generates a scroll to trigger the fetch.
+  function refreshOlderStrip() {
+    if (!olderEl) return;
+    if (olderInflight) {
+      olderEl.replaceChildren(
+        makeEl("div", "cv-older-status", OLDER_LOADING_TEXT),
+      );
+      return;
+    }
+    if (hasOlder) {
+      const button = makeEl("button", "cv-older-btn", OLDER_BUTTON_TEXT);
+      button.type = "button";
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        loadOlder();
+      });
+      olderEl.replaceChildren(button);
+      return;
+    }
+    if (entries.length === 0) {
+      olderEl.replaceChildren();
+      return;
+    }
+    olderEl.replaceChildren(makeEl("div", "cv-older-start", RECORD_START_TEXT));
   }
 
   function setEntries(next) {
@@ -151,6 +230,28 @@ export function createReadMode({
     });
   }
 
+  // Older turns arrive above everything on screen, so the whole mutation —
+  // the strip swapping out of its loading state included — goes through the
+  // scroller in one pass. Split across two, the height it measures would
+  // miss whichever half ran outside it and the view would jump.
+  function prependEntries(next) {
+    const added = Array.isArray(next) ? next : [];
+    const wasEmpty = entries.length === 0;
+    entries = added.concat(entries);
+    if (!inner) return;
+    if (wasEmpty) {
+      render();
+      return;
+    }
+    scroller.contentPrepended(() => {
+      refreshOlderStrip();
+      if (added.length === 0) return;
+      const frag = window.document.createDocumentFragment();
+      for (const entry of added) frag.appendChild(buildEntry(entry));
+      inner.insertBefore(frag, olderEl.nextSibling);
+    });
+  }
+
   // Without a cursor there is nothing to resume from, so the request is the
   // mount request — which is also what a failed mount retries with.
   function conversationPath() {
@@ -164,6 +265,16 @@ export function createReadMode({
     );
   }
 
+  function olderPath() {
+    const query = new URLSearchParams({
+      before: olderCursor,
+      limit: String(OLDER_LIMIT),
+    }).toString();
+    return u(
+      `api/sessions/${encodeURIComponent(session)}/conversation?${query}`,
+    );
+  }
+
   function applyPage(page) {
     const fetched = Array.isArray(page?.entries) ? page.entries : [];
     const first = cursor === null;
@@ -171,8 +282,80 @@ export function createReadMode({
       cursor = page.nextCursor;
     }
     clearError();
-    if (first) setEntries(fetched);
-    else appendEntries(fetched);
+    if (!first) {
+      appendEntries(fetched);
+      return;
+    }
+    // Only the mount page establishes where the record continues backwards:
+    // a forward refresh's own prevCursor describes its own oldest entry,
+    // which is newer than everything already on screen.
+    adoptOlderCursor(page, fetched);
+    setEntries(fetched);
+    maybeLoadOlder();
+  }
+
+  function adoptOlderCursor(page, fetched) {
+    if (typeof page?.prevCursor === "string" && page.prevCursor !== "") {
+      olderCursor = page.prevCursor;
+    }
+    // An empty page claiming more would spin: a page that carried nothing
+    // cannot have moved the cursor, so the next request repeats this one.
+    hasOlder =
+      page?.hasOlder === true && fetched.length > 0 && olderCursor !== null;
+  }
+
+  function applyOlderPage(page) {
+    const fetched = Array.isArray(page?.entries) ? page.entries : [];
+    adoptOlderCursor(page, fetched);
+    clearError();
+    prependEntries(fetched);
+    maybeLoadOlder();
+  }
+
+  function maybeLoadOlder() {
+    if (!mounted || !hasOlder || olderInflight || !scroller) return;
+    if (scroller.scrollY > NEAR_TOP_PX) return;
+    loadOlder();
+  }
+
+  function loadOlder() {
+    if (!mounted || !fetchPage) return Promise.resolve();
+    if (olderInflight) return olderInflight;
+    if (!hasOlder || olderCursor === null) return Promise.resolve();
+    const gen = generation;
+    // The slot is cleared inside the settle, before anything paints, so the
+    // strip's own height change rides the same scroller pass as the turns.
+    const settle = (handle) => (value) => {
+      if (gen !== generation) return;
+      olderInflight = null;
+      handle(value);
+    };
+    const request = fetchPage(olderPath())
+      .then(
+        settle((older) => applyOlderPage(older)),
+        settle(() => {
+          showError();
+          restripOlder();
+        }),
+      )
+      // A throw from applying the page is a bug here, not an unreachable
+      // server, so it is not swallowed into the error strip. The promise a
+      // caller holds still has to settle — this one is handed out through
+      // the SPA's test surface — and the strip must not be left on its
+      // loading line, so clear both and let the fault surface as an
+      // ordinary uncaught error rather than an unhandled rejection.
+      .catch((error) => {
+        if (gen === generation) {
+          olderInflight = null;
+          restripOlder();
+        }
+        window.setTimeout(() => {
+          throw error;
+        }, 0);
+      });
+    olderInflight = request;
+    restripOlder();
+    return request;
   }
 
   function poll() {
@@ -242,6 +425,7 @@ export function createReadMode({
 
     inner = window.document.createElement("div");
     inner.className = "cv-inner";
+    olderEl = makeEl("div", "cv-older");
     host.replaceChildren(inner);
 
     scroller = createSyntheticScroller({ host, inner });
@@ -269,6 +453,10 @@ export function createReadMode({
     inflight = null;
     cursor = null;
     errorEl = null;
+    olderInflight = null;
+    olderCursor = null;
+    hasOlder = false;
+    olderEl = null;
 
     unmountGestures();
     if (scroller) {
@@ -298,6 +486,7 @@ export function createReadMode({
     setEntries,
     appendEntries,
     refreshNow,
+    loadOlderNow: () => loadOlder(),
     scrollBy,
     stickToBottom,
     get session() {
@@ -308,6 +497,9 @@ export function createReadMode({
     },
     get entryCount() {
       return entries.length;
+    },
+    get hasOlder() {
+      return hasOlder;
     },
     get scrollY() {
       return scroller ? scroller.scrollY : 0;
@@ -320,6 +512,9 @@ export function createReadMode({
     },
   };
 }
+
+// Exposed for unit tests.
+export const _internals = { isMonoLine };
 
 // ── Escape stripping ───────────────────────────────────────────────
 // Escape sequences are stripped, not interpreted. Colour is not preserved:
@@ -467,13 +662,15 @@ function buildEntry(entry) {
 function buildTurn(entry) {
   const turn = makeEl("article", "cv-turn");
   turn.dataset.seq = String(entry.seq);
-  turn.appendChild(buildCommand(entry.command));
+
+  const head = makeEl("header", "cv-turn-head");
+  head.appendChild(buildCommand(entry.command));
+  const chip = buildExitChip(entry.exitCode);
+  if (chip) head.appendChild(chip);
+  turn.appendChild(head);
 
   const output = buildOutput(entry);
   if (output) turn.appendChild(output);
-
-  const chip = buildExitChip(entry.exitCode);
-  if (chip) turn.appendChild(chip);
 
   return turn;
 }
@@ -547,10 +744,100 @@ function buildOutput(entry) {
     lines = lines.slice(-OUTPUT_LINE_LIMIT);
   }
 
-  for (const line of lines) {
-    el.appendChild(makeEl("div", "cv-line", line === "" ? "\u00a0" : line));
+  for (const group of groupByShape(lines)) {
+    el.appendChild(
+      group.mono ? buildCodeGroup(group.lines) : buildProseGroup(group.lines),
+    );
   }
   return el;
+}
+
+// ── Shape classification ───────────────────────────────────────────
+// Whether a line needs a fixed-width grid to stay readable — whether its
+// horizontal positions are part of what it says. Both directions of this
+// call cost something: a table reflowed proportionally loses its columns,
+// and a sentence set in monospace is just harder to read. So the signals
+// are narrow and anchored. Prose is full of incidental punctuation, and a
+// line that merely contains a bracket is still a line of prose.
+
+// Leading indentation — a tab, or a gap wide enough to be deliberate.
+const INDENTED_RE = /^(?: {2,}|\t)/;
+// An interior gap wide enough to be a column boundary rather than spacing.
+const COLUMNED_RE = /\S {2,}\S/;
+// Box drawing and block elements. Geometric shapes are excluded: bullets
+// and arrows turn up in ordinary prose.
+const BOX_DRAWN_RE = /[\u2500-\u257F\u2580-\u259F]/;
+// A pipe-table row — `| name | status |`, what docker, mysql and psql
+// print. Needs two separators, so a sentence with one pipe in it is safe.
+const PIPE_TABLE_RE = /^\s*\|[^|]*\|/;
+// An ASCII rule, alone on its line: a run of dashes or equals, or the
+// `+------+` joints that fence a table.
+const ASCII_RULE_RE = /^\s*(?:[-=_*]{4,}|\+[-=+]{2,}\+[-=+\s]*)\s*$/;
+// Unified diff: a hunk header, a file header, a body line whose marker is
+// flush against its content, or one carrying the original's indentation.
+// `- item one` is a bullet in prose, and stays one.
+const DIFF_RE = /^(?:@@ |\+\+\+ |--- |[+-](?=\S)|[+-] {2,})/;
+// Code, at the anchors code puts it. No bare brackets: they belong to
+// prose at least as often.
+const CODEY_RE = /[{};]\s*$|^\s*[$#] \S|=>|::|\|\||&&/;
+
+function isMonoLine(text) {
+  if (text === "") return false;
+  return (
+    INDENTED_RE.test(text) ||
+    COLUMNED_RE.test(text) ||
+    BOX_DRAWN_RE.test(text) ||
+    PIPE_TABLE_RE.test(text) ||
+    ASCII_RULE_RE.test(text) ||
+    DIFF_RE.test(text) ||
+    CODEY_RE.test(text)
+  );
+}
+
+// Consecutive lines of the same shape form one block. A blank line joins
+// whatever block it sits in rather than splitting it, so a code listing
+// with a gap in it stays one listing.
+function groupByShape(lines) {
+  // Output that is nothing but blank lines is still output: it renders as
+  // the blank lines it is rather than as an empty card body.
+  if (lines.every((line) => line === "")) {
+    return lines.length > 0 ? [{ mono: false, lines: lines.slice() }] : [];
+  }
+  const groups = [];
+  for (const line of lines) {
+    const last = groups[groups.length - 1];
+    if (last && (line === "" || last.mono === isMonoLine(line))) {
+      last.lines.push(line);
+      continue;
+    }
+    if (line === "") continue;
+    groups.push({ mono: isMonoLine(line), lines: [line] });
+  }
+  for (const group of groups) trimBlankEdges(group.lines);
+  return groups.filter((group) => group.lines.length > 0);
+}
+
+function trimBlankEdges(lines) {
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  while (lines.length > 0 && lines[0] === "") lines.shift();
+}
+
+function buildProseGroup(lines) {
+  const block = makeEl("div", "cv-prose");
+  for (const line of lines) {
+    block.appendChild(makeEl("div", "cv-line", line === "" ? "\u00a0" : line));
+  }
+  return block;
+}
+
+function buildCodeGroup(lines) {
+  const block = makeEl("pre", "cv-code");
+  for (const line of lines) {
+    block.appendChild(
+      makeEl("div", "cv-codeline", line === "" ? "\u00a0" : line),
+    );
+  }
+  return block;
 }
 
 function toLines(text) {

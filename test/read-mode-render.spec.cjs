@@ -72,19 +72,22 @@ async function renderEntries(page, entries) {
     };
 
     const turns = Array.from(host.querySelectorAll(".cv-turn")).map((el) => {
+      const head = el.querySelector(".cv-turn-head");
       const cmd = el.querySelector(".cv-cmd");
       const out = el.querySelector(".cv-out");
       const chip = el.querySelector(".cv-exit");
-      const lines = Array.from(el.querySelectorAll(".cv-line"));
+      const lines = Array.from(el.querySelectorAll(".cv-line, .cv-codeline"));
       return {
         seq: el.dataset.seq,
-        flexDirection: getComputedStyle(el).flexDirection,
-        cmdMaxWidthRatio: widthRatio(cmd, el),
-        outMaxWidthRatio: widthRatio(out, el),
-        exitMaxWidthRatio: widthRatio(chip, el),
-        outWithinCap: out
+        headHoldsCommand: !!el.querySelector(".cv-turn-head .cv-cmd"),
+        headHoldsChip: !!el.querySelector(".cv-turn-head .cv-exit"),
+        headDirection: head ? getComputedStyle(head).flexDirection : null,
+        separated:
+          parseFloat(getComputedStyle(el).borderTopWidth) > 0 &&
+          parseFloat(getComputedStyle(el).marginBottom) > 0,
+        outWithinCard: out
           ? out.getBoundingClientRect().width <=
-            el.getBoundingClientRect().width * 0.88 + 1
+            el.getBoundingClientRect().width + 1
           : null,
         promptText: textOf(el, ".cv-cmd-prompt"),
         commandText: textOf(el, ".cv-cmd-text"),
@@ -96,6 +99,10 @@ async function renderEntries(page, entries) {
         hasOutput: !!out,
         outAlignSelf: out ? getComputedStyle(out).alignSelf : null,
         lineFontFamily: lines[0] ? getComputedStyle(lines[0]).fontFamily : null,
+        proseMeasure: el.querySelector(".cv-prose")
+          ? getComputedStyle(el.querySelector(".cv-prose")).maxWidth
+          : null,
+        codeBlocks: el.querySelectorAll(".cv-code").length,
         lineCount: lines.length,
         firstLine: lines.length ? lines[0].textContent : null,
         lastLine: lines.length ? lines[lines.length - 1].textContent : null,
@@ -147,7 +154,7 @@ async function stripSequences(page, inputs) {
   }, inputs);
 }
 
-test("read mode: a turn docks the command left and its output right", async ({
+test("read mode: a turn is a card with the command in its header", async ({
   page,
 }) => {
   await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
@@ -171,28 +178,27 @@ test("read mode: a turn docks the command left and its output right", async ({
   const [turn, wide] = result.turns;
 
   expect(turn.seq).toBe("1");
-  expect(turn.flexDirection).toBe("column");
-  expect(turn.cmdAlignSelf).toBe("flex-start");
-  expect(turn.outAlignSelf).toBe("flex-end");
-  expect(turn.exitAlignSelf).toBe("flex-end");
+  // The command and how it ended read as one header line; the output is the
+  // body of the same card, so where a turn starts and ends is unambiguous.
+  expect(turn.headHoldsCommand).toBe(true);
+  expect(turn.headHoldsChip).toBe(true);
+  expect(turn.headDirection).toBe("row");
+  expect(turn.separated).toBe(true);
   expect(turn.cmdVisible).toBe(true);
 
-  // Neither side runs the full width, so the dialogue reads as two columns.
-  expect(turn.cmdMaxWidthRatio).toBe(0.88);
-  expect(turn.outMaxWidthRatio).toBe(0.88);
-  expect(turn.exitMaxWidthRatio).toBe(0.88);
-
-  // Monospace for what was typed, proportional for what came back.
+  // Monospace for what was typed, proportional for prose that came back,
+  // and a measure on the prose so a line stays trackable.
   expect(turn.cmdFontFamily).toContain("JetBrains Mono");
   expect(turn.lineFontFamily).toContain("Inter");
+  expect(turn.proseMeasure).not.toBe("none");
+  expect(turn.codeBlocks).toBe(0);
 
   expect(turn.lineCount).toBe(2);
   expect(turn.firstLine).toBe("file1.txt");
   expect(turn.lastLine).toBe("file2.txt");
 
-  // Output long enough to want the whole row still stops at the cap, so the
-  // left column stays legible as a column.
-  expect(wide.outWithinCap).toBe(true);
+  // A single unbroken line wraps inside the card rather than widening it.
+  expect(wide.outWithinCard).toBe(true);
 });
 
 test("read mode: exit chips render pass, fail and nothing at all", async ({
