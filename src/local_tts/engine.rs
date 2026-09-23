@@ -244,17 +244,25 @@ pub async fn synthesize(data_dir: PathBuf, speech: Speech) -> Result<Vec<u8>, St
     let voice = super::voice();
     ensure_ready(data_dir).await?;
 
-    match with_held(&engine().loaded, voice, move |loaded: &mut Loaded| {
+    speak_with(&engine().loaded, voice, move |loaded: &mut Loaded| {
         loaded.run(&speech)
     })
     .await
-    {
-        Ok(clip) => clip,
-        Err(err) => {
-            set_phase(voice, Phase::Failed(err.clone()));
-            Err(err)
-        }
-    }
+}
+
+/// One utterance against the loaded voice. A sentence the voice cannot say is
+/// that utterance's failure, reported to its caller; the engine that failed
+/// on it is still loaded and still answers the next one, so the phase stays
+/// where it was.
+async fn speak_with<T>(
+    slot: &tokio::sync::Mutex<Option<Held<T>>>,
+    voice: &str,
+    work: impl FnOnce(&mut T) -> Result<Vec<u8>, String> + Send + 'static,
+) -> Result<Vec<u8>, String>
+where
+    T: Send + 'static,
+{
+    with_held(slot, voice, work).await?
 }
 
 async fn is_loaded(voice: &str) -> bool {
@@ -605,6 +613,36 @@ mod tests {
             .await
             .expect_err("a different voice is not this one");
         assert!(err.contains("not loaded"), "{err}");
+    }
+
+    // One sentence the voice could not say used to mark the whole voice
+    // Failed, so every later speak fell back to the browser voice until a
+    // restart although the engine itself was fine.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_utterance_leaves_the_voice_ready() {
+        let voice = "a-failed-utterance-voice";
+        let slot: tokio::sync::Mutex<Option<Held<u32>>> = tokio::sync::Mutex::new(Some(Held {
+            name: voice.to_string(),
+            value: Arc::new(Mutex::new(0)),
+        }));
+        set_phase(voice, Phase::Ready);
+
+        let err = speak_with(&slot, voice, |_: &mut u32| {
+            Err("running the voice: bad input".to_string())
+        })
+        .await
+        .expect_err("the utterance failed");
+        assert!(err.contains("bad input"), "{err}");
+
+        let phase = engine().phase.lock().unwrap().clone();
+        assert!(
+            !matches!(&phase, (named, Phase::Failed(_)) if named == voice),
+            "{phase:?}"
+        );
+        let clip = speak_with(&slot, voice, |_: &mut u32| Ok(b"RIFF".to_vec()))
+            .await
+            .expect("the next utterance is spoken");
+        assert_eq!(clip, b"RIFF");
     }
 
     #[test]
