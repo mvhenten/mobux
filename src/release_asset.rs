@@ -43,17 +43,15 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(feature = "local-tts")]
 const SIDECAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The most the asset may weigh before the download is abandoned.
+/// The most the asset may weigh before the download is abandoned. Without a
+/// cap, a wrong or hostile base URL streams until the disk is full.
 ///
-/// The lock knows what the model files weigh, but the tarball carries the
-/// mobux binary as well, so the budget is a multiple of the locked payload
-/// plus room for a release binary. Without one, a wrong or hostile base URL
-/// streams until the disk is full.
+/// One tarball carries the binary and every vendored model — the voice and the
+/// speech-to-text checkpoint — so the cap is sized to the whole asset, not to
+/// the one manifest being unpacked from it. Sized off a single manifest, the
+/// voice's download refused the combined asset outright.
 #[cfg(feature = "local-tts")]
-pub fn download_budget(manifest: &Manifest<'_>) -> u64 {
-    let locked: u64 = manifest.files.values().map(|f| f.bytes).sum();
-    locked.saturating_mul(3).saturating_add(64 * 1024 * 1024)
-}
+pub const DOWNLOAD_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// One file, pinned by content. Rewritten only by the maintainer script that
 /// refreshes the model.
@@ -184,7 +182,7 @@ async fn download_and_unpack(
         &format!("{base}/{asset}"),
         tarball,
         asset,
-        download_budget(manifest),
+        DOWNLOAD_BUDGET,
         report,
     )
     .await?;
@@ -608,16 +606,24 @@ mod tests {
         );
     }
 
+    // The release tarball carries the binary, the voice and the vendored
+    // speech-to-text checkpoint (base.en: 147,622,416 bytes across its three
+    // files). A budget sized off the voice alone came to 256 MiB, under the
+    // roughly 270 MB the combined asset weighs.
     #[test]
-    fn the_budget_leaves_room_for_the_binary_riding_along() {
-        let files = manifest_files(100 * 1024 * 1024, &"0".repeat(64));
-        let manifest = Manifest {
-            prefix: "tts-voices/x/".to_string(),
-            files: &files,
-        };
-        let budget = download_budget(&manifest);
-        assert!(budget > 100 * 1024 * 1024, "{budget}");
-        assert!(budget < 1024 * 1024 * 1024, "{budget}");
+    fn the_budget_holds_the_whole_combined_asset_with_headroom() {
+        const STT_BASE_EN_BYTES: u64 = 147_622_416;
+        const BINARY_ALLOWANCE: u64 = 64 * 1024 * 1024;
+        let voice: u64 = crate::local_tts::voice_lock()
+            .files
+            .values()
+            .map(|f| f.bytes)
+            .sum();
+        let combined = voice + STT_BASE_EN_BYTES + BINARY_ALLOWANCE;
+        assert!(
+            DOWNLOAD_BUDGET >= combined + combined / 2,
+            "{DOWNLOAD_BUDGET} leaves no headroom over {combined}"
+        );
     }
 
     #[test]
