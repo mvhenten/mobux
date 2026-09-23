@@ -20,7 +20,13 @@ deliberately `cargo install` a new version and restart the service.
 Prebuilt Linux binary from the GitHub release (seconds, no compile; every
 release ships `mobux-x86_64-unknown-linux-gnu.tar.gz` and
 `mobux-aarch64-unknown-linux-gnu.tar.gz`, each with a `.sha256` checksum file,
-as assets). `install.sh` picks the one matching `uname -m`:
+as assets). Each is ~137 MB: the binary plus the default speech model
+(`stt-models/base.en/`, f16 weights), so a fresh install dictates without
+fetching a model from anywhere. The other two checkpoints ship as their own
+platform-independent assets, downloaded only if someone picks them —
+`mobux-stt-tiny.en.tar.gz` (~67 MB) and `mobux-stt-small.en.tar.gz`
+(~424 MB), each with a `.sha256`. `install.sh` picks the platform asset
+matching `uname -m`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mvhenten/mobux/main/install.sh | bash
@@ -34,13 +40,44 @@ curl -fsSLO "https://github.com/mvhenten/mobux/releases/latest/download/$ASSET"
 curl -fsSLO "https://github.com/mvhenten/mobux/releases/latest/download/$ASSET.sha256"
 sha256sum -c "$ASSET.sha256"
 tar -xzf "$ASSET" -C ~/.cargo/bin mobux
+mkdir -p ~/.local/share/mobux
+tar -xzf "$ASSET" -C ~/.local/share/mobux stt-models   # the speech model
 ```
 
-From crates.io (released versions; 5-10 min release-mode compile):
+From crates.io (released versions; 5-10 min release-mode compile). The crate
+carries no weights — crates.io caps a crate near 10 MB — so build with the
+engine and it pulls the same release asset on first use, checking every file
+against the hashes compiled into it:
 
 ```bash
-cargo install mobux --locked
+cargo install mobux --locked --features local-stt
+# on aarch64, add: RUSTFLAGS="-C target-feature=+fp16"
 ```
+
+Switching model in settings downloads that checkpoint's asset — from the
+release matching the running version, not `latest`, because the hashes are
+compiled into the binary — and verifies it against
+`src/local_stt/model.lock.json` before loading it. Weights are stored f16 and
+run f32, so resident memory is about twice the download: ~290 MB for base.en,
+~150 MB for tiny.en, ~970 MB for small.en.
+
+On arm64 the engine needs ARMv8.2 half-precision (FEAT_FP16). candle's gemm
+emits those instructions without declaring the target feature, so the build
+enables it for the whole binary (`.cargo/config.toml`); an ARMv8.0 core
+(Cortex-A72, so a Raspberry Pi 4) cannot execute them, and mobux checks for the
+feature before loading anything and reports the local provider as unavailable
+instead of taking the process down. For an airgapped
+host, or to run a checkpoint mobux does not publish, point
+`MOBUX_STT_MODEL_DIR` at a directory holding `config.json`, `tokenizer.json`
+and `model.safetensors`. A directory named there is used as given and never
+checked against the lock.
+
+A maintainer refreshes a checkpoint with
+`node scripts/stt-model.mjs fetch <dir> <model>` followed by
+`node scripts/stt-model.mjs lock <dir> <model>`, which rewrites
+`src/local_stt/model.lock.json` (`models` lists the catalog, `vendored` names
+the one the platform tarball carries). That script is the only thing in the
+repo that contacts Hugging Face; nothing does at runtime.
 
 Straight from GitHub (latest `main`, including unreleased commits):
 
@@ -288,9 +325,12 @@ and **no commit back to `main`** (branch protection forbids it). The pipeline is
    creates the **git tag** (`vX.Y.Z`), a **GitHub Release** with generated
    notes plus **prebuilt Linux x86_64 and aarch64 binaries**
    (`mobux-<triple>-unknown-linux-gnu.tar.gz` + `.sha256`, built by
-   `scripts/build-release-asset.sh` after the version is patched in; aarch64 is
-   cross-compiled with the `gcc-aarch64-linux-gnu` toolchain the workflow
-   installs), and
+   `scripts/build-release-asset.sh` after the version is patched in, with
+   `--features local-stt` and the default speech model packed alongside;
+   aarch64 is cross-compiled with the `gcc-aarch64-linux-gnu` toolchain the
+   workflow installs), **the two on-demand speech models**
+   (`mobux-stt-<model>.tar.gz` + `.sha256`, platform-independent, listed in
+   `.releaserc.json` like every other asset), and
    **publishes to crates.io**. The in-app self-updater consumes that asset, so
    updates take seconds instead of a 5-10 min compile.
 
@@ -341,7 +381,10 @@ longer used** and can be removed.
 Deploying to hosts stays a separate concern: manual (see above) or the in-app
 self-updater (issue #130). The updater downloads the release's prebuilt binary
 asset for the running architecture, verifies its sha256, and atomically
-replaces the binary `ExecStart` points at (`~/.cargo/bin/mobux`), then restarts
+replaces the binary `ExecStart` points at (`~/.cargo/bin/mobux`) — it takes
+only the binary out of the asset and leaves the speech model alone, so an
+update that changes the pinned weights re-fetches them on first use — then
+restarts
 the unit and health-checks the new version (rollback on failure). Releases
 without the asset (≤ v0.1.10) fall back to `cargo install`, which is why the
 unit PATH should still include `~/.cargo/bin`.

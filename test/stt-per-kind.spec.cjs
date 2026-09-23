@@ -187,8 +187,10 @@ test("GET response has activeKind and per-kind providers map", async ({
   }
 });
 
-// Switching to local kind shows local defaults (127.0.0.1:5200) from the cache.
-test("switching to local kind shows local defaults", async ({ page }) => {
+// The local kind runs in-process, so it carries a checkpoint and no endpoint.
+test("switching to local kind shows an in-process provider", async ({
+  page,
+}) => {
   await openSettings(page);
 
   await selectKind(page, "local");
@@ -207,8 +209,9 @@ test("switching to local kind shows local defaults", async ({ page }) => {
   });
   const body = await resp.json();
   const localProv = body.providers && body.providers.local;
-  // Local defaults or previously saved values.
   expect(localProv).toBeTruthy();
-  expect(localProv.host || "").toMatch(/127\.0\.0\.1/);
-  expect(localProv.port || "").toBe("5200");
+  expect(localProv.host || "").toBe("");
+  expect(localProv.port || "").toBe("");
+  expect(["tiny.en", "base.en", "small.en"]).toContain(localProv.model);
+  expect(typeof body.localEngine).toBe("boolean");
 });

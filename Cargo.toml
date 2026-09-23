@@ -2,6 +2,9 @@
 name = "mobux"
 version = "0.1.5"
 edition = "2021"
+# slice::as_chunks (src/local_stt/wav.rs, engine.rs) stabilised here; an older
+# toolchain fails to compile with an error that names neither.
+rust-version = "1.88"
 description = "A touch-friendly tmux web UI for unhinged people who run terminal sessions from their phone while walking the dog"
 license = "MIT"
 repository = "https://github.com/mvhenten/mobux"
@@ -10,6 +13,20 @@ readme = "README.md"
 keywords = ["tmux", "terminal", "mobile", "web", "tui"]
 categories = ["command-line-utilities", "web-programming"]
 exclude = ["target/"]
+
+[features]
+default = []
+# In-process speech-to-text. Pure Rust (candle) — no cmake, no C++ toolchain —
+# but it roughly doubles the binary and the clean build, so it is opt-in.
+local-stt = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:flate2",
+    "dep:tar",
+    "dep:sha2",
+]
 
 [dependencies]
 anyhow = "1"
@@ -46,6 +63,17 @@ vte = "0.15"
 serde_path_to_error = "0.1"
 schemars = "1"
 garde = { version = "0.22", features = ["derive"] }
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+# Pinned to the version and feature set candle-core already depends on, so
+# the tree carries one tokenizers rather than two.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
+# Unpacking the release tarball the weights ride in, and checking it against
+# the hashes in src/local_stt/model.lock.json. miniz_oxide backend: no zlib.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+tar = { version = "0.4", default-features = false, optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
