@@ -20,7 +20,9 @@
 
 #![cfg_attr(not(feature = "local-stt"), allow(dead_code))]
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "local-stt")]
 mod engine;
@@ -308,6 +310,68 @@ pub async fn ensure_ready(_data_dir: PathBuf, _model: String) -> Result<(), Stri
     Err(UNSUPPORTED_MESSAGE.to_string())
 }
 
+/// At most one background preparation at a time. The status endpoint is polled
+/// every few seconds during a download; each poll used to queue another
+/// fetch-and-load behind the running one, and when the download failed every
+/// queued task ran the whole download again, one after the other.
+pub struct SingleFlight {
+    busy: AtomicBool,
+}
+
+impl SingleFlight {
+    pub const fn new() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+        }
+    }
+
+    /// Spawn `work` unless a run is already in flight. Returns whether it was
+    /// spawned; a caller that is turned away only observes the running one.
+    pub fn spawn<F>(&'static self, work: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        tokio::spawn(async move {
+            let _release = Release(&self.busy);
+            work.await;
+        });
+        true
+    }
+}
+
+impl Default for SingleFlight {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct Release(&'static AtomicBool);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Start fetching and loading `model` in the background, unless a preparation
+/// is already running. A failure lands in the phase, which the status endpoint
+/// reports; polling does not start it again.
+pub fn prepare_in_background(data_dir: PathBuf, model: String) -> bool {
+    static PREPARING: SingleFlight = SingleFlight::new();
+    PREPARING.spawn(async move {
+        if let Err(e) = ensure_ready(data_dir, model).await {
+            eprintln!("[stt] preparing the speech model failed: {e}");
+        }
+    })
+}
+
 /// Transcribe a 16-bit PCM WAV clip. Waits out a first-run download.
 #[cfg(feature = "local-stt")]
 pub async fn transcribe(data_dir: PathBuf, model: String, wav: Vec<u8>) -> Result<String, String> {
@@ -329,6 +393,56 @@ pub async fn transcribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A status poll every second during a failing download must start one
+    // preparation, not one per poll.
+    #[tokio::test]
+    async fn polls_during_a_preparation_start_it_once() {
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let (done, wait_done) = tokio::sync::oneshot::channel::<()>();
+
+        let started = FLIGHT.spawn(async move {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            let _ = finished.await;
+            let _ = done.send(());
+        });
+        assert!(started);
+        for _ in 0..5 {
+            assert!(
+                !FLIGHT.spawn(async {
+                    RUNS.fetch_add(1, Ordering::SeqCst);
+                }),
+                "a poll queued a second preparation"
+            );
+        }
+
+        finish.send(()).unwrap();
+        wait_done.await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_finished_preparation_frees_the_slot() {
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        let (done, wait_done) = tokio::sync::oneshot::channel::<()>();
+        assert!(FLIGHT.spawn(async move {
+            let _ = done.send(());
+        }));
+        wait_done.await.unwrap();
+        for _ in 0..100 {
+            if !FLIGHT.busy.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            FLIGHT.spawn(async {}),
+            "the slot stayed taken after the run ended"
+        );
+    }
 
     #[test]
     fn the_default_is_the_vendored_model_and_the_card_offers_it_first() {

@@ -3088,17 +3088,6 @@ fn active_provider(
     Ok((provider, debug_ctx))
 }
 
-/// Start the fetch-and-load in the background. The engine joins a run already
-/// in flight rather than starting a second download, so this is safe to call
-/// from every status poll.
-fn spawn_model_preparation(data_dir: PathBuf, model: String) {
-    tokio::spawn(async move {
-        if let Err(e) = local_stt::ensure_ready(data_dir, model).await {
-            eprintln!("[stt] preparing the speech model failed: {e}");
-        }
-    });
-}
-
 async fn api_stt_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -3113,16 +3102,17 @@ async fn api_stt_status(
     let status = match &provider {
         transcribe::Provider::InProcess { model } => {
             let phase = local_stt::phase(&state.data_dir, model);
-            // Every poll that sees unfinished work keeps the download running
-            // behind it; otherwise nothing ever finishes the first run except
-            // a dictation the user has to abandon.
+            // A poll that sees unfinished work starts the download if nothing
+            // is running it; otherwise nothing ever finishes the first run
+            // except a dictation the user has to abandon. A running one is only
+            // observed, and a failure stays reported rather than retried.
             if matches!(
                 phase,
                 local_stt::Phase::NotDownloaded
                     | local_stt::Phase::Downloading { .. }
                     | local_stt::Phase::Loading
             ) {
-                spawn_model_preparation(state.data_dir.clone(), model.clone());
+                local_stt::prepare_in_background(state.data_dir.clone(), model.clone());
             }
             SttStatus {
                 kind: ctx.kind,
@@ -3181,7 +3171,7 @@ async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoRespo
         ));
     }
 
-    spawn_model_preparation(state.data_dir.clone(), model.clone());
+    local_stt::prepare_in_background(state.data_dir.clone(), model.clone());
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"status": "started", "model": model})),
