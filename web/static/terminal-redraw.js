@@ -41,7 +41,7 @@ function isBlank(cell) {
 
 // A buffer row as display chunks at most `cols` cells wide, trailing blanks
 // trimmed. `limit` caps the number of chunks (the viewport takes one).
-function serializeRow(line, cols, limit = Infinity) {
+export function serializeRow(line, cols, limit = Infinity) {
   if (!line) return [{ text: "", width: 0 }];
   let end = 0;
   for (let x = 0; x < line.length; x++) {

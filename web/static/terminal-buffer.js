@@ -10,6 +10,8 @@
 // Displays (xterm, sterk, the reader) draw from this buffer through
 // terminal-redraw.js; nothing writes into a display directly.
 
+import { serializeRow } from "./terminal-redraw.js";
+
 export const HISTORY_LIMIT = 10000;
 // Normal-screen rows that scroll off are kept: only synthetic writes reach
 // the normal screen, since tmux switches its client to the alternate screen
@@ -64,21 +66,37 @@ export function createTerminalBuffer({ cols, rows }) {
     );
   }
 
-  const screen = Sterk.createTerminal({
-    cols,
-    rows,
-    scrollback: SCREEN_SCROLLBACK,
-    font: "",
-  });
+  const newScreen = () =>
+    Sterk.createTerminal({
+      cols,
+      rows,
+      scrollback: SCREEN_SCROLLBACK,
+      font: "",
+    });
+  let screen = newScreen();
   screen.write("\x1b[?1049h");
+
+  // Everything subscribed to the screen parser, re-attached when a resize
+  // rebuilds it: [attach(screen) → Disposable, current Disposable].
+  const hooks = [];
+  function hook(attach) {
+    const entry = { attach, sub: attach(screen) };
+    hooks.push(entry);
+    return {
+      dispose() {
+        entry.sub?.dispose?.();
+        const i = hooks.indexOf(entry);
+        if (i >= 0) hooks.splice(i, 1);
+      },
+    };
+  }
 
   const modes = new Map(MIRRORED_MODES.map((m) => [m, m === 25]));
   let queries = "";
   const scalar = (p) => (Array.isArray(p) ? p[0] : p);
-  const subs = [];
   for (const final of ["h", "l"]) {
-    subs.push(
-      screen.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+    hook((t) =>
+      t.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
         for (const m of params.map(scalar)) {
           if (modes.has(m)) modes.set(m, final === "h");
         }
@@ -89,12 +107,49 @@ export function createTerminalBuffer({ cols, rows }) {
   // Device-attribute queries go to the display, which answers them the way
   // it did when it parsed the stream itself.
   for (const prefix of ["", ">"]) {
-    subs.push(
-      screen.parser.registerCsiHandler({ prefix, final: "c" }, (params) => {
+    hook((t) =>
+      t.parser.registerCsiHandler({ prefix, final: "c" }, (params) => {
         queries += `\x1b[${prefix}${params.map(scalar).join(";")}c`;
         return false;
       }),
     );
+  }
+
+  // Sterk's resize keeps the old line count, which breaks its cursor and
+  // scrolling, so a resize rebuilds the screen at the new size and replays
+  // its content: the normal screen up to the cursor, then the alternate
+  // screen's rows (tmux repaints them after the resize anyway).
+  function rebuildScreen(oldRows) {
+    const old = screen;
+    const normal = old.buffer.normal;
+    const onAlt = old.buffer.active.type === "alternate";
+    const lines = [];
+    for (let y = 0; y < normal.length; y++) {
+      lines.push(serializeRow(normal.getLine(y), cols, 1)[0].text);
+    }
+    const end = onAlt
+      ? lines.findLastIndex((l) => l !== "") + 1
+      : normal.cursorY + 1;
+    lines.length = Math.min(lines.length, end);
+    let replay = lines.join("\x1b[0m\r\n") + "\x1b[0m";
+    if (!onAlt) {
+      replay += `\r${normal.cursorX ? `\x1b[${normal.cursorX}C` : ""}`;
+    } else {
+      const alt = old.buffer.active;
+      const top = Math.max(0, alt.length - oldRows);
+      replay += "\x1b[?1049h";
+      for (let r = 0; r < rows && top + r < alt.length; r++) {
+        const { text } = serializeRow(alt.getLine(top + r), cols, 1)[0];
+        replay += `\x1b[${r + 1};1H${text}\x1b[0m`;
+      }
+      const cursorRow = Math.min(rows, alt.cursorY - top + 1);
+      replay += `\x1b[${cursorRow};${alt.cursorX + 1}H`;
+    }
+    for (const entry of hooks) entry.sub?.dispose?.();
+    screen = newScreen();
+    screen.write(replay);
+    for (const entry of hooks) entry.sub = entry.attach(screen);
+    old.dispose();
   }
 
   let historyLines = [];
@@ -154,19 +209,20 @@ export function createTerminalBuffer({ cols, rows }) {
       screen.write(text);
     },
     resize(nextCols, nextRows) {
+      const oldRows = rows;
       cols = nextCols;
       rows = nextRows;
-      screen.resize(cols, rows);
+      rebuildScreen(oldRows);
     },
 
     isAlternate() {
       return screen.buffer.active.type === "alternate";
     },
     onBell(cb) {
-      return screen.onBell(cb);
+      return hook((t) => t.onBell(cb));
     },
     registerOscHandler(id, cb) {
-      return screen.parser.registerOscHandler(id, cb);
+      return hook((t) => t.parser.registerOscHandler(id, cb));
     },
     modes() {
       return modes;
@@ -220,7 +276,7 @@ export function createTerminalBuffer({ cols, rows }) {
     },
 
     dispose() {
-      for (const sub of subs.splice(0)) sub?.dispose?.();
+      for (const entry of hooks.splice(0)) entry.sub?.dispose?.();
       history?.dispose();
       screen.dispose();
     },
