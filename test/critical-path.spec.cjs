@@ -1151,3 +1151,145 @@ test("base: under a path prefix every URL moves with it", async ({ page }) => {
   expect(resolved.api).toBe(`${origin}${prefix}/api/telemetry`);
   expect(resolved.ws).toBe(`${origin.replace(/^http/, "ws")}${prefix}/ws/dev`);
 });
+
+// ── One buffer, one copy (issue #315) ──────────────────────────────
+// The display draws the engine's buffer: tmux history above the screen,
+// then the screen parsed from the stream. Nothing may appear twice and
+// nothing drawn on an alternate screen may land in scrollback.
+
+const ALT_SCRIPT = require("path").join(
+  __dirname,
+  "assets",
+  "alt-screen-repaint.sh",
+);
+
+function terminalLines(page) {
+  return page.evaluate(() => {
+    const t = window.__mobuxView.test;
+    const lines = [];
+    for (let y = 0; y < t.bufferLength(); y++) lines.push(t.lineText(y) || "");
+    return lines;
+  });
+}
+
+function readerLines(page) {
+  return page.evaluate(() =>
+    Array.from(
+      document.querySelectorAll("#reader .rb-line, #reader .rb-codeline"),
+    ).map((el) =>
+      Array.from(el.childNodes)
+        .filter((n) => !(n.classList && n.classList.contains("rb-speaker")))
+        .map((n) => n.textContent)
+        .join(""),
+    ),
+  );
+}
+
+// Lines that are a bare number, counted: { "1": 1, "2": 1, … }.
+function numberCounts(lines) {
+  const counts = {};
+  for (const line of lines) {
+    const m = line.replace(/ /g, " ").trim();
+    if (/^\d+$/.test(m)) counts[m] = (counts[m] || 0) + 1;
+  }
+  return counts;
+}
+
+function expectedCounts(from, to) {
+  const counts = {};
+  for (let i = from; i <= to; i++) counts[String(i)] = 1;
+  return counts;
+}
+
+const altLines = (lines) =>
+  lines.filter((l) => /^alt-line-\d+$/.test(l.replace(/ /g, " ").trim()));
+
+async function runAltScript(page) {
+  const rows = await page.evaluate(() => window.__mobuxView.test.rows());
+  expect(rows, "the pane must be shorter than one 60-line paint").toBeLessThan(
+    60,
+  );
+  tmux(`send-keys -t ${SESSION} "bash ${ALT_SCRIPT}" Enter`);
+  await expect
+    .poll(
+      async () =>
+        (await terminalLines(page)).some((l) => l.trim() === "ALT-DONE"),
+      { timeout: 15000 },
+    )
+    .toBe(true);
+}
+
+test("one copy: an alternate-screen app leaves none of its lines in scrollback", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  await runAltScript(page);
+  await page.waitForTimeout(1000);
+  expect(altLines(await terminalLines(page))).toEqual([]);
+});
+
+test("one copy: seq 1 500 shows each line exactly once once output goes quiet", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 500" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 500));
+
+  await page.evaluate(() => window.__mobuxView.send("seq 501 800\r"));
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 800));
+});
+
+test("one copy: a tmux command via /command keeps a single copy of history", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 500" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 500));
+
+  await page.evaluate(() => window.__mobuxView.test.runTmuxCmd("next-pane"));
+  await page.waitForTimeout(1500);
+  expect(numberCounts(await terminalLines(page))).toEqual(
+    expectedCounts(1, 500),
+  );
+});
+
+test("one copy: the reader shows no alternate-screen lines and each number once", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 500" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await runAltScript(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 500));
+
+  await page.evaluate(() => window.__mobuxView.swap("reader"));
+  await page.waitForFunction(
+    () => {
+      const r = document.getElementById("reader");
+      return r && !r.classList.contains("hidden");
+    },
+    { timeout: 4000 },
+  );
+  await expect
+    .poll(async () => numberCounts(await readerLines(page)), { timeout: 10000 })
+    .toEqual(expectedCounts(1, 500));
+  expect(altLines(await readerLines(page))).toEqual([]);
+});

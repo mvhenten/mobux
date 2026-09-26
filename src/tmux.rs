@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -861,25 +861,76 @@ pub async fn install_bell_hook(port: u16, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Capture the scrollback history of the active pane in a session.
-/// Returns the content with ANSI escape sequences preserved.
-pub async fn capture_history(session: &str, lines: i32, target: Option<&str>) -> Result<String> {
-    let start = format!("-{}", lines);
+/// What `capture_history` returns: the history and the visible screen, or
+/// the history above the visible screen only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryScope {
+    #[default]
+    All,
+    History,
+}
+
+fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "capture-pane",
+        "-p", // print to stdout
+        "-e", // include escape sequences (colors)
+        "-S",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    args.push(format!("-{}", lines)); // start N lines back
+    if scope == HistoryScope::History {
+        args.push("-E".into());
+        args.push("-1".into()); // end on the last history line
+    }
+    args.push("-t".into());
+    args.push(session.into());
+    args
+}
+
+async fn history_size(session: &str, target: Option<&str>) -> Result<u32> {
     let output = tmux_command(
         target,
-        &[
-            "capture-pane",
-            "-p", // print to stdout
-            "-e", // include escape sequences (colors)
-            "-S",
-            &start, // start N lines back
-            "-t",
-            session,
-        ],
+        &["display-message", "-p", "-t", session, "#{history_size}"],
     )
     .output()
     .await
-    .context("failed to execute tmux capture-pane")?;
+    .context("failed to execute tmux display-message")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux display-message failed: {}", msg));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .context("tmux reported a non-numeric history_size")
+}
+
+/// Capture the scrollback history of the active pane in a session.
+/// Returns the content with ANSI escape sequences preserved.
+pub async fn capture_history(
+    session: &str,
+    lines: u32,
+    scope: HistoryScope,
+    target: Option<&str>,
+) -> Result<String> {
+    let lines = match scope {
+        HistoryScope::All => lines,
+        // `-E -1` on an empty history still prints the first visible line.
+        HistoryScope::History => lines.min(history_size(session, target).await?),
+    };
+    if lines == 0 {
+        return Ok(String::new());
+    }
+    let args = capture_history_args(session, lines, scope);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = tmux_command(target, &args)
+        .output()
+        .await
+        .context("failed to execute tmux capture-pane")?;
 
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -892,6 +943,44 @@ pub async fn capture_history(session: &str, lines: i32, target: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_history_args_default_scope_includes_the_screen() {
+        assert_eq!(
+            capture_history_args("main", 10000, HistoryScope::All),
+            vec!["capture-pane", "-p", "-e", "-S", "-10000", "-t", "main"]
+        );
+    }
+
+    #[test]
+    fn capture_history_args_history_scope_ends_above_the_screen() {
+        assert_eq!(
+            capture_history_args("main", 500, HistoryScope::History),
+            vec![
+                "capture-pane",
+                "-p",
+                "-e",
+                "-S",
+                "-500",
+                "-E",
+                "-1",
+                "-t",
+                "main"
+            ]
+        );
+    }
+
+    #[test]
+    fn history_scope_parses_from_the_query_value() {
+        let q: HistoryQuery = serde_json::from_str(r#"{"scope":"history"}"#).unwrap();
+        assert_eq!(q.scope, Some(HistoryScope::History));
+        assert!(serde_json::from_str::<HistoryQuery>(r#"{"scope":"bogus"}"#).is_err());
+    }
+
+    #[derive(Deserialize)]
+    struct HistoryQuery {
+        scope: Option<HistoryScope>,
+    }
 
     #[test]
     fn no_server_error_matches_known_tmux_phrasings() {

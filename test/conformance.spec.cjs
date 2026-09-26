@@ -228,12 +228,11 @@ test("R8: onBufferChanged fires after a write", async ({ page }) => {
   expect(observed).toBe(true);
 });
 
-// R9 — alt-screen state reads false in normal operation. R16 — the "no
-// alternate screen" policy holds: after the injected alt-screen-exit prefix
-// the renderer reports the normal screen. (xterm additionally hard-blocks the
-// alt buffer via its adapter stubs; sterk's own suppression is the upstream
-// stage-3 item — both agree on the normal-operation contract asserted here.)
-test("R9/R16: reports the normal (non-alternate) screen", async ({ page }) => {
+// R9 — alt-screen state follows the stream: after the injected alt-screen
+// exit prefix the engine reports the normal screen.
+test("R9: reports the normal screen after an alternate-screen exit", async ({
+  page,
+}) => {
   await boot(page);
   await page.evaluate(() =>
     window.__mobuxView.test.inject("R9_NORMAL_SCREEN\n"),
@@ -243,49 +242,43 @@ test("R9/R16: reports the normal (non-alternate) screen", async ({ page }) => {
   );
 });
 
-// R16 (mixed DEC private modes) — a CSI `?…h` that packs a blocked mode with
-// an allowed one must suppress the blocked mode AND still apply the allowed
-// one. Both adapters enforce the "no alt screen / no mouse" policy; neither may
-// leak the alt buffer when a benign mode rides along, and neither may drop the
-// benign mode. (xterm blocks via its alt/mouse stubs; sterk consumes the
-// blocked mode at the parser and re-emits the allowed remainder.)
-test("R16: mixed DEC private modes suppress the blocked mode, keep the allowed one", async ({
+// R16 — the alternate screen lives in the engine's buffer. A CSI `?…h` that
+// packs it with another mode switches it and applies the other mode; what is
+// drawn on it never reaches the display's scrollback, and leaving it restores
+// the normal screen.
+test("R16: the alternate screen switches in the buffer and leaves no scrollback", async ({
   page,
 }) => {
   await boot(page);
   // Close the WS so tmux can't re-assert modes or clobber the injected content.
   await page.evaluate(() => window.__mobuxView.test.inject(""));
 
-  // Alt-screen (1049) packed with cursor-visibility (25): the alt buffer must
-  // not activate even though 25 is allowed through.
   await page.evaluate(() =>
     window.__mobuxView.test.writeData("\x1b[?1049;25h"),
   );
   expect(await page.evaluate(() => window.__mobuxView.test.isAlternate())).toBe(
-    false,
+    true,
   );
 
-  // Mouse tracking (1002) packed with save-cursor (1048): the allowed 1048 must
-  // still take effect. Save the cursor after a marker, move away, restore, then
-  // print — the trailing char lands back at the saved column iff 1048 applied.
+  // Mouse tracking (1002) packed with save-cursor (1048): 1048 must take
+  // effect. Save the cursor after a marker, move away, restore, then print —
+  // the trailing char lands back at the saved column iff 1048 applied.
   await page.evaluate(() =>
     window.__mobuxView.test.writeData(
       "\x1b[2J\x1b[HR16SAVE\x1b[?1002;1048h\r\nR16OTHR\x1b[?1048lZ",
     ),
   );
-  const restored = await page.evaluate(() => {
-    const len = window.__mobuxView.test.bufferLength();
-    for (let y = 0; y < len; y++) {
-      const t = window.__mobuxView.test.lineText(y);
-      if (t && t.includes("R16SAVEZ")) return true;
-    }
-    return false;
-  });
-  expect(restored).toBe(true);
-  // Still no alt screen after the second sequence.
+  expect(await bufferHasText(page, "R16SAVEZ")).toBe(true);
+
+  let alt = "";
+  for (let i = 0; i < 200; i++) alt += `R16_ALT_ONLY ${i}\r\n`;
+  await page.evaluate((s) => window.__mobuxView.test.writeData(s), alt);
+  await page.evaluate(() => window.__mobuxView.test.writeData("\x1b[?1049l"));
   expect(await page.evaluate(() => window.__mobuxView.test.isAlternate())).toBe(
     false,
   );
+  expect(await bufferHasText(page, "R16_ALT_ONLY")).toBe(false);
+  expect(await bufferHasText(page, "R16SAVE")).toBe(false);
 });
 
 // R10 — the engine registers an OSC 133 handler through the renderer; an OSC

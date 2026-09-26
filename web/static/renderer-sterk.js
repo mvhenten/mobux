@@ -2,14 +2,14 @@
 //
 // Implements the mobux renderer interface (see terminal-engine.js) over
 // @kattebak/sterk (a clean-room VT core rendered through Ace's DOM text
-// engine). This is one of the two adapters the single engine drives; the
-// engine owns the WebSocket, reconnect, panes, tmux, history and OSC 133
-// bookkeeping and never reaches into a renderer's internals.
+// engine). This is one of the two display adapters the single engine drives;
+// the engine owns the WebSocket, the text buffer, reconnect, panes, tmux,
+// history and OSC 133 bookkeeping, and only its redraw writer writes into the
+// display.
 //
 // Every sterk-specific reach-through lives here and nowhere else: the Ace
 // editor handle for theming, the `getViewportCellCount`/`getCellMetrics`
-// probes, the DEC-private-mode suppression (alt-screen + mouse off), and the
-// `window.__sterk` debug handle the visual test matrix reads.
+// probes, and the `window.__sterk` debug handle the visual test matrix reads.
 //
 // The sterk bundle (sterk.bundle.js) pins `window.Sterk = { createTerminal }`
 // before the engine is constructed.
@@ -180,43 +180,6 @@ export function createSterkRenderer(host, options = {}) {
     if (sub && typeof sub.dispose === "function") rendererCleanups.push(sub);
   }
 
-  // ── R16 alt-screen + mouse-off ──────────────────────────────────────
-  // mobux's standing policy: no alternate screen (tmux alt has no scrollback)
-  // and no mouse-protocol reporting (touch gestures are the input model). We
-  // own sterk, so we suppress the DEC private modes at the parser instead of
-  // patching internals. A CSI `?<mode>h`/`?<mode>l` may pack several modes;
-  // sterk's built-in handler applies the whole group all-or-nothing, so a
-  // sequence that mixes a blocked mode with an allowed one (e.g.
-  // `\x1b[?1049;25h`) would still switch the alt buffer if it fell through.
-  // Consume any sequence carrying a blocked mode and re-emit only the allowed
-  // modes so those still take effect; the re-emitted sequence carries no
-  // blocked mode, so it falls through normally (no recursion).
-  const blockedModes = new Set([
-    // mouse tracking + encodings — kept off on both renderers.
-    9, 1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016,
-  ]);
-  if (options.altScreen === false) {
-    blockedModes.add(47).add(1047).add(1049);
-  }
-  if (sterk.parser && sterk.parser.registerCsiHandler) {
-    const scalar = (p) => (Array.isArray(p) ? p[0] : p);
-    for (const final of ["h", "l"]) {
-      const sub = sterk.parser.registerCsiHandler(
-        { prefix: "?", final },
-        (params) => {
-          const modes = params.map(scalar);
-          if (!modes.some((m) => blockedModes.has(m))) return false;
-          const allowed = modes.filter((m) => !blockedModes.has(m));
-          if (allowed.length > 0) {
-            sterk.write(`\x1b[?${allowed.join(";")}${final}`);
-          }
-          return true;
-        },
-      );
-      if (sub && typeof sub.dispose === "function") rendererCleanups.push(sub);
-    }
-  }
-
   return {
     // R1 — teardown: sterk releases its DOM + internal listeners.
     dispose() {
@@ -303,25 +266,6 @@ export function createSterkRenderer(host, options = {}) {
       };
     },
 
-    // R9 — alt-screen state, via sterk's public `buffer.active.type` (same
-    // shape xterm reports). R16 keeps this false in normal operation by
-    // suppressing the alt-screen switch at the parser.
-    isAlternateScreenActive() {
-      try {
-        return sterk.buffer.active.type === "alternate";
-      } catch (_) {
-        return false;
-      }
-    },
-
-    // R10 — OSC handler registration (the engine uses it for OSC 133).
-    registerOscHandler(id, cb) {
-      if (sterk.parser && sterk.parser.registerOscHandler) {
-        return sterk.parser.registerOscHandler(id, cb);
-      }
-      return { dispose() {} };
-    },
-
     // R11 — theming + font size. Sterk applies the palette in place on its
     // live options object and the Ace editor theme through its renderer.
     setTheme(theme) {
@@ -381,12 +325,6 @@ export function createSterkRenderer(host, options = {}) {
       };
     },
 
-    // R14 — bell. Reports the raw terminal BEL; the chime is driven only by
-    // the server-gated push path, never this event (conformance probe only).
-    onBell(cb) {
-      return sterk.onBell ? sterk.onBell(cb) : { dispose() {} };
-    },
-
     // R15 — input surface ownership. Release sterk's Ace text-input so it can't
     // steal focus or pop the soft keyboard while the mobile bar owns input;
     // re-enable restores it. Confined to this adapter (mirrors the xterm
@@ -414,9 +352,9 @@ export function createSterkRenderer(host, options = {}) {
       }
     },
 
-    // Engine housekeeping used by window-switch / tmux commands.
-    clear() {
-      sterk.clear();
+    // R16 — drop all content, scrollback included, before a full redraw.
+    reset() {
+      sterk.reset();
     },
   };
 }
