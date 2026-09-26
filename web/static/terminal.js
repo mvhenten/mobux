@@ -1,5 +1,6 @@
 import { u } from "./base.js";
 import { TerminalEngine } from "./terminal-engine.js";
+import { DISPLAY_SCROLLBACK } from "./terminal-buffer.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
@@ -87,14 +88,13 @@ const quotes = [
 ];
 
 // Renderer construction options shared by both adapters. The typography
-// matches the reader's (style.css `.rb-line`); `altScreen: false` is mobux's
-// standing "no alternate screen" policy (tmux alt screen has no scrollback).
+// matches the reader's (style.css `.rb-line`); the scrollback holds every row
+// the engine's buffer keeps above the screen.
 const RENDERER_OPTIONS = {
   fontFamily:
     "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
   fontSize: 13,
-  scrollback: 10000,
-  altScreen: false,
+  scrollback: DISPLAY_SCROLLBACK,
 };
 
 // ── Terminal engine factory ─────────────────────────────────────────
@@ -612,6 +612,7 @@ export function createTerminal({
     },
     oscDetected: () => !!core.oscDetected,
     switchWindow: (dir) => core.switchWindow(dir),
+    runTmuxCmd: (command) => core.runTmuxCmd(command),
 
     // ── Renderer-interface conformance hooks ──────────────────────
     // Renderer-agnostic probes the conformance suite (test/conformance

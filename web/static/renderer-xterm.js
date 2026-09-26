@@ -1,13 +1,14 @@
 // Xterm renderer adapter.
 //
 // Implements the mobux renderer interface (see terminal-engine.js) over
-// @xterm/xterm. This is one of the two adapters the single engine drives;
-// the engine owns the WebSocket, reconnect, panes, tmux, history and OSC 133
-// bookkeeping and never reaches into a renderer's internals.
+// @xterm/xterm. This is one of the two display adapters the single engine
+// drives; the engine owns the WebSocket, the text buffer, reconnect, panes,
+// tmux, history and OSC 133 bookkeeping, and only its redraw writer writes
+// into the display.
 //
-// Every xterm-specific reach-through lives here and nowhere else: the
-// mouse-protocol lock, the alt-screen stubs (R16), the `_core` cell-metric
-// probe, and the `window.__xterm` debug handle the visual test matrix reads.
+// Every xterm-specific reach-through lives here and nowhere else: the `_core`
+// cell-metric probe and the `window.__xterm` debug handle the visual test
+// matrix reads.
 //
 // The xterm bundle (xterm.bundle.js) pins `window.Terminal` and
 // `window.WebLinksAddon` before the engine is constructed.
@@ -48,27 +49,6 @@ export function createXtermRenderer(host, options = {}) {
     // Report activations through onLink instead of opening here — the UI owns
     // the open decision (R13).
     term.loadAddon(new WebLinksAddon((_event, uri) => emitLink(uri)));
-  }
-
-  // Lock mouse protocol to NONE — prevents xterm.js from capturing
-  // touch/mouse when tmux sends \x1b[?1000h.
-  try {
-    Object.defineProperty(term._core.coreMouseService, "activeProtocol", {
-      set() {},
-      get() {
-        return "NONE";
-      },
-      configurable: true,
-    });
-  } catch (_) {}
-
-  // R16 — block alternate screen buffer (tmux alt screen has no scrollback).
-  if (options.altScreen === false) {
-    try {
-      const buffers = term._core._bufferService.buffers;
-      buffers.activateAltBuffer = () => {};
-      buffers.activateNormalBuffer = () => {};
-    } catch (_) {}
   }
 
   // Debug peephole for the visual test matrix (confined to this adapter).
@@ -164,19 +144,6 @@ export function createXtermRenderer(host, options = {}) {
       return term.onWriteParsed(cb);
     },
 
-    // R9 — alt-screen state.
-    isAlternateScreenActive() {
-      return term.buffer?.active?.type === "alternate";
-    },
-
-    // R10 — OSC handler registration (the engine uses it for OSC 133).
-    registerOscHandler(id, cb) {
-      if (term.parser && term.parser.registerOscHandler) {
-        return term.parser.registerOscHandler(id, cb);
-      }
-      return { dispose() {} };
-    },
-
     // R11 — theming + font size.
     setTheme(theme) {
       term.options.theme = xtermTheme(theme);
@@ -218,12 +185,6 @@ export function createXtermRenderer(host, options = {}) {
       };
     },
 
-    // R14 — bell. Reports the raw terminal BEL; the chime is driven only by
-    // the server-gated push path, never this event (conformance probe only).
-    onBell(cb) {
-      return term.onBell(cb);
-    },
-
     // R15 — input surface ownership.
     focus() {
       try {
@@ -248,9 +209,9 @@ export function createXtermRenderer(host, options = {}) {
       }
     },
 
-    // Engine housekeeping used by window-switch / tmux commands.
-    clear() {
-      term.clear();
+    // R16 — drop all content, scrollback included, before a full redraw.
+    reset() {
+      term.reset();
     },
   };
 }

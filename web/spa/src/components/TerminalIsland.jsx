@@ -17,7 +17,7 @@ import { u } from "../lib/base.js";
 // The island's job:
 //   1. Render the DOM scaffold the engine binds to (#terminal, #reader,
 //      #loadquote, the #inputBar ribbon, the #cmdPickList overlay, …).
-//   2. Load the renderer's vendor bundle (once per document), then create
+//   2. Load the vendor bundles (once per document), then create
 //      the engine in an effect and dispose it on unmount. A route-param
 //      change is a clean dispose + create — no document reload (#188), and
 //      the new engine attaches to exactly the (node, session) in the URL
@@ -111,12 +111,16 @@ export function TerminalIsland({ node, session }) {
     let viewCtl = null;
 
     // Resolve the renderer choice from the server-held preference (hydrated at
-    // boot by main.jsx), then load the matching vendor bundle + css (once per
-    // document) before constructing the engine.
+    // boot by main.jsx), then load the vendor bundles + css (once per
+    // document) before constructing the engine. The sterk bundle always
+    // loads: the engine's headless text buffer is sterk under either renderer.
     const renderer = getPref("renderer") === "sterk" ? "sterk" : "xterm";
 
     const v = `?v=${CACHE_BUST}`;
-    const bundle = renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js";
+    const bundles =
+      renderer === "sterk"
+        ? ["sterk.bundle.js"]
+        : ["sterk.bundle.js", "xterm.bundle.js"];
 
     if (renderer === "xterm") {
       ensureStylesheet(u(`/static/vendor/xterm.css${v}`));
@@ -127,7 +131,9 @@ export function TerminalIsland({ node, session }) {
       let createReader;
       let createReadMode;
       try {
-        await loadScript(u(`/static/vendor/${bundle}${v}`));
+        await Promise.all(
+          bundles.map((b) => loadScript(u(`/static/vendor/${b}${v}`))),
+        );
         // The engine and reader modules are pure factory exports (no side
         // effects), so the browser's module-map caching is exactly right:
         // first mount fetches them, every later mount reuses them.
