@@ -352,9 +352,6 @@ export function createSterkRenderer(host, options = {}) {
       }
     },
 
-    // R17 — whether autowrapped rows keep their wrapped flag.
-    keepsWrappedRows: false,
-
     // R16 — drop all content, scrollback included, before a full redraw.
     reset() {
       sterk.reset();

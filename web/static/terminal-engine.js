@@ -29,7 +29,6 @@
 //   R13 onLink(cb): Disposable               URL activations; UI opens them
 //   R15 focus(); setNativeInputEnabled(bool)
 //   R16 reset()                              drop all content (full redraw)
-//   R17 keepsWrappedRows: boolean            autowrapped rows keep isWrapped
 //
 // Alternate-screen state (R9), OSC handlers (R10) and the bell (R14) come
 // from the buffer's screen parser, not the renderer.

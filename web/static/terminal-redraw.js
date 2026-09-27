@@ -90,11 +90,9 @@ function serializeLine(rows, cols, skip = 0) {
   return out;
 }
 
-// A display that keeps wrapped rows gets a long line in one write, so its
-// own autowrap marks the continuation rows; any other display gets each row
-// placed on its own.
+// A long line goes to the display in one write, so the display's own
+// autowrap marks its continuation rows.
 export function createRedrawWriter(buffer, renderer) {
-  const wraps = renderer.keepsWrappedRows === true;
   let committedHistory = 0;
   let committedHistoryStart = 0;
   let committedScreen = 0;
@@ -158,7 +156,7 @@ export function createRedrawWriter(buffer, renderer) {
           revision: buffer.lastLineRevision(),
         };
       }
-      if (wraps && displayRows.length < rows) {
+      if (displayRows.length < rows) {
         out += commit(displayRows.join(""), displayRows.length);
       } else {
         for (const text of displayRows) out += commit(text, 1);
@@ -183,13 +181,7 @@ export function createRedrawWriter(buffer, renderer) {
       if (painted[r] !== text) {
         painted[r] = text;
         for (let i = 1; i < displayRows.length; i++) painted[r + i] = null;
-        if (wraps) {
-          out += `\x1b[${r + 1};1H\x1b[2K${displayRows.join("")}`;
-        } else {
-          displayRows.forEach((row, i) => {
-            out += `\x1b[${r + i + 1};1H\x1b[2K${row}`;
-          });
-        }
+        out += `\x1b[${r + 1};1H\x1b[2K${displayRows.join("")}`;
       }
       r += displayRows.length;
       if (r >= rows) break;
@@ -200,13 +192,10 @@ export function createRedrawWriter(buffer, renderer) {
 
   // Only the row count changed (a soft keyboard opening or closing): with
   // the cursor on the top row, a display adds or drops rows below it and
-  // leaves its scrollback alone, so only the viewport needs repainting. A
-  // display that moved rows in or out of its scrollback anyway is redrawn.
+  // leaves its scrollback alone, so only the viewport needs repainting.
   async function resizeRows(rows) {
     await renderer.write("\x1b[H");
     renderer.resize(renderer.cols, rows);
-    const scrollbackRows = renderer.buffer.active.length - renderer.rows;
-    if (scrollbackRows !== committedKeys.length) full = true;
     painted = [];
     cursorKey = "";
   }

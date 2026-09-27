@@ -864,6 +864,15 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
   // viewport (innerHeight shrinks, dvh shrinks, window resize fires).
   const { width } = page.viewportSize();
   const KEYBOARD_UP_HEIGHT = 445;
+  const displayScrollback = () =>
+    page.evaluate(() => {
+      const t = window.__mobuxView.test;
+      const out = [];
+      for (let y = 0; y < t.bufferLength() - t.rows(); y++)
+        out.push(t.lineText(y));
+      return out;
+    });
+  const scrollbackBefore = await displayScrollback();
   const redrawsBefore = await page.evaluate(() =>
     window.__mobuxView.test.fullRedrawCount(),
   );
@@ -939,14 +948,16 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
   ).toBeLessThanOrEqual(geo.barTop + 2);
 
   // Only the row count changed: the display repaints its screen and keeps
-  // its history rows. sterk's resize keeps its old line count, so a sterk
-  // display is still redrawn whole.
-  if (testInfo.project.name === "xterm") {
-    expect(
-      await page.evaluate(() => window.__mobuxView.test.fullRedrawCount()),
-      "a keyboard opening must not redraw history",
-    ).toBe(redrawsBefore);
-  }
+  // its history rows.
+  expect(
+    await page.evaluate(() => window.__mobuxView.test.fullRedrawCount()),
+    "a keyboard opening must not redraw history",
+  ).toBe(redrawsBefore);
+  const scrollbackAfter = await displayScrollback();
+  expect(
+    scrollbackAfter.slice(0, scrollbackBefore.length),
+    "a keyboard opening must leave the display scrollback in place",
+  ).toEqual(scrollbackBefore);
 
   assertNoFailures(captured);
 });
@@ -1426,76 +1437,6 @@ test("history sync: coloured capture lines compare equal wherever the capture st
   expect(result.aligned).toEqual({ drop: 4, keep: 3, extended: false });
 });
 
-// capture-pane -J gives one history line per logical line; a line wrapped
-// on screen and the same line in history get one key, and every display
-// row maps back to it — joined by a display that keeps wrapped rows, one
-// key on its first row otherwise.
-test("line keys: a wrapped line is one line on the screen, in history and on both displays", async ({
-  page,
-}) => {
-  const result = await inPage(page, async (m, r) => {
-    const make = async (keepsWrappedRows) => {
-      const display = new window.XtermHeadless.Terminal({
-        cols: 10,
-        rows: 4,
-        scrollback: 100,
-        allowProposedApi: true,
-      });
-      const renderer = {
-        keepsWrappedRows,
-        get cols() {
-          return display.cols;
-        },
-        get rows() {
-          return display.rows;
-        },
-        buffer: display.buffer,
-        resize: (c, rw) => display.resize(c, rw),
-        reset: () => display.reset(),
-        scrollLines: (n) => display.scrollLines(n),
-        write: (d) => new Promise((res) => display.write(d, res)),
-      };
-      const buffer = m.createTerminalBuffer({
-        cols: 10,
-        rows: 4,
-        scrollback: 100,
-      });
-      const view = r.createRedrawWriter(buffer, renderer);
-      await buffer.syncWhole(["short", "x".repeat(15), "after"], false);
-      await buffer.writeScreen(`\x1b[H${"w".repeat(15)}\r\n$ `);
-      await view.flush();
-      const keys = [];
-      for (let y = 0; y < display.buffer.active.length; y++) {
-        keys.push(view.lineKeyAt(y));
-      }
-      const wrapped = [];
-      for (let y = 0; y < display.buffer.active.length; y++) {
-        wrapped.push(display.buffer.active.getLine(y).isWrapped);
-      }
-      const cursor = buffer.cursorLineKey();
-      buffer.dispose();
-      display.dispose();
-      return { keys, wrapped, cursor };
-    };
-    return { xterm: await make(true), sterk: await make(false) };
-  });
-  // history: short(0), xxx… over two rows(1), after(2); screen: www… over
-  // two rows(3), "$ "(4), then blank rows.
-  expect(result.xterm.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
-  expect(result.xterm.wrapped.slice(0, 7)).toEqual([
-    false,
-    false,
-    true,
-    false,
-    false,
-    true,
-    false,
-  ]);
-  expect(result.sterk.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
-  expect(result.sterk.wrapped.slice(0, 7).every((w) => !w)).toBe(true);
-  expect(result.xterm.cursor).toBe(4);
-});
-
 test("history sync: a tail appends only when it overlaps the held end in one place", async ({
   page,
 }) => {
@@ -1513,29 +1454,34 @@ test("history sync: a tail appends only when it overlaps the held end in one pla
   expect(result.gap).toBeNull();
 });
 
-// A display stand-in: a headless xterm behind the renderer interface the
-// redraw writer drives, counting full redraws.
-const FAKE_DISPLAY = `(keepsWrappedRows, cols, rows) => {
-  const display = new window.XtermHeadless.Terminal({
-    cols, rows, scrollback: 100, allowProposedApi: true,
-  });
+// A display stand-in behind the renderer interface the redraw writer drives,
+// counting full redraws: the VT core of the project's renderer (sterk's on
+// the sterk project, a headless xterm otherwise).
+const FAKE_DISPLAY = `(cols, rows) => {
+  const display = window.Sterk
+    ? window.Sterk.createTerminal({ cols, rows, scrollback: 100 })
+    : new window.XtermHeadless.Terminal({
+        cols, rows, scrollback: 100, allowProposedApi: true,
+      });
+  const lines = () => {
+    const out = [];
+    for (let y = 0; y < display.buffer.active.length; y++) {
+      out.push(display.buffer.active.getLine(y));
+    }
+    return out;
+  };
   const renderer = {
-    keepsWrappedRows,
     resets: 0,
     get cols() { return display.cols; },
     get rows() { return display.rows; },
-    buffer: display.buffer,
+    get buffer() { return display.buffer; },
     resize: (c, r) => display.resize(c, r),
     reset() { this.resets++; display.reset(); },
     scrollLines: (n) => display.scrollLines(n),
     write: (d) => new Promise((res) => display.write(d, res)),
-    text() {
-      const out = [];
-      for (let y = 0; y < display.buffer.active.length; y++) {
-        out.push(display.buffer.active.getLine(y).translateToString(true));
-      }
-      return out;
-    },
+    dispose: () => display.dispose(),
+    text: () => lines().map((l) => l.translateToString(false).trimEnd()),
+    wrapped: () => lines().map((l) => l.isWrapped),
   };
   return renderer;
 }`;
@@ -1553,6 +1499,76 @@ async function withDisplay(page, fn) {
   );
 }
 
+// capture-pane -J gives one history line per logical line; a line wrapped
+// on screen and the same line in history get one key, and every display
+// row maps back to it, the display marking the continuation rows wrapped so
+// the reader joins them.
+test("line keys: a wrapped line is one line on the screen, in history and on the display", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay) => {
+    const renderer = makeDisplay(10, 4);
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const view = r.createRedrawWriter(buffer, renderer);
+    await buffer.syncWhole(["short", "x".repeat(15), "after"], false);
+    await buffer.writeScreen(`\x1b[H${"w".repeat(15)}\r\n$ `);
+    await view.flush();
+    const keys = [];
+    for (let y = 0; y < renderer.buffer.active.length; y++) {
+      keys.push(view.lineKeyAt(y));
+    }
+    const d = await import("/static/terminal-document.js");
+    const reader = d.createTerminalDocument({
+      getActiveBuffer: () => renderer.buffer.active,
+      cols: renderer.cols,
+      oscMarkerForRow: () => null,
+    });
+    const out = {
+      keys,
+      lines: reader.snapshot().lines.map((l) => l.text.trimEnd()),
+      wrapped: renderer.wrapped(),
+      rows: renderer.text(),
+      cursor: buffer.cursorLineKey(),
+    };
+    buffer.dispose();
+    renderer.dispose();
+    return out;
+  });
+  // history: short(0), xxx… over two rows(1), after(2); screen: www… over
+  // two rows(3), "$ "(4), then blank rows.
+  expect(result.rows.slice(0, 7)).toEqual([
+    "short",
+    "xxxxxxxxxx",
+    "xxxxx",
+    "after",
+    "wwwwwwwwww",
+    "wwwww",
+    "$",
+  ]);
+  expect(result.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
+  expect(result.lines).toEqual([
+    "short",
+    "x".repeat(15),
+    "after",
+    "w".repeat(15),
+    "$",
+  ]);
+  expect(result.wrapped.slice(0, 7)).toEqual([
+    false,
+    false,
+    true,
+    false,
+    false,
+    true,
+    false,
+  ]);
+  expect(result.cursor).toBe(4);
+});
+
 // A long line whose top rows have scrolled into history while the rest is
 // still on screen: capture-pane -J gives it only up to the screen, and the
 // endpoint says it continues. When it has scrolled off, the next capture
@@ -1561,7 +1577,7 @@ test("history sync: a line straddling the screen top keeps its key and grows in 
   page,
 }) => {
   const result = await withDisplay(page, async (m, r, makeDisplay) => {
-    const renderer = makeDisplay(true, 10, 4);
+    const renderer = makeDisplay(10, 4);
     const buffer = m.createTerminalBuffer({
       cols: 10,
       rows: 4,
@@ -1622,7 +1638,7 @@ test("history sync: history is capped by display rows at a narrow width", async 
   page,
 }) => {
   const result = await withDisplay(page, async (m, r, makeDisplay) => {
-    const renderer = makeDisplay(true, 10, 4);
+    const renderer = makeDisplay(10, 4);
     const buffer = m.createTerminalBuffer({
       cols: 10,
       rows: 4,
