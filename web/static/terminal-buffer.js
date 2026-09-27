@@ -252,6 +252,8 @@ function lineWidth(line) {
 
 // Upper bound on the display rows a line takes at `cols` (a wide character
 // that does not fit a row's end moves to the next one).
+export const plainText = (line) => line.replace(ESC_RE, "");
+
 export function displayRowsOf(line, cols) {
   return Math.max(1, Math.ceil(lineWidth(line) / Math.max(1, cols - 1)));
 }
@@ -274,12 +276,42 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
 
   const modes = new Map(MIRRORED_MODES.map((m) => [m, m === 25]));
   const scalar = (p) => (Array.isArray(p) ? p[0] : p);
+  // A screen switch reports a scroll of its own; it moves no rows.
+  let switching = false;
+  const SCREEN_SWITCHES = new Set([47, 1047, 1049]);
   const subs = ["h", "l"].map((final) =>
     screen.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
       for (const m of params.map(scalar)) {
         if (modes.has(m)) modes.set(m, final === "h");
+        if (SCREEN_SWITCHES.has(m)) switching = true;
       }
       return false;
+    }),
+  );
+
+  // Rows that left the top of tmux's client screen since the last sync:
+  // tmux scrolls its client with a linefeed at the bottom of a scroll region
+  // that starts at the top row, or with scroll-up. Those rows are the pane
+  // lines entering tmux's history.
+  let scrolledRows = 0;
+  let regionTop = 1;
+  const scrollsHistory = () =>
+    regionTop === 1 && screen.buffer.active.type === "alternate";
+  subs.push(
+    screen.parser.registerCsiHandler({ final: "r" }, (params) => {
+      regionTop = scalar(params[0]) || 1;
+      return false;
+    }),
+    screen.parser.registerCsiHandler({ final: "S" }, (params) => {
+      if (scrollsHistory()) scrolledRows += scalar(params[0]) || 1;
+      return false;
+    }),
+    screen.onScroll(() => {
+      if (switching) switching = false;
+      else if (scrollsHistory()) scrolledRows++;
+    }),
+    screen.onWriteParsed(() => {
+      switching = false;
     }),
   );
 
@@ -361,8 +393,13 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       await rebuild(next, before);
       result = { replaced: true, before };
     } else if (aligned.keep === historyLines.length - aligned.drop) {
+      const segments = grownSegments(
+        aligned.extended ? next[aligned.keep - 1] : null,
+        next.slice(aligned.keep),
+      );
       if (aligned.extended) await extendLast(next[aligned.keep - 1]);
       await append(next.slice(aligned.keep));
+      result = { replaced: false, before, segments };
     } else {
       const kept = historyLines.slice(0, aligned.drop);
       await rebuild(kept.concat(next), historyStart);
@@ -377,11 +414,39 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     const aligned = alignTail(historyLines, tail, minOverlap, lastContinues);
     if (!aligned) return null;
     const before = end();
+    const segments = grownSegments(
+      aligned.extended ? tail[aligned.overlap - 1] : null,
+      tail.slice(aligned.overlap),
+    );
     if (aligned.extended) await extendLast(tail[aligned.overlap - 1]);
     await append(tail.slice(aligned.overlap));
     setContinues(continues);
     await cap();
-    return { replaced: false, before, after: end() };
+    return { replaced: false, before, after: end(), segments };
+  }
+
+  // What a sync added to history, as the screen rows it scrolled off: the
+  // rows a grown last line gained, then each new line's rows at the pane
+  // width.
+  function grownSegments(grownLast, fresh) {
+    const segments = [];
+    const rowsOf = (line) => displayRowsOf(line, cols);
+    if (grownLast !== null) {
+      const held = historyLines[historyLines.length - 1];
+      segments.push({
+        key: end() - 1,
+        rows: rowsOf(grownLast) - rowsOf(held),
+        text: plainText(grownLast),
+      });
+    }
+    fresh.forEach((line, i) => {
+      segments.push({
+        key: end() + i,
+        rows: rowsOf(line),
+        text: plainText(line),
+      });
+    });
+    return segments;
   }
 
   function viewportRows() {
@@ -428,6 +493,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       cols = nextCols;
       rows = nextRows;
       screen.resize(cols, rows);
+      regionTop = 1;
       queue(cap);
     },
 
@@ -474,8 +540,57 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     // screen's scrollback lines, then the viewport's lines — the first of
     // which shares the last history line's key while it straddles.
     screenKeyBase() {
-      const base = end() + logicalLines(scrollbackRows()).length;
+      const base = end() + logicalLines(scrollbackRows()).length + scrolledRows;
       return straddles() ? base - 1 : base;
+    },
+    scrolledRows() {
+      return scrolledRows;
+    },
+    consumeScrolledRows(n) {
+      scrolledRows = Math.max(0, scrolledRows - n);
+    },
+    // The key of the line viewport row `r` belongs to, or null.
+    rowKey(r) {
+      let row = 0;
+      let index = 0;
+      for (const line of logicalLines(viewportRows())) {
+        if (r < row + line.length) return this.screenKeyBase() + index;
+        row += line.length;
+        index++;
+      }
+      return null;
+    },
+    // The screen's lines as { key, row, text }, for placing a marker by text.
+    screenLines() {
+      const out = [];
+      let row = 0;
+      const base = this.screenKeyBase();
+      logicalLines(viewportRows()).forEach((line, index) => {
+        const text = line.map((l) => l?.translateToString(true) ?? "").join("");
+        out.push({ key: base + index, row, text });
+        row += line.length;
+      });
+      return out;
+    },
+    historyText(i) {
+      return plainText(historyLines[i] ?? "");
+    },
+    // Where the cursor is, for a marker: its line key now, its row counted
+    // from the rows scrolled off since the last sync, and the screen's lines
+    // then with the cursor's among them.
+    cursorPlace() {
+      const y = screen.buffer.active.cursorY;
+      const lines = this.screenLines();
+      let lineIndex = 0;
+      while (lineIndex + 1 < lines.length && lines[lineIndex + 1].row <= y) {
+        lineIndex++;
+      }
+      return {
+        key: this.cursorLineKey(),
+        vrow: scrolledRows + y,
+        snapshot: lines.slice(0, -1).map((l) => l.text),
+        lineIndex,
+      };
     },
     cursorLineKey() {
       const y = screen.buffer.active.cursorY;

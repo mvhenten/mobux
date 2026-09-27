@@ -1596,7 +1596,11 @@ test("history sync: a line straddling the screen top keeps its key and grows in 
     return out;
   });
   expect(result.straddleKey).toBe(2);
-  expect(result.moved).toEqual({ replaced: false, before: 3, after: 4 });
+  expect(result.moved).toMatchObject({
+    replaced: false,
+    before: 3,
+    after: 4,
+  });
   expect(result.resets).toBe(0);
   expect(result.historyStart).toBe(0);
   expect(result.rows).toEqual([
@@ -1682,4 +1686,83 @@ test("history sync: a straddle that scrolled off before the next sync keys the p
   expect(result.straddling).toBe(2);
   expect(result.promptBefore).toBe(5);
   expect(result.promptAfter).toBe(5);
+});
+
+// Markers recorded while history lags the screen: a command whose output
+// scrolls 30 lines past a 6-row screen, then its D and A markers, then a
+// sync. tmux scrolls its client with a linefeed at the bottom of a region
+// above the status line — or, when it repaints instead, gives no scroll
+// signal at all and the sync places the markers by their line's text.
+async function markersAfterBurst(page, repaint) {
+  await bootTerminal(page);
+  return page.evaluate(
+    async ({ repaint }) => {
+      const m = await import("/static/terminal-buffer.js");
+      const { createMarkerBook } = await import("/static/terminal-markers.js");
+      const buffer = m.createTerminalBuffer({
+        cols: 20,
+        rows: 6,
+        scrollback: 200,
+      });
+      const book = createMarkerBook(buffer);
+      const stream = [
+        "$ run",
+        ...Array.from({ length: 30 }, (_, i) => `out ${i}`),
+      ];
+      await buffer.writeScreen("\x1b[?1049h\x1b[H$ run");
+      await buffer.syncWhole([], false);
+      book.record("C");
+      let left;
+      if (repaint) {
+        // The last four output lines and a prompt, drawn row by row.
+        left = stream.length - 4;
+        const rows = [...stream.slice(left), "$ "];
+        let out = "";
+        rows.forEach((row, r) => {
+          out += `\x1b[${r + 1};1H\x1b[2K${row}`;
+        });
+        await buffer.writeScreen(out);
+      } else {
+        await buffer.writeScreen("\x1b[1;5r\x1b[2;1H");
+        for (const line of stream.slice(1)) {
+          await buffer.writeScreen(`${line}\x1b[K\r\n`);
+        }
+        await buffer.writeScreen("\x1b[1;6r\x1b[5;1H$ ");
+        left = buffer.scrolledRows();
+      }
+      book.record("D;0");
+      book.record("A");
+      const scrolled = buffer.scrolledRows();
+      const moved = await buffer.syncWhole(stream.slice(0, left), false);
+      book.place(moved, scrolled);
+      const out = {
+        left,
+        scrolled,
+        promptKey: buffer.cursorLineKey(),
+        runKey: buffer.historyStart(),
+        markers: Object.fromEntries(book.map),
+      };
+      buffer.dispose();
+      return out;
+    },
+    { repaint },
+  );
+}
+
+test("markers: a prompt after output that scrolled lands on its own line", async ({
+  page,
+}) => {
+  const result = await markersAfterBurst(page, false);
+  expect(result.scrolled).toBeGreaterThan(20);
+  expect(result.markers[result.runKey]).toBe("C");
+  expect(result.markers[result.promptKey]).toBe("D;0|A");
+});
+
+test("markers: a repaint with no scroll signal is placed by the line's text", async ({
+  page,
+}) => {
+  const result = await markersAfterBurst(page, true);
+  expect(result.scrolled).toBe(0);
+  expect(result.markers[result.runKey]).toBe("C");
+  expect(result.markers[result.promptKey]).toBe("D;0|A");
 });

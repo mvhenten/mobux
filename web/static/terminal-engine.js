@@ -46,6 +46,7 @@ import { openExternal } from "./external-link.js";
 import { createTerminalDocument } from "./terminal-document.js";
 import { createTerminalBuffer, splitCapture } from "./terminal-buffer.js";
 import { createRedrawWriter } from "./terminal-redraw.js";
+import { createMarkerBook } from "./terminal-markers.js";
 import {
   findOsc133AEnd,
   scanForNextAAndCandidate,
@@ -170,7 +171,6 @@ export class TerminalEngine extends EventTarget {
     // (the screen parser is what actually finds the marker in the byte
     // stream — robust across writes in a way a hand-rolled scanner isn't)
     // but only uses it for `oscDetected`.
-    this.oscMarkers = new Map();
     this.oscDetected = false;
     // Is there a currently-open A cycle (seen the marker, no candidate row
     // committed for it yet)? See _ingestPtyData's doc comment.
@@ -184,6 +184,7 @@ export class TerminalEngine extends EventTarget {
       rows: this.renderer.rows,
     });
     this.view = createRedrawWriter(this.buffer, this.renderer);
+    this.markers = createMarkerBook(this.buffer);
     this._historyTimer = null;
     this._historyMaxTimer = null;
     this._historySync = null;
@@ -198,7 +199,7 @@ export class TerminalEngine extends EventTarget {
         return false;
       }
       if (kind !== "A") {
-        this._recordOscMarker(this.buffer.cursorLineKey(), data);
+        this.markers.record(data);
       }
       if (!this.oscDetected) {
         this.oscDetected = true;
@@ -413,7 +414,7 @@ export class TerminalEngine extends EventTarget {
   async clear() {
     this._historyGeneration++;
     this._historyAbort?.abort();
-    this.oscMarkers.clear();
+    this.markers.clear();
     await this.buffer.clearHistory();
     this.view.invalidate();
     await this.view.flush();
@@ -450,31 +451,16 @@ export class TerminalEngine extends EventTarget {
   // message's handler runs, and the screen parser writes asynchronously, so
   // without this queue two chunks could interleave mid-cycle and corrupt
   // `_oscAOpen`.
-  // Record an OSC 133 marker on a line, joining with whatever is already
-  // there rather than clobbering it — see the `oscMarkers` doc comment in
-  // the constructor for why two markers routinely share a line.
-  _recordOscMarker(key, marker) {
-    const existing = this.oscMarkers.get(key);
-    this.oscMarkers.set(key, existing ? `${existing}|${marker}` : marker);
+  // Markers by line key, joined with `|` where two share a line — see the
+  // `oscMarkers` doc comment in the constructor (terminal-markers.js).
+  get oscMarkers() {
+    return this.markers.map;
   }
 
   // The marker on the line display row `y` starts, if any.
   oscMarkerForRow(y) {
     const key = this.view.lineKeyAt(y);
     return key === null ? null : this.oscMarkers.get(key) || null;
-  }
-
-  // Lines that lined up with the new history keep their key. Without an
-  // alignment the old lines are gone, and the screen moves with the change
-  // in history length.
-  _rebaseMarkers({ replaced, before, after }) {
-    const moved = new Map();
-    const first = this.buffer.historyStart();
-    for (const [key, marker] of this.oscMarkers) {
-      if (replaced && key >= before) moved.set(key - before + after, marker);
-      if (!replaced && key >= first) moved.set(key, marker);
-    }
-    this.oscMarkers = moved;
   }
 
   _ingestPtyData(raw) {
@@ -522,7 +508,7 @@ export class TerminalEngine extends EventTarget {
       // output): see the module doc comment for why waiting would let that
       // later, unrelated content overwrite an already-correct row.
       await this._writeSlice(text, cursor, candidateEnd);
-      this._recordOscMarker(this.buffer.cursorLineKey(), "A");
+      this.markers.record("A");
       this._oscAOpen = false;
       cursor = candidateEnd;
       if (nextAEnd !== -1) {
@@ -697,6 +683,7 @@ export class TerminalEngine extends EventTarget {
       !this._disposed && generation === this._historyGeneration;
 
     let moved = null;
+    let scrolled = this.buffer.scrolledRows();
     if (kind === "tail") {
       const tail = await this._fetchHistory(HISTORY_TAIL_LINES, abort.signal);
       if (!tail || !current()) return;
@@ -708,12 +695,13 @@ export class TerminalEngine extends EventTarget {
       if (!current()) return;
     }
     if (!moved) {
+      scrolled = this.buffer.scrolledRows();
       const whole = await this._fetchHistory(HISTORY_WHOLE_LINES, abort.signal);
       if (!whole || !current()) return;
       moved = await this.buffer.syncWhole(whole.lines, whole.continues);
       if (!current()) return;
     }
-    this._rebaseMarkers(moved);
+    this.markers.place(moved, scrolled);
     await this.view.flush();
     this.dispatchEvent(new Event("history"));
   }
