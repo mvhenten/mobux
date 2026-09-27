@@ -120,22 +120,56 @@ pub async fn active_pane_id(tmux_bin: &str, session: &str) -> Option<String> {
     parse_pane_id(&output.stdout)
 }
 
-/// Whether `session`'s active pane is on its alternate screen right now. A
-/// history tap that starts while a full-screen app is already running never
-/// sees that app's `?1049h`, so the recorder asks. `false` on any failure.
-pub async fn pane_alternate_on(tmux_bin: &str, session: &str) -> bool {
-    let Some((program, args)) = tmux_program_and_args(tmux_bin) else {
-        return false;
-    };
-    let Ok(output) = Command::new(program)
+/// A pane's size and whether it is on its alternate screen, which the
+/// conversation recorder's screen model has to match. A tap that starts
+/// while a full-screen app is already running never sees that app's
+/// `?1049h`, so the recorder asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneScreen {
+    pub rows: u16,
+    pub cols: u16,
+    pub alternate: bool,
+}
+
+pub async fn pane_screen(tmux_bin: &str, pane: &str) -> Result<PaneScreen> {
+    let (program, args) =
+        tmux_program_and_args(tmux_bin).ok_or_else(|| anyhow!("empty tmux command"))?;
+    let output = Command::new(program)
         .args(&args)
-        .args(["display-message", "-p", "-t", session, "#{alternate_on}"])
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_height} #{pane_width} #{alternate_on}",
+        ])
         .output()
         .await
-    else {
-        return false;
+        .with_context(|| format!("running tmux display-message for pane {pane}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "tmux display-message for pane {pane} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_pane_screen(&output.stdout)
+}
+
+fn parse_pane_screen(stdout: &[u8]) -> Result<PaneScreen> {
+    let text = String::from_utf8_lossy(stdout);
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    let [rows, cols, alternate] = fields.as_slice() else {
+        return Err(anyhow!("unexpected pane size reply {text:?}"));
     };
-    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1"
+    Ok(PaneScreen {
+        rows: rows
+            .parse()
+            .with_context(|| format!("pane height {rows:?}"))?,
+        cols: cols
+            .parse()
+            .with_context(|| format!("pane width {cols:?}"))?,
+        alternate: *alternate == "1",
+    })
 }
 
 /// True while `tapped_pane` is still the pane a just-refreshed
@@ -260,6 +294,10 @@ pub struct PanePipeTap {
 }
 
 impl PanePipeTap {
+    pub fn pane_id(&self) -> &str {
+        &self.pane_id
+    }
+
     pub async fn start(
         tmux_bin: &str,
         session: &str,
@@ -1083,6 +1121,21 @@ mod tests {
         );
         assert_eq!(tmux_program_and_args("tmux"), Some(("tmux", vec![])));
         assert_eq!(tmux_program_and_args(""), None);
+    }
+
+    #[test]
+    fn parse_pane_screen_reads_size_and_alternate_screen() {
+        assert_eq!(
+            parse_pane_screen(b"34 120 1\n").unwrap(),
+            PaneScreen {
+                rows: 34,
+                cols: 120,
+                alternate: true
+            }
+        );
+        assert!(!parse_pane_screen(b"34 120 0\n").unwrap().alternate);
+        assert!(parse_pane_screen(b"").is_err());
+        assert!(parse_pane_screen(b"x 120 0").is_err());
     }
 
     #[test]

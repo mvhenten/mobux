@@ -67,12 +67,13 @@
 //! ## Full-screen apps
 //!
 //! A pane's own stream (the pipe-pane tap) also runs through a screen model
-//! (`screen_model.rs`). Bytes drawn on the normal screen are recorded as
-//! above. Text on the alternate screen is recorded from what the screen
-//! shows, once per line, at quiet time ([`Segmenter::quiet`]), on each
-//! marker, when the app leaves the alternate screen, and at detach — never
-//! from the repaint bytes, which would record the same lines on every
-//! redraw. The attach relay's client stream is tmux's own full-screen
+//! (`screen_model.rs`) at the pane's size. Bytes drawn on the normal screen
+//! are recorded as above. Text on the alternate screen is recorded from what
+//! the screen shows, diffed against what it showed before, at quiet time and
+//! at least every [`MAX_SNAPSHOT_WAIT_MS`] ([`Segmenter::tick`]), on each
+//! marker, when the app clears or leaves the alternate screen, and at detach
+//! — never from the repaint bytes, which would record the same lines on
+//! every redraw. The attach relay's client stream is tmux's own full-screen
 //! redraw, whose alternate-screen switch says nothing about the pane, so it
 //! is recorded without the model.
 
@@ -185,13 +186,17 @@ const RAW_FLUSH_THRESHOLD: usize = 4096;
 /// entry, command and exit code are still recorded, just truncated.
 const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 
-/// The PTY size `handle_ws` opens with, until the client's first resize.
-pub const DEFAULT_ROWS: u16 = 35;
-pub const DEFAULT_COLS: u16 = 120;
+/// The screen model's size when no pane size is known.
+const DEFAULT_ROWS: u16 = 35;
+const DEFAULT_COLS: u16 = 120;
 
 /// No bytes for this long counts as quiet: the alternate screen has settled
-/// and its text is recorded (see [`Segmenter::quiet`]).
-pub const QUIET_MS: u64 = 400;
+/// and its text is recorded (see [`Segmenter::tick`]).
+pub const QUIET_MS: i64 = 400;
+
+/// An app that never goes quiet (a spinner) still has its screen recorded
+/// this often, so a long task's output is not lost behind it.
+pub const MAX_SNAPSHOT_WAIT_MS: i64 = 3000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Marker {
@@ -229,6 +234,8 @@ pub struct Segmenter {
     open: Option<OpenCommand>,
     cursor: CursorModel,
     screen: Option<ScreenModel>,
+    last_fed_ms: i64,
+    dirty_since_ms: Option<i64>,
     seen_marker: bool,
 }
 
@@ -260,6 +267,8 @@ impl Segmenter {
             open: None,
             cursor: CursorModel::new(),
             screen: None,
+            last_fed_ms: 0,
+            dirty_since_ms: None,
             seen_marker: false,
         }
     }
@@ -277,25 +286,20 @@ impl Segmenter {
         }
     }
 
-    /// Alternate-screen text is waiting for [`Segmenter::quiet`].
-    pub fn wants_quiet_tick(&self) -> bool {
-        self.screen.as_ref().is_some_and(ScreenModel::is_dirty)
+    /// When [`Segmenter::tick`] next has alternate-screen text to record:
+    /// [`QUIET_MS`] after the last bytes, and no later than
+    /// [`MAX_SNAPSHOT_WAIT_MS`] after the text was first drawn.
+    pub fn snapshot_due_at(&self) -> Option<i64> {
+        let since = self.dirty_since_ms?;
+        Some((self.last_fed_ms + QUIET_MS).min(since + MAX_SNAPSHOT_WAIT_MS))
     }
 
-    /// The stream went quiet: record what the alternate screen shows now.
-    pub fn quiet(&mut self, now_ms: i64) -> Vec<PendingEntry> {
+    /// Records what the alternate screen shows, once [`Segmenter::snapshot_due_at`] has passed.
+    pub fn tick(&mut self, now_ms: i64) -> Vec<PendingEntry> {
         let mut events = Vec::new();
-        self.record_snapshot(now_ms, &mut events);
-        events
-    }
-
-    /// The stream this segmenter was fed stops being a pane's own (the
-    /// pipe-pane tap ended and the client stream takes over): record what
-    /// the screen holds and carry on without the model.
-    pub fn stop_screen_model(&mut self, now_ms: i64) -> Vec<PendingEntry> {
-        let mut events = Vec::new();
-        self.drain_screen(now_ms, &mut events);
-        self.screen = None;
+        if self.snapshot_due_at().is_some_and(|due| due <= now_ms) {
+            self.record_snapshot(now_ms, &mut events);
+        }
         events
     }
 
@@ -316,6 +320,22 @@ impl Segmenter {
     }
 
     pub fn feed(&mut self, chunk: &[u8], now_ms: i64) -> Vec<PendingEntry> {
+        let events = self.segment(chunk, now_ms);
+        self.last_fed_ms = now_ms;
+        self.note_dirty(now_ms);
+        events
+    }
+
+    fn note_dirty(&mut self, now_ms: i64) {
+        let dirty = self.screen.as_ref().is_some_and(ScreenModel::is_dirty);
+        self.dirty_since_ms = match (dirty, self.dirty_since_ms) {
+            (false, _) => None,
+            (true, None) => Some(now_ms),
+            (true, since) => since,
+        };
+    }
+
+    fn segment(&mut self, chunk: &[u8], now_ms: i64) -> Vec<PendingEntry> {
         self.scan_buf.extend_from_slice(chunk);
         let mut events = Vec::new();
         loop {
@@ -408,6 +428,7 @@ impl Segmenter {
         if let Some(lines) = self.screen.as_mut().and_then(ScreenModel::snapshot) {
             self.record_lines(lines, now_ms, events);
         }
+        self.note_dirty(now_ms);
     }
 
     /// Alternate-screen lines join an open command's output, or else land
@@ -1454,21 +1475,69 @@ mod tests {
         seg.assume_alternate_screen();
         let events = feed_str(&mut seg, "\x1b[H\x1b[2Jrow one\r\nrow two", 1);
         assert!(events.is_empty(), "{events:?}");
-        assert!(seg.wants_quiet_tick());
-        let quiet = seg.quiet(2);
+        assert_eq!(seg.snapshot_due_at(), Some(1 + QUIET_MS));
+        assert!(seg.tick(QUIET_MS).is_empty(), "not quiet yet");
+        let quiet = seg.tick(1 + QUIET_MS);
         assert_eq!(
             quiet,
             vec![PendingEntry::Raw {
                 raw: "row one\r\nrow two\r\n".to_string(),
-                ts: 2
+                ts: 1 + QUIET_MS
             }]
         );
-        assert!(!seg.wants_quiet_tick());
-        feed_str(&mut seg, "\x1b[H\x1b[2Jrow one\r\nrow two", 3);
+        assert_eq!(seg.snapshot_due_at(), None);
+        feed_str(&mut seg, "\x1b[H\x1b[2Jrow one\r\nrow two", 1000);
         assert!(
-            seg.quiet(4).is_empty(),
+            seg.tick(2000).is_empty(),
             "a repaint of the same screen adds nothing"
         );
+    }
+
+    #[test]
+    fn a_pane_one_row_shorter_than_the_client_records_every_scrolled_line() {
+        // The status bar takes a client row, so a 5-row client gets a 4-row
+        // pane. An app that writes on the pane's bottom row and scrolls with
+        // a linefeed only scrolls a model that is the pane's size.
+        let mut seg = Segmenter::for_pane(4, 40);
+        let mut body = String::from("app\r\n\x1b]133;C\x07\x1b[?1049h");
+        for i in 1..=10 {
+            body.push_str(&format!("\x1b[4;1Hline-{i}\n"));
+        }
+        body.push_str("\x1b[?1049l\x1b]133;D;0\x07");
+        let events = feed_str(&mut seg, &body, 1);
+        let PendingEntry::Command { output, .. } = &events[0] else {
+            panic!("expected a command entry, got {events:?}");
+        };
+        for i in 1..=10 {
+            assert_eq!(
+                output.matches(&format!("line-{i}\r\n")).count(),
+                1,
+                "line-{i} in {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spinner_that_never_goes_quiet_still_records_within_the_max_wait() {
+        let mut seg = Segmenter::for_pane(5, 40);
+        seg.assume_alternate_screen();
+        let mut recorded = Vec::new();
+        for step in 0..100 {
+            let now = step * 100;
+            let frame = format!("\x1b[5;1Hspin {step}\x1b[1;1Htask output {}", step / 10);
+            recorded.extend(feed_str(&mut seg, &frame, now));
+            recorded.extend(seg.tick(now));
+        }
+        let first = recorded
+            .iter()
+            .find_map(|e| match e {
+                PendingEntry::Raw { ts, .. } => Some(*ts),
+                PendingEntry::Command { .. } => None,
+            })
+            .expect("a snapshot while the spinner kept drawing");
+        assert!(first <= MAX_SNAPSHOT_WAIT_MS, "first snapshot at {first}");
+        let raws = recorded.len();
+        assert!(raws >= 3, "one snapshot per max wait over 10 s, got {raws}");
     }
 
     #[test]

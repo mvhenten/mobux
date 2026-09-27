@@ -791,13 +791,13 @@ test("read mode: a real bash session's finished commands render as turns, and a 
   });
 });
 
-// A full-screen app on the pane's alternate screen paints the same 60 lines
-// three times (issue #315). The recorder used to append every repaint's
-// bytes, so each line showed three times; it now records what the screen
-// shows, once.
-async function attemptAltScreenOnce(page) {
+// A full-screen app on the pane's alternate screen (issue #315). The
+// recorder used to append every repaint's bytes, so a line showed once per
+// repaint; it now records what the screen shows. `lines` names every line
+// the script puts on screen, each of which must show exactly once.
+async function attemptAltScreenOnce(page, { script, done, lines }) {
   const session = `readmode-alt-${process.pid}-${Date.now()}`;
-  const script = path.join(__dirname, "assets", "alt-screen-repaint.sh");
+  const scriptPath = path.join(__dirname, "assets", script);
 
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
   await apiUninstall(page, "bash");
@@ -808,6 +808,7 @@ async function attemptAltScreenOnce(page) {
     tmux(`kill-session -t ${session}`);
   } catch (_) {}
   tmux(`new-session -d -s ${session} ${SHELL_ENV} bash`);
+  tmux(`set-option -t ${session} status on`);
 
   try {
     await page.goto(`${APP}#/s/${session}`, { waitUntil: "domcontentloaded" });
@@ -831,12 +832,12 @@ async function attemptAltScreenOnce(page) {
       .toBeGreaterThanOrEqual(1);
     await page.waitForTimeout(250);
 
-    tmux(`send-keys -t ${session} "bash ${script}" Enter`);
+    tmux(`send-keys -t ${session} "bash ${scriptPath}" Enter`);
     const finished = await expect
       .poll(
         async () =>
           (await recordedCommands(page, session)).some((e) =>
-            e.output.includes("ALT-DONE"),
+            e.output.includes(done),
           ),
         { timeout: 15000 },
       )
@@ -855,13 +856,15 @@ async function attemptAltScreenOnce(page) {
       () => document.querySelector("#readmode").textContent,
     );
     const counts = new Map();
-    for (const match of text.matchAll(/alt-line-(\d+)(?!\d)/g)) {
+    for (const match of text.matchAll(/([a-z]+(?:-[a-z]+)*-line-\d+)(?!\d)/g)) {
       counts.set(match[1], (counts.get(match[1]) || 0) + 1);
     }
     const wrong = [];
-    for (let i = 1; i <= 60; i++) {
-      const n = counts.get(String(i)) || 0;
-      if (n !== 1) wrong.push(`alt-line-${i} x${n}`);
+    for (const [prefix, count] of lines) {
+      for (let i = 1; i <= count; i++) {
+        const n = counts.get(`${prefix}-${i}`) || 0;
+        if (n !== 1) wrong.push(`${prefix}-${i} x${n}`);
+      }
     }
     return { ok: wrong.length === 0, detail: wrong.join(", "), hard: true };
   } finally {
@@ -872,18 +875,41 @@ async function attemptAltScreenOnce(page) {
   }
 }
 
-test("read mode: a full-screen app's repaints show each line once", async ({
-  page,
-}) => {
-  test.setTimeout(90000);
+async function verifyAltScreenOnce(page, opts) {
   const details = [];
   for (let i = 0; i < 3; i++) {
-    const result = await attemptAltScreenOnce(page);
+    const result = await attemptAltScreenOnce(page, opts);
     if (result.ok) return;
     details.push(`attempt ${i + 1}: ${result.detail}`);
     if (result.hard) break;
   }
   expect(false, details.join(" | ")).toBe(true);
+}
+
+test("read mode: a full-screen app's repaints show each line once", async ({
+  page,
+}) => {
+  test.setTimeout(90000);
+  await verifyAltScreenOnce(page, {
+    script: "alt-screen-repaint.sh",
+    done: "ALT-DONE",
+    lines: [["alt-line", 60]],
+  });
+});
+
+test("read mode: a full-screen app that scrolls by cursor position, with the status bar on, shows each line once", async ({
+  page,
+}) => {
+  test.setTimeout(90000);
+  await verifyAltScreenOnce(page, {
+    script: "alt-screen-scroll.sh",
+    done: "SCROLL-DONE",
+    lines: [
+      ["bottom-line", 20],
+      ["region-line", 20],
+      ["su-line", 20],
+    ],
+  });
 });
 
 test.describe("read mode: zsh", () => {
@@ -924,6 +950,7 @@ test("read mode: a failing conversation fetch never takes the app over", async (
     tmux(`kill-session -t ${session}`);
   } catch (_) {}
   tmux(`new-session -d -s ${session} ${SHELL_ENV} bash`);
+  tmux(`set-option -t ${session} status on`);
 
   try {
     await page.route(isConversationUrl, answer);

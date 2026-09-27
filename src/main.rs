@@ -2476,12 +2476,11 @@ async fn handle_ws(
     // in the PTY-read branch below, so the slot the departing feeder frees is
     // picked up by whoever is still attached.
     let mut feeder_guard = session_history.try_acquire_feeder(&session_name);
-    let mut size = (session_history::DEFAULT_ROWS, session_history::DEFAULT_COLS);
 
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
-        rows: size.0,
-        cols: size.1,
+        rows: 35,
+        cols: 120,
         pixel_width: 0,
         pixel_height: 0,
     })?;
@@ -2506,11 +2505,15 @@ async fn handle_ws(
         feeder_guard.is_some(),
     )
     .await;
+    let mut tap_started_at = tokio::time::Instant::now();
     let mut segmenter = match feeder_guard {
-        Some(_) => Some(new_segmenter(&tmux_bin, &session_name, history_rx.is_some(), size).await),
+        Some(_) => Some(new_segmenter(&tmux_bin, history_tap.as_ref()).await),
         None => None,
     };
-    let mut quiet_at: Option<tokio::time::Instant> = None;
+    let mut snapshot_at: Option<tokio::time::Instant> = None;
+    let mut pane_check_at = history_tap
+        .as_ref()
+        .map(|_| tokio::time::Instant::now() + PANE_RECHECK);
     // Force a real terminfo entry on the spawned PTY. The host's TERM
     // can be unset, "dumb" (non-interactive shells), or something tmux
     // doesn't have terminfo for — in any of those cases tmux's first
@@ -2568,26 +2571,56 @@ async fn handle_ws(
                     Some(chunk) => {
                         if let Some(seg) = segmenter.as_mut() {
                             let produced = seg.feed(&chunk, session_history::now_ms());
-                            quiet_at = quiet_deadline(seg);
+                            snapshot_at = snapshot_deadline(seg);
                             record_history(&session_history, &session_name, produced).await;
                         }
                     }
                     None => {
+                        // The tap ends when the session's active pane
+                        // changes (see `tmux::PanePipeTap`): record what the
+                        // old pane's segmenter holds and tap the new pane.
+                        // A tap that dies young is not restarted, so a
+                        // broken pipe-pane cannot spin; the client stream
+                        // takes over instead.
                         history_rx = None;
                         history_tap = None;
-                        if let Some(seg) = segmenter.as_mut() {
-                            let produced = seg.stop_screen_model(session_history::now_ms());
-                            quiet_at = None;
+                        snapshot_at = None;
+                        pane_check_at = None;
+                        if let Some(mut seg) = segmenter.take() {
+                            let produced = seg.finish(session_history::now_ms());
                             record_history(&session_history, &session_name, produced).await;
+                            if tap_started_at.elapsed() >= TAP_RESTART_MIN_AGE {
+                                let (tap, rx) =
+                                    start_history_feed(&ssh_target, &tmux_bin, &session_name, true)
+                                        .await;
+                                history_tap = tap;
+                                history_rx = rx;
+                                tap_started_at = tokio::time::Instant::now();
+                            }
+                            segmenter = Some(new_segmenter(&tmux_bin, history_tap.as_ref()).await);
+                            pane_check_at = history_tap
+                                .as_ref()
+                                .map(|_| tokio::time::Instant::now() + PANE_RECHECK);
                         }
                     }
                 }
             }
-            _ = tokio::time::sleep_until(quiet_at.unwrap_or_else(tokio::time::Instant::now)), if quiet_at.is_some() => {
-                quiet_at = None;
+            _ = tokio::time::sleep_until(snapshot_at.unwrap_or_else(tokio::time::Instant::now)), if snapshot_at.is_some() => {
+                snapshot_at = None;
                 if let Some(seg) = segmenter.as_mut() {
-                    let produced = seg.quiet(session_history::now_ms());
+                    let produced = seg.tick(session_history::now_ms());
+                    snapshot_at = snapshot_deadline(seg);
                     record_history(&session_history, &session_name, produced).await;
+                }
+            }
+            _ = tokio::time::sleep_until(pane_check_at.unwrap_or_else(tokio::time::Instant::now)), if pane_check_at.is_some() => {
+                pane_check_at = None;
+                if let (Some(tap), Some(seg)) = (history_tap.as_ref(), segmenter.as_mut()) {
+                    match tmux::pane_screen(&tmux_bin, tap.pane_id()).await {
+                        Ok(pane) => seg.resize(pane.rows, pane.cols),
+                        Err(err) => eprintln!("history: pane size for '{session_name}': {err:#}"),
+                    }
+                    pane_check_at = Some(tokio::time::Instant::now() + PANE_RECHECK);
                 }
             }
             maybe_out = rx.recv() => {
@@ -2611,10 +2644,11 @@ async fn handle_ws(
                                         .await;
                                 history_tap = tap;
                                 history_rx = rx;
-                                segmenter = Some(
-                                    new_segmenter(&tmux_bin, &session_name, history_rx.is_some(), size)
-                                        .await,
-                                );
+                                tap_started_at = tokio::time::Instant::now();
+                                segmenter = Some(new_segmenter(&tmux_bin, history_tap.as_ref()).await);
+                                pane_check_at = history_tap
+                                    .as_ref()
+                                    .map(|_| tokio::time::Instant::now() + PANE_RECHECK);
                             }
                         }
                         // The pipe-pane branch above feeds the segmenter
@@ -2623,7 +2657,7 @@ async fn handle_ws(
                         if history_rx.is_none() {
                             if let Some(seg) = segmenter.as_mut() {
                                 let produced = seg.feed(&chunk, session_history::now_ms());
-                                quiet_at = quiet_deadline(seg);
+                                snapshot_at = snapshot_deadline(seg);
                                 record_history(&session_history, &session_name, produced).await;
                             }
                         }
@@ -2642,9 +2676,11 @@ async fn handle_ws(
                             Message::Text(t) => {
                                 if let Ok(rz) = serde_json::from_str::<ResizeMsg>(&t) {
                                     if rz.kind == "resize" && rz.cols > 0 && rz.rows > 0 {
-                                        size = (rz.rows, rz.cols);
-                                        if let Some(seg) = segmenter.as_mut() {
-                                            seg.resize(rz.rows, rz.cols);
+                                        // tmux resizes the pane after the
+                                        // client; the recorder follows the
+                                        // pane, so check it once tmux has.
+                                        if history_tap.is_some() {
+                                            pane_check_at = Some(tokio::time::Instant::now() + PANE_RESIZE_SETTLE);
                                         }
                                         if let Ok(m) = master.lock() {
                                             let _ = m.resize(PtySize { rows: rz.rows, cols: rz.cols, pixel_width: 0, pixel_height: 0});
@@ -2688,29 +2724,44 @@ async fn handle_ws(
     Ok(())
 }
 
+/// How often the recorder re-reads its pane's size, which a split or a
+/// window resize changes without any message from this client.
+const PANE_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long after a client resize tmux has settled the pane's new size.
+const PANE_RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// A pipe-pane tap younger than this that ends is not restarted.
+const TAP_RESTART_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A segmenter for whichever stream feeds it: the pane's own (the pipe-pane
-/// tap) runs through the screen model at the client's size, the attach
-/// relay's client stream does not (see `session_history.rs`'s module doc).
+/// tap) runs through the screen model at the pane's size, the attach relay's
+/// client stream does not (see `session_history.rs`'s module doc). A pane
+/// whose size cannot be read is recorded without the model, and says so.
 async fn new_segmenter(
     tmux_bin: &str,
-    session_name: &str,
-    pane_stream: bool,
-    (rows, cols): (u16, u16),
+    tap: Option<&tmux::PanePipeTap>,
 ) -> session_history::Segmenter {
-    if !pane_stream {
+    let Some(tap) = tap else {
         return session_history::Segmenter::for_client_stream();
-    }
-    let mut segmenter = session_history::Segmenter::for_pane(rows, cols);
-    if tmux::pane_alternate_on(tmux_bin, session_name).await {
+    };
+    let pane = match tmux::pane_screen(tmux_bin, tap.pane_id()).await {
+        Ok(pane) => pane,
+        Err(err) => {
+            eprintln!("history: recording without a screen model: {err:#}");
+            return session_history::Segmenter::for_client_stream();
+        }
+    };
+    let mut segmenter = session_history::Segmenter::for_pane(pane.rows, pane.cols);
+    if pane.alternate {
         segmenter.assume_alternate_screen();
     }
     segmenter
 }
 
-fn quiet_deadline(segmenter: &session_history::Segmenter) -> Option<tokio::time::Instant> {
-    segmenter.wants_quiet_tick().then(|| {
-        tokio::time::Instant::now() + std::time::Duration::from_millis(session_history::QUIET_MS)
-    })
+fn snapshot_deadline(segmenter: &session_history::Segmenter) -> Option<tokio::time::Instant> {
+    let wait_ms = segmenter.snapshot_due_at()? - session_history::now_ms();
+    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms.max(0) as u64))
 }
 
 async fn record_history(
