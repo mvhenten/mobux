@@ -777,9 +777,43 @@ pub struct Pane {
     pub index: String,
     pub title: String,
     pub active: bool,
-    /// The window's active pane is on its alternate screen: a full-screen
-    /// app (Claude Code, less, vim) owns it and keeps no scrollback of its own.
     pub alternate_on: bool,
+    pub status_lines: u16,
+    pub status_position: String,
+}
+
+const WINDOW_FORMAT: &str = "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{status}:#{status-position}:#{window_name}";
+
+// `#{status}` is `on`, `off` or a line count.
+fn parse_status_lines(status: &str) -> u16 {
+    match status {
+        "on" => 1,
+        "off" => 0,
+        n => n.parse().unwrap_or(1),
+    }
+}
+
+fn parse_windows(stdout: &str) -> Vec<Pane> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(7, ':').collect();
+            let [id, index, active, alternate_on, status, status_position, title] =
+                parts.as_slice()
+            else {
+                return None;
+            };
+            Some(Pane {
+                id: id.to_string(),
+                index: index.to_string(),
+                title: title.to_string(),
+                active: *active == "1",
+                alternate_on: *alternate_on == "1",
+                status_lines: parse_status_lines(status),
+                status_position: status_position.to_string(),
+            })
+        })
+        .collect()
 }
 
 pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>> {
@@ -794,7 +828,7 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
             // Printable separator, free-text window name LAST — see the
             // separator note above list_sessions. `splitn` keeps any `:`
             // inside the window name intact.
-            "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{window_name}",
+            WINDOW_FORMAT,
         ],
     )
     .output()
@@ -806,22 +840,7 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
         return Err(anyhow!("tmux list-windows failed: {}", msg));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut out = vec![];
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(5, ':').collect();
-        if parts.len() != 5 {
-            continue;
-        }
-        out.push(Pane {
-            id: parts[0].to_string(),
-            index: parts[1].to_string(),
-            title: parts[4].to_string(),
-            active: parts[2] == "1",
-            alternate_on: parts[3] == "1",
-        });
-    }
-    Ok(out)
+    Ok(parse_windows(&String::from_utf8_lossy(&output.stdout)))
 }
 
 pub async fn select_pane(session: &str, window_index: &str, target: Option<&str>) -> Result<()> {
@@ -1397,6 +1416,29 @@ mod tests {
         );
         assert_eq!(tmux_program_and_args("tmux"), Some(("tmux", vec![])));
         assert_eq!(tmux_program_and_args(""), None);
+    }
+
+    #[test]
+    fn parse_windows_reads_screen_status_and_a_name_with_colons() {
+        let panes = parse_windows("@1:0:1:1:on:bottom:claude: a:b\n@2:1:0:0:2:top:bash\n");
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].id, "@1");
+        assert_eq!(panes[0].title, "claude: a:b");
+        assert!(panes[0].active);
+        assert!(panes[0].alternate_on);
+        assert_eq!(panes[0].status_lines, 1);
+        assert_eq!(panes[0].status_position, "bottom");
+        assert!(!panes[1].active);
+        assert!(!panes[1].alternate_on);
+        assert_eq!(panes[1].status_lines, 2);
+        assert_eq!(panes[1].status_position, "top");
+    }
+
+    #[test]
+    fn parse_windows_reads_status_off_and_skips_short_lines() {
+        let panes = parse_windows("@1:0:1:0:off:bottom:sh\n@2:1:0\n");
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].status_lines, 0);
     }
 
     #[test]

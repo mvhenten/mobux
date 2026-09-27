@@ -1783,7 +1783,6 @@ test("markers: a repaint with no scroll signal is placed by the line's text", as
   expect(result.markers[result.promptKey]).toBe("D;0|A");
 });
 
-// ── Swipe on the alternate screen (issue #315, stage 2) ────────────
 // A full-screen app keeps no history in tmux or the display, so a swipe
 // scrolls the app: a wheel event through tmux, which forwards it to an app
 // that tracks the mouse and enters copy-mode for one that does not. On the
@@ -1795,45 +1794,70 @@ const ALT_INPUT_SCRIPT = require("path").join(
   "alt-screen-input.sh",
 );
 
-// Finger down the middle of the terminal: reveals what is above.
-async function swipeDown(page) {
-  const fire = (type, y) =>
-    page.evaluate(
-      ({ type, y }) => {
-        const overlay = document.getElementById("touchOverlay");
-        overlay.style.pointerEvents = "auto";
-        const r = document.getElementById("terminal").getBoundingClientRect();
-        const x = r.left + r.width / 2;
-        const top = r.top + r.height / 3;
-        const t = new Touch({
-          identifier: 1,
-          target: overlay,
-          clientX: x,
-          clientY: top + y,
-          pageX: x,
-          pageY: top + y,
-        });
-        overlay.dispatchEvent(
-          new TouchEvent(type, {
-            touches: type === "touchend" ? [] : [t],
-            changedTouches: [t],
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-      },
-      { type, y },
-    );
-  await fire("touchstart", 0);
-  for (let i = 1; i <= 10; i++) await fire("touchmove", i * 20);
-  await fire("touchend", 200);
+const fs = require("fs");
+
+// The client position of the middle of a terminal cell, measured from the
+// terminal box and the grid tmux was given.
+function cellPoint(page, col, row) {
+  return page.evaluate(
+    ({ col, row }) => {
+      const r = document.getElementById("terminal").getBoundingClientRect();
+      const t = window.__mobuxView.test;
+      return {
+        x: r.left + ((col + 0.5) * r.width) / t.cols(),
+        y: r.top + ((row + 0.5) * r.height) / t.rows(),
+      };
+    },
+    { col, row },
+  );
 }
+
+function touch(page, type, x, y) {
+  return page.evaluate(
+    ({ type, x, y }) => {
+      const overlay = document.getElementById("touchOverlay");
+      overlay.style.pointerEvents = "auto";
+      const t = new Touch({
+        identifier: 1,
+        target: overlay,
+        clientX: x,
+        clientY: y,
+        pageX: x + window.scrollX,
+        pageY: y + window.scrollY,
+      });
+      overlay.dispatchEvent(
+        new TouchEvent(type, {
+          touches: type === "touchend" ? [] : [t],
+          changedTouches: [t],
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    { type, x, y },
+  );
+}
+
+// Finger down from a cell: reveals what is above.
+async function swipeDown(page, from = { col: 2, row: 2 }) {
+  const { x, y } = await cellPoint(page, from.col, from.row);
+  await touch(page, "touchstart", x, y);
+  for (let i = 1; i <= 10; i++) await touch(page, "touchmove", x, y + i * 20);
+  await touch(page, "touchend", x, y + 200);
+}
+
+const paneFlag = (flag) =>
+  tmux(`display -p -t ${SESSION} '#{${flag}}'`).toString().trim();
+
+const wheelEvents = (out) =>
+  [...fs.readFileSync(out, "utf8").matchAll(/\x1b\[<(\d+);(\d+);(\d+)M/g)].map(
+    (m) => m.slice(1).join(";"),
+  );
 
 async function startAltInputApp(page, mode) {
   const out = `${SANDBOX_HOME}/alt-input-${Date.now()}`;
-  require("fs").mkdirSync(SANDBOX_HOME, { recursive: true });
-  require("fs").writeFileSync(out, "");
-  await bootTerminal(page);
+  fs.mkdirSync(SANDBOX_HOME, { recursive: true });
+  fs.writeFileSync(out, "");
   tmux(
     `send-keys -t ${SESSION} "bash ${ALT_INPUT_SCRIPT} ${out} ${mode}" Enter`,
   );
@@ -1844,19 +1868,9 @@ async function startAltInputApp(page, mode) {
       { timeout: 10000 },
     )
     .toBe(true);
-  await expect
-    .poll(
-      () => page.evaluate(() => window.__mobuxView.test.wheelScrollsPane()),
-      {
-        timeout: 10000,
-      },
-    )
-    .toBe(true);
+  expect(paneFlag("alternate_on")).toBe("1");
   return out;
 }
-
-const paneFlag = (flag) =>
-  tmux(`display -p -t ${SESSION} '#{${flag}}'`).toString().trim();
 
 // The page goes first: a fling keeps sending wheel events after the swipe.
 async function stopAltInputApp(page) {
@@ -1867,20 +1881,34 @@ async function stopAltInputApp(page) {
   tmux(`send-keys -t ${SESSION} C-c`);
 }
 
-test("alt-screen swipe: an app that tracks the mouse gets wheel events and the display stays put", async ({
+const displayAtBottom = (page) =>
+  page.evaluate(() => {
+    const t = window.__mobuxView.test;
+    return t.viewportY() === t.bufferLength() - t.rows();
+  });
+
+test("alt-screen swipe: an app that tracks the mouse gets wheel events at the touched cell and the display stays put", async ({
   page,
 }) => {
+  await bootTerminal(page);
   const out = await startAltInputApp(page, "mouse");
   try {
-    expect(paneFlag("alternate_on")).toBe("1");
     const viewportBefore = await page.evaluate(() =>
       window.__mobuxView.test.viewportY(),
     );
-    await swipeDown(page);
+    // The client learns the pane's screen from the panes answer a touch asks
+    // for, so the first swipe may still scroll the display.
     await expect
-      .poll(() => require("fs").readFileSync(out, "utf8"), { timeout: 5000 })
-      .toMatch(/\x1b\[<64;\d+;\d+M/);
-    expect(require("fs").readFileSync(out, "utf8")).not.toMatch(/\x1b\[<65;/);
+      .poll(
+        async () => {
+          await swipeDown(page);
+          return wheelEvents(out).length;
+        },
+        { timeout: 10000, intervals: [1000] },
+      )
+      .toBeGreaterThan(0);
+    await page.waitForTimeout(500);
+    expect(new Set(wheelEvents(out))).toEqual(new Set(["64;3;3"]));
     expect(paneFlag("pane_in_mode")).toBe("0");
     expect(await page.evaluate(() => window.__mobuxView.test.viewportY())).toBe(
       viewportBefore,
@@ -1890,17 +1918,89 @@ test("alt-screen swipe: an app that tracks the mouse gets wheel events and the d
   }
 });
 
+test("alt-screen swipe: an answer that arrives mid-swipe hands the rest to the app and pins the display", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 300" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page))["300"], {
+      timeout: 10000,
+    })
+    .toBe(1);
+  const held = [];
+  const isPanes = (url) => new URL(url).pathname.endsWith("/panes");
+  let holding = true;
+  await page.route(isPanes, (route) =>
+    holding ? held.push(route) : route.continue(),
+  );
+  const out = await startAltInputApp(page, "mouse");
+  try {
+    const { x, y } = await cellPoint(page, 2, 2);
+    await touch(page, "touchstart", x, y);
+    for (let i = 1; i <= 5; i++) await touch(page, "touchmove", x, y + i * 20);
+    expect(await displayAtBottom(page), "the swipe starts on the display").toBe(
+      false,
+    );
+
+    holding = false;
+    for (const route of held) await route.continue();
+    await page.waitForTimeout(500);
+    for (let i = 6; i <= 12; i++) await touch(page, "touchmove", x, y + i * 20);
+    await touch(page, "touchend", x, y + 240);
+
+    await expect.poll(() => wheelEvents(out).length).toBeGreaterThan(0);
+    expect(new Set(wheelEvents(out))).toEqual(new Set(["64;3;3"]));
+    expect(await displayAtBottom(page)).toBe(true);
+  } finally {
+    await stopAltInputApp(page);
+  }
+});
+
+test("alt-screen swipe: with the status line on top a swipe from the top row reaches the app", async ({
+  page,
+}) => {
+  tmux(`set-option -t ${SESSION} status-position top`);
+  try {
+    await bootTerminal(page);
+    const out = await startAltInputApp(page, "mouse");
+    try {
+      await expect
+        .poll(
+          async () => {
+            await swipeDown(page, { col: 2, row: 0 });
+            return wheelEvents(out).length;
+          },
+          { timeout: 10000, intervals: [1000] },
+        )
+        .toBeGreaterThan(0);
+      expect(wheelEvents(out)[0]).toBe("64;3;1");
+    } finally {
+      await stopAltInputApp(page);
+    }
+  } finally {
+    tmux(`set-option -u -t ${SESSION} status-position`);
+  }
+});
+
 test("alt-screen swipe: an app that ignores the mouse scrolls in tmux copy-mode", async ({
   page,
 }) => {
+  await bootTerminal(page);
   const out = await startAltInputApp(page, "plain");
   try {
     expect(paneFlag("pane_in_mode")).toBe("0");
-    await swipeDown(page);
     await expect
-      .poll(() => paneFlag("pane_in_mode"), { timeout: 5000 })
+      .poll(
+        async () => {
+          await swipeDown(page);
+          return paneFlag("pane_in_mode");
+        },
+        { timeout: 10000, intervals: [1000] },
+      )
       .toBe("1");
-    expect(require("fs").readFileSync(out, "utf8")).toBe("");
+    expect(fs.readFileSync(out, "utf8")).toBe("");
   } finally {
     await stopAltInputApp(page);
   }
