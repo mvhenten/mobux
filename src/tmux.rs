@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -917,37 +917,309 @@ pub async fn install_bell_hook(port: u16, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Capture the scrollback history of the active pane in a session.
-/// Returns the content with ANSI escape sequences preserved.
-pub async fn capture_history(session: &str, lines: i32, target: Option<&str>) -> Result<String> {
-    let start = format!("-{}", lines);
-    let output = tmux_command(
-        target,
-        &[
-            "capture-pane",
-            "-p", // print to stdout
-            "-e", // include escape sequences (colors)
-            "-S",
-            &start, // start N lines back
-            "-t",
-            session,
-        ],
-    )
-    .output()
-    .await
-    .context("failed to execute tmux capture-pane")?;
+/// What `capture_history` returns: the history and the visible screen, or
+/// the history above the visible screen only, one line per logical line
+/// (wrapped rows joined).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryScope {
+    #[default]
+    All,
+    History,
+}
 
+fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "capture-pane",
+        "-p", // print to stdout
+        "-e", // include escape sequences (colors)
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    if scope == HistoryScope::History {
+        args.push("-J".into()); // join wrapped rows into their line
+    }
+    args.push("-S".into());
+    args.push(format!("-{}", lines)); // start N lines back
+    if scope == HistoryScope::History {
+        args.push("-E".into());
+        args.push("-1".into()); // end on the last history line
+    }
+    args.push("-t".into());
+    args.push(session.into());
+    args
+}
+
+/// A capture that starts below the top of the history can start inside a
+/// wrapped line; that partial first line is dropped.
+fn drop_partial_first_line(text: String, truncated: bool) -> String {
+    if !truncated {
+        return text;
+    }
+    match text.find('\n') {
+        Some(i) => text[i + 1..].to_string(),
+        None => String::new(),
+    }
+}
+
+/// The last history row and the first screen row, joined when the one wraps
+/// into the other.
+fn straddle_args(session: &str) -> Vec<String> {
+    [
+        "capture-pane",
+        "-p",
+        "-J",
+        "-S",
+        "-1",
+        "-E",
+        "0",
+        "-t",
+        session,
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect()
+}
+
+fn joins_into_screen(out: &str) -> bool {
+    out.lines().count() == 1
+}
+
+async fn capture(args: &[String], target: Option<&str>) -> Result<String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = tmux_command(target, &args)
+        .output()
+        .await
+        .context("failed to execute tmux capture-pane")?;
     if !output.status.success() {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(anyhow!("tmux capture-pane failed: {}", msg));
     }
-
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// A capture, and for `HistoryScope::History` whether its last line carries
+/// on into the first row of the visible screen (a wrapped line straddling
+/// the top of the screen, captured only up to there).
+pub struct HistoryCapture {
+    pub text: String,
+    pub continues: bool,
+}
+
+/// Capture the scrollback history of the active pane in a session.
+/// Returns the content with ANSI escape sequences preserved.
+pub async fn capture_history(
+    session: &str,
+    lines: u32,
+    scope: HistoryScope,
+    target: Option<&str>,
+) -> Result<HistoryCapture> {
+    if scope == HistoryScope::All {
+        let text = capture(&capture_history_args(session, lines, scope), target).await?;
+        return Ok(HistoryCapture {
+            text,
+            continues: false,
+        });
+    }
+    let delim = format!(
+        "mobux-history-end-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    );
+    let out = capture(&history_capture_args(session, lines, &delim), target).await?;
+    parse_history_capture(&out, lines, &delim)
+        .ok_or_else(|| anyhow!("tmux history capture came back unreadable"))
+}
+
+/// The history size, the history capture and the straddle check as one
+/// tmux invocation, so all three describe the same moment; `delim` is
+/// printed between the capture and the straddle check.
+fn history_capture_args(session: &str, lines: u32, delim: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "display-message",
+        "-p",
+        "-t",
+        session,
+        "#{history_size}",
+        ";",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    args.extend(capture_history_args(session, lines, HistoryScope::History));
+    args.extend([";", "display-message", "-p", delim, ";"].map(String::from));
+    args.extend(straddle_args(session));
+    args
+}
+
+fn parse_history_capture(out: &str, lines: u32, delim: &str) -> Option<HistoryCapture> {
+    let (size, rest) = out.split_once('\n')?;
+    let size: u32 = size.trim().parse().ok()?;
+    let marker = format!("{}\n", delim);
+    let at = rest.rfind(&marker)?;
+    if at > 0 && !rest[..at].ends_with('\n') {
+        return None;
+    }
+    // `-E -1` on an empty history still prints the first visible line.
+    if size == 0 {
+        return Some(HistoryCapture {
+            text: String::new(),
+            continues: false,
+        });
+    }
+    Some(HistoryCapture {
+        text: drop_partial_first_line(rest[..at].to_string(), lines < size),
+        continues: joins_into_screen(&rest[at + marker.len()..]),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_history_args_default_scope_includes_the_screen() {
+        assert_eq!(
+            capture_history_args("main", 10000, HistoryScope::All),
+            vec!["capture-pane", "-p", "-e", "-S", "-10000", "-t", "main"]
+        );
+    }
+
+    #[test]
+    fn capture_history_args_history_scope_joins_lines_above_the_screen() {
+        assert_eq!(
+            capture_history_args("main", 500, HistoryScope::History),
+            vec![
+                "capture-pane",
+                "-p",
+                "-e",
+                "-J",
+                "-S",
+                "-500",
+                "-E",
+                "-1",
+                "-t",
+                "main"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_straddling_the_screen_top_joins_into_one() {
+        assert_eq!(
+            straddle_args("main"),
+            vec![
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-1",
+                "-E",
+                "0",
+                "-t",
+                "main"
+            ]
+        );
+        assert!(joins_into_screen("a wrapped line and its rest\n"));
+        assert!(!joins_into_screen("last history line\nfirst screen row\n"));
+    }
+
+    #[test]
+    fn history_capture_chains_size_capture_and_straddle_check() {
+        let args = history_capture_args("main", 500, "end-marker");
+        assert_eq!(
+            args,
+            vec![
+                "display-message",
+                "-p",
+                "-t",
+                "main",
+                "#{history_size}",
+                ";",
+                "capture-pane",
+                "-p",
+                "-e",
+                "-J",
+                "-S",
+                "-500",
+                "-E",
+                "-1",
+                "-t",
+                "main",
+                ";",
+                "display-message",
+                "-p",
+                "end-marker",
+                ";",
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-1",
+                "-E",
+                "0",
+                "-t",
+                "main"
+            ]
+        );
+    }
+
+    #[test]
+    fn history_capture_output_parses_into_text_and_straddle() {
+        let whole = parse_history_capture(
+            "3\na\nb\nc\nend-marker\nc and its rest\n",
+            500,
+            "end-marker",
+        )
+        .unwrap();
+        assert_eq!(whole.text, "a\nb\nc\n");
+        assert!(whole.continues);
+
+        let truncated = parse_history_capture(
+            "900\ntail of a wrap\nx\nend-marker\nx\nrow0\n",
+            2,
+            "end-marker",
+        )
+        .unwrap();
+        assert_eq!(truncated.text, "x\n");
+        assert!(!truncated.continues);
+
+        let empty =
+            parse_history_capture("0\nrow0\nend-marker\nrow0\nrow1\n", 500, "end-marker").unwrap();
+        assert_eq!(empty.text, "");
+        assert!(!empty.continues);
+
+        assert!(parse_history_capture("x\nend-marker\n", 500, "end-marker").is_none());
+        assert!(parse_history_capture("3\nno marker\n", 500, "end-marker").is_none());
+    }
+
+    #[test]
+    fn a_truncated_capture_drops_its_partial_first_line() {
+        assert_eq!(
+            drop_partial_first_line("tail of a wrap\nwhole\n".into(), true),
+            "whole\n"
+        );
+        assert_eq!(
+            drop_partial_first_line("first\nwhole\n".into(), false),
+            "first\nwhole\n"
+        );
+        assert_eq!(drop_partial_first_line("only".into(), true), "");
+    }
+
+    #[test]
+    fn history_scope_parses_from_the_query_value() {
+        let q: HistoryQuery = serde_json::from_str(r#"{"scope":"history"}"#).unwrap();
+        assert_eq!(q.scope, Some(HistoryScope::History));
+        assert!(serde_json::from_str::<HistoryQuery>(r#"{"scope":"bogus"}"#).is_err());
+    }
+
+    #[derive(Deserialize)]
+    struct HistoryQuery {
+        scope: Option<HistoryScope>,
+    }
 
     #[test]
     fn no_server_error_matches_known_tmux_phrasings() {

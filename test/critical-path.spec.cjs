@@ -864,6 +864,9 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
   // viewport (innerHeight shrinks, dvh shrinks, window resize fires).
   const { width } = page.viewportSize();
   const KEYBOARD_UP_HEIGHT = 445;
+  const redrawsBefore = await page.evaluate(() =>
+    window.__mobuxView.test.fullRedrawCount(),
+  );
   await page.setViewportSize({ width, height: KEYBOARD_UP_HEIGHT });
 
   // Let the reflow + PTY resize round-trip land, then read the geometry.
@@ -934,6 +937,16 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
     geo.markerBottom,
     `last output row (bottom ${geo.markerBottom}) must sit above the input bar (top ${geo.barTop}); screenshot: ${screenshotPath}`,
   ).toBeLessThanOrEqual(geo.barTop + 2);
+
+  // Only the row count changed: the display repaints its screen and keeps
+  // its history rows. sterk's resize keeps its old line count, so a sterk
+  // display is still redrawn whole.
+  if (testInfo.project.name === "xterm") {
+    expect(
+      await page.evaluate(() => window.__mobuxView.test.fullRedrawCount()),
+      "a keyboard opening must not redraw history",
+    ).toBe(redrawsBefore);
+  }
 
   assertNoFailures(captured);
 });
@@ -1150,4 +1163,606 @@ test("base: under a path prefix every URL moves with it", async ({ page }) => {
   expect(resolved.base).toBe(`${origin}${prefix}/`);
   expect(resolved.api).toBe(`${origin}${prefix}/api/telemetry`);
   expect(resolved.ws).toBe(`${origin.replace(/^http/, "ws")}${prefix}/ws/dev`);
+});
+
+// ── One buffer, one copy (issue #315) ──────────────────────────────
+// The display draws the engine's buffer: tmux history above the screen,
+// then the screen parsed from the stream. Nothing may appear twice and
+// nothing drawn on an alternate screen may land in scrollback.
+
+const ALT_SCRIPT = require("path").join(
+  __dirname,
+  "assets",
+  "alt-screen-repaint.sh",
+);
+
+function terminalLines(page) {
+  return page.evaluate(() => {
+    const t = window.__mobuxView.test;
+    const lines = [];
+    for (let y = 0; y < t.bufferLength(); y++) lines.push(t.lineText(y) || "");
+    return lines;
+  });
+}
+
+function readerLines(page) {
+  return page.evaluate(() =>
+    Array.from(
+      document.querySelectorAll("#reader .rb-line, #reader .rb-codeline"),
+    ).map((el) =>
+      Array.from(el.childNodes)
+        .filter((n) => !(n.classList && n.classList.contains("rb-speaker")))
+        .map((n) => n.textContent)
+        .join(""),
+    ),
+  );
+}
+
+// Lines that are a bare number, counted: { "1": 1, "2": 1, … }.
+function numberCounts(lines) {
+  const counts = {};
+  for (const line of lines) {
+    const m = line.replace(/ /g, " ").trim();
+    if (/^\d+$/.test(m)) counts[m] = (counts[m] || 0) + 1;
+  }
+  return counts;
+}
+
+function expectedCounts(from, to) {
+  const counts = {};
+  for (let i = from; i <= to; i++) counts[String(i)] = 1;
+  return counts;
+}
+
+const altLines = (lines) =>
+  lines.filter((l) => /^alt-line-\d+$/.test(l.replace(/ /g, " ").trim()));
+
+async function runAltScript(page) {
+  const rows = await page.evaluate(() => window.__mobuxView.test.rows());
+  expect(rows, "the pane must be shorter than one 60-line paint").toBeLessThan(
+    60,
+  );
+  tmux(`send-keys -t ${SESSION} "bash ${ALT_SCRIPT}" Enter`);
+  await expect
+    .poll(
+      async () =>
+        (await terminalLines(page)).some((l) => l.trim() === "ALT-DONE"),
+      { timeout: 15000 },
+    )
+    .toBe(true);
+}
+
+test("one copy: an alternate-screen app leaves none of its lines in scrollback", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  await runAltScript(page);
+  await page.waitForTimeout(1000);
+  expect(altLines(await terminalLines(page))).toEqual([]);
+});
+
+test("one copy: seq 1 500 shows each line exactly once once output goes quiet", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 500" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 500));
+
+  await page.evaluate(() => window.__mobuxView.send("seq 501 800\r"));
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 800));
+});
+
+test("one copy: a tmux command via /command keeps a single copy of history", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 500" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 500));
+
+  await page.evaluate(() =>
+    document.querySelector('#cmdPickList [data-cmd="next-pane"]').click(),
+  );
+  await page.waitForTimeout(1500);
+  expect(numberCounts(await terminalLines(page))).toEqual(
+    expectedCounts(1, 500),
+  );
+});
+
+test("one copy: the reader shows no alternate-screen lines and each number once", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 500" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await runAltScript(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page)), {
+      timeout: 10000,
+    })
+    .toEqual(expectedCounts(1, 500));
+
+  await page.evaluate(() => window.__mobuxView.swap("reader"));
+  await page.waitForFunction(
+    () => {
+      const r = document.getElementById("reader");
+      return r && !r.classList.contains("hidden");
+    },
+    { timeout: 4000 },
+  );
+  await expect
+    .poll(async () => numberCounts(await readerLines(page)), { timeout: 10000 })
+    .toEqual(expectedCounts(1, 500));
+  expect(altLines(await readerLines(page))).toEqual([]);
+});
+
+test("one copy: history catches up while output keeps flowing", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  const rows = await page.evaluate(() => window.__mobuxView.test.rows());
+  tmux(
+    `send-keys -t ${SESSION} "for i in \\$(seq 1 400); do echo flow-\\$i; sleep 0.05; done" Enter`,
+  );
+  // Output never pauses for 400ms, so only the maximum wait brings the
+  // scrolled-off lines into scrollback before the loop ends (~20s).
+  await expect
+    .poll(
+      async () => {
+        const lines = await terminalLines(page);
+        const scrollback = lines.slice(0, lines.length - rows);
+        return scrollback.some((l) => l.trim() === "flow-1");
+      },
+      { timeout: 8000 },
+    )
+    .toBe(true);
+  tmux(`send-keys -t ${SESSION} C-c`);
+});
+
+// alignHistory / normalizeCapture / line keys, run in the page against the
+// served modules.
+async function inPage(page, fn) {
+  await bootTerminal(page);
+  return page.evaluate(
+    async ({ body }) => {
+      const m = await import("/static/terminal-buffer.js");
+      const r = await import("/static/terminal-redraw.js");
+      return new Function("m", "r", body)(m, r);
+    },
+    { body: `return (${fn})(m, r);` },
+  );
+}
+
+// tmux keeps appending until the history reaches its limit, then drops a
+// tenth of the limit off the top (grid_collect_history): at a limit of 100,
+// 99 lines plus 6 new ones leaves lines 11..105.
+test("history sync: lines tmux drops off the top keep the rest in place", async ({
+  page,
+}) => {
+  const result = await inPage(page, (m) => {
+    const range = (a, b) =>
+      Array.from({ length: b - a + 1 }, (_, i) => `line ${a + i}`);
+    const held = range(1, 99);
+    return {
+      grown: m.alignHistory(held.slice(0, 93), held),
+      dropped: m.alignHistory(held, range(11, 105)),
+      paneGrew: m.alignHistory(held, range(1, 90)),
+      cleared: m.alignHistory(held, ["$ "]),
+    };
+  });
+  expect(result.grown).toEqual({ drop: 0, keep: 93, extended: false });
+  expect(result.dropped).toEqual({ drop: 10, keep: 89, extended: false });
+  expect(result.paneGrew).toEqual({ drop: 0, keep: 90, extended: false });
+  expect(result.cleared).toBeNull();
+});
+
+test("history sync: repeating output keeps every line and never guesses a tail", async ({
+  page,
+}) => {
+  const result = await inPage(page, async (m) => {
+    const buffer = m.createTerminalBuffer({
+      cols: 20,
+      rows: 5,
+      scrollback: 1000,
+    });
+    const ys = (n) => Array.from({ length: n }, () => "y");
+    await buffer.syncWhole(["$ yes", ...ys(79)], false);
+    // tmux has since dropped "$ yes" off its top and added eleven lines.
+    await buffer.syncWhole(ys(90), false);
+    const lines = [];
+    for (let i = 0; i < buffer.historyRowCount(); i++) {
+      lines.push(buffer.historyRow(i).translateToString(true));
+    }
+    const tail = await buffer.syncTail(ys(40), false, 10);
+    buffer.dispose();
+    return { lines, tail };
+  });
+  expect(result.lines).toEqual([
+    "$ yes",
+    ...Array.from({ length: 90 }, () => "y"),
+  ]);
+  expect(result.tail).toBeNull();
+});
+
+test("history sync: coloured capture lines compare equal wherever the capture starts", async ({
+  page,
+}) => {
+  const result = await inPage(page, (m) => {
+    // capture-pane -e output: the background set on "bg4" carries into the
+    // next lines until "plain7" switches it off.
+    const whole = [
+      "\x1b[31mred1\x1b[39m",
+      "\x1b[31mred2\x1b[39m",
+      "\x1b[1m\x1b[31m\x1b[44mbold3\x1b[0m",
+      "\x1b[44mbg4",
+      "carried5",
+      "more6",
+      "\x1b[49mplain7",
+    ];
+    // The same lines captured after tmux dropped the first four: tmux states
+    // the style the first line starts in.
+    const next = ["\x1b[44mcarried5", "more6", "\x1b[49mplain7", "next8"];
+    const held = m.normalizeCapture(whole);
+    const captured = m.normalizeCapture(next);
+    return { held, captured, aligned: m.alignHistory(held, captured) };
+  });
+  expect(result.held[1]).toBe("\x1b[0;31mred2");
+  expect(result.held[4]).toBe("\x1b[0;44mcarried5");
+  expect(result.held[6]).toBe("plain7");
+  expect(result.captured.slice(0, 3)).toEqual(result.held.slice(4, 7));
+  expect(result.aligned).toEqual({ drop: 4, keep: 3, extended: false });
+});
+
+// capture-pane -J gives one history line per logical line; a line wrapped
+// on screen and the same line in history get one key, and every display
+// row maps back to it — joined by a display that keeps wrapped rows, one
+// key on its first row otherwise.
+test("line keys: a wrapped line is one line on the screen, in history and on both displays", async ({
+  page,
+}) => {
+  const result = await inPage(page, async (m, r) => {
+    const make = async (keepsWrappedRows) => {
+      const display = new window.XtermHeadless.Terminal({
+        cols: 10,
+        rows: 4,
+        scrollback: 100,
+        allowProposedApi: true,
+      });
+      const renderer = {
+        keepsWrappedRows,
+        get cols() {
+          return display.cols;
+        },
+        get rows() {
+          return display.rows;
+        },
+        buffer: display.buffer,
+        resize: (c, rw) => display.resize(c, rw),
+        reset: () => display.reset(),
+        scrollLines: (n) => display.scrollLines(n),
+        write: (d) => new Promise((res) => display.write(d, res)),
+      };
+      const buffer = m.createTerminalBuffer({
+        cols: 10,
+        rows: 4,
+        scrollback: 100,
+      });
+      const view = r.createRedrawWriter(buffer, renderer);
+      await buffer.syncWhole(["short", "x".repeat(15), "after"], false);
+      await buffer.writeScreen(`\x1b[H${"w".repeat(15)}\r\n$ `);
+      await view.flush();
+      const keys = [];
+      for (let y = 0; y < display.buffer.active.length; y++) {
+        keys.push(view.lineKeyAt(y));
+      }
+      const wrapped = [];
+      for (let y = 0; y < display.buffer.active.length; y++) {
+        wrapped.push(display.buffer.active.getLine(y).isWrapped);
+      }
+      const cursor = buffer.cursorLineKey();
+      buffer.dispose();
+      display.dispose();
+      return { keys, wrapped, cursor };
+    };
+    return { xterm: await make(true), sterk: await make(false) };
+  });
+  // history: short(0), xxx… over two rows(1), after(2); screen: www… over
+  // two rows(3), "$ "(4), then blank rows.
+  expect(result.xterm.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
+  expect(result.xterm.wrapped.slice(0, 7)).toEqual([
+    false,
+    false,
+    true,
+    false,
+    false,
+    true,
+    false,
+  ]);
+  expect(result.sterk.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
+  expect(result.sterk.wrapped.slice(0, 7).every((w) => !w)).toBe(true);
+  expect(result.xterm.cursor).toBe(4);
+});
+
+test("history sync: a tail appends only when it overlaps the held end in one place", async ({
+  page,
+}) => {
+  const result = await inPage(page, (m) => {
+    const range = (a, b) =>
+      Array.from({ length: b - a + 1 }, (_, i) => `line ${a + i}`);
+    const held = [...range(1, 200), "$ ", ""];
+    return {
+      continues: m.alignTail(held, [...range(151, 200), "$ ", "", "new"], 10),
+      // More new lines than the tail shows: only the blank lines line up.
+      gap: m.alignTail(held, ["", ...range(1000, 1400)], 10),
+    };
+  });
+  expect(result.continues).toEqual({ overlap: 52, extended: false });
+  expect(result.gap).toBeNull();
+});
+
+// A display stand-in: a headless xterm behind the renderer interface the
+// redraw writer drives, counting full redraws.
+const FAKE_DISPLAY = `(keepsWrappedRows, cols, rows) => {
+  const display = new window.XtermHeadless.Terminal({
+    cols, rows, scrollback: 100, allowProposedApi: true,
+  });
+  const renderer = {
+    keepsWrappedRows,
+    resets: 0,
+    get cols() { return display.cols; },
+    get rows() { return display.rows; },
+    buffer: display.buffer,
+    resize: (c, r) => display.resize(c, r),
+    reset() { this.resets++; display.reset(); },
+    scrollLines: (n) => display.scrollLines(n),
+    write: (d) => new Promise((res) => display.write(d, res)),
+    text() {
+      const out = [];
+      for (let y = 0; y < display.buffer.active.length; y++) {
+        out.push(display.buffer.active.getLine(y).translateToString(true));
+      }
+      return out;
+    },
+  };
+  return renderer;
+}`;
+
+async function withDisplay(page, fn) {
+  await bootTerminal(page);
+  return page.evaluate(
+    async ({ body, fake }) => {
+      const m = await import("/static/terminal-buffer.js");
+      const r = await import("/static/terminal-redraw.js");
+      const makeDisplay = new Function(`return (${fake})`)();
+      return new Function("m", "r", "makeDisplay", body)(m, r, makeDisplay);
+    },
+    { body: `return (${fn})(m, r, makeDisplay);`, fake: FAKE_DISPLAY },
+  );
+}
+
+// A long line whose top rows have scrolled into history while the rest is
+// still on screen: capture-pane -J gives it only up to the screen, and the
+// endpoint says it continues. When it has scrolled off, the next capture
+// has it whole.
+test("history sync: a line straddling the screen top keeps its key and grows in place", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay) => {
+    const renderer = makeDisplay(true, 10, 4);
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const view = r.createRedrawWriter(buffer, renderer);
+    const long = "L".repeat(10) + "M".repeat(10) + "N".repeat(5);
+    await buffer.writeScreen(`\x1b[?1049h\x1b[H${long.slice(10)}\r\nprompt`);
+    await buffer.syncWhole(["one", "two", long.slice(0, 10)], true);
+    await view.flush();
+    const straddleKey = buffer.screenKeyBase();
+    const resetsBefore = renderer.resets;
+    // The pane scrolled: the long line and "three" left the screen.
+    await buffer.writeScreen("\x1b[2J\x1b[Hprompt");
+    const moved = await buffer.syncTail(
+      ["one", "two", long, "three"],
+      false,
+      2,
+    );
+    await view.flush();
+    const rows = renderer.text();
+    const out = {
+      straddleKey,
+      moved,
+      resets: renderer.resets - resetsBefore,
+      historyStart: buffer.historyStart(),
+      rows: rows.slice(0, 7),
+      keys: [0, 1, 2, 3, 4, 5, 6].map((y) => view.lineKeyAt(y)),
+      promptKey: buffer.cursorLineKey(),
+    };
+    buffer.dispose();
+    return out;
+  });
+  expect(result.straddleKey).toBe(2);
+  expect(result.moved).toMatchObject({
+    replaced: false,
+    before: 3,
+    after: 4,
+  });
+  expect(result.resets).toBe(0);
+  expect(result.historyStart).toBe(0);
+  expect(result.rows).toEqual([
+    "one",
+    "two",
+    "LLLLLLLLLL",
+    "MMMMMMMMMM",
+    "NNNNN",
+    "three",
+    "prompt",
+  ]);
+  expect(result.keys).toEqual([0, 1, 2, null, null, 3, 4]);
+  expect(result.promptKey).toBe(4);
+});
+
+// At a narrow width a long history line takes several display rows; the
+// history is capped by those rows so the display never trims its own top.
+test("history sync: history is capped by display rows at a narrow width", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay) => {
+    const renderer = makeDisplay(true, 10, 4);
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const view = r.createRedrawWriter(buffer, renderer);
+    const lines = Array.from(
+      { length: 40 },
+      (_, i) => `${String(i).padStart(2, "0")}${"x".repeat(23)}`,
+    );
+    await buffer.syncWhole(lines, false);
+    await view.flush();
+    const out = {
+      held: buffer.historyRowCount(),
+      start: buffer.historyStart(),
+      displayRows: renderer.buffer.active.length,
+      firstKey: view.lineKeyAt(0),
+      firstRow: renderer.text()[0],
+    };
+    buffer.dispose();
+    return out;
+  });
+  // 25 cells take three rows at 10 columns: 40 lines are 120 rows, past the
+  // 90-row budget (100 minus the screen's 10), so history is cut to 20
+  // lines (60 rows).
+  expect(result.held).toBe(20);
+  expect(result.start).toBe(20);
+  expect(result.displayRows).toBeLessThanOrEqual(100 + 4);
+  expect(result.firstKey).toBe(20);
+  expect(result.firstRow).toBe("20xxxxxxxx");
+});
+
+// The straddle holds only while screen row 0 still shows the remainder it
+// showed at the sync: once that has scrolled off, a prompt drawn before the
+// next sync keys to its own line, and keeps that key after the sync.
+test("history sync: a straddle that scrolled off before the next sync keys the prompt to its own line", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m) => {
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const long = "L".repeat(10) + "M".repeat(5);
+    await buffer.writeScreen(
+      `\x1b[?1049h\x1b[H${long.slice(10)}\r\nout1\r\nout2`,
+    );
+    await buffer.syncWhole(["one", "two", long.slice(0, 10)], true);
+    const straddling = buffer.screenKeyBase();
+    // tmux scrolls the remainder off the top and draws a prompt.
+    await buffer.writeScreen("\x1b[H\x1b[2Kout1\r\n\x1b[2Kout2\r\n\x1b[2K$ ");
+    const promptBefore = buffer.cursorLineKey();
+    await buffer.syncTail(["one", "two", long], false, 2);
+    const promptAfter = buffer.cursorLineKey();
+    buffer.dispose();
+    return { straddling, promptBefore, promptAfter };
+  });
+  // history: one(0) two(1) long(2); screen after the scroll: out1(3)
+  // out2(4) "$ "(5).
+  expect(result.straddling).toBe(2);
+  expect(result.promptBefore).toBe(5);
+  expect(result.promptAfter).toBe(5);
+});
+
+// Markers recorded while history lags the screen: a command whose output
+// scrolls 30 lines past a 6-row screen, then its D and A markers, then a
+// sync. tmux scrolls its client with a linefeed at the bottom of a region
+// above the status line — or, when it repaints instead, gives no scroll
+// signal at all and the sync places the markers by their line's text.
+async function markersAfterBurst(page, repaint) {
+  await bootTerminal(page);
+  return page.evaluate(
+    async ({ repaint }) => {
+      const m = await import("/static/terminal-buffer.js");
+      const { createMarkerBook } = await import("/static/terminal-markers.js");
+      const buffer = m.createTerminalBuffer({
+        cols: 20,
+        rows: 6,
+        scrollback: 200,
+      });
+      const book = createMarkerBook(buffer);
+      const stream = [
+        "$ run",
+        ...Array.from({ length: 30 }, (_, i) => `out ${i}`),
+      ];
+      await buffer.writeScreen("\x1b[?1049h\x1b[H$ run");
+      await buffer.syncWhole([], false);
+      book.record("C");
+      let left;
+      if (repaint) {
+        // The last four output lines and a prompt, drawn row by row.
+        left = stream.length - 4;
+        const rows = [...stream.slice(left), "$ "];
+        let out = "";
+        rows.forEach((row, r) => {
+          out += `\x1b[${r + 1};1H\x1b[2K${row}`;
+        });
+        await buffer.writeScreen(out);
+      } else {
+        await buffer.writeScreen("\x1b[1;5r\x1b[2;1H");
+        for (const line of stream.slice(1)) {
+          await buffer.writeScreen(`${line}\x1b[K\r\n`);
+        }
+        await buffer.writeScreen("\x1b[1;6r\x1b[5;1H$ ");
+        left = buffer.scrolledRows();
+      }
+      book.record("D;0");
+      book.record("A");
+      const scrolled = buffer.scrolledRows();
+      const moved = await buffer.syncWhole(stream.slice(0, left), false);
+      book.place(moved, scrolled);
+      const out = {
+        left,
+        scrolled,
+        promptKey: buffer.cursorLineKey(),
+        runKey: buffer.historyStart(),
+        markers: Object.fromEntries(book.map),
+      };
+      buffer.dispose();
+      return out;
+    },
+    { repaint },
+  );
+}
+
+test("markers: a prompt after output that scrolled lands on its own line", async ({
+  page,
+}) => {
+  const result = await markersAfterBurst(page, false);
+  expect(result.scrolled).toBeGreaterThan(20);
+  expect(result.markers[result.runKey]).toBe("C");
+  expect(result.markers[result.promptKey]).toBe("D;0|A");
+});
+
+test("markers: a repaint with no scroll signal is placed by the line's text", async ({
+  page,
+}) => {
+  const result = await markersAfterBurst(page, true);
+  expect(result.scrolled).toBe(0);
+  expect(result.markers[result.runKey]).toBe("C");
+  expect(result.markers[result.promptKey]).toBe("D;0|A");
 });

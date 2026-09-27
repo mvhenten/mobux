@@ -1185,17 +1185,40 @@ async fn api_select_pane(
     Ok(Json(json!({"ok": true})))
 }
 
+const HISTORY_MAX_LINES: u32 = 10000;
+
+#[derive(Deserialize)]
+struct SessionHistoryQuery {
+    node: Option<String>,
+    scope: Option<tmux::HistoryScope>,
+    lines: Option<u32>,
+}
+
+/// GET /api/sessions/{name}/history — the pane's tmux scrollback.
+/// `scope=history` leaves out the visible screen and returns one line per
+/// logical line, with `X-History-Continues: 1` when the last one carries on
+/// into the screen; `lines` caps how many lines back the capture starts
+/// (default and maximum 10000).
 async fn api_session_history(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(q): Query<NodeQuery>,
-) -> Result<String, AppError> {
+    Query(q): Query<SessionHistoryQuery>,
+) -> Result<(HeaderMap, String), AppError> {
     validate_session_name(&state, &name)?;
     let target = resolve_node_target(&state, q.node.as_deref()).await?;
-    let history = tmux::capture_history(&name, 10000, target.as_deref())
-        .await
-        .map_err(AppError::bad_request)?;
-    Ok(history)
+    let lines = q
+        .lines
+        .unwrap_or(HISTORY_MAX_LINES)
+        .clamp(1, HISTORY_MAX_LINES);
+    let history =
+        tmux::capture_history(&name, lines, q.scope.unwrap_or_default(), target.as_deref())
+            .await
+            .map_err(AppError::bad_request)?;
+    let mut headers = HeaderMap::new();
+    if history.continues {
+        headers.insert("x-history-continues", HeaderValue::from_static("1"));
+    }
+    Ok((headers, history.text))
 }
 
 #[derive(Deserialize)]

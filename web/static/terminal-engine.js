@@ -2,16 +2,19 @@
 //
 // The engine owns everything that is renderer-independent: the PTY
 // WebSocket lifecycle, reconnect backoff, tmux pane tracking, tmux
-// commands, history reload, and OSC 133 marker bookkeeping. It drives a
-// renderer through the explicit interface below and never reaches into a
-// renderer's internals. The two adapters (renderer-xterm.js,
-// renderer-sterk.js) are the only code that knows which renderer is live.
+// commands, history, and OSC 133 marker bookkeeping. It owns the one text
+// buffer (terminal-buffer.js): the stream is parsed into it once, and the
+// redraw writer (terminal-redraw.js) draws it into the renderer. The two
+// adapters (renderer-xterm.js, renderer-sterk.js) are views only — the
+// engine never writes the stream into them and never reaches into their
+// internals.
 //
 // ── Renderer interface (the only crossing) ──────────────────────────────
 // An adapter is a plain object exposing:
 //
 //   R1  dispose()
 //   R2  write(data): Promise<void>            resolves once the buffer reflects data
+//                                             (only the redraw writer calls it)
 //   R3  resize(cols, rows)
 //       measure(): {cols, rows, cellWidth, cellHeight}   authoritative fit
 //       cellSize(): {width, height}
@@ -20,17 +23,16 @@
 //   R6  scrollLines(n), scrollToBottom()
 //   R7  buffer.active.{length,cursorX,cursorY,baseY,viewportY,getLine}
 //   R8  onBufferChanged(cb): Disposable       fires after a write is parsed
-//   R9  isAlternateScreenActive(): boolean
-//   R10 registerOscHandler(id, cb): Disposable
 //   R11 setTheme(theme); setFontSize(px); getFontSize()
 //   R12 getSelection(); hasSelection(); clearSelection(); selectAll();
 //       onSelectionChange(cb): Disposable    native-DOM selection (#137)
 //   R13 onLink(cb): Disposable               URL activations; UI opens them
-//   R14 onBell(cb): Disposable               terminal BEL; UI decides
 //   R15 focus(); setNativeInputEnabled(bool)
-//   R16 constructed with { altScreen: false }; the renderer suppresses
-//       alternate-screen switching (and mouse-protocol reporting) itself
-//       clear()                              (engine housekeeping)
+//   R16 reset()                              drop all content (full redraw)
+//   R17 keepsWrappedRows: boolean            autowrapped rows keep isWrapped
+//
+// Alternate-screen state (R9), OSC handlers (R10) and the bell (R14) come
+// from the buffer's screen parser, not the renderer.
 //
 // The engine exposes the surface its consumers use: EventTarget events (open,
 // close, data, panes, history, osc-detected), the connection/scroll/pane/tmux/
@@ -42,6 +44,9 @@
 import { u, wsUrl } from "./base.js";
 import { openExternal } from "./external-link.js";
 import { createTerminalDocument } from "./terminal-document.js";
+import { createTerminalBuffer, splitCapture } from "./terminal-buffer.js";
+import { createRedrawWriter } from "./terminal-redraw.js";
+import { createMarkerBook } from "./terminal-markers.js";
 import {
   findOsc133AEnd,
   scanForNextAAndCandidate,
@@ -57,6 +62,50 @@ function oscInputToString(data) {
   return typeof data === "string" ? data : oscTextDecoder.decode(data);
 }
 
+// History syncs with tmux once the stream has been quiet for
+// HISTORY_QUIET_MS, and at least every HISTORY_MAX_WAIT_MS while it flows.
+const HISTORY_QUIET_MS = 400;
+const HISTORY_MAX_WAIT_MS = 2000;
+// A catch-up fetches this many of the last history lines and needs this
+// many of them to overlap what is held; otherwise it fetches the whole
+// history (the server's maximum).
+const HISTORY_TAIL_LINES = 500;
+const HISTORY_TAIL_OVERLAP = 50;
+const HISTORY_WHOLE_LINES = 10000;
+
+// OSC 10 / 11 / 12: foreground / background / cursor colour queries.
+const COLOUR_QUERIES = {
+  10: (theme) => theme.foreground || theme.palette?.[7],
+  11: (theme) => theme.background || theme.palette?.[0],
+  12: (theme) => theme.cursor || theme.foreground || theme.palette?.[7],
+};
+
+const hex2 = (n) => n.toString(16).padStart(2, "0");
+
+// Indexed colour `n` as #rrggbb: the theme's 16, then xterm's 6×6×6 cube
+// and grey ramp.
+function paletteHex(theme, n) {
+  if (n < 16) return theme.palette?.[n];
+  if (n < 232) {
+    const level = (v) => (v === 0 ? 0 : 55 + v * 40);
+    const c = n - 16;
+    return `#${[Math.floor(c / 36), Math.floor(c / 6) % 6, c % 6]
+      .map((v) => hex2(level(v)))
+      .join("")}`;
+  }
+  if (n < 256) return `#${hex2(8 + (n - 232) * 10).repeat(3)}`;
+  return null;
+}
+
+function oscColour(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+  if (!m) return null;
+  return `rgb:${m
+    .slice(1)
+    .map((c) => c + c)
+    .join("/")}`;
+}
+
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
   "prev-window",
@@ -68,7 +117,7 @@ export class TerminalEngine extends EventTarget {
   // `node` (#176): the remote node this session lives on — every PTY/tmux
   // call carries ?node=<name> so the hub proxies it over SSH. "" ⇒ the local
   // host, exactly the pre-node behavior.
-  constructor({ session, node, host, renderer, build }) {
+  constructor({ session, node, host, renderer, build, scrollback }) {
     super();
     this.session = session;
     this.node = node || "";
@@ -94,8 +143,8 @@ export class TerminalEngine extends EventTarget {
     this._reconnectMin = 500;
     this._reconnectMax = 10000;
 
-    // OSC 133 (FinalTerm / shell-integration) markers. Recorded by absolute
-    // row for all four kinds (diagnostics, oscMarkerCount, reader command
+    // OSC 133 (FinalTerm / shell-integration) markers. Recorded by logical
+    // line (the buffer's line key) for all four kinds (diagnostics, oscMarkerCount, reader command
     // grouping — issue #219), but only `A` is trustworthy for row-sensitive
     // decisions under tmux — a passthrough envelope that carries no trailing
     // text in the same shell write (as `B` never does) can land on a cursor
@@ -105,7 +154,7 @@ export class TerminalEngine extends EventTarget {
     //
     // A row's value is the full marker payload (`"C"`, `"D;0"`, `"A"`, …),
     // not just the kind letter — the reader needs the exit code carried
-    // after `D;`. When two markers land on the same absolute row — which
+    // after `D;`. When two markers land on the same line — which
     // happens routinely, since the shell's PS1 emits `D;$?` immediately
     // followed by `A` in the same write, and a zero-output command never
     // moves the cursor between its `C` and that `D`/`A` — both are kept,
@@ -119,10 +168,9 @@ export class TerminalEngine extends EventTarget {
     // osc133-attribution.js). `_ingestPtyData` below attributes `A` instead,
     // to the row its own prompt text draws on, and calls `_recordOscMarker`
     // itself once a candidate is found. This handler still fires for `A`
-    // (the renderer's own parser is what actually finds the marker in the
-    // byte stream — robust across writes in a way a hand-rolled scanner
-    // isn't) but only uses it for `oscDetected`.
-    this.oscMarkers = new Map();
+    // (the screen parser is what actually finds the marker in the byte
+    // stream — robust across writes in a way a hand-rolled scanner isn't)
+    // but only uses it for `oscDetected`.
     this.oscDetected = false;
     // Is there a currently-open A cycle (seen the marker, no candidate row
     // committed for it yet)? See _ingestPtyData's doc comment.
@@ -130,15 +178,28 @@ export class TerminalEngine extends EventTarget {
     // Serializes _ingestPtyData calls — see that method's doc comment.
     this._ingestChain = Promise.resolve();
 
-    this._oscSub = this.renderer.registerOscHandler(133, (data) => {
+    this.buffer = createTerminalBuffer({
+      scrollback,
+      cols: this.renderer.cols,
+      rows: this.renderer.rows,
+    });
+    this.view = createRedrawWriter(this.buffer, this.renderer);
+    this.markers = createMarkerBook(this.buffer);
+    this._historyTimer = null;
+    this._historyMaxTimer = null;
+    this._historySync = null;
+    this._historyNext = null;
+    this._historyAbort = null;
+    this._historyGeneration = 0;
+    this._theme = null;
+
+    this._oscSub = this.buffer.registerOscHandler(133, (data) => {
       const kind = (data || "").charAt(0);
       if (kind !== "A" && kind !== "B" && kind !== "C" && kind !== "D") {
         return false;
       }
       if (kind !== "A") {
-        const buf = this.getActiveBuffer();
-        const absY = (buf.baseY || 0) + (buf.cursorY || 0);
-        this._recordOscMarker(absY, data);
+        this.markers.record(data);
       }
       if (!this.oscDetected) {
         this.oscDetected = true;
@@ -148,6 +209,29 @@ export class TerminalEngine extends EventTarget {
     });
 
     this._inputSub = this.renderer.onInput((d) => this.send(d));
+    this._replySub = this.buffer.onData((d) => this.send(d));
+    this._colourSubs = Object.entries(COLOUR_QUERIES).map(([id, pick]) =>
+      this.buffer.registerOscHandler(Number(id), (data) => {
+        if (data !== "?") return false;
+        const colour = this._theme && oscColour(pick(this._theme));
+        if (colour) this.send(`\x1b]${id};${colour}\x1b\\`);
+        return true;
+      }),
+    );
+    this._colourSubs.push(
+      this.buffer.registerOscHandler(4, (data) => {
+        const parts = data.split(";");
+        if (parts.length % 2 || parts.some((p, i) => i % 2 && p !== "?")) {
+          return false;
+        }
+        for (let i = 0; i < parts.length; i += 2) {
+          const colour =
+            this._theme && oscColour(paletteHex(this._theme, Number(parts[i])));
+          if (colour) this.send(`\x1b]4;${parts[i]};${colour}\x1b\\`);
+        }
+        return true;
+      }),
+    );
 
     // The read-only document contract (issue #206, D2). The reader consumes
     // this instead of reaching into the buffer, `cols`, the OSC marker map,
@@ -190,20 +274,11 @@ export class TerminalEngine extends EventTarget {
       this.refreshPanes();
       this.dispatchEvent(new Event("open"));
     };
-    this.ws.onmessage = async (ev) => {
-      let bytes;
-      if (typeof ev.data === "string") {
-        this._ingestPtyData(ev.data);
-        bytes = ev.data;
-      } else if (ev.data instanceof ArrayBuffer) {
-        const u8 = new Uint8Array(ev.data);
-        this._ingestPtyData(u8);
-        bytes = u8;
-      } else if (ev.data instanceof Blob) {
-        const u8 = new Uint8Array(await ev.data.arrayBuffer());
-        this._ingestPtyData(u8);
-        bytes = u8;
-      }
+    this.ws.onmessage = (ev) => {
+      const bytes =
+        typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data);
+      this._ingestPtyData(bytes);
+      this._scheduleHistoryTail();
       this.dispatchEvent(new CustomEvent("data", { detail: bytes }));
     };
     this.ws.onclose = () => {
@@ -271,23 +346,38 @@ export class TerminalEngine extends EventTarget {
       this.ws?.close();
     } catch (_) {}
     this.ws = null;
+    this._disposed = true;
+    clearTimeout(this._historyTimer);
+    clearTimeout(this._historyMaxTimer);
     try {
       this._oscSub?.dispose();
     } catch (_) {}
     try {
       this._inputSub?.dispose();
     } catch (_) {}
+    this._replySub.dispose();
+    for (const sub of this._colourSubs) sub.dispose();
+    this.view.dispose();
     try {
       this.renderer.dispose();
     } catch (_) {}
+    this.buffer.dispose();
   }
 
   // ── Resize ────────────────────────────────────────────────────────
   resize() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const { cols, rows } = this.renderer.measure();
-    this.renderer.resize(cols, rows);
+    this._resizeBuffer(cols, rows);
     this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+  }
+
+  _resizeBuffer(cols, rows) {
+    if (cols === this.buffer.cols && rows === this.buffer.rows) return;
+    const widthChanged = cols !== this.buffer.cols;
+    this.buffer.resize(cols, rows);
+    if (widthChanged) this.view.invalidate();
+    this.view.flush();
   }
 
   _forceRedraw() {
@@ -298,7 +388,7 @@ export class TerminalEngine extends EventTarget {
     );
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      this.renderer.resize(cols, rows);
+      this._resizeBuffer(cols, rows);
       this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }, 50);
   }
@@ -321,23 +411,27 @@ export class TerminalEngine extends EventTarget {
   scrollToBottom() {
     this.renderer.scrollToBottom();
   }
-  clear() {
-    this.renderer.clear();
+  async clear() {
+    this._historyGeneration++;
+    this._historyAbort?.abort();
+    this.markers.clear();
+    await this.buffer.clearHistory();
+    this.view.invalidate();
+    await this.view.flush();
   }
 
   get cols() {
-    return this.renderer.cols;
+    return this.buffer.cols;
   }
   get rows() {
-    return this.renderer.rows;
+    return this.buffer.rows;
   }
 
   // ── Renderer interface passthroughs ───────────────────────────────
-  // Routed through the same OSC 133 A-marker attribution pipeline as the
-  // live WS stream (_ingestPtyData) — history reload/test injection carry
-  // the same marker bytes a real prompt would, and should attribute them
-  // the same way. reloadHistory() below writes straight to the renderer
-  // instead: replayed scrollback text, never a live marker.
+  // Routed through the same screen parser and OSC 133 A-marker attribution
+  // pipeline as the live WS stream (_ingestPtyData) — test injection carries
+  // the same marker bytes a real prompt would, and should attribute them the
+  // same way. History never goes through here: it has its own parser.
   write(data) {
     return this._ingestPtyData(data);
   }
@@ -348,27 +442,33 @@ export class TerminalEngine extends EventTarget {
   // search by the next A, not B/C/D). Every PTY write funnels through here
   // (both the live WS stream and the public write() passthrough) so there
   // is exactly one attribution path regardless of entry point. Nothing is
-  // ever withheld from rendering — every byte is handed to the renderer as
-  // soon as it's available; only the bookkeeping (which row is "the"
-  // prompt row) is deferred.
+  // ever withheld from rendering — every byte is parsed into the screen as
+  // soon as it's available; only the bookkeeping (which row is "the" prompt
+  // row) is deferred.
   //
   // Chunks are processed strictly one at a time through `_ingestChain`: a
   // WS `onmessage` handler doesn't await the previous call before the next
-  // message's handler runs (fire-and-forget, for throughput), so without
-  // this queue two chunks could interleave mid-cycle and corrupt
-  // `_oscAOpen`. Queuing makes "chunk 1 fully done" a
-  // precondition for "start chunk 2".
-  // Record an OSC 133 marker on an absolute row, joining with whatever is
-  // already there rather than clobbering it — see the `oscMarkers` doc
-  // comment in the constructor for why two markers routinely share a row.
-  _recordOscMarker(absY, marker) {
-    const existing = this.oscMarkers.get(absY);
-    this.oscMarkers.set(absY, existing ? `${existing}|${marker}` : marker);
+  // message's handler runs, and the screen parser writes asynchronously, so
+  // without this queue two chunks could interleave mid-cycle and corrupt
+  // `_oscAOpen`.
+  // Markers by line key, joined with `|` where two share a line — see the
+  // `oscMarkers` doc comment in the constructor (terminal-markers.js).
+  get oscMarkers() {
+    return this.markers.map;
+  }
+
+  // The marker on the line display row `y` starts, if any.
+  oscMarkerForRow(y) {
+    const key = this.view.lineKeyAt(y);
+    return key === null ? null : this.oscMarkers.get(key) || null;
   }
 
   _ingestPtyData(raw) {
     const str = oscInputToString(raw);
-    const step = () => this._consumeChunk(str);
+    const step = async () => {
+      await this._consumeChunk(str);
+      await this.view.flush();
+    };
     this._ingestChain = this._ingestChain.then(step, step);
     return this._ingestChain;
   }
@@ -408,8 +508,7 @@ export class TerminalEngine extends EventTarget {
       // output): see the module doc comment for why waiting would let that
       // later, unrelated content overwrite an already-correct row.
       await this._writeSlice(text, cursor, candidateEnd);
-      const buf = this.getActiveBuffer();
-      this._recordOscMarker((buf.baseY || 0) + (buf.cursorY || 0), "A");
+      this.markers.record("A");
       this._oscAOpen = false;
       cursor = candidateEnd;
       if (nextAEnd !== -1) {
@@ -422,13 +521,13 @@ export class TerminalEngine extends EventTarget {
 
   _writeSlice(text, from, to) {
     if (to <= from) return Promise.resolve();
-    return this.renderer.write(text.slice(from, to));
+    return this.buffer.writeScreen(text.slice(from, to));
   }
   onBufferChanged(cb) {
     return this.renderer.onBufferChanged(cb);
   }
   isAlternateScreenActive() {
-    return this.renderer.isAlternateScreenActive();
+    return this.buffer.isAlternate();
   }
   focus() {
     this.renderer.focus();
@@ -437,6 +536,7 @@ export class TerminalEngine extends EventTarget {
     this.renderer.setNativeInputEnabled(enabled);
   }
   setTheme(theme) {
+    this._theme = theme;
     this.renderer.setTheme(theme);
   }
 
@@ -460,7 +560,7 @@ export class TerminalEngine extends EventTarget {
     return this.renderer.onLink(cb);
   }
   onBell(cb) {
-    return this.renderer.onBell(cb);
+    return this.buffer.onBell(cb);
   }
 
   setFontSize(px) {
@@ -529,20 +629,94 @@ export class TerminalEngine extends EventTarget {
   }
 
   // ── History ───────────────────────────────────────────────────────
-  async reloadHistory() {
-    try {
-      const res = await fetch(
-        u(
-          `api/sessions/${encodeURIComponent(this.session)}/history${this._nodeQuery()}`,
-        ),
+  // History is the pane's tmux history above the visible screen
+  // (scope=history). A catch-up fetches its tail and appends what is new; a
+  // reload, or a tail that cannot be placed, fetches it whole
+  // (terminal-buffer.js alignTail / alignHistory).
+  _historyUrl(lines) {
+    const q = new URLSearchParams({ scope: "history", lines: String(lines) });
+    if (this.node) q.set("node", this.node);
+    return u(
+      `api/sessions/${encodeURIComponent(this.session)}/history?${q.toString()}`,
+    );
+  }
+
+  reloadHistory() {
+    return this._requestHistory("whole");
+  }
+
+  _requestHistory(kind) {
+    if (this._historySync) {
+      if (this._historyNext !== "whole") this._historyNext = kind;
+      return this._historySync;
+    }
+    this._historySync = this._runHistorySync(kind).finally(() => {
+      this._historySync = null;
+      const next = this._historyNext;
+      this._historyNext = null;
+      if (next && !this._disposed) this._requestHistory(next);
+    });
+    return this._historySync;
+  }
+
+  async _fetchHistory(lines, signal) {
+    const res = await fetch(this._historyUrl(lines), { signal }).catch(
+      () => null,
+    );
+    if (!res || !res.ok) return null;
+    const text = await res.text().catch(() => null);
+    if (text === null) return null;
+    return {
+      lines: splitCapture(text),
+      continues: res.headers.get("x-history-continues") === "1",
+    };
+  }
+
+  async _runHistorySync(kind) {
+    clearTimeout(this._historyTimer);
+    clearTimeout(this._historyMaxTimer);
+    this._historyMaxTimer = null;
+    const generation = this._historyGeneration;
+    const abort = new AbortController();
+    this._historyAbort = abort;
+    const current = () =>
+      !this._disposed && generation === this._historyGeneration;
+
+    let moved = null;
+    let scrolled = this.buffer.scrolledRows();
+    if (kind === "tail") {
+      const tail = await this._fetchHistory(HISTORY_TAIL_LINES, abort.signal);
+      if (!tail || !current()) return;
+      moved = await this.buffer.syncTail(
+        tail.lines,
+        tail.continues,
+        HISTORY_TAIL_OVERLAP,
       );
-      if (!res.ok) return;
-      const history = await res.text();
-      if (history.trim()) {
-        this.renderer.write(history.replace(/\n/g, "\r\n"));
-        this.scrollToBottom();
-        this.dispatchEvent(new CustomEvent("history", { detail: history }));
-      }
-    } catch (_) {}
+      if (!current()) return;
+    }
+    if (!moved) {
+      scrolled = this.buffer.scrolledRows();
+      const whole = await this._fetchHistory(HISTORY_WHOLE_LINES, abort.signal);
+      if (!whole || !current()) return;
+      moved = await this.buffer.syncWhole(whole.lines, whole.continues);
+      if (!current()) return;
+    }
+    this.markers.place(moved, scrolled);
+    await this.view.flush();
+    this.dispatchEvent(new Event("history"));
+  }
+
+  _scheduleHistoryTail() {
+    clearTimeout(this._historyTimer);
+    this._historyTimer = setTimeout(
+      () => this._requestHistory("tail"),
+      HISTORY_QUIET_MS,
+    );
+    if (this._historyMaxTimer === null) {
+      this._historyMaxTimer = setTimeout(
+        () => this._requestHistory("tail"),
+        HISTORY_MAX_WAIT_MS,
+      );
+    }
   }
 }

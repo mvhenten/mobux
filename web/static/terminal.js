@@ -87,14 +87,12 @@ const quotes = [
 ];
 
 // Renderer construction options shared by both adapters. The typography
-// matches the reader's (style.css `.rb-line`); `altScreen: false` is mobux's
-// standing "no alternate screen" policy (tmux alt screen has no scrollback).
+// matches the reader's (style.css `.rb-line`).
 const RENDERER_OPTIONS = {
   fontFamily:
     "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
   fontSize: 13,
   scrollback: 10000,
-  altScreen: false,
 };
 
 // ── Terminal engine factory ─────────────────────────────────────────
@@ -217,6 +215,7 @@ export function createTerminal({
     host: termEl,
     renderer: rendererImpl,
     build,
+    scrollback: RENDERER_OPTIONS.scrollback,
   });
 
   // Apply the stored theme to all three layers. The renderer applied its boot
@@ -581,10 +580,8 @@ export function createTerminal({
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return core.write(s);
     },
-    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit) prefix.
-    // Use this in tests that care about sticky-to-bottom behaviour after
-    // incremental content growth: the alt-screen exit sequence causes sterk to
-    // reset the buffer, which races with the test's scroll-geometry probe.
+    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit) prefix,
+    // for tests that grow the same screen incrementally.
     injectLinesPlain: (n, prefix = "inject") => {
       try {
         core.ws?.close();
@@ -675,6 +672,7 @@ export function createTerminal({
       };
     },
     oscMarkerCount: () => core.oscMarkers.size,
+    fullRedrawCount: () => core.view.fullRedraws(),
   };
 
   refreshViewToggle();
