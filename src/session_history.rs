@@ -1,7 +1,7 @@
 //! Server-side conversation history (issue #220): a per-session, append-only
 //! JSONL log built by segmenting the PTY relay's byte stream on OSC 133
-//! markers as they flow — decoupled from tmux scrollback and the terminal
-//! screen model.
+//! markers as they flow — decoupled from tmux scrollback and the browser's
+//! terminal.
 //!
 //! Simpler than the browser's OSC 133 handling
 //! (`web/static/osc133-attribution.js`), which renders a live buffer and so
@@ -63,6 +63,18 @@
 //! that's still open (no `D` yet) at detach is flushed too, with
 //! `exit_code: None`, rather than silently dropped — the user's typed
 //! command and whatever output arrived are real information worth keeping.
+//!
+//! ## Full-screen apps
+//!
+//! A pane's own stream (the pipe-pane tap) also runs through a screen model
+//! (`screen_model.rs`). Bytes drawn on the normal screen are recorded as
+//! above. Text on the alternate screen is recorded from what the screen
+//! shows, once per line, at quiet time ([`Segmenter::quiet`]), on each
+//! marker, when the app leaves the alternate screen, and at detach — never
+//! from the repaint bytes, which would record the same lines on every
+//! redraw. The attach relay's client stream is tmux's own full-screen
+//! redraw, whose alternate-screen switch says nothing about the pane, so it
+//! is recorded without the model.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -73,6 +85,7 @@ use std::sync::{Arc, Mutex};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL, Engine};
 use serde::{Deserialize, Serialize};
 
+use crate::screen_model::{Drawn, ScreenModel};
 use crate::terminal_cursor::CursorModel;
 
 /// A completed command block: one shell command, its output, and how it
@@ -172,6 +185,14 @@ const RAW_FLUSH_THRESHOLD: usize = 4096;
 /// entry, command and exit code are still recorded, just truncated.
 const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 
+/// The PTY size `handle_ws` opens with, until the client's first resize.
+pub const DEFAULT_ROWS: u16 = 35;
+pub const DEFAULT_COLS: u16 = 120;
+
+/// No bytes for this long counts as quiet: the alternate screen has settled
+/// and its text is recorded (see [`Segmenter::quiet`]).
+pub const QUIET_MS: u64 = 400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Marker {
     A,
@@ -207,6 +228,7 @@ pub struct Segmenter {
     pending: Vec<u8>,
     open: Option<OpenCommand>,
     cursor: CursorModel,
+    screen: Option<ScreenModel>,
     seen_marker: bool,
 }
 
@@ -218,13 +240,79 @@ impl Default for Segmenter {
 
 impl Segmenter {
     pub fn new() -> Self {
+        Self::for_pane(DEFAULT_ROWS, DEFAULT_COLS)
+    }
+
+    /// Records a pane's own output stream, through the screen model.
+    pub fn for_pane(rows: u16, cols: u16) -> Self {
+        Self {
+            screen: Some(ScreenModel::new(rows, cols)),
+            ..Self::for_client_stream()
+        }
+    }
+
+    /// Records a tmux client's stream (the attach relay), without the
+    /// screen model — see the module doc.
+    pub fn for_client_stream() -> Self {
         Self {
             scan_buf: Vec::new(),
             pending: Vec::new(),
             open: None,
             cursor: CursorModel::new(),
+            screen: None,
             seen_marker: false,
         }
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        if let Some(screen) = self.screen.as_mut() {
+            screen.resize(rows, cols);
+        }
+    }
+
+    /// The pane was already on its alternate screen when recording began.
+    pub fn assume_alternate_screen(&mut self) {
+        if let Some(screen) = self.screen.as_mut() {
+            screen.assume_alternate_screen();
+        }
+    }
+
+    /// Alternate-screen text is waiting for [`Segmenter::quiet`].
+    pub fn wants_quiet_tick(&self) -> bool {
+        self.screen.as_ref().is_some_and(ScreenModel::is_dirty)
+    }
+
+    /// The stream went quiet: record what the alternate screen shows now.
+    pub fn quiet(&mut self, now_ms: i64) -> Vec<PendingEntry> {
+        let mut events = Vec::new();
+        self.record_snapshot(now_ms, &mut events);
+        events
+    }
+
+    /// The stream this segmenter was fed stops being a pane's own (the
+    /// pipe-pane tap ended and the client stream takes over): record what
+    /// the screen holds and carry on without the model.
+    pub fn stop_screen_model(&mut self, now_ms: i64) -> Vec<PendingEntry> {
+        let mut events = Vec::new();
+        self.drain_screen(now_ms, &mut events);
+        self.screen = None;
+        events
+    }
+
+    /// Everything still in flight at detach: the screen, then [`Segmenter::flush`].
+    pub fn finish(&mut self, now_ms: i64) -> Vec<PendingEntry> {
+        let mut events = Vec::new();
+        self.drain_screen(now_ms, &mut events);
+        events.extend(self.flush(now_ms));
+        events
+    }
+
+    fn drain_screen(&mut self, now_ms: i64, events: &mut Vec<PendingEntry>) {
+        if let Some(screen) = self.screen.as_mut() {
+            let drawn = screen.release_held();
+            self.record_drawn(drawn, now_ms, events);
+        }
+        self.record_snapshot(now_ms, events);
     }
 
     pub fn feed(&mut self, chunk: &[u8], now_ms: i64) -> Vec<PendingEntry> {
@@ -300,6 +388,50 @@ impl Segmenter {
         // anything else), even though only the row content it derives at
         // the next `C` (see `handle_marker`) is ever consumed.
         self.cursor.feed(&bytes);
+        let drawn = match self.screen.as_mut() {
+            Some(screen) => screen.feed(&bytes),
+            None => vec![Drawn::Normal(bytes)],
+        };
+        self.record_drawn(drawn, now_ms, events);
+    }
+
+    fn record_drawn(&mut self, drawn: Vec<Drawn>, now_ms: i64, events: &mut Vec<PendingEntry>) {
+        for piece in drawn {
+            match piece {
+                Drawn::Normal(bytes) => self.record_bytes(&bytes, now_ms, events),
+                Drawn::Lines(lines) => self.record_lines(lines, now_ms, events),
+            }
+        }
+    }
+
+    fn record_snapshot(&mut self, now_ms: i64, events: &mut Vec<PendingEntry>) {
+        if let Some(lines) = self.screen.as_mut().and_then(ScreenModel::snapshot) {
+            self.record_lines(lines, now_ms, events);
+        }
+    }
+
+    /// Alternate-screen lines join an open command's output, or else land
+    /// as a raw entry straight away: they were already settled on screen.
+    fn record_lines(&mut self, lines: Vec<String>, now_ms: i64, events: &mut Vec<PendingEntry>) {
+        let text: String = lines.iter().map(|line| format!("{line}\r\n")).collect();
+        if let Some(open) = &mut self.open {
+            let room = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(open.output.len());
+            let take = floor_char_boundary(&text, room);
+            open.output.extend_from_slice(&text.as_bytes()[..take]);
+            return;
+        }
+        if !self.seen_marker && !self.pending.is_empty() {
+            let raw = String::from_utf8_lossy(&self.pending).into_owned();
+            self.pending.clear();
+            events.push(PendingEntry::Raw { raw, ts: now_ms });
+        }
+        events.push(PendingEntry::Raw {
+            raw: text,
+            ts: now_ms,
+        });
+    }
+
+    fn record_bytes(&mut self, bytes: &[u8], now_ms: i64, events: &mut Vec<PendingEntry>) {
         if let Some(open) = &mut self.open {
             if open.output.len() < MAX_COMMAND_OUTPUT_BYTES {
                 let room = MAX_COMMAND_OUTPUT_BYTES - open.output.len();
@@ -308,7 +440,7 @@ impl Segmenter {
             }
             return;
         }
-        self.pending.extend_from_slice(&bytes);
+        self.pending.extend_from_slice(bytes);
         while self.pending.len() >= RAW_FLUSH_THRESHOLD {
             let chunk: Vec<u8> = self.pending.drain(0..RAW_FLUSH_THRESHOLD).collect();
             events.push(PendingEntry::Raw {
@@ -319,6 +451,7 @@ impl Segmenter {
     }
 
     fn handle_marker(&mut self, marker: Marker, now_ms: i64, events: &mut Vec<PendingEntry>) {
+        self.record_snapshot(now_ms, events);
         self.seen_marker = true;
         match marker {
             Marker::C => {
@@ -359,6 +492,16 @@ impl Segmenter {
             }
         }
     }
+}
+
+fn floor_char_boundary(text: &str, max: usize) -> usize {
+    if max >= text.len() {
+        return text.len();
+    }
+    (0..=max)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0)
 }
 
 enum MarkerMatch {
@@ -1255,7 +1398,7 @@ mod tests {
         let repaint_burst = "\x1b[?1049h\x1b[?1h\x1b=\x1b[H\x1b[2J\x1b[?25h\r\n\
              Welcome to Ubuntu — motd banner line one\r\n\
              Last login: Tue Jul 21 07:00:00 2026\r\n";
-        let mut seg = Segmenter::new();
+        let mut seg = Segmenter::for_client_stream();
         let events = feed_str(
             &mut seg,
             &format!(
@@ -1276,6 +1419,56 @@ mod tests {
         assert_eq!(command, "mvhenten@sandbox:~$ echo hello");
         assert_eq!(output, "hello\r\n");
         assert_eq!(*exit_code, Some(0));
+    }
+
+    #[test]
+    fn a_full_screen_repaint_is_recorded_once_not_once_per_repaint() {
+        // A full-screen app on the pane's alternate screen repaints the same
+        // screen over and over (issue #315). Each repaint's bytes used to be
+        // appended to the command's output, so every line landed once per
+        // repaint.
+        let repaint_burst = "\x1b[?1049h\x1b[?1h\x1b=\x1b[H\x1b[2J\x1b[?25h\r\n\
+             Welcome to Ubuntu — motd banner line one\r\n\
+             Last login: Tue Jul 21 07:00:00 2026\r\n";
+        let mut seg = Segmenter::new();
+        let mut events = feed_str(&mut seg, "app\r\n\x1b]133;C\x07", 1);
+        for _ in 0..3 {
+            events.extend(feed_str(&mut seg, repaint_burst, 2));
+        }
+        events.extend(feed_str(
+            &mut seg,
+            "\x1b[?1049l\x1b]133;D;0\x07\x1b]133;A\x07",
+            3,
+        ));
+        assert_eq!(events.len(), 1, "{events:?}");
+        let PendingEntry::Command { output, .. } = &events[0] else {
+            panic!("expected a command entry, got {events:?}");
+        };
+        assert_eq!(output.matches("Welcome to Ubuntu").count(), 1, "{output:?}");
+        assert_eq!(output.matches("Last login").count(), 1, "{output:?}");
+    }
+
+    #[test]
+    fn alternate_screen_text_with_no_command_open_lands_at_quiet_time() {
+        let mut seg = Segmenter::new();
+        seg.assume_alternate_screen();
+        let events = feed_str(&mut seg, "\x1b[H\x1b[2Jrow one\r\nrow two", 1);
+        assert!(events.is_empty(), "{events:?}");
+        assert!(seg.wants_quiet_tick());
+        let quiet = seg.quiet(2);
+        assert_eq!(
+            quiet,
+            vec![PendingEntry::Raw {
+                raw: "row one\r\nrow two\r\n".to_string(),
+                ts: 2
+            }]
+        );
+        assert!(!seg.wants_quiet_tick());
+        feed_str(&mut seg, "\x1b[H\x1b[2Jrow one\r\nrow two", 3);
+        assert!(
+            seg.quiet(4).is_empty(),
+            "a repaint of the same screen adds nothing"
+        );
     }
 
     #[test]

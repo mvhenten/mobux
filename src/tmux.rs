@@ -120,6 +120,24 @@ pub async fn active_pane_id(tmux_bin: &str, session: &str) -> Option<String> {
     parse_pane_id(&output.stdout)
 }
 
+/// Whether `session`'s active pane is on its alternate screen right now. A
+/// history tap that starts while a full-screen app is already running never
+/// sees that app's `?1049h`, so the recorder asks. `false` on any failure.
+pub async fn pane_alternate_on(tmux_bin: &str, session: &str) -> bool {
+    let Some((program, args)) = tmux_program_and_args(tmux_bin) else {
+        return false;
+    };
+    let Ok(output) = Command::new(program)
+        .args(&args)
+        .args(["display-message", "-p", "-t", session, "#{alternate_on}"])
+        .output()
+        .await
+    else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1"
+}
+
 /// True while `tapped_pane` is still the pane a just-refreshed
 /// [`active_pane_id`] query names. A failed query (`current: None`) is
 /// inconclusive rather than a mismatch, so a transient tmux error never

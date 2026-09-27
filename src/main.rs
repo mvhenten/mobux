@@ -51,6 +51,7 @@ mod local_tts;
 mod nodes;
 mod push;
 mod release_asset;
+mod screen_model;
 mod service;
 mod session_history;
 mod shell_integration;
@@ -2475,14 +2476,12 @@ async fn handle_ws(
     // in the PTY-read branch below, so the slot the departing feeder frees is
     // picked up by whoever is still attached.
     let mut feeder_guard = session_history.try_acquire_feeder(&session_name);
-    let mut segmenter = feeder_guard
-        .as_ref()
-        .map(|_| session_history::Segmenter::new());
+    let mut size = (session_history::DEFAULT_ROWS, session_history::DEFAULT_COLS);
 
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
-        rows: 35,
-        cols: 120,
+        rows: size.0,
+        cols: size.1,
         pixel_width: 0,
         pixel_height: 0,
     })?;
@@ -2507,6 +2506,11 @@ async fn handle_ws(
         feeder_guard.is_some(),
     )
     .await;
+    let mut segmenter = match feeder_guard {
+        Some(_) => Some(new_segmenter(&tmux_bin, &session_name, history_rx.is_some(), size).await),
+        None => None,
+    };
+    let mut quiet_at: Option<tokio::time::Instant> = None;
     // Force a real terminfo entry on the spawned PTY. The host's TERM
     // can be unset, "dumb" (non-interactive shells), or something tmux
     // doesn't have terminfo for — in any of those cases tmux's first
@@ -2564,22 +2568,26 @@ async fn handle_ws(
                     Some(chunk) => {
                         if let Some(seg) = segmenter.as_mut() {
                             let produced = seg.feed(&chunk, session_history::now_ms());
-                            if !produced.is_empty() {
-                                let history = session_history.clone();
-                                let name = session_name.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    for entry in produced {
-                                        let _ = history.append(&name, entry);
-                                    }
-                                })
-                                .await;
-                            }
+                            quiet_at = quiet_deadline(seg);
+                            record_history(&session_history, &session_name, produced).await;
                         }
                     }
                     None => {
                         history_rx = None;
                         history_tap = None;
+                        if let Some(seg) = segmenter.as_mut() {
+                            let produced = seg.stop_screen_model(session_history::now_ms());
+                            quiet_at = None;
+                            record_history(&session_history, &session_name, produced).await;
+                        }
                     }
+                }
+            }
+            _ = tokio::time::sleep_until(quiet_at.unwrap_or_else(tokio::time::Instant::now)), if quiet_at.is_some() => {
+                quiet_at = None;
+                if let Some(seg) = segmenter.as_mut() {
+                    let produced = seg.quiet(session_history::now_ms());
+                    record_history(&session_history, &session_name, produced).await;
                 }
             }
             maybe_out = rx.recv() => {
@@ -2598,12 +2606,15 @@ async fn handle_ws(
                         if feeder_guard.is_none() {
                             feeder_guard = session_history.try_acquire_feeder(&session_name);
                             if feeder_guard.is_some() {
-                                segmenter = Some(session_history::Segmenter::new());
                                 let (tap, rx) =
                                     start_history_feed(&ssh_target, &tmux_bin, &session_name, true)
                                         .await;
                                 history_tap = tap;
                                 history_rx = rx;
+                                segmenter = Some(
+                                    new_segmenter(&tmux_bin, &session_name, history_rx.is_some(), size)
+                                        .await,
+                                );
                             }
                         }
                         // The pipe-pane branch above feeds the segmenter
@@ -2612,16 +2623,8 @@ async fn handle_ws(
                         if history_rx.is_none() {
                             if let Some(seg) = segmenter.as_mut() {
                                 let produced = seg.feed(&chunk, session_history::now_ms());
-                                if !produced.is_empty() {
-                                    let history = session_history.clone();
-                                    let name = session_name.clone();
-                                    let _ = tokio::task::spawn_blocking(move || {
-                                        for entry in produced {
-                                            let _ = history.append(&name, entry);
-                                        }
-                                    })
-                                    .await;
-                                }
+                                quiet_at = quiet_deadline(seg);
+                                record_history(&session_history, &session_name, produced).await;
                             }
                         }
                         let text = String::from_utf8_lossy(&chunk).to_string();
@@ -2639,6 +2642,10 @@ async fn handle_ws(
                             Message::Text(t) => {
                                 if let Ok(rz) = serde_json::from_str::<ResizeMsg>(&t) {
                                     if rz.kind == "resize" && rz.cols > 0 && rz.rows > 0 {
+                                        size = (rz.rows, rz.cols);
+                                        if let Some(seg) = segmenter.as_mut() {
+                                            seg.resize(rz.rows, rz.cols);
+                                        }
                                         if let Ok(m) = master.lock() {
                                             let _ = m.resize(PtySize { rows: rz.rows, cols: rz.cols, pixel_width: 0, pixel_height: 0});
                                         }
@@ -2667,11 +2674,8 @@ async fn handle_ws(
     }
 
     if let Some(mut seg) = segmenter.take() {
-        if let Some(entry) = seg.flush(session_history::now_ms()) {
-            let history = session_history.clone();
-            let name = session_name.clone();
-            let _ = tokio::task::spawn_blocking(move || history.append(&name, entry)).await;
-        }
+        let produced = seg.finish(session_history::now_ms());
+        record_history(&session_history, &session_name, produced).await;
     }
 
     // `PanePipeTap::drop` stops its tmux-side target and removes its fifo —
@@ -2682,6 +2686,49 @@ async fn handle_ws(
     let _ = child.kill();
     let _ = child.wait();
     Ok(())
+}
+
+/// A segmenter for whichever stream feeds it: the pane's own (the pipe-pane
+/// tap) runs through the screen model at the client's size, the attach
+/// relay's client stream does not (see `session_history.rs`'s module doc).
+async fn new_segmenter(
+    tmux_bin: &str,
+    session_name: &str,
+    pane_stream: bool,
+    (rows, cols): (u16, u16),
+) -> session_history::Segmenter {
+    if !pane_stream {
+        return session_history::Segmenter::for_client_stream();
+    }
+    let mut segmenter = session_history::Segmenter::for_pane(rows, cols);
+    if tmux::pane_alternate_on(tmux_bin, session_name).await {
+        segmenter.assume_alternate_screen();
+    }
+    segmenter
+}
+
+fn quiet_deadline(segmenter: &session_history::Segmenter) -> Option<tokio::time::Instant> {
+    segmenter.wants_quiet_tick().then(|| {
+        tokio::time::Instant::now() + std::time::Duration::from_millis(session_history::QUIET_MS)
+    })
+}
+
+async fn record_history(
+    history: &Arc<session_history::SessionHistoryStore>,
+    session_name: &str,
+    produced: Vec<session_history::PendingEntry>,
+) {
+    if produced.is_empty() {
+        return;
+    }
+    let history = history.clone();
+    let name = session_name.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        for entry in produced {
+            let _ = history.append(&name, entry);
+        }
+    })
+    .await;
 }
 
 /// Starts (or, on re-acquire, restarts) the `tmux pipe-pane`-backed history

@@ -21,6 +21,7 @@
 // the reliable half) and output text the test itself echoed.
 
 const fs = require("fs");
+const path = require("path");
 const { test, expect } = require("./fixtures.cjs");
 const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
 const { resolveZshBin } = require("./lib/zsh.cjs");
@@ -788,6 +789,101 @@ test("read mode: a real bash session's finished commands render as turns, and a 
     seedRc: "PS1='readmodetest: '\n",
     shellCommand: "bash",
   });
+});
+
+// A full-screen app on the pane's alternate screen paints the same 60 lines
+// three times (issue #315). The recorder used to append every repaint's
+// bytes, so each line showed three times; it now records what the screen
+// shows, once.
+async function attemptAltScreenOnce(page) {
+  const session = `readmode-alt-${process.pid}-${Date.now()}`;
+  const script = path.join(__dirname, "assets", "alt-screen-repaint.sh");
+
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await apiUninstall(page, "bash");
+  fs.writeFileSync(`${SANDBOX_HOME}/.bashrc`, "PS1='readmodetest: '\n");
+  await apiInstall(page, "bash");
+
+  try {
+    tmux(`kill-session -t ${session}`);
+  } catch (_) {}
+  tmux(`new-session -d -s ${session} ${SHELL_ENV} bash`);
+
+  try {
+    await page.goto(`${APP}#/s/${session}`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => window.__mobuxView && window.__mobuxView.test,
+    );
+    await waitForClientAttached(tmux, session);
+    await page.evaluate(() => window.__mobuxView.swap("xterm"));
+    await expect
+      .poll(() => page.evaluate(() => window.__mobuxView.current), {
+        timeout: 5000,
+      })
+      .toBe("xterm");
+
+    tmux(`send-keys -t ${session} true Enter`);
+    await expect
+      .poll(async () => (await recordedCommands(page, session)).length, {
+        timeout: 8000,
+        message: "waiting for the warm-up command entry",
+      })
+      .toBeGreaterThanOrEqual(1);
+    await page.waitForTimeout(250);
+
+    tmux(`send-keys -t ${session} "bash ${script}" Enter`);
+    const finished = await expect
+      .poll(
+        async () =>
+          (await recordedCommands(page, session)).some((e) =>
+            e.output.includes("ALT-DONE"),
+          ),
+        { timeout: 15000 },
+      )
+      .toBe(true)
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!finished) {
+      return { ok: false, detail: "the script's command entry never landed" };
+    }
+
+    await page.evaluate(() => window.__mobuxView.swap("read"));
+    await refreshReadMode(page);
+    const text = await page.evaluate(
+      () => document.querySelector("#readmode").textContent,
+    );
+    const counts = new Map();
+    for (const match of text.matchAll(/alt-line-(\d+)(?!\d)/g)) {
+      counts.set(match[1], (counts.get(match[1]) || 0) + 1);
+    }
+    const wrong = [];
+    for (let i = 1; i <= 60; i++) {
+      const n = counts.get(String(i)) || 0;
+      if (n !== 1) wrong.push(`alt-line-${i} x${n}`);
+    }
+    return { ok: wrong.length === 0, detail: wrong.join(", "), hard: true };
+  } finally {
+    try {
+      tmux(`kill-session -t ${session}`);
+    } catch (_) {}
+    await apiUninstall(page, "bash");
+  }
+}
+
+test("read mode: a full-screen app's repaints show each line once", async ({
+  page,
+}) => {
+  test.setTimeout(90000);
+  const details = [];
+  for (let i = 0; i < 3; i++) {
+    const result = await attemptAltScreenOnce(page);
+    if (result.ok) return;
+    details.push(`attempt ${i + 1}: ${result.detail}`);
+    if (result.hard) break;
+  }
+  expect(false, details.join(" | ")).toBe(true);
 });
 
 test.describe("read mode: zsh", () => {
