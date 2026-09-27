@@ -551,11 +551,15 @@ test("reader view: real PTY output reaches the reader pane", async ({
 });
 
 // The reader draws the engine buffer, not a display: with every write into
-// the display swallowed, injected lines still reach the reader and never
-// the display.
+// xterm swallowed, injected lines still reach the reader and never xterm.
+// sterk has no write path; it draws the same buffer (the sterk test below).
 test("reader view: the reader draws from the buffer, not the display", async ({
   page,
-}) => {
+}, testInfo) => {
+  test.skip(
+    testInfo.project.use.renderer !== "xterm",
+    "sterk draws the buffer itself",
+  );
   await bootTerminal(page);
   await page.evaluate(() => window.__mobuxView.swap("reader"));
   await page.waitForFunction(
@@ -567,8 +571,7 @@ test("reader view: the reader draws from the buffer, not the display", async ({
   );
   const marker = `BUFFER_ONLY_${Math.floor(Math.random() * 1e9)}`;
   await page.evaluate(async (m) => {
-    const display = window.__xterm || window.__sterk._sterk;
-    display.write = (_data, done) => done?.();
+    window.__xterm.write = (_data, done) => done?.();
     await window.__mobuxView.test.injectLines(5, m);
   }, marker);
   await expect
@@ -585,6 +588,147 @@ test("reader view: the reader draws from the buffer, not the display", async ({
     return rows;
   });
   expect(displayRows.filter((row) => row.includes(marker))).toEqual([]);
+});
+
+// sterk draws the engine buffer itself: with any write into the sterk
+// display captured and swallowed, injected lines still render, and nothing
+// was written.
+test("sterk: the display draws the buffer and nothing writes into it", async ({
+  page,
+}, testInfo) => {
+  sterkOnly(test, testInfo);
+  await bootTerminal(page);
+  const marker = `STERK_BUFFER_${Math.floor(Math.random() * 1e9)}`;
+  const writes = await page.evaluate(async (m) => {
+    const display = window.__sterk._sterk;
+    const captured = [];
+    display.write = (data, done) => {
+      captured.push(String(data));
+      done?.();
+    };
+    window.__sterkWrites = captured;
+    await window.__mobuxView.test.injectLines(5, m);
+    return captured.length;
+  }, marker);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          (m) =>
+            [...document.querySelectorAll("#terminal .ace_line")].filter((l) =>
+              l.textContent.includes(m),
+            ).length,
+          marker,
+        ),
+      { timeout: 10000 },
+    )
+    .toBe(5);
+  const rows = await page.evaluate(() => {
+    const t = window.__mobuxView.test;
+    const out = [];
+    for (let y = 0; y < t.bufferLength(); y++) out.push(t.lineText(y) || "");
+    return out;
+  });
+  expect(rows.filter((row) => row.includes(marker))).toHaveLength(5);
+  expect(writes).toBe(0);
+  expect(await page.evaluate(() => window.__sterkWrites.length)).toBe(0);
+});
+
+// The screen source reports each buffer change as rows off the top of the
+// history, rows onto its end and the screen rows that differ, and falls back
+// to a full repaint when history is replaced.
+test("sterk: the screen source reports append, trim, row diffs, full and the straddle", async ({
+  page,
+}, testInfo) => {
+  sterkOnly(test, testInfo);
+  await bootTerminal(page);
+  const result = await page.evaluate(async () => {
+    const { createTerminalBuffer } = await import("/static/terminal-buffer.js");
+    const { createScreenSource } =
+      await import("/static/terminal-screen-source.js");
+    const cols = 20;
+    const buffer = createTerminalBuffer({ cols, rows: 5, scrollback: 100 });
+    const source = createScreenSource(buffer, window.Sterk.screenLineFromCells);
+    let changes = [];
+    source.subscribe((change) => changes.push(change));
+    const text = (line) => line.runs.map((r) => r.text).join("");
+    const history = () => {
+      const out = [];
+      for (let i = 0; i < source.history.length; i++) {
+        out.push(text(source.history.line(i)).trimEnd());
+      }
+      return out;
+    };
+    const take = () => {
+      const out = changes;
+      changes = [];
+      return out;
+    };
+    const lines = (n, from = 0) =>
+      Array.from({ length: n }, (_, i) => `line ${from + i}`);
+    const out = {};
+
+    await buffer.writeScreen("\x1b[?1049h\x1b[Hscreen");
+    take();
+    await buffer.syncWhole(lines(80), false);
+    out.append = take();
+    out.appendHistory = [history()[0], history()[79], source.history.length];
+
+    await buffer.syncWhole(lines(91), false);
+    out.trim = take();
+    out.trimHistory = [history()[0], history().at(-1), source.history.length];
+
+    await buffer.writeScreen("\x1b[3;1Hrow two");
+    out.row = take();
+    out.rowText = text(source.screen.line(2)).trimEnd();
+
+    await buffer.clearHistory();
+    out.clear = take();
+    out.clearLength = source.history.length;
+
+    await buffer.syncWhole(["A".repeat(cols)], true);
+    out.straddle = take();
+    out.straddleRow = source.screen.line(0).wrapped;
+    await buffer.syncWhole(["A".repeat(cols * 2)], false);
+    out.grown = take();
+    out.grownHistory = history();
+    out.rebuilds = source.rebuilds();
+    source.dispose();
+    buffer.dispose();
+    return out;
+  });
+  const history = (change) => change.map((c) => [c.history, c.full]);
+
+  expect(history(result.append)).toEqual([
+    [{ removedTop: 0, appended: 80 }, false],
+  ]);
+  expect(result.appendHistory).toEqual(["line 0", "line 79", 80]);
+
+  expect(history(result.trim)).toEqual([
+    [{ removedTop: 31, appended: 11 }, false],
+  ]);
+  expect(result.trimHistory).toEqual(["line 31", "line 90", 60]);
+
+  expect(result.row).toHaveLength(1);
+  expect(result.row[0].screenRows).toEqual([2]);
+  expect(result.row[0].full).toBe(false);
+  expect(result.rowText).toBe("row two");
+
+  expect(result.clear.map((c) => c.full)).toEqual([true]);
+  expect(result.clearLength).toBe(0);
+
+  expect(history(result.straddle)).toEqual([
+    [{ removedTop: 0, appended: 1 }, false],
+  ]);
+  expect(result.straddle[0].screenRows).toContain(0);
+  expect(result.straddleRow).toBe(true);
+
+  expect(history(result.grown)).toEqual([
+    [{ removedTop: 0, appended: 1 }, false],
+  ]);
+  expect(result.grown[0].screenRows).toContain(0);
+  expect(result.grownHistory).toEqual(["A".repeat(20), "A".repeat(20)]);
+  expect(result.rebuilds).toBe(1);
 });
 
 test("auto-reconnect: unexpected socket drop re-establishes the WS via onclose backoff", async ({
@@ -1522,14 +1666,12 @@ test("history sync: a tail appends only when it overlaps the held end in one pla
 });
 
 // A display stand-in behind the renderer interface the redraw writer drives,
-// counting full redraws: the VT core of the project's renderer (sterk's on
-// the sterk project, a headless xterm otherwise).
+// counting full redraws: a headless xterm, the VT core of the one display
+// the redraw writer draws.
 const FAKE_DISPLAY = `(cols, rows) => {
-  const display = window.Sterk
-    ? window.Sterk.createTerminal({ cols, rows, scrollback: 100 })
-    : new window.XtermHeadless.Terminal({
-        cols, rows, scrollback: 100, allowProposedApi: true,
-      });
+  const display = new window.XtermHeadless.Terminal({
+    cols, rows, scrollback: 100, allowProposedApi: true,
+  });
   const lines = () => {
     const out = [];
     for (let y = 0; y < display.buffer.active.length; y++) {

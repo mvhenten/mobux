@@ -1,5 +1,6 @@
-// The redraw writer (issue #315): the only thing that writes into a display
-// renderer. It draws the engine's buffer (terminal-buffer.js) as plain VT:
+// The redraw writer (issue #315): the only thing that writes into xterm, the
+// display that cannot draw a buffer it does not own. It draws the engine's
+// buffer (terminal-buffer.js) as plain VT:
 // history and normal-screen scrollback lines are appended to the display's
 // scrollback once, and the viewport is repainted from the screen.
 
@@ -130,8 +131,7 @@ export function createRedrawWriter(buffer, renderer) {
   // Erasing a whole row first clears a wrapped flag left on it.
   //
   // Paint on the viewport's top row, then scroll as many rows from the
-  // bottom row so it lands in the display's scrollback. Only absolute cursor
-  // moves and a linefeed on the last row: both displays agree on those.
+  // bottom row so it lands in the display's scrollback.
   function commitLines(lines, cols, rows) {
     let out = "\x1b[0m";
     const commit = (text, count) =>
@@ -268,6 +268,10 @@ export function createRedrawWriter(buffer, renderer) {
         return draw();
       });
       return pending;
+    },
+    // Resolves once every queued draw has reached the display.
+    settle() {
+      return queue;
     },
     invalidate() {
       full = true;

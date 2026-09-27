@@ -1,108 +1,147 @@
 // Sterk renderer adapter.
 //
-// Implements the mobux renderer interface (see terminal-engine.js) over
-// @kattebak/sterk (a clean-room VT core rendered through Ace's DOM text
-// engine). This is one of the two display adapters the single engine drives;
-// the engine owns the WebSocket, the text buffer, reconnect, panes, tmux,
-// history and OSC 133 bookkeeping, and only its redraw writer writes into the
-// display.
+// Implements the mobux renderer interface (see terminal-engine.js) as a
+// sterk buffer view over the engine's text buffer: sterk draws the buffer
+// through a ScreenSource (terminal-screen-source.js) and nothing writes into
+// it. The engine owns the WebSocket, the buffer, reconnect, panes, tmux,
+// history and OSC 133 bookkeeping.
 //
 // Every sterk-specific reach-through lives here and nowhere else: the Ace
 // editor handle for theming, the `getViewportCellCount`/`getCellMetrics`
 // probes, and the `window.__sterk` debug handle the visual test matrix reads.
 //
-// The sterk bundle (sterk.bundle.js) pins `window.Sterk = { createTerminal }`
-// before the engine is constructed.
+// The sterk bundle (sterk.bundle.js) pins
+// `window.Sterk = { createBufferView, screenLineFromCells }` before the
+// engine is constructed.
 
 import { getStoredThemeId, getTheme } from "./themes.js";
+import { createScreenSource } from "./terminal-screen-source.js";
+
+// The grid the engine starts its buffer at, before the first measure.
+const BOOT_GRID = { cols: 120, rows: 35 };
+
+// Trailing punctuation is not part of the URL. xterm's WebLinks addon forbids
+// a URL ending in punctuation (its final character class excludes `.,:!?` and
+// brackets); strip the same trailing set so the boundary matches the addon —
+// `see https://x/foo.` links `foo`, not `foo.`.
+const URL_RE = /https?:\/\/[^\s)"'>]+/g;
+const TRAILING_PUNCT_RE = /[.,;:!?)\]}]+$/;
 
 export function createSterkRenderer(host, options = {}) {
   const Sterk = window.Sterk;
-  if (!Sterk || !Sterk.createTerminal) {
+  if (!Sterk || !Sterk.createBufferView) {
     throw new Error(
       "sterk bundle not loaded — check vendor/sterk.bundle.js script tag",
     );
   }
 
   const bootTheme = getTheme(getStoredThemeId());
-
-  let sterk;
-  try {
-    sterk = Sterk.createTerminal({
-      cols: 120,
-      rows: 35,
-      scrollback: options.scrollback,
-      fontSize: options.fontSize,
-      fontFamily: options.fontFamily,
-      // Opt OUT of sterk's built-in font registry. Per the v2.6.0+ contract:
-      // `font === ""` AND an explicit `fontFamily` means "consumer manages
-      // their own font stack".
-      font: "",
-      theme: {
-        foreground: bootTheme.foreground,
-        background: bootTheme.background,
-        palette: bootTheme.palette,
-      },
-    });
-  } catch (err) {
-    console.error("[sterk] createTerminal failed:", err);
-    window.__sterkError = err;
-    throw err;
-  }
-
-  try {
-    sterk.open(host);
-  } catch (err) {
-    console.error("[sterk] open failed:", err);
-    window.__sterkError = err;
-    throw err;
-  }
-
-  // Debug peephole for the visual test matrix (confined to this adapter).
-  // Exposes the sterk instance and its live options so sterk-only tests can
-  // read the Ace DOM and the applied palette.
-  const debugHandle = {
-    _sterk: sterk,
-    get options() {
-      return sterk.options;
-    },
-    scrollLines(n) {
-      sterk.scrollLines(n);
-    },
-    scrollToBottom() {
-      sterk.scrollToBottom();
+  // The live settings, read by the visual test matrix through __sterk.
+  const settings = {
+    scrollback: options.scrollback,
+    fontSize: options.fontSize,
+    fontFamily: options.fontFamily,
+    theme: {
+      foreground: bootTheme.foreground,
+      background: bootTheme.background,
+      palette: bootTheme.palette,
     },
   };
-  if (typeof window !== "undefined") {
-    window.__sterk = debugHandle;
+
+  let view = null;
+  let source = null;
+  const cleanups = [];
+  const linkSubs = [];
+  const emitLink = (uri) => {
+    for (const cb of linkSubs.slice()) cb(uri);
+  };
+
+  const debugHandle = {
+    get _sterk() {
+      return view;
+    },
+    get options() {
+      return settings;
+    },
+    scrollLines(n) {
+      view?.scrollLines(n);
+    },
+    scrollToBottom() {
+      view?.scrollToBottom();
+    },
+  };
+  window.__sterk = debugHandle;
+
+  // Sterk detects URLs itself; a link provider re-detects the http(s)
+  // subset mobux opens and carries an `activate` handler, so a click on a
+  // URL fans out to every onLink subscriber. The UI (terminal.js) decides
+  // how to open — mobux routes it out of the app shell.
+  function provideLinks(bufferLineNumber, deliver) {
+    const text = source.rowText(bufferLineNumber - 1);
+    if (!text) return deliver(undefined);
+    const links = [];
+    URL_RE.lastIndex = 0;
+    let m;
+    while ((m = URL_RE.exec(text)) !== null) {
+      const uri = m[0].replace(TRAILING_PUNCT_RE, "");
+      if (!uri) continue;
+      links.push({
+        range: {
+          start: { x: m.index + 1, y: bufferLineNumber },
+          end: { x: m.index + uri.length, y: bufferLineNumber },
+        },
+        text: uri,
+        activate: (_event, activatedUri) => emitLink(activatedUri),
+      });
+    }
+    deliver(links.length ? links : undefined);
+  }
+
+  function drawBuffer(buffer) {
+    source = createScreenSource(buffer, Sterk.screenLineFromCells);
+    try {
+      view = Sterk.createBufferView(host, source, {
+        fontSize: settings.fontSize,
+        fontFamily: settings.fontFamily,
+        // `font === ""` with an explicit `fontFamily`: mobux manages its
+        // own font stack.
+        font: "",
+        theme: settings.theme,
+      });
+    } catch (err) {
+      console.error("[sterk] createBufferView failed:", err);
+      window.__sterkError = err;
+      throw err;
+    }
+    cleanups.push(view.registerLinkProvider({ provideLinks }));
+    return {
+      flush: () => Promise.resolve(),
+      settle: () => view.refresh(),
+      invalidate() {},
+      fullRedraws: () => source.rebuilds(),
+      dispose: () => source.dispose(),
+    };
   }
 
   const cellSize = () => {
-    const metrics = sterk.getCellMetrics ? sterk.getCellMetrics() : null;
+    const metrics = view?.getCellMetrics();
     return metrics
       ? { width: metrics.width, height: metrics.height }
       : { width: 9, height: 18 };
   };
 
   const horizontalPadding = () => {
-    try {
-      const cs = getComputedStyle(host);
-      return (
-        (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
-      );
-    } catch (_) {
-      return 0;
-    }
+    const cs = getComputedStyle(host);
+    return (
+      (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+    );
   };
 
-  // Prefer sterk's `getViewportCellCount()` — the renderer's authoritative
-  // answer that already accounts for internal padding / scrollbar
-  // reservation, so there is no `- 1` fudge. Fall back to naive cell math
-  // for older builds without the API.
+  // Prefer sterk's `getViewportCellCount()` — the view's own answer that
+  // already accounts for internal padding / scrollbar reservation. Fall
+  // back to naive cell math before Ace has measured itself.
   const computeCellGrid = (hostH) => {
-    const count = sterk.getViewportCellCount
-      ? sterk.getViewportCellCount()
-      : null;
+    const count = view?.getViewportCellCount();
     if (count && count.cols > 0 && count.rows > 0) {
       return {
         cols: Math.max(20, count.cols),
@@ -110,99 +149,32 @@ export function createSterkRenderer(host, options = {}) {
       };
     }
     const cell = cellSize();
-    const pad = horizontalPadding();
-    const hostW = host.clientWidth || window.innerWidth - pad;
+    const hostW = host.clientWidth || window.innerWidth - horizontalPadding();
     return {
       cols: Math.max(20, Math.floor(hostW / cell.width)),
       rows: Math.max(10, Math.floor(hostH / cell.height)),
     };
   };
 
-  // Disposables sterk hands back for the subscriptions/handlers this adapter
-  // registers on it; drained by dispose() so a remount leaves nothing behind.
-  const rendererCleanups = [];
-
-  // ── R13 links ───────────────────────────────────────────────────────
-  // Sterk detects URLs itself; a link provider re-detects the http(s) subset
-  // mobux opens and carries an `activate` handler. Provider links take
-  // precedence over built-in detection at the same position, so a click on a
-  // URL fans out to every onLink subscriber. The UI (terminal.js) decides how
-  // to open — mobux routes it out of the app shell.
-  const linkSubs = [];
-  const emitLink = (uri) => {
-    for (const cb of linkSubs.slice()) cb(uri);
-  };
-  const URL_RE = /https?:\/\/[^\s)"'>]+/g;
-  // Trailing punctuation is not part of the URL. xterm's WebLinks addon forbids
-  // a URL ending in punctuation (its final character class excludes `.,:!?` and
-  // brackets); strip the same trailing set so the boundary matches the addon —
-  // `see https://x/foo.` links `foo`, not `foo.`.
-  const TRAILING_PUNCT_RE = /[.,;:!?)\]}]+$/;
-  if (sterk.registerLinkProvider) {
-    const sub = sterk.registerLinkProvider({
-      provideLinks(bufferLineNumber, deliver) {
-        const line = sterk.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) return deliver(undefined);
-        const text = line.translateToString(false);
-        const links = [];
-        URL_RE.lastIndex = 0;
-        let m;
-        while ((m = URL_RE.exec(text)) !== null) {
-          const uri = m[0].replace(TRAILING_PUNCT_RE, "");
-          if (!uri) continue;
-          const startX = m.index + 1; // 1-based start column
-          const endX = m.index + uri.length; // 1-based inclusive last column
-          links.push({
-            range: {
-              start: { x: startX, y: bufferLineNumber },
-              end: { x: endX, y: bufferLineNumber },
-            },
-            text: uri,
-            activate: (_event, activatedUri) => emitLink(activatedUri),
-          });
-        }
-        deliver(links.length ? links : undefined);
-      },
-    });
-    if (sub && typeof sub.dispose === "function") rendererCleanups.push(sub);
-  }
-
   return {
+    // Draws the engine's buffer; the engine uses the returned view in place
+    // of its redraw writer.
+    drawBuffer,
+
     // R1 — teardown: sterk releases its DOM + internal listeners.
     dispose() {
       linkSubs.length = 0;
-      for (const sub of rendererCleanups.splice(0)) {
-        try {
-          sub.dispose();
-        } catch (_) {}
-      }
-      try {
-        sterk.dispose();
-      } catch (_) {}
-      if (typeof window !== "undefined" && window.__sterk === debugHandle) {
-        delete window.__sterk;
-      }
+      for (const sub of cleanups.splice(0)) sub.dispose();
+      view?.dispose();
+      if (window.__sterk === debugHandle) delete window.__sterk;
     },
 
-    // R2 — resolves after the buffer reflects the data. Sterk resolves on its
-    // own write callback (the semantics the existing suite already relies on);
-    // the stronger slow-CI flush guarantee is the upstream sterk fix.
-    write(data) {
-      const text =
-        typeof data === "string"
-          ? data
-          : new TextDecoder("utf-8", { fatal: false }).decode(data);
-      return new Promise((resolve) => sterk.write(text, resolve));
-    },
-
-    // R3 — authoritative fit for the host's current size.
-    resize(cols, rows) {
-      sterk.resize(cols, rows);
-    },
+    // R3 — authoritative fit for the host's current size. The view follows
+    // the buffer's grid.
     measure() {
       const hostH = host.clientHeight || window.innerHeight;
-      // Update .sterk-viewport height to match host so Ace sees a sized
-      // viewport before we ask it for its grid count.
+      // Size .sterk-viewport to the host so Ace sees a sized viewport
+      // before it is asked for its grid count.
       const viewport = host.querySelector(".sterk-viewport");
       if (viewport && hostH > 0) {
         viewport.style.height = `${hostH}px`;
@@ -215,86 +187,72 @@ export function createSterkRenderer(host, options = {}) {
 
     // R4 — current grid.
     get cols() {
-      return sterk.cols;
+      return source ? source.cols : BOOT_GRID.cols;
     },
     get rows() {
-      return sterk.rows;
+      return source ? source.rows : BOOT_GRID.rows;
     },
 
     // R5 — keystrokes / IME output bound for the PTY.
     onInput(cb) {
-      return sterk.onData(cb);
+      return view.onData(cb);
     },
 
     // R6 — scroll.
     scrollLines(n) {
-      sterk.scrollLines(n);
+      view.scrollLines(n);
     },
     scrollToBottom() {
-      sterk.scrollToBottom();
+      view.scrollToBottom();
     },
 
-    // R7 — scroll position and a row's text. Sterk's translateToString(true)
-    // trims both edges, which would shift the columns of an indented row;
-    // read it raw and trim the right.
+    // R7 — scroll position and a row's text, in the view's row space.
     viewport() {
-      const buf = sterk.buffer.active;
-      return { length: buf.length, top: buf.viewportY };
+      return { length: view.length, top: view.viewportY };
     },
     rowText(y) {
-      const line = sterk.buffer.active.getLine(y);
-      return line ? line.translateToString(false).replace(/\s+$/, "") : null;
+      return source.rowText(y);
     },
 
-    // R11 — theming + font size. Sterk applies the palette in place on its
-    // live options object and the Ace editor theme through its renderer.
+    // R11 — theming + font size: the Ace editor theme through the view's
+    // editor.
     setTheme(theme) {
-      const opts = sterk.options;
-      if (opts && opts.theme && Array.isArray(opts.theme.palette)) {
-        opts.theme.palette = theme.palette.slice(0, 16);
-        opts.theme.background = theme.background || theme.palette[0];
-        opts.theme.foreground =
-          theme.foreground || theme.palette[7] || "#c5c8c6";
-      }
-      const editor =
-        sterk.renderer && sterk.renderer.getEditor
-          ? sterk.renderer.getEditor()
-          : null;
-      if (editor && typeof editor.setTheme === "function" && theme.aceTheme) {
-        editor.setTheme(theme.aceTheme);
-      }
+      settings.theme = {
+        palette: theme.palette.slice(0, 16),
+        background: theme.background || theme.palette[0],
+        foreground: theme.foreground || theme.palette[7] || "#c5c8c6",
+      };
+      if (theme.aceTheme) view?.getEditor().setTheme(theme.aceTheme);
     },
     setFontSize(px) {
-      if (px !== sterk.options.fontSize) {
-        sterk.options.fontSize = px;
-      }
+      if (px === settings.fontSize) return;
+      settings.fontSize = px;
+      view?.setFontSize(px);
     },
     getFontSize() {
-      return sterk.options.fontSize;
+      return settings.fontSize;
     },
 
     // R12 — selection. Sterk selects through Ace's native DOM selection, so
     // copy / long-press act on real text (the substrate #137 builds on).
     getSelection() {
-      return sterk.getSelection ? sterk.getSelection() : "";
+      return view.getSelection();
     },
     hasSelection() {
-      return sterk.hasSelection ? sterk.hasSelection() : false;
+      return view.hasSelection();
     },
     clearSelection() {
-      sterk.clearSelection?.();
+      view.clearSelection();
     },
     selectAll() {
-      sterk.selectAll?.();
+      view.selectAll();
     },
     onSelectionChange(cb) {
-      return sterk.onSelectionChange
-        ? sterk.onSelectionChange(cb)
-        : { dispose() {} };
+      return view.onSelectionChange(cb);
     },
 
-    // R13 — links. Subscribe to URL activations detected by the sterk link
-    // provider registered above; the UI decides how to open them.
+    // R13 — links detected by the provider above; the UI decides how to
+    // open them.
     onLink(cb) {
       linkSubs.push(cb);
       return {
@@ -305,14 +263,11 @@ export function createSterkRenderer(host, options = {}) {
       };
     },
 
-    // R15 — input surface ownership. Release sterk's Ace text-input so it can't
-    // steal focus or pop the soft keyboard while the mobile bar owns input;
-    // re-enable restores it. Confined to this adapter (mirrors the xterm
-    // textarea handling).
+    // R15 — input surface ownership. Release the view's Ace text-input so it
+    // can't steal focus or pop the soft keyboard while the mobile bar owns
+    // input; re-enable restores it.
     focus() {
-      try {
-        host.querySelector(".ace_text-input")?.focus();
-      } catch (_) {}
+      host.querySelector(".ace_text-input")?.focus();
     },
     setNativeInputEnabled(enabled) {
       const ta = host.querySelector(".ace_text-input");
@@ -321,20 +276,13 @@ export function createSterkRenderer(host, options = {}) {
           ta.removeAttribute("tabindex");
           ta.style.pointerEvents = "";
         }
-      } else {
-        try {
-          sterk.blur?.();
-        } catch (_) {}
-        if (ta) {
-          ta.setAttribute("tabindex", "-1");
-          ta.style.pointerEvents = "none";
-        }
+        return;
       }
-    },
-
-    // R16 — drop all content, scrollback included, before a full redraw.
-    reset() {
-      sterk.reset();
+      view?.blur();
+      if (ta) {
+        ta.setAttribute("tabindex", "-1");
+        ta.style.pointerEvents = "none";
+      }
     },
   };
 }

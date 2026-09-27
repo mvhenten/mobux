@@ -3,18 +3,22 @@
 // The engine owns everything that is renderer-independent: the PTY
 // WebSocket lifecycle, reconnect backoff, tmux pane tracking, tmux
 // commands, history, and OSC 133 marker bookkeeping. It owns the one text
-// buffer (terminal-buffer.js): the stream is parsed into it once, and the
-// redraw writer (terminal-redraw.js) draws it into the renderer. The two
-// adapters (renderer-xterm.js, renderer-sterk.js) are views only — the
-// engine never writes the stream into them and never reaches into their
-// internals.
+// buffer (terminal-buffer.js): the stream is parsed into it once. The two
+// adapters (renderer-xterm.js, renderer-sterk.js) are views only: sterk
+// draws the buffer itself (drawBuffer), and the redraw writer
+// (terminal-redraw.js) draws it into xterm, which cannot draw a buffer it
+// does not own. The engine never writes the stream into a renderer and never
+// reaches into their internals.
 //
 // ── Renderer interface (the only crossing) ──────────────────────────────
 // An adapter is a plain object exposing:
 //
 //   R1  dispose()
+//   R0  drawBuffer(buffer): view              a renderer that draws the buffer
+//                                             itself; the others get the redraw
+//                                             writer, which alone calls R2, R3
+//                                             resize and R16
 //   R2  write(data): Promise<void>            resolves once the buffer reflects data
-//                                             (only the redraw writer calls it)
 //   R3  resize(cols, rows)
 //       measure(): {cols, rows, cellWidth, cellHeight}   authoritative fit
 //       cellSize(): {width, height}
@@ -191,7 +195,9 @@ export class TerminalEngine extends EventTarget {
       cols: this.renderer.cols,
       rows: this.renderer.rows,
     });
-    this.view = createRedrawWriter(this.buffer, this.renderer);
+    this.view = this.renderer.drawBuffer
+      ? this.renderer.drawBuffer(this.buffer)
+      : createRedrawWriter(this.buffer, this.renderer);
     this.markers = createMarkerBook(this.buffer);
     this._historyTimer = null;
     this._historyMaxTimer = null;
@@ -441,8 +447,9 @@ export class TerminalEngine extends EventTarget {
   // pipeline as the live WS stream (_ingestPtyData) — test injection carries
   // the same marker bytes a real prompt would, and should attribute them the
   // same way. History never goes through here: it has its own parser.
+  // Resolves once the display shows the write.
   write(data) {
-    return this._ingestPtyData(data);
+    return this._ingestPtyData(data).then(() => this.view.settle());
   }
 
   // ── OSC 133 A-marker row attribution ───────────────────────────────

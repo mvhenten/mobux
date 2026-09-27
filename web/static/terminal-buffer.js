@@ -10,8 +10,8 @@
 //            with what is held and append what is new. Lines tmux drops off
 //            its top are kept until the display's row budget is spent.
 //
-// Displays draw this buffer through terminal-redraw.js; the reader reads it
-// through terminal-document.js.
+// xterm draws this buffer through terminal-redraw.js, sterk through
+// terminal-screen-source.js; the reader reads it through terminal-document.js.
 
 const SCREEN_SCROLLBACK = 1000;
 
@@ -321,6 +321,9 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     return buf.getLine(buf.baseY + paneRows().first + y);
   };
   let regionTop = 1;
+  // Rows the normal screen dropped off the top of its full scrollback.
+  let screenTrimmed = 0;
+  let normalBase = 0;
   const scrollsHistory = () =>
     regionTop === paneRows().first + 1 &&
     screen.buffer.active.type === "alternate";
@@ -340,6 +343,14 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     screen.onScroll(() => {
       if (switching) switching = false;
       else if (scrollsHistory()) scrolled.push(!paneRow(0)?.isWrapped);
+    }),
+    screen.onScroll(() => {
+      const normal = screen.buffer.normal;
+      if (screen.buffer.active.type !== "normal") return;
+      if (normal.baseY === screenLimit && normalBase === screenLimit) {
+        screenTrimmed++;
+      }
+      normalBase = normal.baseY;
     }),
     screen.onWriteParsed(() => {
       switching = false;
@@ -361,6 +372,9 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
   // it: once the screen has scrolled past it, it no longer does.
   let straddleRow = null;
   let lastRevision = 0;
+  // Bumped each time the history is rebuilt other than by dropping lines
+  // off its top.
+  let historyEpoch = 0;
   let ops = Promise.resolve();
   const changeSubs = new Set();
 
@@ -379,7 +393,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
 
   // Build the history terminal aside and swap it in once parsed, so a draw
   // never sees a half-parsed history.
-  async function rebuild(lines, start) {
+  async function rebuild(lines, start, trim = false) {
     const width = lines.reduce((w, l) => Math.max(w, lineWidth(l)), cols);
     const next = newHistory(width);
     if (lines.length) await write(next, historyText(lines));
@@ -388,6 +402,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     historyCols = width;
     historyLines = lines;
     historyStart = start;
+    if (!trim) historyEpoch++;
   }
 
   function widen(lines) {
@@ -419,7 +434,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     if (total <= historyBudget) return;
     let drop = 0;
     while (total > (historyBudget * 2) / 3) total -= rowsOf[drop++];
-    await rebuild(historyLines.slice(drop), historyStart + drop);
+    await rebuild(historyLines.slice(drop), historyStart + drop, true);
   }
 
   const end = () => historyStart + historyLines.length;
@@ -601,6 +616,12 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     },
     historyStart() {
       return historyStart;
+    },
+    historyEpoch() {
+      return historyEpoch;
+    },
+    screenTrimmed() {
+      return screenTrimmed;
     },
     // Bumped each time the last history line is rewritten because it grew.
     lastLineRevision() {
