@@ -21,8 +21,8 @@
 //   R4  cols, rows                            current grid
 //   R5  onInput(cb): Disposable               keystrokes / IME bound for the PTY
 //   R6  scrollLines(n), scrollToBottom()
-//   R7  buffer.active.{length,cursorX,cursorY,baseY,viewportY,getLine}
-//   R8  onBufferChanged(cb): Disposable       fires after a write is parsed
+//   R7  viewport(): {length, top}             display rows, first one shown
+//       rowText(y): string | null             a display row's text (tap to open)
 //   R11 setTheme(theme); setFontSize(px); getFontSize()
 //   R12 getSelection(); hasSelection(); clearSelection(); selectAll();
 //       onSelectionChange(cb): Disposable    native-DOM selection (#137)
@@ -30,13 +30,14 @@
 //   R15 focus(); setNativeInputEnabled(bool)
 //   R16 reset()                              drop all content (full redraw)
 //
-// Alternate-screen state (R9), OSC handlers (R10) and the bell (R14) come
-// from the buffer's screen parser, not the renderer.
+// Alternate-screen state (R9), OSC handlers (R10), the bell (R14) and
+// buffer changes come from the buffer, not the renderer. The reader reads the
+// buffer through the document contract and never touches a display.
 //
 // The engine exposes the surface its consumers use: EventTarget events (open,
 // close, data, panes, history, osc-detected), the connection/scroll/pane/tmux/
 // history methods, the interface passthroughs above, and a read-only `document`
-// contract (see terminal-document.js) the reader consumes. terminal.js drives
+// contract over the buffer (see terminal-document.js) the reader consumes. terminal.js drives
 // the engine; the reader (reader.js) is a sibling the SPA mounts — the engine
 // has no knowledge of it.
 
@@ -240,10 +241,8 @@ export class TerminalEngine extends EventTarget {
       }),
     );
 
-    // The read-only document contract (issue #206, D2). The reader consumes
-    // this instead of reaching into the buffer, `cols`, the OSC marker map,
-    // `onBufferChanged`, and the last-row-is-status convention. The engine has
-    // no knowledge of the reader; it only publishes the document.
+    // The read-only document contract over the buffer (issues #206, #315).
+    // The engine has no knowledge of the reader; it only publishes it.
     this.document = createTerminalDocument(this);
   }
 
@@ -408,9 +407,12 @@ export class TerminalEngine extends EventTarget {
     return this.renderer.cellSize();
   }
 
-  // ── Buffer / scroll passthroughs ──────────────────────────────────
-  getActiveBuffer() {
-    return this.renderer.buffer.active;
+  // ── Display / scroll passthroughs ─────────────────────────────────
+  viewport() {
+    return this.renderer.viewport();
+  }
+  rowText(y) {
+    return this.renderer.rowText(y);
   }
   scrollLines(n) {
     this.renderer.scrollLines(n);
@@ -462,12 +464,6 @@ export class TerminalEngine extends EventTarget {
   // `oscMarkers` doc comment in the constructor (terminal-markers.js).
   get oscMarkers() {
     return this.markers.map;
-  }
-
-  // The marker on the line display row `y` starts, if any.
-  oscMarkerForRow(y) {
-    const key = this.view.lineKeyAt(y);
-    return key === null ? null : this.oscMarkers.get(key) || null;
   }
 
   _ingestPtyData(raw) {
@@ -531,7 +527,7 @@ export class TerminalEngine extends EventTarget {
     return this.buffer.writeScreen(text.slice(from, to));
   }
   onBufferChanged(cb) {
-    return this.renderer.onBufferChanged(cb);
+    return this.buffer.onChange(cb);
   }
   isAlternateScreenActive() {
     return this.buffer.isAlternate();

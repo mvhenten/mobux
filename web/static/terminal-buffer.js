@@ -322,6 +322,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     }),
     screen.onWriteParsed(() => {
       switching = false;
+      changed();
     }),
   );
 
@@ -340,9 +341,17 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
   let straddleRow = null;
   let lastRevision = 0;
   let ops = Promise.resolve();
+  const changeSubs = new Set();
+
+  function changed() {
+    for (const cb of [...changeSubs]) cb();
+  }
 
   function queue(op) {
-    const run = ops.then(op);
+    const run = ops.then(op).then((result) => {
+      changed();
+      return result;
+    });
     ops = run.catch(() => {});
     return run;
   }
@@ -507,6 +516,12 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       queue(cap);
     },
 
+    // Fires after the screen parses a write and after a history change.
+    onChange(cb) {
+      changeSubs.add(cb);
+      return { dispose: () => changeSubs.delete(cb) };
+    },
+
     isAlternate() {
       return screen.buffer.active.type === "alternate";
     },
@@ -638,6 +653,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     },
 
     dispose() {
+      changeSubs.clear();
       for (const sub of subs) sub.dispose();
       history.dispose();
       screen.dispose();

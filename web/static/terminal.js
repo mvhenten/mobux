@@ -388,11 +388,8 @@ export function createTerminal({
       const rect = termEl.getBoundingClientRect();
       const col = Math.floor((x - rect.left) / cell.width);
       const row = Math.floor((y - rect.top) / cell.height);
-      const buffer = core.getActiveBuffer();
-      const bufferRow = buffer.viewportY + row;
-      const line = buffer.getLine(bufferRow);
-      if (!line) return;
-      const text = line.translateToString(true);
+      const text = core.rowText(core.viewport().top + row);
+      if (text === null) return;
       const urlRe = /https?:\/\/[^\s)"'>]+/g;
       let match;
       while ((match = urlRe.exec(text)) !== null) {
@@ -647,13 +644,13 @@ export function createTerminal({
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return core.write(s);
     },
-    bufferLength: () => core.getActiveBuffer().length,
+    bufferLength: () => core.viewport().length,
     isAlternate: () => core.isAlternateScreenActive(),
     wheelScrollsPane: () => core.wheelScrollsPane(),
     terminalRows: () => core.rows,
     cols: () => core.cols,
     rows: () => core.rows,
-    viewportY: () => core.getActiveBuffer().viewportY,
+    viewportY: () => core.viewport().top,
     scrollToBottom: () => core.scrollToBottom(),
     wsReady: () => core.ws?.readyState === WebSocket.OPEN,
     // Simulate an *unexpected* server-side drop: close the socket WITHOUT
@@ -713,21 +710,12 @@ export function createTerminal({
     setFontSize: (px) => core.setFontSize(px),
     focus: () => core.focus(),
     setNativeInputEnabled: (enabled) => core.setNativeInputEnabled(enabled),
-    lineText: (y) => {
-      const line = core.getActiveBuffer().getLine(y);
-      return line ? line.translateToString(true) : null;
-    },
-    cellInfo: (y, x) => {
-      const line = core.getActiveBuffer().getLine(y);
-      if (!line) return null;
-      const cell = line.getCell(x);
-      return {
-        chars: cell.getChars(),
-        code: cell.getCode(),
-        bold: cell.isBold(),
-        fgDefault: cell.isFgDefault(),
-        bgDefault: cell.isBgDefault(),
-      };
+    lineText: (y) => core.rowText(y),
+    // The reader's document, read from the buffer.
+    documentSnapshot: () => core.document.snapshot(),
+    // Swallow every write into the display, so it draws nothing more.
+    stubDisplayWrites: () => {
+      core.renderer.write = () => Promise.resolve();
     },
     oscMarkerCount: () => core.oscMarkers.size,
     fullRedrawCount: () => core.view.fullRedraws(),

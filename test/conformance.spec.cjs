@@ -63,8 +63,8 @@ async function boot(page) {
   );
 }
 
-// Scan the whole buffer for a marker string. Renderer-agnostic — reads the
-// R7 buffer read model through the engine.
+// Scan every display row for a marker string. Renderer-agnostic — reads the
+// R7 row text through the engine.
 async function bufferHasText(page, marker) {
   return page.evaluate((m) => {
     const len = window.__mobuxView.test.bufferLength();
@@ -176,39 +176,46 @@ test("R6: scrollLines and scrollToBottom move the viewport", async ({
   expect(back).toBe(bottom);
 });
 
-// R7 — buffer read model: line + cell surface term-tokenizer.js consumes.
-test("R7: buffer exposes lines and styled cells", async ({ page }) => {
+// R7 — the display reports its scroll position and each row's text.
+test("R7: viewport and row text read the display", async ({ page }) => {
   await boot(page);
   await page.evaluate(() =>
-    window.__mobuxView.test.inject("R7_CELL_SURFACE_XYZ\n"),
+    window.__mobuxView.test.inject("R7_ROW_TEXT_XYZ\n"),
   );
-  const info = await page.evaluate((m) => {
-    const len = window.__mobuxView.test.bufferLength();
-    for (let y = 0; y < len; y++) {
-      const t = window.__mobuxView.test.lineText(y);
-      if (t && t.includes(m)) {
-        const x = t.indexOf(m);
-        return { text: t, cell: window.__mobuxView.test.cellInfo(y, x) };
-      }
-    }
-    return null;
-  }, "R7_CELL_SURFACE_XYZ");
-  expect(info).not.toBeNull();
-  expect(info.cell).not.toBeNull();
-  expect(info.cell.chars).toBe("R");
-  expect(info.cell.code).toBe("R".charCodeAt(0));
-  // The style surface term-tokenizer.js consumes is present and truthy-usable.
-  // (xterm's predicates return a numeric attribute value, sterk's return a
-  // boolean; both are consumed as truthy — the read model, not the JS type, is
-  // the contract.)
-  expect(info.cell.bold).toBeDefined();
-  expect(info.cell.fgDefault).toBeDefined();
-  expect(info.cell.bgDefault).toBeDefined();
+  const probe = await page.evaluate(() => ({
+    length: window.__mobuxView.test.bufferLength(),
+    top: window.__mobuxView.test.viewportY(),
+    rows: window.__mobuxView.test.rows(),
+  }));
+  expect(probe.length).toBeGreaterThanOrEqual(probe.rows);
+  expect(probe.top).toBeGreaterThanOrEqual(0);
+  expect(await bufferHasText(page, "R7_ROW_TEXT_XYZ")).toBe(true);
 });
 
-// R8 — onBufferChanged fires after a write is parsed. Subscribe, then write
-// in the same pass so the subscription is guaranteed live before the write.
-test("R8: onBufferChanged fires after a write", async ({ page }) => {
+// The reader's document is read from the engine buffer: a written line
+// reaches it with its styled runs.
+test("document: a written line reaches the document with its attrs", async ({
+  page,
+}) => {
+  await boot(page);
+  await page.evaluate(() =>
+    window.__mobuxView.test.inject("plain \x1b[1mDOC_BOLD_XYZ\x1b[0m\n"),
+  );
+  const line = await page.evaluate(() =>
+    window.__mobuxView.test
+      .documentSnapshot()
+      .lines.find((l) => l.text.includes("DOC_BOLD_XYZ")),
+  );
+  expect(line).toBeDefined();
+  expect(line.text).toBe("plain DOC_BOLD_XYZ");
+  const bold = line.runs.find((r) => r.text === "DOC_BOLD_XYZ");
+  expect(bold.attrs.bold).toBe(true);
+  expect(line.runs[0].attrs.bold).toBe(false);
+});
+
+// onBufferChanged fires after the buffer parses a write. Subscribe, then
+// write in the same pass so the subscription is guaranteed live before it.
+test("buffer: onBufferChanged fires after a write", async ({ page }) => {
   await boot(page);
   const observed = await page.evaluate(
     () =>

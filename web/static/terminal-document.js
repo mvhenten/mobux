@@ -1,29 +1,29 @@
-// The terminal document contract — a read-only view of the active buffer for
-// the reader (issue #206, D2).
+// The terminal document contract — a read-only view of the engine's text
+// buffer (terminal-buffer.js) for the reader (issues #206, #315).
 //
-// The reader renders scrollback as a document. It used to reach into the
-// engine for the raw material: the active buffer, `cols`, the OSC 133 marker
-// map, `onWriteParsed`, and the last-row-is-status convention. Those five
-// contact points are collapsed here into one documented interface, built once
-// over the renderer-agnostic buffer read model (R7) the engine already
-// exposes. Cell walking, wrapped-row joining, palette decoding, OSC lookup,
-// and the status-line peel live behind this contract; block classification
+// The reader draws the same buffer the displays draw, never a display. The
+// lines come from the buffer's line model: one line per history line, then
+// the screen's scrollback and viewport grouped into logical lines, the
+// viewport line that continues the last history line (a straddle) joined
+// onto it. Cell walking, palette decoding, OSC lookup by line key, and the
+// tmux status-line peel live behind this contract; block classification
 // stays reader-side.
 //
 // ── Contract ────────────────────────────────────────────────────────────
 //   snapshot(): { lines, status }
-//     lines   logical lines (wrapped rows already joined), each:
-//               { runs: [{ text, attrs }], text, osc }
+//     lines   logical lines, each: { runs: [{ text, attrs }], text, osc }
 //             `osc` is null, or one or more OSC 133 marker payloads joined by
-//             `|` when more than one lands on the same row (e.g. `'A'`,
+//             `|` when more than one lands on the same line (e.g. `'A'`,
 //             `'C'`, `'D;0'`, `'D;0|A'`) — see terminal-engine.js's
 //             `oscMarkers` doc comment. Consumers scan for a kind rather than
 //             compare for equality; term-tokenizer.js's `oscHas`/
 //             `oscExitCode` do this.
 //     status  the tmux status line as a separate field: { runs } | null
-//   subscribe(cb): Disposable    fires after each buffer write
+//   subscribe(cb): Disposable    fires after each buffer change
 //   onOscDetected(cb): Disposable   fires the first time an OSC 133 marker lands
 //   oscDetected: boolean
+
+import { isBlankCell, logicalLines } from "./terminal-buffer.js";
 
 // ── ANSI 256-colour palette (xterm default) ────────────────────────
 // Index 0-15 are the basic ANSI colours, exposed via CSS variables so themes
@@ -117,39 +117,43 @@ function attrsEqual(a, b) {
   );
 }
 
+// A row's cells, the trailing blank ones left out when `trim`.
+function* rowCells(row, trim) {
+  let end = row.length;
+  if (trim) {
+    while (end > 0 && isBlankCell(row.getCell(end - 1))) end--;
+  }
+  for (let x = 0; x < end; x++) {
+    const cell = row.getCell(x);
+    if (cell && cell.getWidth() > 0) yield cell;
+  }
+}
+
 // ── Run extraction ─────────────────────────────────────────────────
-// Walk a logical line's cells (possibly spanning multiple buffer rows when
-// wrapped) and group consecutive cells with identical attrs into runs.
-// Trailing default-attr whitespace is stripped.
-//
-// `rowChain` is an array of xterm-shaped IBufferLine objects (the wrapped
-// chain), not a single line.
-export function extractRuns(rowChain, cols) {
+// Group a logical line's cells into runs of identical attrs. `segments` are
+// { rows, trim }: the rows of a wrapped chain run on, a history row ends at
+// its last cell. Trailing whitespace is stripped.
+function extractRuns(segments) {
   const runs = [];
   let cur = null;
-  for (const line of rowChain) {
-    if (!line) continue;
-    for (let x = 0; x < cols; x++) {
-      const cell = line.getCell(x);
-      if (!cell) continue;
-      const ch = cell.getChars();
-      // Empty (null) cells past content: some apps fill with spaces, so we
-      // can't fully skip mid-line — emit a space and let the trailing-trim
-      // below drop the tail.
-      const text = ch === "" ? " " : ch;
-      const attrs = cellAttrs(cell);
-      if (cur && attrsEqual(cur.attrs, attrs)) {
-        cur.text += text;
-      } else {
-        if (cur) runs.push(cur);
-        cur = { text, attrs };
+  for (const { rows, trim } of segments) {
+    for (const row of rows) {
+      if (!row) continue;
+      for (const cell of rowCells(row, trim)) {
+        const text = cell.getChars() || " ";
+        const attrs = cellAttrs(cell);
+        if (cur && attrsEqual(cur.attrs, attrs)) {
+          cur.text += text;
+        } else {
+          if (cur) runs.push(cur);
+          cur = { text, attrs };
+        }
       }
     }
   }
   if (cur) runs.push(cur);
-  // Trim trailing whitespace from the last run. Terminal apps often pad lines
-  // with spaces; when those carry a non-default bg they render as tiny empty
-  // chips at the end of the line. Strip them regardless of attrs.
+  // Terminal apps pad lines with spaces; with a non-default bg they would
+  // render as empty chips at the end of the line.
   while (runs.length > 0) {
     const last = runs[runs.length - 1];
     last.text = last.text.replace(/\s+$/u, "");
@@ -162,70 +166,72 @@ export function extractRuns(rowChain, cols) {
   return runs;
 }
 
-// ── Logical-line iteration ─────────────────────────────────────────
-// Coalesces wrapped rows so the reader gets one entry per logical line and can
-// reflow on its own width.
-function* logicalLines(buffer, endY) {
-  const total = endY != null ? endY : buffer.length;
-  let chain = [];
-  let startY = 0;
-  for (let y = 0; y < total; y++) {
-    const line = buffer.getLine(y);
-    if (!line) continue;
-    if (line.isWrapped && chain.length > 0) {
-      chain.push(line);
-    } else {
-      if (chain.length > 0) yield { chain, startY };
-      chain = [line];
-      startY = y;
-    }
+// The buffer's lines as { segments, key }, and the rows outside the pane
+// (tmux's status line) on the side.
+function bufferLines(buffer, paneRows) {
+  const lines = [];
+  const start = buffer.historyStart();
+  const count = buffer.historyRowCount();
+  for (let i = 0; i < count; i++) {
+    lines.push({
+      segments: [{ rows: [buffer.historyRow(i)], trim: true }],
+      key: start + i,
+    });
   }
-  if (chain.length > 0) yield { chain, startY };
+  logicalLines(buffer.scrollbackRows()).forEach((rows, j) => {
+    lines.push({ segments: [{ rows, trim: false }], key: start + count + j });
+  });
+
+  const { first, last } = paneRows;
+  const base = buffer.screenKeyBase();
+  const straddles = buffer.straddles() && count > 0;
+  const status = [];
+  let row = 0;
+  logicalLines(buffer.viewportRows()).forEach((rows, index) => {
+    const at = row;
+    row += rows.length;
+    if (at < first || at > last) {
+      status.push(...rows);
+      return;
+    }
+    if (index === 0 && straddles) {
+      lines[count - 1].segments.push({ rows, trim: false });
+      return;
+    }
+    lines.push({ segments: [{ rows, trim: false }], key: base + index });
+  });
+  return { lines, status };
 }
 
-// Build the document contract over the engine. The engine owns the buffer read
-// model (R7), the OSC marker map, and the write/osc-detected events; this is
-// the only place the reader's raw material is assembled.
+// Build the document contract over the engine: its buffer, its OSC marker
+// map by line key, its pane rows, and its buffer-change and osc-detected
+// events.
 export function createTerminalDocument(engine) {
   function snapshot() {
-    const buffer = engine.getActiveBuffer();
-    const cols = engine.cols;
-    const total = buffer.length;
-    // The very last buffer row is the tmux status line (when status is on). It
-    // does not belong in the scrollable flow — peel it off into its own field
-    // and stop the logical-line walk one row short.
-    const statusEndY = total > 0 ? total - 1 : 0;
-
-    const lines = [];
-    for (const { chain, startY } of logicalLines(buffer, statusEndY)) {
-      const runs = extractRuns(chain, cols);
+    const markers = engine.oscMarkers;
+    const { lines: raw, status: statusRows } = bufferLines(
+      engine.buffer,
+      engine.paneRows(),
+    );
+    const lines = raw.map(({ segments, key }) => {
+      const runs = extractRuns(segments);
       const text = runs.map((r) => r.text).join("");
-      const osc = engine.oscMarkerForRow(startY);
-      lines.push({ runs, text, osc });
-    }
-    // Drop the run of empty rows the terminal pads below the last output up to
-    // the status line — the reader is a document, not a fixed grid, so trailing
-    // blank space is noise (and would otherwise push the last real line off the
-    // bottom of the scroll).
-    while (
-      lines.length > 0 &&
-      (!lines[lines.length - 1].text ||
-        lines[lines.length - 1].text.trim().length === 0)
-    ) {
+      return { runs, text, osc: markers.get(key) || null };
+    });
+    // The reader is a document, not a fixed grid: the blank rows below the
+    // last output are noise.
+    while (lines.length > 0 && lines[lines.length - 1].text.trim() === "") {
       lines.pop();
     }
 
     let status = null;
-    if (total > 0) {
-      const line = buffer.getLine(statusEndY);
-      if (line) {
-        const runs = extractRuns([line], cols);
-        if (runs.some((r) => r.text && r.text.trim().length > 0)) {
-          status = { runs };
-        }
+    for (const row of statusRows) {
+      const runs = extractRuns([{ rows: [row], trim: false }]);
+      if (runs.some((r) => r.text.trim().length > 0)) {
+        status = { runs };
+        break;
       }
     }
-
     return { lines, status };
   }
 
