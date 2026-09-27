@@ -119,7 +119,10 @@ export function createRedrawWriter(buffer, renderer) {
     return Math.max(0, buf.length - renderer.rows - buf.viewportY);
   }
 
+  let fullRedraws = 0;
+
   function resetDisplay() {
+    fullRedraws++;
     renderer.reset();
     committedHistory = 0;
     committedScreen = 0;
@@ -195,14 +198,30 @@ export function createRedrawWriter(buffer, renderer) {
     return out;
   }
 
-  function draw() {
+  // Only the row count changed (a soft keyboard opening or closing): with
+  // the cursor on the top row, a display adds or drops rows below it and
+  // leaves its scrollback alone, so only the viewport needs repainting. A
+  // display that moved rows in or out of its scrollback anyway is redrawn.
+  async function resizeRows(rows) {
+    await renderer.write("\x1b[H");
+    renderer.resize(renderer.cols, rows);
+    const scrollbackRows = renderer.buffer.active.length - renderer.rows;
+    if (scrollbackRows !== committedKeys.length) full = true;
+    painted = [];
+    cursorKey = "";
+  }
+
+  async function draw() {
     if (disposed) return undefined;
     const cols = buffer.cols;
     const rows = buffer.rows;
     const keep = distanceFromBottom();
-    if (renderer.cols !== cols || renderer.rows !== rows) {
+    if (renderer.cols !== cols) {
       renderer.resize(cols, rows);
       full = true;
+    } else if (renderer.rows !== rows) {
+      if (full) renderer.resize(cols, rows);
+      else await resizeRows(rows);
     }
     const historyRows = buffer.historyRowCount();
     const historyStart = buffer.historyStart();
@@ -288,6 +307,9 @@ export function createRedrawWriter(buffer, renderer) {
     },
     invalidate() {
       full = true;
+    },
+    fullRedraws() {
+      return fullRedraws;
     },
     // The line key display row `y` starts, or null.
     lineKeyAt(y) {

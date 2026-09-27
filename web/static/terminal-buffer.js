@@ -293,6 +293,9 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
   // The key of the first history line: keys stay with their line.
   let historyStart = 0;
   let lastContinues = false;
+  // Screen row 0 as it was when a capture said the last line continues into
+  // it: once the screen has scrolled past it, it no longer does.
+  let straddleRow = null;
   let lastRevision = 0;
   let ops = Promise.resolve();
 
@@ -364,7 +367,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       const kept = historyLines.slice(0, aligned.drop);
       await rebuild(kept.concat(next), historyStart);
     }
-    lastContinues = continues;
+    setContinues(continues);
     await cap();
     return { ...result, after: end() };
   }
@@ -376,7 +379,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     const before = end();
     if (aligned.extended) await extendLast(tail[aligned.overlap - 1]);
     await append(tail.slice(aligned.overlap));
-    lastContinues = continues;
+    setContinues(continues);
     await cap();
     return { replaced: false, before, after: end() };
   }
@@ -395,12 +398,20 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     return out;
   }
 
+  const firstRowText = () => viewportRows()[0]?.translateToString(false) ?? "";
+
+  function setContinues(continues) {
+    lastContinues = continues;
+    straddleRow = continues ? firstRowText() : null;
+  }
+
   // The screen's first line is the rest of the last history line when that
   // one straddles the top of the screen.
   const straddles = () =>
     lastContinues &&
     historyLines.length > 0 &&
-    screen.buffer.normal.baseY === 0;
+    screen.buffer.normal.baseY === 0 &&
+    firstRowText() === straddleRow;
 
   return {
     get cols() {
@@ -492,7 +503,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return queue(async () => {
         const before = end();
         await rebuild([], before);
-        lastContinues = false;
+        setContinues(false);
         return { replaced: true, before, after: end() };
       });
     },

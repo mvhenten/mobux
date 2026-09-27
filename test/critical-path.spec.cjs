@@ -864,6 +864,9 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
   // viewport (innerHeight shrinks, dvh shrinks, window resize fires).
   const { width } = page.viewportSize();
   const KEYBOARD_UP_HEIGHT = 445;
+  const redrawsBefore = await page.evaluate(() =>
+    window.__mobuxView.test.fullRedrawCount(),
+  );
   await page.setViewportSize({ width, height: KEYBOARD_UP_HEIGHT });
 
   // Let the reflow + PTY resize round-trip land, then read the geometry.
@@ -934,6 +937,16 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
     geo.markerBottom,
     `last output row (bottom ${geo.markerBottom}) must sit above the input bar (top ${geo.barTop}); screenshot: ${screenshotPath}`,
   ).toBeLessThanOrEqual(geo.barTop + 2);
+
+  // Only the row count changed: the display repaints its screen and keeps
+  // its history rows. sterk's resize keeps its old line count, so a sterk
+  // display is still redrawn whole.
+  if (testInfo.project.name === "xterm") {
+    expect(
+      await page.evaluate(() => window.__mobuxView.test.fullRedrawCount()),
+      "a keyboard opening must not redraw history",
+    ).toBe(redrawsBefore);
+  }
 
   assertNoFailures(captured);
 });
@@ -1556,8 +1569,8 @@ test("history sync: a line straddling the screen top keeps its key and grows in 
     });
     const view = r.createRedrawWriter(buffer, renderer);
     const long = "L".repeat(10) + "M".repeat(10) + "N".repeat(5);
-    await buffer.syncWhole(["one", "two", long.slice(0, 10)], true);
     await buffer.writeScreen(`\x1b[?1049h\x1b[H${long.slice(10)}\r\nprompt`);
+    await buffer.syncWhole(["one", "two", long.slice(0, 10)], true);
     await view.flush();
     const straddleKey = buffer.screenKeyBase();
     const resetsBefore = renderer.resets;
@@ -1636,4 +1649,37 @@ test("history sync: history is capped by display rows at a narrow width", async 
   expect(result.displayRows).toBeLessThanOrEqual(100 + 4);
   expect(result.firstKey).toBe(20);
   expect(result.firstRow).toBe("20xxxxxxxx");
+});
+
+// The straddle holds only while screen row 0 still shows the remainder it
+// showed at the sync: once that has scrolled off, a prompt drawn before the
+// next sync keys to its own line, and keeps that key after the sync.
+test("history sync: a straddle that scrolled off before the next sync keys the prompt to its own line", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m) => {
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const long = "L".repeat(10) + "M".repeat(5);
+    await buffer.writeScreen(
+      `\x1b[?1049h\x1b[H${long.slice(10)}\r\nout1\r\nout2`,
+    );
+    await buffer.syncWhole(["one", "two", long.slice(0, 10)], true);
+    const straddling = buffer.screenKeyBase();
+    // tmux scrolls the remainder off the top and draws a prompt.
+    await buffer.writeScreen("\x1b[H\x1b[2Kout1\r\n\x1b[2Kout2\r\n\x1b[2K$ ");
+    const promptBefore = buffer.cursorLineKey();
+    await buffer.syncTail(["one", "two", long], false, 2);
+    const promptAfter = buffer.cursorLineKey();
+    buffer.dispose();
+    return { straddling, promptBefore, promptAfter };
+  });
+  // history: one(0) two(1) long(2); screen after the scroll: out1(3)
+  // out2(4) "$ "(5).
+  expect(result.straddling).toBe(2);
+  expect(result.promptBefore).toBe(5);
+  expect(result.promptAfter).toBe(5);
 });

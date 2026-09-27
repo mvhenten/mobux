@@ -672,6 +672,7 @@ export function createTerminal({
       };
     },
     oscMarkerCount: () => core.oscMarkers.size,
+    fullRedrawCount: () => core.view.fullRedraws(),
   };
 
   refreshViewToggle();

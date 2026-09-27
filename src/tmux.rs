@@ -895,24 +895,6 @@ fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<S
     args
 }
 
-async fn history_size(session: &str, target: Option<&str>) -> Result<u32> {
-    let output = tmux_command(
-        target,
-        &["display-message", "-p", "-t", session, "#{history_size}"],
-    )
-    .output()
-    .await
-    .context("failed to execute tmux display-message")?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!("tmux display-message failed: {}", msg));
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .context("tmux reported a non-numeric history_size")
-}
-
 /// A capture that starts below the top of the history can start inside a
 /// wrapped line; that partial first line is dropped.
 fn drop_partial_first_line(text: String, truncated: bool) -> String {
@@ -984,29 +966,58 @@ pub async fn capture_history(
             continues: false,
         });
     }
-    // The start row is counted from the size read before the capture; a size
-    // that moved meanwhile could leave a partial first line, so read again.
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let size = history_size(session, target).await?;
-        // `-E -1` on an empty history still prints the first visible line.
-        let n = lines.min(size);
-        if n == 0 {
-            return Ok(HistoryCapture {
-                text: String::new(),
-                continues: false,
-            });
-        }
-        let text = capture(&capture_history_args(session, n, scope), target).await?;
-        let continues = joins_into_screen(&capture(&straddle_args(session), target).await?);
-        if history_size(session, target).await? == size || attempt == 3 {
-            return Ok(HistoryCapture {
-                text: drop_partial_first_line(text, n < size),
-                continues,
-            });
-        }
+    let delim = format!(
+        "mobux-history-end-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    );
+    let out = capture(&history_capture_args(session, lines, &delim), target).await?;
+    parse_history_capture(&out, lines, &delim)
+        .ok_or_else(|| anyhow!("tmux history capture came back unreadable"))
+}
+
+/// The history size, the history capture and the straddle check as one
+/// tmux invocation, so all three describe the same moment; `delim` is
+/// printed between the capture and the straddle check.
+fn history_capture_args(session: &str, lines: u32, delim: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "display-message",
+        "-p",
+        "-t",
+        session,
+        "#{history_size}",
+        ";",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    args.extend(capture_history_args(session, lines, HistoryScope::History));
+    args.extend([";", "display-message", "-p", delim, ";"].map(String::from));
+    args.extend(straddle_args(session));
+    args
+}
+
+fn parse_history_capture(out: &str, lines: u32, delim: &str) -> Option<HistoryCapture> {
+    let (size, rest) = out.split_once('\n')?;
+    let size: u32 = size.trim().parse().ok()?;
+    let marker = format!("{}\n", delim);
+    let at = rest.rfind(&marker)?;
+    if at > 0 && !rest[..at].ends_with('\n') {
+        return None;
     }
+    // `-E -1` on an empty history still prints the first visible line.
+    if size == 0 {
+        return Some(HistoryCapture {
+            text: String::new(),
+            continues: false,
+        });
+    }
+    Some(HistoryCapture {
+        text: drop_partial_first_line(rest[..at].to_string(), lines < size),
+        continues: joins_into_screen(&rest[at + marker.len()..]),
+    })
 }
 
 #[cfg(test)]
@@ -1058,6 +1069,75 @@ mod tests {
         );
         assert!(joins_into_screen("a wrapped line and its rest\n"));
         assert!(!joins_into_screen("last history line\nfirst screen row\n"));
+    }
+
+    #[test]
+    fn history_capture_chains_size_capture_and_straddle_check() {
+        let args = history_capture_args("main", 500, "end-marker");
+        assert_eq!(
+            args,
+            vec![
+                "display-message",
+                "-p",
+                "-t",
+                "main",
+                "#{history_size}",
+                ";",
+                "capture-pane",
+                "-p",
+                "-e",
+                "-J",
+                "-S",
+                "-500",
+                "-E",
+                "-1",
+                "-t",
+                "main",
+                ";",
+                "display-message",
+                "-p",
+                "end-marker",
+                ";",
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-1",
+                "-E",
+                "0",
+                "-t",
+                "main"
+            ]
+        );
+    }
+
+    #[test]
+    fn history_capture_output_parses_into_text_and_straddle() {
+        let whole = parse_history_capture(
+            "3\na\nb\nc\nend-marker\nc and its rest\n",
+            500,
+            "end-marker",
+        )
+        .unwrap();
+        assert_eq!(whole.text, "a\nb\nc\n");
+        assert!(whole.continues);
+
+        let truncated = parse_history_capture(
+            "900\ntail of a wrap\nx\nend-marker\nx\nrow0\n",
+            2,
+            "end-marker",
+        )
+        .unwrap();
+        assert_eq!(truncated.text, "x\n");
+        assert!(!truncated.continues);
+
+        let empty =
+            parse_history_capture("0\nrow0\nend-marker\nrow0\nrow1\n", 500, "end-marker").unwrap();
+        assert_eq!(empty.text, "");
+        assert!(!empty.continues);
+
+        assert!(parse_history_capture("x\nend-marker\n", 500, "end-marker").is_none());
+        assert!(parse_history_capture("3\nno marker\n", 500, "end-marker").is_none());
     }
 
     #[test]

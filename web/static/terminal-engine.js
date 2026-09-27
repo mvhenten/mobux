@@ -373,8 +373,9 @@ export class TerminalEngine extends EventTarget {
 
   _resizeBuffer(cols, rows) {
     if (cols === this.buffer.cols && rows === this.buffer.rows) return;
+    const widthChanged = cols !== this.buffer.cols;
     this.buffer.resize(cols, rows);
-    this.view.invalidate();
+    if (widthChanged) this.view.invalidate();
     this.view.flush();
   }
 
