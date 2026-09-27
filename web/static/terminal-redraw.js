@@ -61,13 +61,16 @@ function* lineCells(rows) {
 const rowTail = (width, cols) => (width < cols ? "\x1b[0m\x1b[K" : "\x1b[0m");
 
 // A logical line as the display rows it takes at `cols`, each row's text
-// stating its own style.
-function serializeLine(rows, cols) {
+// stating its own style, from its `skip`-th cell on. `cells` on the result
+// counts the line's cells.
+function serializeLine(rows, cols, skip = 0) {
   const out = [];
   let text = "";
   let style = "\x1b[0m";
   let used = 0;
+  let cells = 0;
   for (const cell of lineCells(rows)) {
+    if (cells++ < skip) continue;
     const w = cell.getWidth();
     if (used + w > cols) {
       out.push(text + rowTail(used, cols));
@@ -82,7 +85,8 @@ function serializeLine(rows, cols) {
     text += cell.getChars() || " ";
     used += w;
   }
-  out.push(text + rowTail(used, cols));
+  if (used > 0 || skip === 0) out.push(text + rowTail(used, cols));
+  out.cells = cells;
   return out;
 }
 
@@ -96,6 +100,8 @@ export function createRedrawWriter(buffer, renderer) {
   let committedScreen = 0;
   let committedScreenLines = 0;
   let lastScreenRow = null;
+  // The last history line committed, to append to it when it grows.
+  let committedLast = null;
   // The line key each display row starts, null on a row that continues a
   // line: scrollback rows, then viewport rows.
   let committedKeys = [];
@@ -119,6 +125,7 @@ export function createRedrawWriter(buffer, renderer) {
     committedScreen = 0;
     committedScreenLines = 0;
     lastScreenRow = null;
+    committedLast = null;
     committedKeys = [];
     painted = [];
     cursorKey = "";
@@ -137,9 +144,17 @@ export function createRedrawWriter(buffer, renderer) {
     let out = "\x1b[0m";
     const commit = (text, count) =>
       `\x1b[1;1H\x1b[2K${text}\x1b[${rows};1H${"\n".repeat(count)}`;
-    for (const { rows: line, key } of lines) {
-      const displayRows = serializeLine(line, cols);
-      committedKeys.push(...keysFor(key, displayRows.length));
+    for (const { rows: line, key, index, skip = 0 } of lines) {
+      const displayRows = serializeLine(line, cols, skip);
+      if (!displayRows.length) continue;
+      committedKeys.push(...keysFor(skip ? null : key, displayRows.length));
+      if (index !== undefined) {
+        committedLast = {
+          index,
+          cells: displayRows.cells,
+          revision: buffer.lastLineRevision(),
+        };
+      }
       if (wraps && displayRows.length < rows) {
         out += commit(displayRows.join(""), displayRows.length);
       } else {
@@ -151,13 +166,16 @@ export function createRedrawWriter(buffer, renderer) {
 
   function paintViewport(cols, rows) {
     const base = buffer.screenKeyBase();
+    const straddles = buffer.straddles();
     const keys = [];
     let out = "";
     let r = 0;
     let index = 0;
     for (const line of logicalLines(buffer.viewportRows())) {
       const displayRows = serializeLine(line, cols).slice(0, rows - r);
-      keys.push(...keysFor(base + index++, displayRows.length));
+      const key = straddles && index === 0 ? null : base + index;
+      index++;
+      keys.push(...keysFor(key, displayRows.length));
       const text = displayRows.join("\n");
       if (painted[r] !== text) {
         painted[r] = text;
@@ -196,13 +214,31 @@ export function createRedrawWriter(buffer, renderer) {
       historyRows < committedHistory ||
       screenRows < committedScreen ||
       (historyRows > committedHistory && committedScreen > 0) ||
-      logicalLines([lastScreenRow, ...backlog])[0].length > 1;
+      logicalLines([lastScreenRow, ...backlog])[0].length > 1 ||
+      (committedLast !== null &&
+        committedLast.revision !== buffer.lastLineRevision() &&
+        committedLast.index !== committedHistory - 1);
     if (redraw) resetDisplay();
     committedHistoryStart = historyStart;
 
     const fresh = [];
+    const grew =
+      committedLast &&
+      committedLast.index === committedHistory - 1 &&
+      committedLast.revision !== buffer.lastLineRevision();
+    if (grew) {
+      fresh.push({
+        rows: [buffer.historyRow(committedLast.index)],
+        index: committedLast.index,
+        skip: committedLast.cells,
+      });
+    }
     for (let i = committedHistory; i < historyRows; i++) {
-      fresh.push({ rows: [buffer.historyRow(i)], key: historyStart + i });
+      fresh.push({
+        rows: [buffer.historyRow(i)],
+        key: historyStart + i,
+        index: i,
+      });
     }
     const screenRowsNew = redraw ? buffer.scrollbackRows() : backlog;
     for (const line of logicalLines(screenRowsNew)) {

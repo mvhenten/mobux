@@ -925,6 +925,50 @@ fn drop_partial_first_line(text: String, truncated: bool) -> String {
     }
 }
 
+/// The last history row and the first screen row, joined when the one wraps
+/// into the other.
+fn straddle_args(session: &str) -> Vec<String> {
+    [
+        "capture-pane",
+        "-p",
+        "-J",
+        "-S",
+        "-1",
+        "-E",
+        "0",
+        "-t",
+        session,
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect()
+}
+
+fn joins_into_screen(out: &str) -> bool {
+    out.lines().count() == 1
+}
+
+async fn capture(args: &[String], target: Option<&str>) -> Result<String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = tmux_command(target, &args)
+        .output()
+        .await
+        .context("failed to execute tmux capture-pane")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux capture-pane failed: {}", msg));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// A capture, and for `HistoryScope::History` whether its last line carries
+/// on into the first row of the visible screen (a wrapped line straddling
+/// the top of the screen, captured only up to there).
+pub struct HistoryCapture {
+    pub text: String,
+    pub continues: bool,
+}
+
 /// Capture the scrollback history of the active pane in a session.
 /// Returns the content with ANSI escape sequences preserved.
 pub async fn capture_history(
@@ -932,34 +976,37 @@ pub async fn capture_history(
     lines: u32,
     scope: HistoryScope,
     target: Option<&str>,
-) -> Result<String> {
-    let (lines, truncated) = match scope {
-        HistoryScope::All => (lines, false),
-        HistoryScope::History => {
-            // `-E -1` on an empty history still prints the first visible line.
-            let size = history_size(session, target).await?;
-            (lines.min(size), lines < size)
+) -> Result<HistoryCapture> {
+    if scope == HistoryScope::All {
+        let text = capture(&capture_history_args(session, lines, scope), target).await?;
+        return Ok(HistoryCapture {
+            text,
+            continues: false,
+        });
+    }
+    // The start row is counted from the size read before the capture; a size
+    // that moved meanwhile could leave a partial first line, so read again.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let size = history_size(session, target).await?;
+        // `-E -1` on an empty history still prints the first visible line.
+        let n = lines.min(size);
+        if n == 0 {
+            return Ok(HistoryCapture {
+                text: String::new(),
+                continues: false,
+            });
         }
-    };
-    if lines == 0 {
-        return Ok(String::new());
+        let text = capture(&capture_history_args(session, n, scope), target).await?;
+        let continues = joins_into_screen(&capture(&straddle_args(session), target).await?);
+        if history_size(session, target).await? == size || attempt == 3 {
+            return Ok(HistoryCapture {
+                text: drop_partial_first_line(text, n < size),
+                continues,
+            });
+        }
     }
-    let args = capture_history_args(session, lines, scope);
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = tmux_command(target, &args)
-        .output()
-        .await
-        .context("failed to execute tmux capture-pane")?;
-
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!("tmux capture-pane failed: {}", msg));
-    }
-
-    Ok(drop_partial_first_line(
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        truncated,
-    ))
 }
 
 #[cfg(test)]
@@ -991,6 +1038,26 @@ mod tests {
                 "main"
             ]
         );
+    }
+
+    #[test]
+    fn a_line_straddling_the_screen_top_joins_into_one() {
+        assert_eq!(
+            straddle_args("main"),
+            vec![
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-1",
+                "-E",
+                "0",
+                "-t",
+                "main"
+            ]
+        );
+        assert!(joins_into_screen("a wrapped line and its rest\n"));
+        assert!(!joins_into_screen("last history line\nfirst screen row\n"));
     }
 
     #[test]

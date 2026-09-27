@@ -5,8 +5,10 @@
 //            alternate screen is allowed; tmux's client lives on it, so it
 //            keeps no scrollback. Its last row is the tmux status line.
 //   history  the pane's tmux history above the visible screen, one entry
-//            per logical line, fed by capture-pane (scope=history). Each
-//            sync fetches it whole and lines it up with what is held.
+//            per logical line, fed by capture-pane (scope=history). Syncs
+//            line a captured tail (or, failing that, the whole history) up
+//            with what is held and append what is new. Lines tmux drops off
+//            its top are kept until the display's row budget is spent.
 //
 // Displays draw from this buffer through terminal-redraw.js.
 
@@ -141,28 +143,63 @@ export function splitCapture(text) {
   return lines;
 }
 
-// How a freshly captured history lines up with the one held. tmux only
-// appends lines, drops a block off the top once it reaches its limit, and
-// moves lines back onto the screen when the pane grows, so the new history
-// is the held one with `drop` lines gone from the top, then its next `keep`
-// lines, then new ones. The result is the captured history whichever
-// alignment is taken; the alignment only decides which lines keep their
-// identity (and their markers). Null when nothing lines up.
-export function alignHistory(held, next) {
-  if (held.length === 0) return { drop: 0, keep: 0 };
-  for (let drop = 0; drop < held.length; drop++) {
-    if (held[drop] !== next[0]) continue;
-    const keep = Math.min(held.length - drop, next.length);
-    let match = true;
-    for (let j = 1; j < keep; j++) {
-      if (held[drop + j] !== next[j]) {
-        match = false;
-        break;
-      }
+// A held line matches its captured counterpart when equal. The last held
+// line also matches the start of it when it straddled the top of the
+// screen (`grows`): such a line is captured only up to there, and whole
+// once it has scrolled off.
+function suffixMatches(held, next, from, count, grows) {
+  for (let j = 0; j < count; j++) {
+    const a = held[from + j];
+    const b = next[j];
+    if (a === b) continue;
+    if (grows && from + j === held.length - 1 && b.startsWith(a)) continue;
+    return false;
+  }
+  return true;
+}
+
+// How a whole captured history lines up with the one held. tmux appends
+// lines, drops a tenth of its limit off the top once it reaches it, and
+// moves lines back onto the screen when the pane grows. So the capture is
+// the held history from line `drop` on — its last line possibly grown —
+// followed by new lines; or, after the pane grew, only its next `keep`
+// lines. Null when nothing lines up.
+export function alignHistory(held, next, grows = false) {
+  const L = held.length;
+  if (L === 0) return { drop: 0, keep: 0, extended: false };
+  for (let drop = 0; drop < L; drop++) {
+    const keep = L - drop;
+    if (keep > next.length) continue;
+    if (suffixMatches(held, next, drop, keep, grows)) {
+      return { drop, keep, extended: next[keep - 1] !== held[L - 1] };
     }
-    if (match) return { drop, keep };
+  }
+  for (let drop = 0; drop < L; drop++) {
+    const keep = Math.min(L - drop, next.length);
+    if (keep === 0 || keep === L - drop) continue;
+    let match = true;
+    for (let j = 0; j < keep && match; j++) match = held[drop + j] === next[j];
+    if (match) return { drop, keep, extended: false };
   }
   return null;
+}
+
+// How a captured tail (the last lines of tmux's history) continues the
+// held history: it must overlap the held end on exactly one run of at
+// least `minOverlap` lines. Anything else — no overlap, more new lines
+// than the tail can show, or repeating output that fits several ways — is
+// null, and the caller fetches the whole history instead.
+export function alignTail(held, tail, minOverlap, grows = false) {
+  const L = held.length;
+  if (L === 0) return { overlap: 0, extended: false };
+  let found = null;
+  for (let o = Math.min(L, tail.length); o > 0; o--) {
+    if (!suffixMatches(held, tail, L - o, o, grows)) continue;
+    if (found !== null) return null;
+    found = o;
+  }
+  if (found === null || found < Math.min(minOverlap, L)) return null;
+  return { overlap: found, extended: tail[found - 1] !== held[L - 1] };
 }
 
 export function isBlankCell(cell) {
@@ -204,8 +241,7 @@ function write(term, data) {
 
 const historyText = (lines) => lines.map((l) => `\x1b[0m${l}\r\n`).join("");
 
-// Upper bound on a line's cell width, so the history terminal is wide enough
-// that every line stays one row.
+// Upper bound on a line's cell width.
 function lineWidth(line) {
   let width = 0;
   for (const ch of line.replace(ESC_RE, "")) {
@@ -214,8 +250,14 @@ function lineWidth(line) {
   return width;
 }
 
+// Upper bound on the display rows a line takes at `cols` (a wide character
+// that does not fit a row's end moves to the next one).
+export function displayRowsOf(line, cols) {
+  return Math.max(1, Math.ceil(lineWidth(line) / Math.max(1, cols - 1)));
+}
+
 // `scrollback` is the display's: history and normal-screen scrollback
-// together never exceed it.
+// rows together never exceed it, so the display never trims on its own.
 export function createTerminalBuffer({ cols, rows, scrollback }) {
   const Headless = window.XtermHeadless;
   if (!Headless || !Headless.Terminal) {
@@ -224,7 +266,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     );
   }
   const screenLimit = Math.min(SCREEN_SCROLLBACK, Math.floor(scrollback / 10));
-  const historyLimit = scrollback - screenLimit;
+  const historyBudget = scrollback - screenLimit;
   const newTerminal = (options) =>
     new Headless.Terminal({ allowProposedApi: true, ...options });
 
@@ -241,14 +283,17 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     }),
   );
 
+  // Two rows, so the last line stays on screen and can be rewritten when it
+  // grows; everything above it is scrollback.
   const newHistory = (width) =>
-    newTerminal({ cols: width, rows: 1, scrollback: historyLimit + 10 });
+    newTerminal({ cols: width, rows: 2, scrollback: historyBudget + 10 });
   let history = newHistory(cols);
   let historyCols = cols;
   let historyLines = [];
-  // The key of the first history line: keys stay with their line as lines
-  // leave the top.
+  // The key of the first history line: keys stay with their line.
   let historyStart = 0;
+  let lastContinues = false;
+  let lastRevision = 0;
   let ops = Promise.resolve();
 
   function queue(op) {
@@ -270,35 +315,69 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     historyStart = start;
   }
 
+  function widen(lines) {
+    const width = lines.reduce((w, l) => Math.max(w, lineWidth(l)), 0);
+    if (width <= historyCols) return;
+    historyCols = width;
+    history.resize(historyCols, 2);
+  }
+
+  async function extendLast(line) {
+    widen([line]);
+    await write(history, `\x1b[A\r\x1b[2K\x1b[0m${line}\r\n`);
+    historyLines = historyLines.slice(0, -1).concat([line]);
+    lastRevision++;
+  }
+
   async function append(fresh) {
-    const width = fresh.reduce((w, l) => Math.max(w, lineWidth(l)), 0);
-    if (width > historyCols) {
-      historyCols = width;
-      history.resize(historyCols, 1);
-    }
+    if (!fresh.length) return;
+    widen(fresh);
     await write(history, historyText(fresh));
     historyLines = historyLines.concat(fresh);
   }
 
+  // Past the row budget, drop lines off the top down to two thirds of it,
+  // so the display redraws once per third of a budget, not per line.
+  async function cap() {
+    const rowsOf = historyLines.map((l) => displayRowsOf(l, cols));
+    let total = rowsOf.reduce((a, b) => a + b, 0);
+    if (total <= historyBudget) return;
+    let drop = 0;
+    while (total > (historyBudget * 2) / 3) total -= rowsOf[drop++];
+    await rebuild(historyLines.slice(drop), historyStart + drop);
+  }
+
   const end = () => historyStart + historyLines.length;
 
-  // Take a captured history. Resolves with the keys it moved: lines that
-  // lined up keep theirs; with nothing lined up, the old lines' keys are
-  // gone and the screen's move from `before` to `after`.
-  async function sync(raw) {
-    const next = normalizeCapture(raw).slice(-historyLimit);
+  async function syncWhole(raw, continues) {
+    const next = normalizeCapture(raw);
     const before = end();
-    const aligned = alignHistory(historyLines, next);
+    const aligned = alignHistory(historyLines, next, lastContinues);
+    let result = { replaced: false, before };
     if (!aligned) {
       await rebuild(next, before);
-      return { replaced: true, before, after: end() };
-    }
-    const { drop, keep } = aligned;
-    if (drop === 0 && keep === historyLines.length) {
-      if (next.length > keep) await append(next.slice(keep));
+      result = { replaced: true, before };
+    } else if (aligned.keep === historyLines.length - aligned.drop) {
+      if (aligned.extended) await extendLast(next[aligned.keep - 1]);
+      await append(next.slice(aligned.keep));
     } else {
-      await rebuild(next, historyStart + drop);
+      const kept = historyLines.slice(0, aligned.drop);
+      await rebuild(kept.concat(next), historyStart);
     }
+    lastContinues = continues;
+    await cap();
+    return { ...result, after: end() };
+  }
+
+  async function syncTail(raw, continues, minOverlap) {
+    const tail = normalizeCapture(raw);
+    const aligned = alignTail(historyLines, tail, minOverlap, lastContinues);
+    if (!aligned) return null;
+    const before = end();
+    if (aligned.extended) await extendLast(tail[aligned.overlap - 1]);
+    await append(tail.slice(aligned.overlap));
+    lastContinues = continues;
+    await cap();
     return { replaced: false, before, after: end() };
   }
 
@@ -316,6 +395,13 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     return out;
   }
 
+  // The screen's first line is the rest of the last history line when that
+  // one straddles the top of the screen.
+  const straddles = () =>
+    lastContinues &&
+    historyLines.length > 0 &&
+    screen.buffer.normal.baseY === 0;
+
   return {
     get cols() {
       return cols;
@@ -323,7 +409,6 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     get rows() {
       return rows;
     },
-    historyLimit,
 
     writeScreen(text) {
       return write(screen, text);
@@ -332,6 +417,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       cols = nextCols;
       rows = nextRows;
       screen.resize(cols, rows);
+      queue(cap);
     },
 
     isAlternate() {
@@ -359,6 +445,11 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     historyStart() {
       return historyStart;
     },
+    // Bumped each time the last history line is rewritten because it grew.
+    lastLineRevision() {
+      return lastRevision;
+    },
+    straddles,
     screenScrollbackCount() {
       return screen.buffer.normal.baseY;
     },
@@ -369,9 +460,11 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return { x: buf.cursorX, y: buf.cursorY };
     },
     // Line keys: history lines from `historyStart`, then the normal
-    // screen's scrollback lines, then the viewport's lines.
+    // screen's scrollback lines, then the viewport's lines — the first of
+    // which shares the last history line's key while it straddles.
     screenKeyBase() {
-      return end() + logicalLines(scrollbackRows()).length;
+      const base = end() + logicalLines(scrollbackRows()).length;
+      return straddles() ? base - 1 : base;
     },
     cursorLineKey() {
       const y = screen.buffer.active.cursorY;
@@ -385,13 +478,21 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return this.screenKeyBase() + index;
     },
 
-    sync(raw) {
-      return queue(() => sync(raw));
+    // A whole capture. Lines that line up keep their key; with nothing
+    // lined up (history cleared) the old keys are gone and the screen's
+    // move from `before` to `after`.
+    syncWhole(raw, continues) {
+      return queue(() => syncWhole(raw, continues));
+    },
+    // A captured tail; null when it cannot be placed.
+    syncTail(raw, continues, minOverlap) {
+      return queue(() => syncTail(raw, continues, minOverlap));
     },
     clearHistory() {
       return queue(async () => {
         const before = end();
         await rebuild([], before);
+        lastContinues = false;
         return { replaced: true, before, after: end() };
       });
     },

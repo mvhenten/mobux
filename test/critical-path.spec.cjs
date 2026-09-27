@@ -1350,13 +1350,13 @@ test("history sync: lines tmux drops off the top keep the rest in place", async 
       cleared: m.alignHistory(held, ["$ "]),
     };
   });
-  expect(result.grown).toEqual({ drop: 0, keep: 93 });
-  expect(result.dropped).toEqual({ drop: 10, keep: 89 });
-  expect(result.paneGrew).toEqual({ drop: 0, keep: 90 });
+  expect(result.grown).toEqual({ drop: 0, keep: 93, extended: false });
+  expect(result.dropped).toEqual({ drop: 10, keep: 89, extended: false });
+  expect(result.paneGrew).toEqual({ drop: 0, keep: 90, extended: false });
   expect(result.cleared).toBeNull();
 });
 
-test("history sync: repeating output ends as the captured history", async ({
+test("history sync: repeating output keeps every line and never guesses a tail", async ({
   page,
 }) => {
   const result = await inPage(page, async (m) => {
@@ -1366,17 +1366,22 @@ test("history sync: repeating output ends as the captured history", async ({
       scrollback: 1000,
     });
     const ys = (n) => Array.from({ length: n }, () => "y");
-    await buffer.sync(ys(50));
-    await buffer.sync(["$ yes", ...ys(79)]);
-    await buffer.sync(ys(90));
+    await buffer.syncWhole(["$ yes", ...ys(79)], false);
+    // tmux has since dropped "$ yes" off its top and added eleven lines.
+    await buffer.syncWhole(ys(90), false);
     const lines = [];
     for (let i = 0; i < buffer.historyRowCount(); i++) {
       lines.push(buffer.historyRow(i).translateToString(true));
     }
+    const tail = await buffer.syncTail(ys(40), false, 10);
     buffer.dispose();
-    return lines;
+    return { lines, tail };
   });
-  expect(result).toEqual(Array.from({ length: 90 }, () => "y"));
+  expect(result.lines).toEqual([
+    "$ yes",
+    ...Array.from({ length: 90 }, () => "y"),
+  ]);
+  expect(result.tail).toBeNull();
 });
 
 test("history sync: coloured capture lines compare equal wherever the capture starts", async ({
@@ -1405,7 +1410,7 @@ test("history sync: coloured capture lines compare equal wherever the capture st
   expect(result.held[4]).toBe("\x1b[0;44mcarried5");
   expect(result.held[6]).toBe("plain7");
   expect(result.captured.slice(0, 3)).toEqual(result.held.slice(4, 7));
-  expect(result.aligned).toEqual({ drop: 4, keep: 3 });
+  expect(result.aligned).toEqual({ drop: 4, keep: 3, extended: false });
 });
 
 // capture-pane -J gives one history line per logical line; a line wrapped
@@ -1443,7 +1448,7 @@ test("line keys: a wrapped line is one line on the screen, in history and on bot
         scrollback: 100,
       });
       const view = r.createRedrawWriter(buffer, renderer);
-      await buffer.sync(["short", "x".repeat(15), "after"]);
+      await buffer.syncWhole(["short", "x".repeat(15), "after"], false);
       await buffer.writeScreen(`\x1b[H${"w".repeat(15)}\r\n$ `);
       await view.flush();
       const keys = [];
@@ -1476,4 +1481,159 @@ test("line keys: a wrapped line is one line on the screen, in history and on bot
   expect(result.sterk.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
   expect(result.sterk.wrapped.slice(0, 7).every((w) => !w)).toBe(true);
   expect(result.xterm.cursor).toBe(4);
+});
+
+test("history sync: a tail appends only when it overlaps the held end in one place", async ({
+  page,
+}) => {
+  const result = await inPage(page, (m) => {
+    const range = (a, b) =>
+      Array.from({ length: b - a + 1 }, (_, i) => `line ${a + i}`);
+    const held = [...range(1, 200), "$ ", ""];
+    return {
+      continues: m.alignTail(held, [...range(151, 200), "$ ", "", "new"], 10),
+      // More new lines than the tail shows: only the blank lines line up.
+      gap: m.alignTail(held, ["", ...range(1000, 1400)], 10),
+    };
+  });
+  expect(result.continues).toEqual({ overlap: 52, extended: false });
+  expect(result.gap).toBeNull();
+});
+
+// A display stand-in: a headless xterm behind the renderer interface the
+// redraw writer drives, counting full redraws.
+const FAKE_DISPLAY = `(keepsWrappedRows, cols, rows) => {
+  const display = new window.XtermHeadless.Terminal({
+    cols, rows, scrollback: 100, allowProposedApi: true,
+  });
+  const renderer = {
+    keepsWrappedRows,
+    resets: 0,
+    get cols() { return display.cols; },
+    get rows() { return display.rows; },
+    buffer: display.buffer,
+    resize: (c, r) => display.resize(c, r),
+    reset() { this.resets++; display.reset(); },
+    scrollLines: (n) => display.scrollLines(n),
+    write: (d) => new Promise((res) => display.write(d, res)),
+    text() {
+      const out = [];
+      for (let y = 0; y < display.buffer.active.length; y++) {
+        out.push(display.buffer.active.getLine(y).translateToString(true));
+      }
+      return out;
+    },
+  };
+  return renderer;
+}`;
+
+async function withDisplay(page, fn) {
+  await bootTerminal(page);
+  return page.evaluate(
+    async ({ body, fake }) => {
+      const m = await import("/static/terminal-buffer.js");
+      const r = await import("/static/terminal-redraw.js");
+      const makeDisplay = new Function(`return (${fake})`)();
+      return new Function("m", "r", "makeDisplay", body)(m, r, makeDisplay);
+    },
+    { body: `return (${fn})(m, r, makeDisplay);`, fake: FAKE_DISPLAY },
+  );
+}
+
+// A long line whose top rows have scrolled into history while the rest is
+// still on screen: capture-pane -J gives it only up to the screen, and the
+// endpoint says it continues. When it has scrolled off, the next capture
+// has it whole.
+test("history sync: a line straddling the screen top keeps its key and grows in place", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay) => {
+    const renderer = makeDisplay(true, 10, 4);
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const view = r.createRedrawWriter(buffer, renderer);
+    const long = "L".repeat(10) + "M".repeat(10) + "N".repeat(5);
+    await buffer.syncWhole(["one", "two", long.slice(0, 10)], true);
+    await buffer.writeScreen(`\x1b[?1049h\x1b[H${long.slice(10)}\r\nprompt`);
+    await view.flush();
+    const straddleKey = buffer.screenKeyBase();
+    const resetsBefore = renderer.resets;
+    // The pane scrolled: the long line and "three" left the screen.
+    await buffer.writeScreen("\x1b[2J\x1b[Hprompt");
+    const moved = await buffer.syncTail(
+      ["one", "two", long, "three"],
+      false,
+      2,
+    );
+    await view.flush();
+    const rows = renderer.text();
+    const out = {
+      straddleKey,
+      moved,
+      resets: renderer.resets - resetsBefore,
+      historyStart: buffer.historyStart(),
+      rows: rows.slice(0, 7),
+      keys: [0, 1, 2, 3, 4, 5, 6].map((y) => view.lineKeyAt(y)),
+      promptKey: buffer.cursorLineKey(),
+    };
+    buffer.dispose();
+    return out;
+  });
+  expect(result.straddleKey).toBe(2);
+  expect(result.moved).toEqual({ replaced: false, before: 3, after: 4 });
+  expect(result.resets).toBe(0);
+  expect(result.historyStart).toBe(0);
+  expect(result.rows).toEqual([
+    "one",
+    "two",
+    "LLLLLLLLLL",
+    "MMMMMMMMMM",
+    "NNNNN",
+    "three",
+    "prompt",
+  ]);
+  expect(result.keys).toEqual([0, 1, 2, null, null, 3, 4]);
+  expect(result.promptKey).toBe(4);
+});
+
+// At a narrow width a long history line takes several display rows; the
+// history is capped by those rows so the display never trims its own top.
+test("history sync: history is capped by display rows at a narrow width", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay) => {
+    const renderer = makeDisplay(true, 10, 4);
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 4,
+      scrollback: 100,
+    });
+    const view = r.createRedrawWriter(buffer, renderer);
+    const lines = Array.from(
+      { length: 40 },
+      (_, i) => `${String(i).padStart(2, "0")}${"x".repeat(23)}`,
+    );
+    await buffer.syncWhole(lines, false);
+    await view.flush();
+    const out = {
+      held: buffer.historyRowCount(),
+      start: buffer.historyStart(),
+      displayRows: renderer.buffer.active.length,
+      firstKey: view.lineKeyAt(0),
+      firstRow: renderer.text()[0],
+    };
+    buffer.dispose();
+    return out;
+  });
+  // 25 cells take three rows at 10 columns: 40 lines are 120 rows, past the
+  // 90-row budget (100 minus the screen's 10), so history is cut to 20
+  // lines (60 rows).
+  expect(result.held).toBe(20);
+  expect(result.start).toBe(20);
+  expect(result.displayRows).toBeLessThanOrEqual(100 + 4);
+  expect(result.firstKey).toBe(20);
+  expect(result.firstRow).toBe("20xxxxxxxx");
 });

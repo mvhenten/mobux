@@ -65,6 +65,12 @@ function oscInputToString(data) {
 // HISTORY_QUIET_MS, and at least every HISTORY_MAX_WAIT_MS while it flows.
 const HISTORY_QUIET_MS = 400;
 const HISTORY_MAX_WAIT_MS = 2000;
+// A catch-up fetches this many of the last history lines and needs this
+// many of them to overlap what is held; otherwise it fetches the whole
+// history (the server's maximum).
+const HISTORY_TAIL_LINES = 500;
+const HISTORY_TAIL_OVERLAP = 50;
+const HISTORY_WHOLE_LINES = 10000;
 
 // OSC 10 / 11 / 12: foreground / background / cursor colour queries.
 const COLOUR_QUERIES = {
@@ -181,7 +187,7 @@ export class TerminalEngine extends EventTarget {
     this._historyTimer = null;
     this._historyMaxTimer = null;
     this._historySync = null;
-    this._historyAgain = false;
+    this._historyNext = null;
     this._historyAbort = null;
     this._historyGeneration = 0;
     this._theme = null;
@@ -637,13 +643,11 @@ export class TerminalEngine extends EventTarget {
 
   // ── History ───────────────────────────────────────────────────────
   // History is the pane's tmux history above the visible screen
-  // (scope=history), fetched whole on every sync and lined up with the one
-  // held (terminal-buffer.js alignHistory).
-  _historyUrl() {
-    const q = new URLSearchParams({
-      scope: "history",
-      lines: String(this.buffer.historyLimit),
-    });
+  // (scope=history). A catch-up fetches its tail and appends what is new; a
+  // reload, or a tail that cannot be placed, fetches it whole
+  // (terminal-buffer.js alignTail / alignHistory).
+  _historyUrl(lines) {
+    const q = new URLSearchParams({ scope: "history", lines: String(lines) });
     if (this.node) q.set("node", this.node);
     return u(
       `api/sessions/${encodeURIComponent(this.session)}/history?${q.toString()}`,
@@ -651,49 +655,77 @@ export class TerminalEngine extends EventTarget {
   }
 
   reloadHistory() {
+    return this._requestHistory("whole");
+  }
+
+  _requestHistory(kind) {
     if (this._historySync) {
-      this._historyAgain = true;
+      if (this._historyNext !== "whole") this._historyNext = kind;
       return this._historySync;
     }
-    this._historySync = this._runHistorySync().finally(() => {
+    this._historySync = this._runHistorySync(kind).finally(() => {
       this._historySync = null;
-      if (this._historyAgain && !this._disposed) {
-        this._historyAgain = false;
-        this.reloadHistory();
-      }
+      const next = this._historyNext;
+      this._historyNext = null;
+      if (next && !this._disposed) this._requestHistory(next);
     });
     return this._historySync;
   }
 
-  async _runHistorySync() {
+  async _fetchHistory(lines, signal) {
+    const res = await fetch(this._historyUrl(lines), { signal }).catch(
+      () => null,
+    );
+    if (!res || !res.ok) return null;
+    const text = await res.text().catch(() => null);
+    if (text === null) return null;
+    return {
+      lines: splitCapture(text),
+      continues: res.headers.get("x-history-continues") === "1",
+    };
+  }
+
+  async _runHistorySync(kind) {
     clearTimeout(this._historyTimer);
     clearTimeout(this._historyMaxTimer);
     this._historyMaxTimer = null;
     const generation = this._historyGeneration;
     const abort = new AbortController();
     this._historyAbort = abort;
-    const res = await fetch(this._historyUrl(), { signal: abort.signal }).catch(
-      () => null,
-    );
-    const text = res && res.ok ? await res.text().catch(() => null) : null;
-    if (text === null || this._disposed) return;
-    if (generation !== this._historyGeneration) return;
-    const moved = await this.buffer.sync(splitCapture(text));
-    if (this._disposed || generation !== this._historyGeneration) return;
+    const current = () =>
+      !this._disposed && generation === this._historyGeneration;
+
+    let moved = null;
+    if (kind === "tail") {
+      const tail = await this._fetchHistory(HISTORY_TAIL_LINES, abort.signal);
+      if (!tail || !current()) return;
+      moved = await this.buffer.syncTail(
+        tail.lines,
+        tail.continues,
+        HISTORY_TAIL_OVERLAP,
+      );
+      if (!current()) return;
+    }
+    if (!moved) {
+      const whole = await this._fetchHistory(HISTORY_WHOLE_LINES, abort.signal);
+      if (!whole || !current()) return;
+      moved = await this.buffer.syncWhole(whole.lines, whole.continues);
+      if (!current()) return;
+    }
     this._rebaseMarkers(moved);
     await this.view.flush();
-    this.dispatchEvent(new CustomEvent("history", { detail: text }));
+    this.dispatchEvent(new Event("history"));
   }
 
   _scheduleHistoryTail() {
     clearTimeout(this._historyTimer);
     this._historyTimer = setTimeout(
-      () => this.reloadHistory(),
+      () => this._requestHistory("tail"),
       HISTORY_QUIET_MS,
     );
     if (this._historyMaxTimer === null) {
       this._historyMaxTimer = setTimeout(
-        () => this.reloadHistory(),
+        () => this._requestHistory("tail"),
         HISTORY_MAX_WAIT_MS,
       );
     }

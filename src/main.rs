@@ -1195,13 +1195,14 @@ struct SessionHistoryQuery {
 
 /// GET /api/sessions/{name}/history — the pane's tmux scrollback.
 /// `scope=history` leaves out the visible screen and returns one line per
-/// logical line; `lines` caps how many lines back the capture starts
+/// logical line, with `X-History-Continues: 1` when the last one carries on
+/// into the screen; `lines` caps how many lines back the capture starts
 /// (default and maximum 10000).
 async fn api_session_history(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<SessionHistoryQuery>,
-) -> Result<String, AppError> {
+) -> Result<(HeaderMap, String), AppError> {
     validate_session_name(&state, &name)?;
     let target = resolve_node_target(&state, q.node.as_deref()).await?;
     let lines = q
@@ -1212,7 +1213,11 @@ async fn api_session_history(
         tmux::capture_history(&name, lines, q.scope.unwrap_or_default(), target.as_deref())
             .await
             .map_err(AppError::bad_request)?;
-    Ok(history)
+    let mut headers = HeaderMap::new();
+    if history.continues {
+        headers.insert("x-history-continues", HeaderValue::from_static("1"));
+    }
+    Ok((headers, history.text))
 }
 
 #[derive(Deserialize)]
