@@ -15,14 +15,20 @@
 //! off its bottom by `ESC M` on its top row, by `CSI T` or by `CSI L`.
 //!
 //! A snapshot is those rows followed by the visible rows, and is compared
-//! with the previous snapshot only. The previous one is laid over it at the
-//! shift where the most non-blank rows agree, which is how a scroll lines up,
-//! and a row is new when the previous snapshot has nothing equal at its
-//! place. A shift only counts when its agreeing rows outnumber the rows it
-//! contradicts, and a non-zero one needs at least two; with no such shift the
-//! screen is a different one and every row of it is new, so a second screen
-//! of code keeps its closing brace. A snapshot with nothing new leaves the
-//! previous one in place; leaving the alternate screen forgets it.
+//! with the previous snapshot only. A row is already seen when the previous
+//! snapshot holds the same text at the same screen row, or at the shift
+//! where the most rows agree that way — which is how a scroll lines up, and
+//! how text scrolling above a fixed input box and footer lines up at the
+//! shift while the footer lines up in place. A shift only counts when its
+//! agreeing rows outnumber the rows it contradicts, and a scroll (any shift
+//! but in place) needs at least two rows agreeing at the shift itself; with
+//! no such shift the screen is a different one and every row of it is new,
+//! so a second screen of code keeps its closing brace. A snapshot with
+//! nothing new leaves the previous one in place; leaving the alternate
+//! screen forgets it.
+//!
+//! A spinner or timer line that is rewritten in place is recorded again at
+//! each snapshot it changed in, at most every few seconds.
 //!
 //! `vt100` keeps the scroll region private, so this mirrors it: `CSI r`, the
 //! grid clear on `?1049h`, `ESC c` and a resize, applied the same way.
@@ -348,59 +354,55 @@ impl ScreenModel {
     }
 }
 
-/// The non-blank rows of `candidate` that `previous`, laid over it at its
-/// best shift, does not hold at the same place — or all of them when no
-/// shift lines up (a different screen). A shift lines up when it agrees on
-/// more rows than it contradicts, and a scroll (a non-zero shift) on at
-/// least two, so one stray equal line cannot pass for a scroll.
+/// The non-blank rows of `candidate` that `previous` holds neither at the
+/// same screen row nor at the best shift — or all of them when no shift
+/// lines up (a different screen). Both snapshots end with the visible rows,
+/// so the same screen row is the same distance from the end.
 fn new_rows(previous: &[String], candidate: &[String]) -> Vec<String> {
-    let non_blank = |rows: &[String]| -> Vec<String> {
-        rows.iter().filter(|r| !r.is_empty()).cloned().collect()
-    };
     let (p, c) = (previous.len() as isize, candidate.len() as isize);
-    let mut best: Option<(isize, usize, usize)> = None;
+    let in_place = c - p;
+    let at = |i: isize| (0..p).contains(&i).then(|| &previous[i as usize]);
+    let seen = |j: isize, shift: isize| {
+        let now = &candidate[j as usize];
+        at(j - shift) == Some(now) || at(j - in_place) == Some(now)
+    };
+    type Rank = (usize, std::cmp::Reverse<usize>, std::cmp::Reverse<isize>);
+    let mut best: Option<(isize, Rank)> = None;
     for shift in (1 - p)..c {
-        let (mut agree, mut differ) = (0, 0);
-        for j in shift.max(0)..c.min(p + shift) {
-            let (was, now) = (&previous[(j - shift) as usize], &candidate[j as usize]);
-            if was.is_empty() || now.is_empty() {
+        let (mut agree, mut agree_at_shift, mut differ) = (0, 0, 0);
+        for j in 0..c {
+            let now = &candidate[j as usize];
+            if now.is_empty() {
                 continue;
             }
-            if was == now {
+            if at(j - shift) == Some(now) {
+                agree_at_shift += 1;
+            }
+            if seen(j, shift) {
                 agree += 1;
-            } else {
+            } else if at(j - shift).is_some_and(|was| !was.is_empty()) {
                 differ += 1;
             }
         }
-        let lines_up = agree > differ && (shift == 0 || agree >= 2);
+        let lines_up = agree > differ && (shift == in_place || agree_at_shift >= 2);
         if !lines_up {
             continue;
         }
-        let better = match best {
-            None => true,
-            Some((best_shift, a, d)) => {
-                (
-                    agree,
-                    std::cmp::Reverse(differ),
-                    std::cmp::Reverse(shift.abs()),
-                ) > (a, std::cmp::Reverse(d), std::cmp::Reverse(best_shift.abs()))
-            }
-        };
-        if better {
-            best = Some((shift, agree, differ));
+        let rank = (
+            agree,
+            std::cmp::Reverse(differ),
+            std::cmp::Reverse((shift - in_place).abs()),
+        );
+        if best.as_ref().is_none_or(|(_, best_rank)| rank > *best_rank) {
+            best = Some((shift, rank));
         }
     }
-    let Some((shift, _, _)) = best else {
-        return non_blank(candidate);
-    };
-    candidate
-        .iter()
-        .enumerate()
-        .filter(|(j, now)| {
-            let i = *j as isize - shift;
-            !now.is_empty() && (i < 0 || i >= p || previous[i as usize] != **now)
+    (0..c)
+        .filter(|&j| {
+            !candidate[j as usize].is_empty()
+                && best.as_ref().is_none_or(|(shift, _)| !seen(j, *shift))
         })
-        .map(|(_, now)| now.clone())
+        .map(|j| candidate[j as usize].clone())
         .collect()
 }
 
@@ -652,6 +654,43 @@ mod tests {
         assert_eq!(
             model.snapshot(),
             Some(["build finished", "ok"].map(String::from).to_vec())
+        );
+    }
+
+    #[test]
+    fn text_scrolling_above_a_fixed_footer_records_only_the_new_text() {
+        // Claude Code's layout: text scrolls in rows 1-5 above an input box
+        // and a footer that stay put in rows 6-8.
+        let footer = ["+-----+", "| > |", "? help"].map(String::from);
+        let mut model = ScreenModel::new(8, 40);
+        let mut body = String::from("\x1b[?1049h\x1b[1;5r");
+        for (i, row) in footer.iter().enumerate() {
+            body.push_str(&format!("\x1b[{};1H{row}", i + 6));
+        }
+        for i in 1..=5 {
+            body.push_str(&format!("\x1b[{i};1Ht-{i}"));
+        }
+        model.feed(body.as_bytes());
+        let mut first = numbered("t", 5);
+        first.extend(footer.iter().cloned());
+        assert_eq!(model.snapshot(), Some(first));
+
+        model.feed(b"\x1b[5;1H\nt-6\x1b[5;1H\nt-7");
+        assert_eq!(
+            model.snapshot(),
+            Some(["t-6", "t-7"].map(String::from).to_vec()),
+            "a linefeed in the region"
+        );
+
+        let mut redraw = String::new();
+        for (row, i) in (5..=9).enumerate() {
+            redraw.push_str(&format!("\x1b[{};1Ht-{i}\x1b[K", row + 1));
+        }
+        model.feed(redraw.as_bytes());
+        assert_eq!(
+            model.snapshot(),
+            Some(["t-8", "t-9"].map(String::from).to_vec()),
+            "a redraw two rows further down"
         );
     }
 
