@@ -32,9 +32,8 @@ export function createMarkerBook(buffer) {
     return out;
   }
 
-  // The screen as it was when the marker was recorded, found again among
-  // the lines added to history since and the screen now (the last screen
-  // line, tmux's status line, left out). A line may have grown since
+  // The pane as it was when the marker was recorded, found again among the
+  // lines added to history since and the pane now. A line may have grown since
   // (typing after a prompt), so a recorded line matches the start of one.
   // The latest place the whole screen fits wins.
   function findSnapshot(entry, stream) {
@@ -68,7 +67,7 @@ export function createMarkerBook(buffer) {
   }
 
   function placeByText(entry, before) {
-    const screen = buffer.screenLines().slice(0, -1);
+    const screen = buffer.screenLines();
     const found = findSnapshot(entry, [
       ...historyCandidates(before - 1),
       ...screen,

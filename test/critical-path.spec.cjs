@@ -567,9 +567,9 @@ test("reader view: the reader draws from the buffer, not the display", async ({
   );
   const marker = `BUFFER_ONLY_${Math.floor(Math.random() * 1e9)}`;
   await page.evaluate(async (m) => {
-    const t = window.__mobuxView.test;
-    t.stubDisplayWrites();
-    await t.injectLines(5, m);
+    const display = window.__xterm || window.__sterk._sterk;
+    display.write = (_data, done) => done?.();
+    await window.__mobuxView.test.injectLines(5, m);
   }, marker);
   await expect
     .poll(
@@ -1355,6 +1355,38 @@ test("one copy: the reader shows no alternate-screen lines and each number once"
   expect(altLines(await readerLines(page))).toEqual([]);
 });
 
+test("reader view: with the status line on top it is the status bar, not a line", async ({
+  page,
+}) => {
+  tmux(`set-option -t ${SESSION} status-position top`);
+  try {
+    const marker = `TOP_STATUS_${Math.floor(Math.random() * 1e9)}`;
+    tmux(`send-keys -t ${SESSION} "echo ${marker}" Enter`);
+    await bootTerminal(page);
+    await page.evaluate(() => window.__mobuxView.swap("reader"));
+    await expect
+      .poll(
+        async () =>
+          (await readerLines(page)).filter((l) => l.trim() === marker).length,
+        { timeout: 10000 },
+      )
+      .toBe(1);
+    expect(
+      await page.evaluate(() => window.__mobuxView.test.statusBarFilled()),
+    ).toBe(true);
+    const statusText = await page.evaluate(
+      () => document.querySelector(".reader-statusbar").textContent,
+    );
+    // tmux cuts the session name in status-left to fit its length.
+    const tag = `[${SESSION.slice(0, 5)}`;
+    expect(statusText).toContain(tag);
+    const lines = await readerLines(page);
+    expect(lines.filter((l) => l.includes(tag))).toEqual([]);
+  } finally {
+    tmux(`set-option -u -t ${SESSION} status-position`);
+  }
+});
+
 test("one copy: history catches up while output keeps flowing", async ({
   page,
 }) => {
@@ -1568,7 +1600,6 @@ test("line keys: a wrapped line is one line on the screen, in history and on the
         [3, "D;0"],
         [4, "A"],
       ]),
-      paneRows: () => ({ first: 0, last: 3 }),
     });
     const snapshot = reader.snapshot();
     const out = {
@@ -1640,7 +1671,6 @@ test("history sync: a line straddling the screen top keeps its key and grows in 
     const reader = d.createTerminalDocument({
       buffer,
       oscMarkers,
-      paneRows: () => ({ first: 0, last: 3 }),
     });
     const straddling = reader.snapshot().lines.map((l) => [l.text, l.osc]);
     const resetsBefore = renderer.resets;
@@ -1770,6 +1800,81 @@ test("history sync: a straddle that scrolled off before the next sync keys the p
   expect(result.straddling).toBe(2);
   expect(result.promptBefore).toBe(5);
   expect(result.promptAfter).toBe(5);
+});
+
+// The part of a straddling line captured into history is whole screen
+// rows, so a blank at its last column belongs to the line.
+test("document: a straddling line keeps the blank at the wrap", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay, d) => {
+    const read = async (captured) => {
+      const buffer = m.createTerminalBuffer({
+        cols: 10,
+        rows: 4,
+        scrollback: 100,
+      });
+      await buffer.writeScreen("\x1b[?1049h\x1b[Habc\r\n$ ");
+      await buffer.syncWhole(["one", captured], true);
+      const doc = d.createTerminalDocument({ buffer, oscMarkers: new Map() });
+      const lines = doc.snapshot().lines.map((l) => l.text);
+      buffer.dispose();
+      return lines;
+    };
+    return {
+      spaced: await read("123456789 "),
+      trimmed: await read("123456789"),
+    };
+  });
+  expect(result.spaced).toEqual(["one", "123456789 abc", "$"]);
+  expect(result.trimmed).toEqual(["one", "123456789 abc", "$"]);
+});
+
+// With tmux's status line on top, the pane starts on the second row: the
+// straddling line joins there, the status row is no line, and redrawing it
+// moves no line key.
+test("document: with the status line on top the pane's first row joins the straddle", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay, d) => {
+    const { createMarkerBook } = await import("/static/terminal-markers.js");
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 5,
+      scrollback: 100,
+    });
+    buffer.setStatus(1, "top");
+    await buffer.writeScreen(
+      "\x1b[?1049h\x1b[H[0] 10:00\x1b[2;1Habc\r\nout\r\n$ ",
+    );
+    await buffer.syncWhole(["one", "123456789 "], true);
+    const book = createMarkerBook(buffer);
+    book.record("A");
+    const doc = d.createTerminalDocument({ buffer, oscMarkers: book.map });
+    const snap = () => {
+      const { lines, status } = doc.snapshot();
+      return {
+        lines: lines.map((l) => [l.text, l.osc]),
+        status: status.rows.map((row) => row.runs.map((x) => x.text).join("")),
+      };
+    };
+    const before = { ...snap(), key: buffer.cursorLineKey() };
+    await buffer.writeScreen("\x1b[s\x1b[1;1H\x1b[2K[0] 10:01\x1b[u");
+    const after = { ...snap(), key: buffer.cursorLineKey() };
+    buffer.dispose();
+    return { before, after };
+  });
+  const lines = [
+    ["one", null],
+    ["123456789 abc", null],
+    ["out", null],
+    ["$", "A"],
+  ];
+  expect(result.before.lines).toEqual(lines);
+  expect(result.before.status).toEqual(["[0] 10:00"]);
+  expect(result.after.lines).toEqual(lines);
+  expect(result.after.status).toEqual(["[0] 10:01"]);
+  expect(result.after.key).toBe(result.before.key);
 });
 
 // Markers recorded while history lags the screen: a command whose output

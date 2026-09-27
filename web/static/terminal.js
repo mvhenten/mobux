@@ -711,12 +711,7 @@ export function createTerminal({
     focus: () => core.focus(),
     setNativeInputEnabled: (enabled) => core.setNativeInputEnabled(enabled),
     lineText: (y) => core.rowText(y),
-    // The reader's document, read from the buffer.
     documentSnapshot: () => core.document.snapshot(),
-    // Swallow every write into the display, so it draws nothing more.
-    stubDisplayWrites: () => {
-      core.renderer.write = () => Promise.resolve();
-    },
     oscMarkerCount: () => core.oscMarkers.size,
     fullRedrawCount: () => core.view.fullRedraws(),
   };

@@ -18,7 +18,8 @@
 //             `oscMarkers` doc comment. Consumers scan for a kind rather than
 //             compare for equality; term-tokenizer.js's `oscHas`/
 //             `oscExitCode` do this.
-//     status  the tmux status line as a separate field: { runs } | null
+//     status  tmux's status lines, top to bottom, as a separate field:
+//             { rows: [{ runs }] } | null
 //   subscribe(cb): Disposable    fires after each buffer change
 //   onOscDetected(cb): Disposable   fires the first time an OSC 133 marker lands
 //   oscDetected: boolean
@@ -117,11 +118,14 @@ function attrsEqual(a, b) {
   );
 }
 
-// A row's cells, the trailing blank ones left out when `trim`.
-function* rowCells(row, trim) {
+// `fill` rounds a trimmed row's end up to a multiple of it: the part of a
+// straddling line captured into history is whole screen rows, trailing
+// blanks included.
+function* rowCells(row, trim, fill) {
   let end = row.length;
   if (trim) {
     while (end > 0 && isBlankCell(row.getCell(end - 1))) end--;
+    if (fill) end = Math.min(row.length, Math.ceil(end / fill) * fill);
   }
   for (let x = 0; x < end; x++) {
     const cell = row.getCell(x);
@@ -131,15 +135,15 @@ function* rowCells(row, trim) {
 
 // ── Run extraction ─────────────────────────────────────────────────
 // Group a logical line's cells into runs of identical attrs. `segments` are
-// { rows, trim }: the rows of a wrapped chain run on, a history row ends at
-// its last cell. Trailing whitespace is stripped.
+// { rows, trim, fill }: the rows of a wrapped chain run on, a history row
+// ends at its last cell. Trailing whitespace is stripped from the line.
 function extractRuns(segments) {
   const runs = [];
   let cur = null;
-  for (const { rows, trim } of segments) {
+  for (const { rows, trim, fill } of segments) {
     for (const row of rows) {
       if (!row) continue;
-      for (const cell of rowCells(row, trim)) {
+      for (const cell of rowCells(row, trim, fill)) {
         const text = cell.getChars() || " ";
         const attrs = cellAttrs(cell);
         if (cur && attrsEqual(cur.attrs, attrs)) {
@@ -166,9 +170,8 @@ function extractRuns(segments) {
   return runs;
 }
 
-// The buffer's lines as { segments, key }, and the rows outside the pane
-// (tmux's status line) on the side.
-function bufferLines(buffer, paneRows) {
+// The buffer's lines as { segments, key }.
+function bufferLines(buffer) {
   const lines = [];
   const start = buffer.historyStart();
   const count = buffer.historyRowCount();
@@ -181,39 +184,26 @@ function bufferLines(buffer, paneRows) {
   logicalLines(buffer.scrollbackRows()).forEach((rows, j) => {
     lines.push({ segments: [{ rows, trim: false }], key: start + count + j });
   });
-
-  const { first, last } = paneRows;
-  const base = buffer.screenKeyBase();
   const straddles = buffer.straddles() && count > 0;
-  const status = [];
-  let row = 0;
-  logicalLines(buffer.viewportRows()).forEach((rows, index) => {
-    const at = row;
-    row += rows.length;
-    if (at < first || at > last) {
-      status.push(...rows);
-      return;
-    }
+  buffer.screenLines().forEach(({ rows, key }, index) => {
     if (index === 0 && straddles) {
-      lines[count - 1].segments.push({ rows, trim: false });
+      const last = lines[count - 1].segments;
+      last[0].fill = buffer.cols;
+      last.push({ rows, trim: false });
       return;
     }
-    lines.push({ segments: [{ rows, trim: false }], key: base + index });
+    lines.push({ segments: [{ rows, trim: false }], key });
   });
-  return { lines, status };
+  return lines;
 }
 
 // Build the document contract over the engine: its buffer, its OSC marker
-// map by line key, its pane rows, and its buffer-change and osc-detected
-// events.
+// map by line key, and its buffer-change and osc-detected events.
 export function createTerminalDocument(engine) {
   function snapshot() {
+    const { buffer } = engine;
     const markers = engine.oscMarkers;
-    const { lines: raw, status: statusRows } = bufferLines(
-      engine.buffer,
-      engine.paneRows(),
-    );
-    const lines = raw.map(({ segments, key }) => {
+    const lines = bufferLines(buffer).map(({ segments, key }) => {
       const runs = extractRuns(segments);
       const text = runs.map((r) => r.text).join("");
       return { runs, text, osc: markers.get(key) || null };
@@ -224,15 +214,11 @@ export function createTerminalDocument(engine) {
       lines.pop();
     }
 
-    let status = null;
-    for (const row of statusRows) {
-      const runs = extractRuns([{ rows: [row], trim: false }]);
-      if (runs.some((r) => r.text.trim().length > 0)) {
-        status = { runs };
-        break;
-      }
-    }
-    return { lines, status };
+    const statusRows = buffer
+      .statusRows()
+      .map((row) => ({ runs: extractRuns([{ rows: [row], trim: false }]) }))
+      .filter(({ runs }) => runs.length > 0);
+    return { lines, status: statusRows.length ? { rows: statusRows } : null };
   }
 
   function onOscDetected(cb) {

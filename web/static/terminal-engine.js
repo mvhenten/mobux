@@ -544,10 +544,7 @@ export class TerminalEngine extends EventTarget {
   // The client rows a wheel event may land on: tmux's status line switches
   // windows on a wheel.
   paneRows() {
-    const pane = this.panes[this.activeIndex];
-    const status = pane?.statusLines ?? 1;
-    const first = pane?.statusPosition === "top" ? status : 0;
-    return { first, last: Math.max(first, first + this.rows - status - 1) };
+    return this.buffer.paneRows();
   }
   forgetPaneScreen(settleMs) {
     this._paneScreenKnown = false;
@@ -630,6 +627,8 @@ export class TerminalEngine extends EventTarget {
       if (askedAt >= this._paneScreenFrom) this._paneScreenKnown = true;
       this.activeIndex = this.panes.findIndex((p) => p.active);
       if (this.activeIndex < 0) this.activeIndex = 0;
+      const pane = this.panes[this.activeIndex];
+      this.buffer.setStatus(pane?.statusLines ?? 1, pane?.statusPosition);
       this.dispatchEvent(
         new CustomEvent("panes", {
           detail: { panes: this.panes, activeIndex: this.activeIndex },

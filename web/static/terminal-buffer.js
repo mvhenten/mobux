@@ -10,7 +10,8 @@
 //            with what is held and append what is new. Lines tmux drops off
 //            its top are kept until the display's row budget is spent.
 //
-// Displays draw from this buffer through terminal-redraw.js.
+// Displays draw this buffer through terminal-redraw.js; the reader reads it
+// through terminal-document.js.
 
 const SCREEN_SCROLLBACK = 1000;
 
@@ -299,14 +300,24 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     }),
   );
 
-  // Rows that left the top of tmux's client screen since the last sync:
-  // tmux scrolls its client with a linefeed at the bottom of a scroll region
-  // that starts at the top row, or with scroll-up. Those rows are the pane
-  // lines entering tmux's history.
+  // tmux's status lines take the top or bottom rows of its client screen;
+  // the rest is the pane.
+  let statusLines = 1;
+  let statusTop = false;
+  const paneRows = () => {
+    const first = statusTop ? statusLines : 0;
+    return { first, last: Math.max(first, first + rows - statusLines - 1) };
+  };
+
+  // Rows that left the top of the pane since the last sync: tmux scrolls
+  // its client with a linefeed at the bottom of a scroll region that starts
+  // at the pane's top row, or with scroll-up. Those rows are the pane lines
+  // entering tmux's history.
   let scrolledRows = 0;
   let regionTop = 1;
   const scrollsHistory = () =>
-    regionTop === 1 && screen.buffer.active.type === "alternate";
+    regionTop === paneRows().first + 1 &&
+    screen.buffer.active.type === "alternate";
   subs.push(
     screen.parser.registerCsiHandler({ final: "r" }, (params) => {
       regionTop = scalar(params[0]) || 1;
@@ -482,15 +493,33 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     return out;
   }
 
-  const firstRowText = () => viewportRows()[0]?.translateToString(false) ?? "";
+  function statusRows() {
+    const { first, last } = paneRows();
+    return viewportRows().filter((_, r) => r < first || r > last);
+  }
+
+  // The pane's lines, each { rows, row } with `row` counted from the pane's
+  // top.
+  function paneLines() {
+    const { first, last } = paneRows();
+    let row = 0;
+    return logicalLines(viewportRows().slice(first, last + 1)).map((line) => {
+      const out = { rows: line, row };
+      row += line.length;
+      return out;
+    });
+  }
+
+  const firstRowText = () =>
+    viewportRows()[paneRows().first]?.translateToString(false) ?? "";
 
   function setContinues(continues) {
     lastContinues = continues;
     straddleRow = continues ? firstRowText() : null;
   }
 
-  // The screen's first line is the rest of the last history line when that
-  // one straddles the top of the screen.
+  // The pane's first line is the rest of the last history line when that
+  // one straddles the top of the pane.
   const straddles = () =>
     lastContinues &&
     historyLines.length > 0 &&
@@ -516,7 +545,19 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       queue(cap);
     },
 
-    // Fires after the screen parses a write and after a history change.
+    // How many status lines tmux draws, and whether at the top.
+    setStatus(lines, position) {
+      const top = position === "top";
+      if (lines === statusLines && top === statusTop) return;
+      statusLines = lines;
+      statusTop = top;
+      changed();
+    },
+    paneRows,
+    statusRows,
+
+    // Fires after the screen parses a write, after a history change and
+    // when the status lines move.
     onChange(cb) {
       changeSubs.add(cb);
       return { dispose: () => changeSubs.delete(cb) };
@@ -566,8 +607,9 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return { x: buf.cursorX, y: buf.cursorY };
     },
     // Line keys: history lines from `historyStart`, then the normal
-    // screen's scrollback lines, then the viewport's lines — the first of
-    // which shares the last history line's key while it straddles.
+    // screen's scrollback lines, then the pane's lines — the first of which
+    // shares the last history line's key while it straddles. Status lines
+    // have no key.
     screenKeyBase() {
       const base = end() + logicalLines(scrollbackRows()).length + scrolledRows;
       return straddles() ? base - 1 : base;
@@ -578,37 +620,33 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     consumeScrolledRows(n) {
       scrolledRows = Math.max(0, scrolledRows - n);
     },
-    // The key of the line viewport row `r` belongs to, or null.
+    // The key of the line pane row `r` belongs to, or null.
     rowKey(r) {
-      let row = 0;
-      let index = 0;
-      for (const line of logicalLines(viewportRows())) {
-        if (r < row + line.length) return this.screenKeyBase() + index;
-        row += line.length;
-        index++;
-      }
-      return null;
-    },
-    // The screen's lines as { key, row, text }, for placing a marker by text.
-    screenLines() {
-      const out = [];
-      let row = 0;
       const base = this.screenKeyBase();
-      logicalLines(viewportRows()).forEach((line, index) => {
-        const text = line.map((l) => l?.translateToString(true) ?? "").join("");
-        out.push({ key: base + index, row, text });
-        row += line.length;
-      });
-      return out;
+      const lines = paneLines();
+      const index = lines.findIndex(
+        (l) => r >= l.row && r < l.row + l.rows.length,
+      );
+      return index === -1 ? null : base + index;
+    },
+    // The pane's lines as { key, row, rows, text }.
+    screenLines() {
+      const base = this.screenKeyBase();
+      return paneLines().map((line, index) => ({
+        key: base + index,
+        row: line.row,
+        rows: line.rows,
+        text: line.rows.map((l) => l?.translateToString(true) ?? "").join(""),
+      }));
     },
     historyText(i) {
       return plainText(historyLines[i] ?? "");
     },
-    // Where the cursor is, for a marker: its line key now, its row counted
-    // from the rows scrolled off since the last sync, and the screen's lines
-    // then with the cursor's among them.
+    // Where the cursor is, for a marker: its line key now, its pane row
+    // counted from the rows scrolled off since the last sync, and the
+    // pane's lines then with the cursor's among them.
     cursorPlace() {
-      const y = screen.buffer.active.cursorY;
+      const y = screen.buffer.active.cursorY - paneRows().first;
       const lines = this.screenLines();
       let lineIndex = 0;
       while (lineIndex + 1 < lines.length && lines[lineIndex + 1].row <= y) {
@@ -617,19 +655,15 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return {
         key: this.cursorLineKey(),
         vrow: scrolledRows + y,
-        snapshot: lines.slice(0, -1).map((l) => l.text),
+        snapshot: lines.map((l) => l.text),
         lineIndex,
       };
     },
     cursorLineKey() {
-      const y = screen.buffer.active.cursorY;
-      let row = 0;
+      const y = screen.buffer.active.cursorY - paneRows().first;
+      const lines = paneLines();
       let index = 0;
-      for (const line of logicalLines(viewportRows())) {
-        if (y < row + line.length) break;
-        row += line.length;
-        index++;
-      }
+      while (index + 1 < lines.length && lines[index + 1].row <= y) index++;
       return this.screenKeyBase() + index;
     },
 
