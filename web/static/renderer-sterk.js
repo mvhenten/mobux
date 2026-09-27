@@ -58,16 +58,6 @@ export function createSterkRenderer(host, options = {}) {
     throw err;
   }
 
-  // onWriteParsed fires once per write(); fan it out to every subscriber
-  // (the reader relies on this) so multiple consumers can observe buffer
-  // changes without competing for sterk's single hook.
-  const writeParsedSubs = [];
-  if (sterk.onWriteParsed) {
-    sterk.onWriteParsed(() => {
-      for (const cb of writeParsedSubs.slice()) cb();
-    });
-  }
-
   // Debug peephole for the visual test matrix (confined to this adapter).
   // Exposes the sterk instance and its live options so sterk-only tests can
   // read the Ace DOM and the applied palette.
@@ -75,9 +65,6 @@ export function createSterkRenderer(host, options = {}) {
     _sterk: sterk,
     get options() {
       return sterk.options;
-    },
-    get buffer() {
-      return sterk.buffer;
     },
     scrollLines(n) {
       sterk.scrollLines(n);
@@ -183,7 +170,6 @@ export function createSterkRenderer(host, options = {}) {
   return {
     // R1 — teardown: sterk releases its DOM + internal listeners.
     dispose() {
-      writeParsedSubs.length = 0;
       linkSubs.length = 0;
       for (const sub of rendererCleanups.splice(0)) {
         try {
@@ -240,7 +226,7 @@ export function createSterkRenderer(host, options = {}) {
       return sterk.onData(cb);
     },
 
-    // R6 — scroll; viewport position is readable via the buffer.
+    // R6 — scroll.
     scrollLines(n) {
       sterk.scrollLines(n);
     },
@@ -248,22 +234,16 @@ export function createSterkRenderer(host, options = {}) {
       sterk.scrollToBottom();
     },
 
-    // R7 — xterm-shaped buffer read model.
-    buffer: {
-      get active() {
-        return makeBufferAdapter(sterk);
-      },
+    // R7 — scroll position and a row's text. Sterk's translateToString(true)
+    // trims both edges, which would shift the columns of an indented row;
+    // read it raw and trim the right.
+    viewport() {
+      const buf = sterk.buffer.active;
+      return { length: buf.length, top: buf.viewportY };
     },
-
-    // R8 — fires after a write is parsed; multiple subscribers.
-    onBufferChanged(cb) {
-      writeParsedSubs.push(cb);
-      return {
-        dispose() {
-          const i = writeParsedSubs.indexOf(cb);
-          if (i >= 0) writeParsedSubs.splice(i, 1);
-        },
-      };
+    rowText(y) {
+      const line = sterk.buffer.active.getLine(y);
+      return line ? line.translateToString(false).replace(/\s+$/, "") : null;
     },
 
     // R11 — theming + font size. Sterk applies the palette in place on its
@@ -355,107 +335,6 @@ export function createSterkRenderer(host, options = {}) {
     // R16 — drop all content, scrollback included, before a full redraw.
     reset() {
       sterk.reset();
-    },
-  };
-}
-
-function makeBufferAdapter(sterk) {
-  // Don't capture the buffer — read sterk.buffer.active fresh each time so we
-  // see updated state after scrollToBottom() / scrollLines() / write().
-  return {
-    get length() {
-      return sterk.buffer.active.length;
-    },
-    get cursorX() {
-      return sterk.buffer.active.cursorX;
-    },
-    get cursorY() {
-      return sterk.buffer.active.cursorY;
-    },
-    get baseY() {
-      return sterk.buffer.active.baseY;
-    },
-    get viewportY() {
-      return sterk.buffer.active.viewportY;
-    },
-    getLine(y) {
-      const line = sterk.buffer.active.getLine(y);
-      return line ? makeLineAdapter(line) : null;
-    },
-  };
-}
-
-function makeLineAdapter(line) {
-  return {
-    get isWrapped() {
-      return line.isWrapped;
-    },
-    // xterm-shaped semantics (D7): `trimRight` trims the RIGHT edge only, so
-    // column indices stay aligned with getCell(x). Sterk's own
-    // translateToString(true) trims both edges, which would shift every column
-    // on an indented line; read it raw and trim the right ourselves.
-    translateToString(trimRight) {
-      const raw = line.translateToString(false);
-      return trimRight ? raw.replace(/\s+$/, "") : raw;
-    },
-    getCell(x) {
-      return makeCellAdapter(line.getCell(x));
-    },
-  };
-}
-
-function makeCellAdapter(cell) {
-  return {
-    getChars() {
-      return cell.getChars();
-    },
-    getCode() {
-      return cell.getCode();
-    },
-    isFgRGB() {
-      return cell.isFgRGB();
-    },
-    isBgRGB() {
-      return cell.isBgRGB();
-    },
-    isFgPalette() {
-      return cell.isFgPalette();
-    },
-    isBgPalette() {
-      return cell.isBgPalette();
-    },
-    isFgDefault() {
-      return cell.isFgDefault();
-    },
-    isBgDefault() {
-      return cell.isBgDefault();
-    },
-    getFgColor() {
-      return cell.getFgColor();
-    },
-    getBgColor() {
-      return cell.getBgColor();
-    },
-    getFgColorMode() {
-      return cell.getFgColorMode();
-    },
-    getBgColorMode() {
-      return cell.getBgColorMode();
-    },
-    isBold() {
-      return cell.isBold();
-    },
-    isItalic() {
-      return cell.isItalic();
-    },
-    isUnderline() {
-      return cell.isUnderline();
-    },
-    isInverse() {
-      return cell.isInverse();
-    },
-    isDim() {
-      return cell.isDim();
     },
   };
 }

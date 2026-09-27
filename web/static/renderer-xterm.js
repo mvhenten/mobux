@@ -124,7 +124,7 @@ export function createXtermRenderer(host, options = {}) {
       return term.onData(cb);
     },
 
-    // R6 — scroll; viewport position is readable via the buffer.
+    // R6 — scroll.
     scrollLines(n) {
       term.scrollLines(n);
     },
@@ -132,16 +132,14 @@ export function createXtermRenderer(host, options = {}) {
       term.scrollToBottom();
     },
 
-    // R7 — xterm-shaped buffer read model.
-    buffer: {
-      get active() {
-        return term.buffer.active;
-      },
+    // R7 — scroll position and a row's text.
+    viewport() {
+      const buf = term.buffer.active;
+      return { length: buf.length, top: buf.viewportY };
     },
-
-    // R8 — fires after a write is parsed; multiple subscribers.
-    onBufferChanged(cb) {
-      return term.onWriteParsed(cb);
+    rowText(y) {
+      const line = term.buffer.active.getLine(y);
+      return line ? line.translateToString(true) : null;
     },
 
     // R11 — theming + font size.

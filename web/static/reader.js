@@ -273,23 +273,26 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
   };
 }
 
-// ── Status bar (tmux's bottom row) ────────────────────────────────
-// The document contract peels the last buffer row into a `status` field
-// ({ runs } | null). It does not belong in the scrollable flow — render it
-// into a dedicated bottom-pinned element.
+// ── Status bar (tmux's status lines) ──────────────────────────────
+// The document contract peels tmux's status lines into a `status` field
+// ({ rows: [{ runs }] } | null). They do not belong in the scrollable flow —
+// render them into a dedicated bottom-pinned element, one row each.
 function renderStatusBar(hostEl, status) {
   if (!hostEl) return;
-  if (!status || !status.runs || status.runs.length === 0) {
+  if (!status || !status.rows || status.rows.length === 0) {
     hostEl.replaceChildren();
     hostEl.classList.remove("reader-statusbar--filled");
     hostEl.style.background = "";
     return;
   }
-  const runs = status.runs;
-  const inner = window.document.createElement("div");
-  inner.className = "reader-statusbar-inner";
-  appendRuns(inner, runs);
-  hostEl.replaceChildren(inner);
+  const rows = status.rows.map(({ runs }) => {
+    const inner = window.document.createElement("div");
+    inner.className = "reader-statusbar-inner";
+    appendRuns(inner, runs);
+    return inner;
+  });
+  const runs = status.rows.flatMap((row) => row.runs);
+  hostEl.replaceChildren(...rows);
   hostEl.classList.add("reader-statusbar--filled");
   // Use the run with the dominant background as the strip background so the
   // bar reads as one continuous surface rather than chips.
@@ -402,7 +405,10 @@ function renderCodeBlock(block) {
 
   const text = block.lines.map((l) => l.text).join("\n");
   const language = block.language || "";
-  addSpeakerIcon(wrap, "code", text, { label: "Say what this code is", language });
+  addSpeakerIcon(wrap, "code", text, {
+    label: "Say what this code is",
+    language,
+  });
   addSpeakerIcon(wrap, "code", text, {
     label: "Read the code in full",
     className: "rb-speaker rb-speaker-full",
@@ -566,9 +572,11 @@ function handleSpeakerClick(icon, request) {
       // re-rendered icon currently wearing the class for the same key. Module
       // state goes last so we can't race a render mid-clear.
       if (icon.isConnected) markIdle(icon);
-      window.document.querySelectorAll(".rb-speaker.rb-speaking").forEach((other) => {
-        if (other.dataset.speechKey === key) markIdle(other);
-      });
+      window.document
+        .querySelectorAll(".rb-speaker.rb-speaking")
+        .forEach((other) => {
+          if (other.dataset.speechKey === key) markIdle(other);
+        });
       if (speakingKey === key) speakingKey = null;
     },
     onError: (message) => showSpeechNotice(message),
