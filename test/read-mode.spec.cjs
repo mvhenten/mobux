@@ -905,6 +905,7 @@ test("read mode: a full-screen app that scrolls by cursor position, with the sta
     script: "alt-screen-scroll.sh",
     done: "SCROLL-DONE",
     lines: [
+      ["repaint-line", 10],
       ["bottom-line", 20],
       ["region-line", 20],
       ["su-line", 20],

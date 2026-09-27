@@ -273,10 +273,19 @@ impl Segmenter {
         }
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) {
-        if let Some(screen) = self.screen.as_mut() {
-            screen.resize(rows, cols);
+    /// Follows the pane to a new size, recording first what a smaller screen
+    /// would cut off.
+    pub fn resize(&mut self, rows: u16, cols: u16, now_ms: i64) -> Vec<PendingEntry> {
+        let mut events = Vec::new();
+        if let Some(lines) = self
+            .screen
+            .as_mut()
+            .and_then(|screen| screen.resize(rows, cols))
+        {
+            self.record_lines(lines, now_ms, &mut events);
         }
+        self.note_dirty(now_ms);
+        events
     }
 
     /// The pane was already on its alternate screen when recording began.

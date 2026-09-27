@@ -2617,7 +2617,10 @@ async fn handle_ws(
                 pane_check_at = None;
                 if let (Some(tap), Some(seg)) = (history_tap.as_ref(), segmenter.as_mut()) {
                     match tmux::pane_screen(&tmux_bin, tap.pane_id()).await {
-                        Ok(pane) => seg.resize(pane.rows, pane.cols),
+                        Ok(pane) => {
+                            let produced = seg.resize(pane.rows, pane.cols, session_history::now_ms());
+                            record_history(&session_history, &session_name, produced).await;
+                        }
                         Err(err) => eprintln!("history: pane size for '{session_name}': {err:#}"),
                     }
                     pane_check_at = Some(tokio::time::Instant::now() + PANE_RECHECK);

@@ -8,25 +8,30 @@
 //!
 //! A snapshot is taken when the caller asks (quiet time, a marker, detach),
 //! right before the app clears the screen, re-enters or leaves the alternate
-//! screen, and whenever enough scrolled-off rows pile up. Rows scrolled off
-//! the top of the scroll region in between — by a linefeed on its bottom row
-//! or by `CSI S` — are kept as they go, because the alternate grid keeps no
-//! scrollback. Each snapshot is diffed against the recent snapshots, line by
-//! line in order, so an unchanged repaint records nothing while a screen
-//! that really shows `ok` three times records it three times. Leaving the
-//! alternate screen forgets the recent snapshots: the next app starts fresh.
+//! screen, before a resize, and whenever enough scrolled-off rows pile up.
+//! Rows that leave the screen in between are kept as they go, because the
+//! alternate grid keeps no scrollback: off the top of the scroll region by a
+//! linefeed, `ESC D` or `ESC E` on its bottom row, by `CSI S` or by `CSI M`;
+//! off its bottom by `ESC M` on its top row, by `CSI T` or by `CSI L`.
+//!
+//! A snapshot is those rows followed by the visible rows, and is compared
+//! with the previous snapshot only. The previous one is laid over it at the
+//! shift where the most non-blank rows agree, which is how a scroll lines up,
+//! and a row is new when the previous snapshot has nothing equal at its
+//! place. A shift only counts when its agreeing rows outnumber the rows it
+//! contradicts, and a non-zero one needs at least two; with no such shift the
+//! screen is a different one and every row of it is new, so a second screen
+//! of code keeps its closing brace. A snapshot with nothing new leaves the
+//! previous one in place; leaving the alternate screen forgets it.
 //!
 //! `vt100` keeps the scroll region private, so this mirrors it: `CSI r`, the
 //! grid clear on `?1049h`, `ESC c` and a resize, applied the same way.
-
-use std::collections::VecDeque;
+//! `vt100` ignores `ESC D` and `ESC E`, so they are drawn as the linefeed and
+//! carriage return plus linefeed they stand for.
 
 /// Scrolled-off rows held before a snapshot is forced, bounding memory
 /// while an app scrolls without ever going quiet.
 const SCROLLED_OFF_CAP: usize = 500;
-
-/// Lines of recent snapshots a new one is diffed against.
-const RECENT_CAP: usize = 1000;
 
 #[derive(Debug, PartialEq)]
 pub enum Drawn {
@@ -94,7 +99,7 @@ pub struct ScreenModel {
     held: Vec<u8>,
     dirty: bool,
     scrolled_off: Vec<String>,
-    recent: VecDeque<String>,
+    previous: Vec<String>,
     regions: [Region; 2],
 }
 
@@ -106,7 +111,7 @@ impl ScreenModel {
             held: Vec::new(),
             dirty: false,
             scrolled_off: Vec::new(),
-            recent: VecDeque::new(),
+            previous: Vec::new(),
             regions: [Region::full(rows); 2],
         }
     }
@@ -115,9 +120,15 @@ impl ScreenModel {
         self.parser.screen().size()
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    /// Resizes the model, first snapshotting what a smaller screen would
+    /// cut off.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Option<Vec<String>> {
         let (rows, cols) = (rows.max(1), cols.max(1));
-        let (old_rows, _) = self.size();
+        let (old_rows, old_cols) = self.size();
+        if (rows, cols) == (old_rows, old_cols) {
+            return None;
+        }
+        let lines = self.snapshot();
         self.parser.screen_mut().set_size(rows, cols);
         for region in &mut self.regions {
             if region.bottom + 1 == old_rows {
@@ -128,6 +139,7 @@ impl ScreenModel {
                 region.top = 0;
             }
         }
+        lines
     }
 
     pub fn assume_alternate_screen(&mut self) {
@@ -169,8 +181,8 @@ impl ScreenModel {
         drawn
     }
 
-    /// The alternate-screen lines the recent snapshots do not already hold,
-    /// or `None` when nothing new was drawn since the last snapshot.
+    /// The alternate-screen lines the previous snapshot does not hold, or
+    /// `None` when nothing new was drawn since it.
     pub fn snapshot(&mut self) -> Option<Vec<String>> {
         if !self.dirty {
             return None;
@@ -186,29 +198,19 @@ impl ScreenModel {
                     .map(|row| row.trim_end().to_string()),
             );
         }
-        candidate.retain(|line| !line.is_empty());
-        if candidate.is_empty() || self.recent_ends_with(&candidate) {
+        if candidate.iter().all(String::is_empty) {
             return None;
         }
-        let new = unmatched(self.recent.make_contiguous(), &candidate);
-        self.recent.extend(candidate);
-        while self.recent.len() > RECENT_CAP {
-            self.recent.pop_front();
+        let new = new_rows(&self.previous, &candidate);
+        if new.is_empty() {
+            return None;
         }
-        (!new.is_empty()).then_some(new)
+        self.previous = candidate;
+        Some(new)
     }
 
     fn alternate(&self) -> bool {
         self.parser.screen().alternate_screen()
-    }
-
-    fn recent_ends_with(&self, candidate: &[String]) -> bool {
-        candidate.len() <= self.recent.len()
-            && self
-                .recent
-                .iter()
-                .skip(self.recent.len() - candidate.len())
-                .eq(candidate.iter())
     }
 
     fn push_snapshot(&mut self, drawn: &mut Vec<Drawn>) {
@@ -227,15 +229,21 @@ impl ScreenModel {
             self.push_snapshot(drawn);
         }
         let lead_len = lead.len().min(run.len());
-        if was_alternate && lead.is_csi(false, b'S') {
-            self.capture_scroll_up(lead.param(0).max(1));
+        match lead {
+            Lead::Esc { byte: b'D' } => self.process_text(b"\n"),
+            Lead::Esc { byte: b'E' } => self.process_text(b"\r\n"),
+            _ => {
+                if was_alternate {
+                    self.capture_lead_scroll(&lead);
+                }
+                self.process_lead(&run[..lead_len]);
+            }
         }
-        self.process_lead(&run[..lead_len]);
         self.track_region(&lead);
         self.process_text(&run[lead_len..]);
 
         if self.alternate() != was_alternate {
-            self.recent.clear();
+            self.previous.clear();
         }
         if self.alternate() {
             self.dirty = true;
@@ -296,56 +304,104 @@ impl ScreenModel {
         self.parser.process(rest);
     }
 
+    /// Rows the lead escape is about to push off the screen: `CSI S`, `CSI M`
+    /// and `ESC M`, `CSI T`, `CSI L`, the way `vt100` applies them.
+    fn capture_lead_scroll(&mut self, lead: &Lead) {
+        let region = self.regions[1];
+        let (row, _) = self.parser.screen().cursor_position();
+        let count = lead.param(0).max(1);
+        let in_region = (region.top..=region.bottom).contains(&row);
+        if lead.is_csi(false, b'S') {
+            self.capture_scroll_up(count);
+        } else if lead.is_csi(false, b'M') && in_region {
+            let end = region.bottom.min(row.saturating_add(count - 1));
+            self.capture_rows(row, end);
+        } else if matches!(lead, Lead::Esc { byte: b'M' }) && row == region.top {
+            self.capture_rows(region.bottom, region.bottom);
+        } else if lead.is_csi(false, b'T') {
+            let start = region.top.max((region.bottom + 1).saturating_sub(count));
+            self.capture_rows(start, region.bottom);
+        } else if lead.is_csi(false, b'L') && row <= region.bottom {
+            let start = row.max((region.bottom + 1).saturating_sub(count));
+            self.capture_rows(start, region.bottom);
+        }
+    }
+
     fn capture_scroll_up(&mut self, count: u16) {
         let region = self.regions[1];
-        let (_, cols) = self.size();
         let end = region.bottom.min(region.top.saturating_add(count - 1));
+        self.capture_rows(region.top, end);
+    }
+
+    fn capture_rows(&mut self, start: u16, end: u16) {
+        let (_, cols) = self.size();
         let lost: Vec<String> = self
             .parser
             .screen()
             .rows(0, cols)
-            .skip(usize::from(region.top))
-            .take(usize::from(end - region.top) + 1)
+            .skip(usize::from(start))
+            .take(usize::from(end.saturating_sub(start)) + 1)
             .map(|row| row.trim_end().to_string())
-            .filter(|row| !row.is_empty())
             .collect();
-        if !lost.is_empty() {
-            self.scrolled_off.extend(lost);
-            self.dirty = true;
-        }
+        self.scrolled_off.extend(lost);
+        self.dirty = true;
     }
 }
 
-/// The candidate lines a longest common subsequence with `recent` leaves
-/// unmatched, in order: what this snapshot shows that the recent ones did
-/// not, counting a repeated line once per repeat.
-fn unmatched(recent: &[String], candidate: &[String]) -> Vec<String> {
-    let (n, m) = (recent.len(), candidate.len());
-    let mut table = vec![0u16; (n + 1) * (m + 1)];
-    let at = |i: usize, j: usize| i * (m + 1) + j;
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            table[at(i, j)] = if recent[i] == candidate[j] {
-                table[at(i + 1, j + 1)] + 1
+/// The non-blank rows of `candidate` that `previous`, laid over it at its
+/// best shift, does not hold at the same place — or all of them when no
+/// shift lines up (a different screen). A shift lines up when it agrees on
+/// more rows than it contradicts, and a scroll (a non-zero shift) on at
+/// least two, so one stray equal line cannot pass for a scroll.
+fn new_rows(previous: &[String], candidate: &[String]) -> Vec<String> {
+    let non_blank = |rows: &[String]| -> Vec<String> {
+        rows.iter().filter(|r| !r.is_empty()).cloned().collect()
+    };
+    let (p, c) = (previous.len() as isize, candidate.len() as isize);
+    let mut best: Option<(isize, usize, usize)> = None;
+    for shift in (1 - p)..c {
+        let (mut agree, mut differ) = (0, 0);
+        for j in shift.max(0)..c.min(p + shift) {
+            let (was, now) = (&previous[(j - shift) as usize], &candidate[j as usize]);
+            if was.is_empty() || now.is_empty() {
+                continue;
+            }
+            if was == now {
+                agree += 1;
             } else {
-                table[at(i + 1, j)].max(table[at(i, j + 1)])
-            };
+                differ += 1;
+            }
+        }
+        let lines_up = agree > differ && (shift == 0 || agree >= 2);
+        if !lines_up {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((best_shift, a, d)) => {
+                (
+                    agree,
+                    std::cmp::Reverse(differ),
+                    std::cmp::Reverse(shift.abs()),
+                ) > (a, std::cmp::Reverse(d), std::cmp::Reverse(best_shift.abs()))
+            }
+        };
+        if better {
+            best = Some((shift, agree, differ));
         }
     }
-    let (mut i, mut j) = (0, 0);
-    let mut new = Vec::new();
-    while j < m {
-        if i < n && recent[i] == candidate[j] {
-            i += 1;
-            j += 1;
-        } else if i < n && table[at(i + 1, j)] >= table[at(i, j + 1)] {
-            i += 1;
-        } else {
-            new.push(candidate[j].clone());
-            j += 1;
-        }
-    }
-    new
+    let Some((shift, _, _)) = best else {
+        return non_blank(candidate);
+    };
+    candidate
+        .iter()
+        .enumerate()
+        .filter(|(j, now)| {
+            let i = *j as isize - shift;
+            !now.is_empty() && (i < 0 || i >= p || previous[i as usize] != **now)
+        })
+        .map(|(_, now)| now.clone())
+        .collect()
 }
 
 fn parse_lead(run: &[u8]) -> Lead {
@@ -498,6 +554,115 @@ mod tests {
             expected,
             "a second run records again"
         );
+    }
+
+    fn screen(body: &str) -> String {
+        format!("\x1b[H\x1b[2J{body}")
+    }
+
+    #[test]
+    fn shrinking_the_screen_records_the_rows_it_cuts_off_first() {
+        let mut model = ScreenModel::new(6, 40);
+        model.feed(b"\x1b[?1049hfresh-1\r\nfresh-2\r\nfresh-3\r\nfresh-4\r\nfresh-5\r\nfresh-6");
+        assert_eq!(model.resize(4, 40), Some(numbered("fresh", 6)));
+        assert_eq!(model.size(), (4, 40));
+        assert_eq!(
+            model.resize(4, 40),
+            None,
+            "an unchanged size records nothing"
+        );
+    }
+
+    #[test]
+    fn index_reverse_index_and_line_insert_delete_keep_the_rows_they_push_off() {
+        // Rows 1-3 scroll, row 4 is a status line. ncurses scrolls with
+        // ESC D on the bottom row and CSI M at the top, and the other way
+        // with ESC M on the top row and CSI L.
+        let mut model = ScreenModel::new(4, 40);
+        let mut body = String::from("\x1b[?1049h\x1b[1;3r\x1b[4;1Hstatus");
+        for i in 1..=4 {
+            body.push_str(&format!("\x1b[3;1Hrow-{i}\x1bD"));
+        }
+        body.push_str("\x1b[3;1Hind-1\x1bD\x1b[3;1Hind-2\x1bD");
+        body.push_str("\x1b[1;1H\x1b[2M");
+        body.push_str("\x1b[3;1Hri-1\x1b[1;1H\x1bM");
+        body.push_str("\x1b[3;1Hil-1\x1b[2;1H\x1b[2L");
+        body.push_str("\x1b[?1049l");
+        let mut expected = numbered("row", 4);
+        expected.extend(["ind-1", "ind-2", "ri-1", "il-1", "status"].map(String::from));
+        assert_eq!(lines(&model.feed(body.as_bytes())), expected);
+    }
+
+    #[test]
+    fn a_second_screen_of_code_keeps_its_closing_brace() {
+        let mut model = ScreenModel::new(10, 40);
+        model.feed(b"\x1b[?1049h");
+        model.feed(screen("fn a() {\r\n    let x = 1;\r\n}").as_bytes());
+        assert_eq!(
+            model.snapshot(),
+            Some(
+                ["fn a() {", "    let x = 1;", "}"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+        let drawn = model.feed(screen("fn b() {\r\n    let y = 2;\r\n}").as_bytes());
+        assert!(lines(&drawn).is_empty(), "{drawn:?}");
+        assert_eq!(
+            model.snapshot(),
+            Some(
+                ["fn b() {", "    let y = 2;", "}"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+    }
+
+    #[test]
+    fn test_output_shown_again_after_a_different_screen_is_recorded_again() {
+        let tests = "test one ... ok\r\ntest two ... ok\r\n2 passed";
+        let expected: Vec<String> = ["test one ... ok", "test two ... ok", "2 passed"]
+            .map(String::from)
+            .to_vec();
+        let mut model = ScreenModel::new(10, 40);
+        model.feed(b"\x1b[?1049h");
+        model.feed(screen(tests).as_bytes());
+        assert_eq!(model.snapshot(), Some(expected.clone()));
+        model.feed(screen("usage: app [options]\r\n  --help").as_bytes());
+        assert!(model.snapshot().is_some());
+        model.feed(screen(tests).as_bytes());
+        assert_eq!(model.snapshot(), Some(expected));
+    }
+
+    #[test]
+    fn a_line_shown_twice_within_one_run_is_recorded_twice() {
+        let mut model = ScreenModel::new(10, 40);
+        model.feed(b"\x1b[?1049h");
+        model.feed(screen("ok\r\nok\r\nPASS\r\nok").as_bytes());
+        assert_eq!(
+            model.snapshot(),
+            Some(["ok", "ok", "PASS", "ok"].map(String::from).to_vec())
+        );
+        model.feed(screen("build started\r\nok").as_bytes());
+        assert_eq!(
+            model.snapshot(),
+            Some(["build started", "ok"].map(String::from).to_vec())
+        );
+        model.feed(screen("build finished\r\nok").as_bytes());
+        assert_eq!(
+            model.snapshot(),
+            Some(["build finished", "ok"].map(String::from).to_vec())
+        );
+    }
+
+    #[test]
+    fn a_repaint_of_the_same_screen_records_nothing() {
+        let mut model = ScreenModel::new(10, 40);
+        model.feed(b"\x1b[?1049h");
+        model.feed(screen("same\r\nscreen").as_bytes());
+        assert!(model.snapshot().is_some());
+        model.feed(screen("same\r\nscreen").as_bytes());
+        assert_eq!(model.snapshot(), None);
     }
 
     #[test]
