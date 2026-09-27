@@ -10,12 +10,10 @@
 // Displays (xterm, sterk, the reader) draw from this buffer through
 // terminal-redraw.js; nothing writes into a display directly.
 
-export const HISTORY_LIMIT = 10000;
 // Normal-screen rows that scroll off are kept: only synthetic writes reach
 // the normal screen, since tmux switches its client to the alternate screen
-// at attach.
+// at attach. They share the display's scrollback with history.
 const SCREEN_SCROLLBACK = 1000;
-export const DISPLAY_SCROLLBACK = HISTORY_LIMIT + SCREEN_SCROLLBACK;
 
 // DEC private modes that change what the display sends back (cursor-key
 // encoding, cursor visibility, bracketed paste), mirrored onto the display.
@@ -63,7 +61,14 @@ function write(term, data) {
 
 const historyText = (lines) => lines.map((l) => `\x1b[0m${l}\r\n`).join("");
 
-export function createTerminalBuffer({ cols, rows }) {
+// `scrollback` is the display's: history and normal-screen scrollback
+// together never exceed it, so the display drops no row the buffer keeps.
+export function createTerminalBuffer({ cols, rows, scrollback }) {
+  const screenScrollbackLimit = Math.min(
+    SCREEN_SCROLLBACK,
+    Math.floor(scrollback / 10),
+  );
+  const historyLimit = scrollback - screenScrollbackLimit;
   const Headless = window.XtermHeadless;
   if (!Headless || !Headless.Terminal) {
     throw new Error(
@@ -73,7 +78,7 @@ export function createTerminalBuffer({ cols, rows }) {
   const newTerminal = (options) =>
     new Headless.Terminal({ allowProposedApi: true, ...options });
 
-  const screen = newTerminal({ cols, rows, scrollback: SCREEN_SCROLLBACK });
+  const screen = newTerminal({ cols, rows, scrollback: screenScrollbackLimit });
 
   const modes = new Map(MIRRORED_MODES.map((m) => [m, m === 25]));
   const scalar = (p) => (Array.isArray(p) ? p[0] : p);
@@ -89,19 +94,19 @@ export function createTerminalBuffer({ cols, rows }) {
   // History rows become visible to the display only once parsed; a replace
   // builds the new terminal aside and swaps it in, so a draw never sees a
   // half-parsed history.
-  let history = newTerminal({ cols, rows: 1, scrollback: HISTORY_LIMIT + 10 });
+  let history = newTerminal({ cols, rows: 1, scrollback: historyLimit + 10 });
   let historyCols = cols;
   let historyLines = [];
   let generation = 0;
 
   async function setHistory(lines) {
-    const kept = lines.slice(-HISTORY_LIMIT);
+    const kept = lines.slice(-historyLimit);
     const mine = ++generation;
     const width = kept.reduce((w, l) => Math.max(w, lineWidth(l)), cols);
     const next = newTerminal({
       cols: width,
       rows: 1,
-      scrollback: HISTORY_LIMIT + 10,
+      scrollback: historyLimit + 10,
     });
     if (kept.length) await write(next, historyText(kept));
     if (mine !== generation) {
@@ -200,7 +205,7 @@ export function createTerminalBuffer({ cols, rows }) {
       if (overlap === 0 && historyLines.length > 0) return false;
       const fresh = tail.slice(overlap);
       if (fresh.length === 0) return true;
-      if (historyLines.length + fresh.length > HISTORY_LIMIT) return false;
+      if (historyLines.length + fresh.length > historyLimit) return false;
       await appendHistory(fresh);
       return true;
     },

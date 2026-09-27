@@ -76,7 +76,7 @@ export class TerminalEngine extends EventTarget {
   // `node` (#176): the remote node this session lives on — every PTY/tmux
   // call carries ?node=<name> so the hub proxies it over SSH. "" ⇒ the local
   // host, exactly the pre-node behavior.
-  constructor({ session, node, host, renderer, build }) {
+  constructor({ session, node, host, renderer, build, scrollback }) {
     super();
     this.session = session;
     this.node = node || "";
@@ -142,6 +142,7 @@ export class TerminalEngine extends EventTarget {
     this._ingestChain = Promise.resolve();
 
     this.buffer = createTerminalBuffer({
+      scrollback,
       cols: this.renderer.cols,
       rows: this.renderer.rows,
     });

@@ -1,6 +1,5 @@
 import { u } from "./base.js";
 import { TerminalEngine } from "./terminal-engine.js";
-import { DISPLAY_SCROLLBACK } from "./terminal-buffer.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
@@ -88,13 +87,13 @@ const quotes = [
 ];
 
 // Renderer construction options shared by both adapters. The typography
-// matches the reader's (style.css `.rb-line`); the scrollback holds every row
-// the engine's buffer keeps above the screen.
+// matches the reader's (style.css `.rb-line`). The engine's buffer keeps no
+// more rows above the screen than this scrollback holds.
 const RENDERER_OPTIONS = {
   fontFamily:
     "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
   fontSize: 13,
-  scrollback: DISPLAY_SCROLLBACK,
+  scrollback: 10000,
 };
 
 // ── Terminal engine factory ─────────────────────────────────────────
@@ -217,6 +216,7 @@ export function createTerminal({
     host: termEl,
     renderer: rendererImpl,
     build,
+    scrollback: RENDERER_OPTIONS.scrollback,
   });
 
   // Apply the stored theme to all three layers. The renderer applied its boot
