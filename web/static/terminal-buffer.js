@@ -321,9 +321,18 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     return buf.getLine(buf.baseY + paneRows().first + y);
   };
   let regionTop = 1;
-  // Rows the normal screen dropped off the top of its full scrollback.
+  // Rows the normal screen dropped off the top of its full scrollback: a
+  // scroll of a region that starts at the top row, with the scrollback full
+  // before and after it.
   let screenTrimmed = 0;
   let normalBase = 0;
+  const countTrim = () => {
+    const normal = screen.buffer.normal;
+    if (screen.buffer.active.type !== "normal") return;
+    const full = normal.baseY === screenLimit && normalBase === screenLimit;
+    if (full && regionTop === 1) screenTrimmed++;
+    normalBase = normal.baseY;
+  };
   const scrollsHistory = () =>
     regionTop === paneRows().first + 1 &&
     screen.buffer.active.type === "alternate";
@@ -341,16 +350,12 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return false;
     }),
     screen.onScroll(() => {
-      if (switching) switching = false;
-      else if (scrollsHistory()) scrolled.push(!paneRow(0)?.isWrapped);
-    }),
-    screen.onScroll(() => {
-      const normal = screen.buffer.normal;
-      if (screen.buffer.active.type !== "normal") return;
-      if (normal.baseY === screenLimit && normalBase === screenLimit) {
-        screenTrimmed++;
+      if (switching) {
+        switching = false;
+        return;
       }
-      normalBase = normal.baseY;
+      if (scrollsHistory()) scrolled.push(!paneRow(0)?.isWrapped);
+      countTrim();
     }),
     screen.onWriteParsed(() => {
       switching = false;

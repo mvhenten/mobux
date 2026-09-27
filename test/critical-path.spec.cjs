@@ -590,26 +590,19 @@ test("reader view: the reader draws from the buffer, not the display", async ({
   expect(displayRows.filter((row) => row.includes(marker))).toEqual([]);
 });
 
-// sterk draws the engine buffer itself: with any write into the sterk
-// display captured and swallowed, injected lines still render, and nothing
-// was written.
+// sterk draws the engine buffer itself: the view has no write path, and
+// lines injected into the buffer render in it.
 test("sterk: the display draws the buffer and nothing writes into it", async ({
   page,
 }, testInfo) => {
   sterkOnly(test, testInfo);
   await bootTerminal(page);
   const marker = `STERK_BUFFER_${Math.floor(Math.random() * 1e9)}`;
-  const writes = await page.evaluate(async (m) => {
-    const display = window.__sterk._sterk;
-    const captured = [];
-    display.write = (data, done) => {
-      captured.push(String(data));
-      done?.();
-    };
-    window.__sterkWrites = captured;
-    await window.__mobuxView.test.injectLines(5, m);
-    return captured.length;
-  }, marker);
+  expect(
+    await page.evaluate(() => typeof window.__sterk._sterk.write),
+    "the sterk display takes no writes",
+  ).toBe("undefined");
+  await page.evaluate((m) => window.__mobuxView.test.injectLines(5, m), marker);
   await expect
     .poll(
       () =>
@@ -630,8 +623,6 @@ test("sterk: the display draws the buffer and nothing writes into it", async ({
     return out;
   });
   expect(rows.filter((row) => row.includes(marker))).toHaveLength(5);
-  expect(writes).toBe(0);
-  expect(await page.evaluate(() => window.__sterkWrites.length)).toBe(0);
 });
 
 // The screen source reports each buffer change as rows off the top of the
@@ -689,10 +680,18 @@ test("sterk: the screen source reports append, trim, row diffs, full and the str
     await buffer.syncWhole(["A".repeat(cols)], true);
     out.straddle = take();
     out.straddleRow = source.screen.line(0).wrapped;
+    buffer.setStatus(1, "top");
+    out.statusTop = take();
+    out.statusTopRow = source.screen.line(0).wrapped;
+    buffer.setStatus(1, "bottom");
+    take();
+    await buffer.writeScreen("\x1b[4;5H");
+    out.cursor = take();
+    out.cursorAt = source.cursor;
     await buffer.syncWhole(["A".repeat(cols * 2)], false);
     out.grown = take();
     out.grownHistory = history();
-    out.rebuilds = source.rebuilds();
+    out.fullRepaints = source.fullRepaints();
     source.dispose();
     buffer.dispose();
     return out;
@@ -728,7 +727,112 @@ test("sterk: the screen source reports append, trim, row diffs, full and the str
   ]);
   expect(result.grown[0].screenRows).toContain(0);
   expect(result.grownHistory).toEqual(["A".repeat(20), "A".repeat(20)]);
-  expect(result.rebuilds).toBe(1);
+  expect(result.statusTop).toHaveLength(1);
+  expect(result.statusTop[0].screenRows).toContain(0);
+  expect(result.statusTopRow).toBe(false);
+  expect(result.cursor).toHaveLength(1);
+  expect(result.cursor[0].screenRows).toEqual([]);
+  expect(result.cursorAt).toEqual({ x: 4, y: 3, visible: true });
+  // The switch to the alternate screen, then the history clear.
+  expect(result.fullRepaints).toBe(2);
+});
+
+// The normal screen's own scrollback: rows xterm drops off its full top are
+// reported as removed, and a screen switch or a scroll region below the top
+// row drops nothing.
+test("sterk: the screen source follows the normal screen's scrollback", async ({
+  page,
+}, testInfo) => {
+  sterkOnly(test, testInfo);
+  await bootTerminal(page);
+  const result = await page.evaluate(async () => {
+    const { createTerminalBuffer } = await import("/static/terminal-buffer.js");
+    const { createScreenSource } =
+      await import("/static/terminal-screen-source.js");
+    const buffer = createTerminalBuffer({ cols: 20, rows: 5, scrollback: 100 });
+    const source = createScreenSource(buffer, window.Sterk.screenLineFromCells);
+    let changes = [];
+    source.subscribe((change) => changes.push(change));
+    const text = (line) =>
+      line.runs
+        .map((r) => r.text)
+        .join("")
+        .trimEnd();
+    const step = () => {
+      const held = [];
+      for (let i = 0; i < source.history.length; i++) {
+        held.push(text(source.history.line(i)));
+      }
+      const truth = buffer
+        .scrollbackRows()
+        .map((row) => row.translateToString(true));
+      const out = {
+        changes: changes.map((c) => [c.history, c.full]),
+        matches: JSON.stringify(held) === JSON.stringify(truth),
+        held,
+      };
+      changes = [];
+      return out;
+    };
+    const lines = (n, from) =>
+      Array.from({ length: n }, (_, i) => `n${from + i}\r\n`).join("");
+    const out = {};
+    await buffer.writeScreen(lines(12, 0));
+    out.grow = step();
+    await buffer.writeScreen(lines(5, 12));
+    out.trim = step();
+    await buffer.writeScreen("\x1b[?1049halt\x1b[?1049l");
+    out.switchOnce = step();
+    await buffer.writeScreen("\x1b[?1049halt");
+    await buffer.writeScreen("\x1b[?1049l");
+    out.switchTwice = step();
+    await buffer.writeScreen("\x1b[2;4r\x1b[4;1H\n\n\n\x1b[r\x1b[5;1H");
+    out.region = step();
+    buffer.resize(30, 5);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    out.resize = step();
+    out.resizeCols = source.cols;
+    await buffer.writeScreen(lines(3, 17));
+    out.after = step();
+    source.dispose();
+    buffer.dispose();
+    return out;
+  });
+  const moved = (step) =>
+    step.changes.reduce(
+      (sum, [h]) => [sum[0] + h.removedTop, sum[1] + h.appended],
+      [0, 0],
+    );
+
+  expect(result.grow.changes).toEqual([
+    [{ removedTop: 0, appended: 8 }, false],
+  ]);
+  expect(result.grow.matches).toBe(true);
+  expect(result.trim.changes).toEqual([
+    [{ removedTop: 3, appended: 5 }, false],
+  ]);
+  expect(result.trim.held[0]).toBe("n3");
+  expect(result.trim.matches).toBe(true);
+
+  expect(moved(result.switchOnce)).toEqual([0, 0]);
+  expect(result.switchOnce.matches).toBe(true);
+  expect(result.switchTwice.changes.map(([, full]) => full)).toEqual([
+    true,
+    true,
+  ]);
+  expect(result.switchTwice.matches).toBe(true);
+
+  expect(moved(result.region)).toEqual([0, 0]);
+  expect(result.region.matches).toBe(true);
+
+  expect(result.resize.changes.map(([, full]) => full)).toContain(true);
+  expect(result.resizeCols).toBe(30);
+  expect(result.resize.matches).toBe(true);
+
+  expect(result.after.changes).toEqual([
+    [{ removedTop: 3, appended: 3 }, false],
+  ]);
+  expect(result.after.matches).toBe(true);
 });
 
 test("auto-reconnect: unexpected socket drop re-establishes the WS via onclose backoff", async ({
@@ -1128,12 +1232,15 @@ test("soft keyboard: resizes-content contract keeps input bar and bottom rows vi
     `last output row (bottom ${geo.markerBottom}) must sit above the input bar (top ${geo.barTop}); screenshot: ${screenshotPath}`,
   ).toBeLessThanOrEqual(geo.barTop + 2);
 
-  // Only the row count changed: the display repaints its screen and keeps
-  // its history rows.
-  expect(
-    await page.evaluate(() => window.__mobuxView.test.fullRedrawCount()),
-    "a keyboard opening must not redraw history",
-  ).toBe(redrawsBefore);
+  // Only the row count changed: xterm repaints its screen and keeps its
+  // history rows. sterk's view repaints in full on any grid change; its
+  // history rows must still come back in place.
+  if (testInfo.project.use.renderer === "xterm") {
+    expect(
+      await page.evaluate(() => window.__mobuxView.test.fullRedrawCount()),
+      "a keyboard opening must not redraw history",
+    ).toBe(redrawsBefore);
+  }
   const scrollbackAfter = await displayScrollback();
   expect(
     scrollbackAfter.slice(0, scrollbackBefore.length),

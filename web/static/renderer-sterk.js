@@ -10,6 +10,11 @@
 // editor handle for theming, the `getViewportCellCount`/`getCellMetrics`
 // probes, and the `window.__sterk` debug handle the visual test matrix reads.
 //
+// sterk's BufferView type offers built-in fonts and themes only: no font size,
+// no custom palette, and no read of a drawn row. mobux reaches the Ace surface
+// the view is built on for those — `setFontSize`, `getEditor` — so the text
+// read back is the text drawn, not the source a frame ahead of it.
+//
 // The sterk bundle (sterk.bundle.js) pins
 // `window.Sterk = { createBufferView, screenLineFromCells }` before the
 // engine is constructed.
@@ -76,8 +81,13 @@ export function createSterkRenderer(host, options = {}) {
   // subset mobux opens and carries an `activate` handler, so a click on a
   // URL fans out to every onLink subscriber. The UI (terminal.js) decides
   // how to open — mobux routes it out of the app shell.
+  function drawnRow(y) {
+    if (y < 0 || y >= view.length) return null;
+    return view.getEditor().session.getLine(y).replace(/\s+$/, "");
+  }
+
   function provideLinks(bufferLineNumber, deliver) {
-    const text = source.rowText(bufferLineNumber - 1);
+    const text = drawnRow(bufferLineNumber - 1);
     if (!text) return deliver(undefined);
     const links = [];
     URL_RE.lastIndex = 0;
@@ -118,7 +128,7 @@ export function createSterkRenderer(host, options = {}) {
       flush: () => Promise.resolve(),
       settle: () => view.refresh(),
       invalidate() {},
-      fullRedraws: () => source.rebuilds(),
+      fullRedraws: () => source.fullRepaints(),
       dispose: () => source.dispose(),
     };
   }
@@ -211,7 +221,7 @@ export function createSterkRenderer(host, options = {}) {
       return { length: view.length, top: view.viewportY };
     },
     rowText(y) {
-      return source.rowText(y);
+      return drawnRow(y);
     },
 
     // R11 — theming + font size: the Ace editor theme through the view's

@@ -447,7 +447,6 @@ export class TerminalEngine extends EventTarget {
   // pipeline as the live WS stream (_ingestPtyData) — test injection carries
   // the same marker bytes a real prompt would, and should attribute them the
   // same way. History never goes through here: it has its own parser.
-  // Resolves once the display shows the write.
   write(data) {
     return this._ingestPtyData(data).then(() => this.view.settle());
   }

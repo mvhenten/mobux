@@ -10,8 +10,6 @@ import { historyLine, lineCells } from "./terminal-lines.js";
 
 const BLANK = { runs: [], wrapped: false };
 
-const lineText = (line) => line.runs.map((r) => r.text).join("");
-
 // A wide character that does not fit a row's end starts the next row.
 function cutRows(cells, cols) {
   const rows = [[]];
@@ -39,7 +37,7 @@ export function createScreenSource(buffer, toLine) {
   let cursor = null;
   let cursorKey = "";
   let seen = null;
-  let rebuilds = 0;
+  let fullRepaints = 0;
 
   function rowsOfLine(i, cols) {
     const cells = [...lineCells(historyLine(buffer, i).segments)];
@@ -55,6 +53,7 @@ export function createScreenSource(buffer, toLine) {
     return {
       cols: buffer.cols,
       rows: buffer.rows,
+      alternate: buffer.isAlternate(),
       epoch: buffer.historyEpoch(),
       start: buffer.historyStart(),
       count: buffer.historyRowCount(),
@@ -139,11 +138,10 @@ export function createScreenSource(buffer, toLine) {
   function refresh() {
     const now = state();
     let history = seen ? historyChange(now) : null;
-    if (!history) {
-      if (seen) rebuilds++;
-      rebuild(now);
-    }
-    const full = !history || now.rows !== seen.rows;
+    if (!history) rebuild(now);
+    const full =
+      !history || now.rows !== seen.rows || now.alternate !== seen.alternate;
+    if (full && seen) fullRepaints++;
     seen = now;
 
     screenRows = readScreen();
@@ -202,17 +200,8 @@ export function createScreenSource(buffer, toLine) {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };
     },
-    // Row `y` of history then screen, trailing blanks dropped.
-    rowText(y) {
-      const line =
-        y < historyRows.length
-          ? historyRows[y]
-          : screenRows[y - historyRows.length];
-      return line ? lineText(line).replace(/\s+$/, "") : null;
-    },
-    // Times the history rows were read afresh rather than moved.
-    rebuilds() {
-      return rebuilds;
+    fullRepaints() {
+      return fullRepaints;
     },
     dispose() {
       sub.dispose();
