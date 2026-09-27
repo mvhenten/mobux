@@ -1891,7 +1891,12 @@ test("markers: a wrapped line half scrolled off moves no line key", async ({
       scrollback: 100,
     });
     const book = createMarkerBook(buffer);
-    const doc = d.createTerminalDocument({ buffer, oscMarkers: book.map });
+    const doc = d.createTerminalDocument({
+      buffer,
+      get oscMarkers() {
+        return book.map;
+      },
+    });
     await buffer.writeScreen(
       `\x1b[?1049h\x1b[1;4r\x1b[H${"w".repeat(15)}\r\nout\r\n$ `,
     );
