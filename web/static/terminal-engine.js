@@ -29,6 +29,7 @@
 //   R13 onLink(cb): Disposable               URL activations; UI opens them
 //   R15 focus(); setNativeInputEnabled(bool)
 //   R16 reset()                              drop all content (full redraw)
+//   R17 keepsWrappedRows: boolean            autowrapped rows keep isWrapped
 //
 // Alternate-screen state (R9), OSC handlers (R10) and the bell (R14) come
 // from the buffer's screen parser, not the renderer.
@@ -60,10 +61,26 @@ function oscInputToString(data) {
   return typeof data === "string" ? data : oscTextDecoder.decode(data);
 }
 
-// How long the stream must stay quiet before history is extended from the
-// tmux tail, and how many tail lines are fetched to match against.
+// History catches up from the tmux tail once the stream has been quiet for
+// HISTORY_QUIET_MS, and at least every HISTORY_MAX_WAIT_MS while it flows.
 const HISTORY_QUIET_MS = 400;
+const HISTORY_MAX_WAIT_MS = 2000;
 const HISTORY_TAIL_LINES = 1000;
+
+// OSC 10 / 11: foreground / background colour queries.
+const COLOUR_QUERIES = {
+  10: (theme) => theme.foreground || theme.palette?.[7],
+  11: (theme) => theme.background || theme.palette?.[0],
+};
+
+function oscColour(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+  if (!m) return null;
+  return `rgb:${m
+    .slice(1)
+    .map((c) => c + c)
+    .join("/")}`;
+}
 
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
@@ -102,8 +119,8 @@ export class TerminalEngine extends EventTarget {
     this._reconnectMin = 500;
     this._reconnectMax = 10000;
 
-    // OSC 133 (FinalTerm / shell-integration) markers. Recorded by absolute
-    // row for all four kinds (diagnostics, oscMarkerCount, reader command
+    // OSC 133 (FinalTerm / shell-integration) markers. Recorded by logical
+    // line (the buffer's line key) for all four kinds (diagnostics, oscMarkerCount, reader command
     // grouping — issue #219), but only `A` is trustworthy for row-sensitive
     // decisions under tmux — a passthrough envelope that carries no trailing
     // text in the same shell write (as `B` never does) can land on a cursor
@@ -113,7 +130,7 @@ export class TerminalEngine extends EventTarget {
     //
     // A row's value is the full marker payload (`"C"`, `"D;0"`, `"A"`, …),
     // not just the kind letter — the reader needs the exit code carried
-    // after `D;`. When two markers land on the same absolute row — which
+    // after `D;`. When two markers land on the same line — which
     // happens routinely, since the shell's PS1 emits `D;$?` immediately
     // followed by `A` in the same write, and a zero-output command never
     // moves the cursor between its `C` and that `D`/`A` — both are kept,
@@ -130,9 +147,6 @@ export class TerminalEngine extends EventTarget {
     // (the screen parser is what actually finds the marker in the byte
     // stream — robust across writes in a way a hand-rolled scanner isn't)
     // but only uses it for `oscDetected`.
-    //
-    // Rows are display rows: history, then normal-screen scrollback, then
-    // the screen viewport — the layout the redraw writer draws.
     this.oscMarkers = new Map();
     this.oscDetected = false;
     // Is there a currently-open A cycle (seen the marker, no candidate row
@@ -148,7 +162,9 @@ export class TerminalEngine extends EventTarget {
     });
     this.view = createRedrawWriter(this.buffer, this.renderer);
     this._historyTimer = null;
+    this._historyMaxTimer = null;
     this._historyTail = null;
+    this._theme = null;
     this._historyTailAgain = false;
 
     this._oscSub = this.buffer.registerOscHandler(133, (data) => {
@@ -157,7 +173,7 @@ export class TerminalEngine extends EventTarget {
         return false;
       }
       if (kind !== "A") {
-        this._recordOscMarker(this.buffer.cursorDisplayRow(), data);
+        this._recordOscMarker(this.buffer.cursorLineKey(), data);
       }
       if (!this.oscDetected) {
         this.oscDetected = true;
@@ -168,6 +184,14 @@ export class TerminalEngine extends EventTarget {
 
     this._inputSub = this.renderer.onInput((d) => this.send(d));
     this._replySub = this.buffer.onData((d) => this.send(d));
+    this._colourSubs = Object.entries(COLOUR_QUERIES).map(([id, pick]) =>
+      this.buffer.registerOscHandler(Number(id), (data) => {
+        if (data !== "?") return false;
+        const colour = this._theme && oscColour(pick(this._theme));
+        if (colour) this.send(`\x1b]${id};${colour}\x1b\\`);
+        return true;
+      }),
+    );
 
     // The read-only document contract (issue #206, D2). The reader consumes
     // this instead of reaching into the buffer, `cols`, the OSC marker map,
@@ -284,6 +308,7 @@ export class TerminalEngine extends EventTarget {
     this.ws = null;
     this._disposed = true;
     clearTimeout(this._historyTimer);
+    clearTimeout(this._historyMaxTimer);
     try {
       this._oscSub?.dispose();
     } catch (_) {}
@@ -291,6 +316,7 @@ export class TerminalEngine extends EventTarget {
       this._inputSub?.dispose();
     } catch (_) {}
     this._replySub.dispose();
+    for (const sub of this._colourSubs) sub.dispose();
     this.view.dispose();
     try {
       this.renderer.dispose();
@@ -344,8 +370,6 @@ export class TerminalEngine extends EventTarget {
   scrollToBottom() {
     this.renderer.scrollToBottom();
   }
-  // Drop history and its markers (a window switch: the next window's
-  // history replaces it, and tmux repaints the screen).
   async clear() {
     this.oscMarkers.clear();
     await this.buffer.clearHistory();
@@ -384,12 +408,28 @@ export class TerminalEngine extends EventTarget {
   // message's handler runs, and the screen parser writes asynchronously, so
   // without this queue two chunks could interleave mid-cycle and corrupt
   // `_oscAOpen`.
-  // Record an OSC 133 marker on an absolute row, joining with whatever is
-  // already there rather than clobbering it — see the `oscMarkers` doc
-  // comment in the constructor for why two markers routinely share a row.
-  _recordOscMarker(absY, marker) {
-    const existing = this.oscMarkers.get(absY);
-    this.oscMarkers.set(absY, existing ? `${existing}|${marker}` : marker);
+  // Record an OSC 133 marker on a line, joining with whatever is already
+  // there rather than clobbering it — see the `oscMarkers` doc comment in
+  // the constructor for why two markers routinely share a line.
+  _recordOscMarker(key, marker) {
+    const existing = this.oscMarkers.get(key);
+    this.oscMarkers.set(key, existing ? `${existing}|${marker}` : marker);
+  }
+
+  // The marker on the display's `index`-th logical line.
+  oscMarkerForLine(index) {
+    return this.oscMarkers.get(this.buffer.historyStart() + index) || null;
+  }
+
+  // A replaced history moves the screen by the change in history length;
+  // markers on the replaced lines have no counterpart and are dropped.
+  _rebaseMarkers({ replaced, before, after }) {
+    if (!replaced) return;
+    const moved = new Map();
+    for (const [key, marker] of this.oscMarkers) {
+      if (key >= before) moved.set(key - before + after, marker);
+    }
+    this.oscMarkers = moved;
   }
 
   _ingestPtyData(raw) {
@@ -437,7 +477,7 @@ export class TerminalEngine extends EventTarget {
       // output): see the module doc comment for why waiting would let that
       // later, unrelated content overwrite an already-correct row.
       await this._writeSlice(text, cursor, candidateEnd);
-      this._recordOscMarker(this.buffer.cursorDisplayRow(), "A");
+      this._recordOscMarker(this.buffer.cursorLineKey(), "A");
       this._oscAOpen = false;
       cursor = candidateEnd;
       if (nextAEnd !== -1) {
@@ -465,6 +505,7 @@ export class TerminalEngine extends EventTarget {
     this.renderer.setNativeInputEnabled(enabled);
   }
   setTheme(theme) {
+    this._theme = theme;
     this.renderer.setTheme(theme);
   }
 
@@ -558,8 +599,8 @@ export class TerminalEngine extends EventTarget {
 
   // ── History ───────────────────────────────────────────────────────
   // History is the pane's tmux history above the visible screen
-  // (scope=history). A reload replaces it; while the stream flows it is
-  // extended from the tmux tail once output goes quiet.
+  // (scope=history). A reload replaces it; while the stream flows it catches
+  // up from the tmux tail.
   _historyUrl(params) {
     const q = new URLSearchParams(params);
     if (this.node) q.set("node", this.node);
@@ -571,18 +612,27 @@ export class TerminalEngine extends EventTarget {
   async _fetchHistory(params) {
     const res = await fetch(this._historyUrl(params)).catch(() => null);
     if (!res || !res.ok) return null;
-    return res.text();
+    const size = res.headers.get("x-history-size");
+    const limit = res.headers.get("x-history-limit");
+    const info =
+      size !== null && limit !== null
+        ? { size: Number(size), limit: Number(limit) }
+        : null;
+    return { text: await res.text(), info };
   }
 
   async reloadHistory() {
     const history = await this._fetchHistory({ scope: "history" });
     if (history === null || this._disposed) return;
-    await this.buffer.setHistory(splitCapture(history));
+    const moved = await this.buffer.setHistory(
+      splitCapture(history.text),
+      history.info,
+    );
     if (this._disposed) return;
+    this._rebaseMarkers(moved);
     this.view.invalidate();
     await this.view.flush();
-    this.scrollToBottom();
-    this.dispatchEvent(new CustomEvent("history", { detail: history }));
+    this.dispatchEvent(new CustomEvent("history", { detail: history.text }));
   }
 
   _scheduleHistoryTail() {
@@ -591,9 +641,18 @@ export class TerminalEngine extends EventTarget {
       () => this._extendHistory(),
       HISTORY_QUIET_MS,
     );
+    if (this._historyMaxTimer === null) {
+      this._historyMaxTimer = setTimeout(
+        () => this._extendHistory(),
+        HISTORY_MAX_WAIT_MS,
+      );
+    }
   }
 
   async _extendHistory() {
+    clearTimeout(this._historyTimer);
+    clearTimeout(this._historyMaxTimer);
+    this._historyMaxTimer = null;
     if (this._historyTail) {
       this._historyTailAgain = true;
       return;
@@ -605,7 +664,13 @@ export class TerminalEngine extends EventTarget {
     const tail = await this._historyTail;
     if (this._disposed) return;
     if (tail !== null) {
-      if (await this.buffer.mergeHistoryTail(splitCapture(tail))) {
+      const moved = await this.buffer.mergeHistoryTail(
+        splitCapture(tail.text),
+        tail.info,
+      );
+      if (this._disposed) return;
+      if (moved) {
+        this._rebaseMarkers(moved);
         await this.view.flush();
       } else {
         await this.reloadHistory();

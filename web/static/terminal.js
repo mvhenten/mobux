@@ -87,8 +87,7 @@ const quotes = [
 ];
 
 // Renderer construction options shared by both adapters. The typography
-// matches the reader's (style.css `.rb-line`). The engine's buffer keeps no
-// more rows above the screen than this scrollback holds.
+// matches the reader's (style.css `.rb-line`).
 const RENDERER_OPTIONS = {
   fontFamily:
     "'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', monospace",
@@ -581,10 +580,8 @@ export function createTerminal({
       for (let i = 0; i < n; i++) s += `${prefix} ${i}\r\n`;
       return core.write(s);
     },
-    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit) prefix.
-    // Use this in tests that care about sticky-to-bottom behaviour after
-    // incremental content growth: the alt-screen exit sequence causes sterk to
-    // reset the buffer, which races with the test's scroll-geometry probe.
+    // Like injectLines but WITHOUT the \x1b[?1049l (alt-screen exit) prefix,
+    // for tests that grow the same screen incrementally.
     injectLinesPlain: (n, prefix = "inject") => {
       try {
         core.ws?.close();
@@ -612,7 +609,6 @@ export function createTerminal({
     },
     oscDetected: () => !!core.oscDetected,
     switchWindow: (dir) => core.switchWindow(dir),
-    runTmuxCmd: (command) => core.runTmuxCmd(command),
 
     // ── Renderer-interface conformance hooks ──────────────────────
     // Renderer-agnostic probes the conformance suite (test/conformance

@@ -164,36 +164,21 @@ export function extractRuns(rowChain, cols) {
 
 // ── Logical-line iteration ─────────────────────────────────────────
 // Coalesces wrapped rows so the reader gets one entry per logical line and can
-// reflow on its own width. `startY` is the absolute buffer row where the chain
-// begins — needed to look up OSC 133 markers attached to specific rows.
+// reflow on its own width.
 function* logicalLines(buffer, endY) {
   const total = endY != null ? endY : buffer.length;
   let chain = [];
-  let chainStartY = -1;
   for (let y = 0; y < total; y++) {
     const line = buffer.getLine(y);
     if (!line) continue;
     if (line.isWrapped && chain.length > 0) {
       chain.push(line);
     } else {
-      if (chain.length > 0) yield { chain, startY: chainStartY };
+      if (chain.length > 0) yield { chain };
       chain = [line];
-      chainStartY = y;
     }
   }
-  if (chain.length > 0) yield { chain, startY: chainStartY };
-}
-
-// First OSC 133 marker found anywhere in [startY, startY+len). A chain may
-// span several wrapped rows; the marker can land on any of them (e.g. a prompt
-// whose own line wraps).
-function oscKindForChain(oscMarkers, startY, len) {
-  if (!oscMarkers || oscMarkers.size === 0) return null;
-  for (let y = startY; y < startY + len; y++) {
-    const k = oscMarkers.get(y);
-    if (k) return k;
-  }
-  return null;
+  if (chain.length > 0) yield { chain };
 }
 
 // Build the document contract over the engine. The engine owns the buffer read
@@ -210,10 +195,11 @@ export function createTerminalDocument(engine) {
     const statusEndY = total > 0 ? total - 1 : 0;
 
     const lines = [];
-    for (const { chain, startY } of logicalLines(buffer, statusEndY)) {
+    let index = 0;
+    for (const { chain } of logicalLines(buffer, statusEndY)) {
       const runs = extractRuns(chain, cols);
       const text = runs.map((r) => r.text).join("");
-      const osc = oscKindForChain(engine.oscMarkers, startY, chain.length);
+      const osc = engine.oscMarkerForLine(index++);
       lines.push({ runs, text, osc });
     }
     // Drop the run of empty rows the terminal pads below the last output up to

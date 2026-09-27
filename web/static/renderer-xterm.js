@@ -209,6 +209,9 @@ export function createXtermRenderer(host, options = {}) {
       }
     },
 
+    // R17 — whether autowrapped rows keep their wrapped flag.
+    keepsWrappedRows: true,
+
     // R16 — drop all content, scrollback included, before a full redraw.
     reset() {
       term.reset();

@@ -891,10 +891,31 @@ fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<S
     args
 }
 
-async fn history_size(session: &str, target: Option<&str>) -> Result<u32> {
+/// The pane's history size and limit, in lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryInfo {
+    pub size: u32,
+    pub limit: u32,
+}
+
+fn parse_history_info(out: &str) -> Option<HistoryInfo> {
+    let mut it = out.split_whitespace().map(str::parse::<u32>);
+    match (it.next(), it.next(), it.next()) {
+        (Some(Ok(size)), Some(Ok(limit)), None) => Some(HistoryInfo { size, limit }),
+        _ => None,
+    }
+}
+
+async fn history_info(session: &str, target: Option<&str>) -> Result<HistoryInfo> {
     let output = tmux_command(
         target,
-        &["display-message", "-p", "-t", session, "#{history_size}"],
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{history_size} #{history_limit}",
+        ],
     )
     .output()
     .await
@@ -903,10 +924,15 @@ async fn history_size(session: &str, target: Option<&str>) -> Result<u32> {
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(anyhow!("tmux display-message failed: {}", msg));
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .context("tmux reported a non-numeric history_size")
+    parse_history_info(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| anyhow!("tmux reported an unreadable history size"))
+}
+
+/// A capture, and for `HistoryScope::History` the history size it was taken
+/// at (absent when the history grew while it was being captured).
+pub struct HistoryCapture {
+    pub text: String,
+    pub info: Option<HistoryInfo>,
 }
 
 /// Capture the scrollback history of the active pane in a session.
@@ -916,15 +942,33 @@ pub async fn capture_history(
     lines: u32,
     scope: HistoryScope,
     target: Option<&str>,
-) -> Result<String> {
-    let lines = match scope {
-        HistoryScope::All => lines,
-        // `-E -1` on an empty history still prints the first visible line.
-        HistoryScope::History => lines.min(history_size(session, target).await?),
+) -> Result<HistoryCapture> {
+    let before = match scope {
+        HistoryScope::All => None,
+        HistoryScope::History => Some(history_info(session, target).await?),
     };
+    // `-E -1` on an empty history still prints the first visible line.
+    let lines = before.map_or(lines, |info| lines.min(info.size));
     if lines == 0 {
-        return Ok(String::new());
+        return Ok(HistoryCapture {
+            text: String::new(),
+            info: before,
+        });
     }
+    let text = capture_pane(session, lines, scope, target).await?;
+    let info = match before {
+        None => None,
+        Some(info) => Some(history_info(session, target).await?).filter(|after| *after == info),
+    };
+    Ok(HistoryCapture { text, info })
+}
+
+async fn capture_pane(
+    session: &str,
+    lines: u32,
+    scope: HistoryScope,
+    target: Option<&str>,
+) -> Result<String> {
     let args = capture_history_args(session, lines, scope);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = tmux_command(target, &args)
@@ -968,6 +1012,19 @@ mod tests {
                 "main"
             ]
         );
+    }
+
+    #[test]
+    fn history_info_parses_size_and_limit() {
+        assert_eq!(
+            parse_history_info("120 2000\n"),
+            Some(HistoryInfo {
+                size: 120,
+                limit: 2000
+            })
+        );
+        assert_eq!(parse_history_info("120"), None);
+        assert_eq!(parse_history_info("x 2000"), None);
     }
 
     #[test]

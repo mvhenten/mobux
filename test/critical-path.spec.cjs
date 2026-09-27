@@ -1260,7 +1260,9 @@ test("one copy: a tmux command via /command keeps a single copy of history", asy
     })
     .toEqual(expectedCounts(1, 500));
 
-  await page.evaluate(() => window.__mobuxView.test.runTmuxCmd("next-pane"));
+  await page.evaluate(() =>
+    document.querySelector('#cmdPickList [data-cmd="next-pane"]').click(),
+  );
   await page.waitForTimeout(1500);
   expect(numberCounts(await terminalLines(page))).toEqual(
     expectedCounts(1, 500),
@@ -1292,4 +1294,121 @@ test("one copy: the reader shows no alternate-screen lines and each number once"
     .poll(async () => numberCounts(await readerLines(page)), { timeout: 10000 })
     .toEqual(expectedCounts(1, 500));
   expect(altLines(await readerLines(page))).toEqual([]);
+});
+
+test("one copy: history catches up while output keeps flowing", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  const rows = await page.evaluate(() => window.__mobuxView.test.rows());
+  tmux(
+    `send-keys -t ${SESSION} "for i in \\$(seq 1 400); do echo flow-\\$i; sleep 0.05; done" Enter`,
+  );
+  // Output never pauses for 400ms, so only the maximum wait brings the
+  // scrolled-off lines into scrollback before the loop ends (~20s).
+  await expect
+    .poll(
+      async () => {
+        const lines = await terminalLines(page);
+        const scrollback = lines.slice(0, lines.length - rows);
+        return scrollback.some((l) => l.trim() === "flow-1");
+      },
+      { timeout: 8000 },
+    )
+    .toBe(true);
+  tmux(`send-keys -t ${SESSION} C-c`);
+});
+
+// planHistoryMerge / normalizeCapture, run in the page against the served
+// module.
+async function historyMerge(page, fn, arg) {
+  await bootTerminal(page);
+  return page.evaluate(
+    async ({ body, arg }) => {
+      const m = await import("/static/terminal-buffer.js");
+      return new Function("m", "arg", body)(m, arg);
+    },
+    { body: `return (${fn})(m, arg);`, arg },
+  );
+}
+
+test("history merge: a tail that cannot be anchored reloads instead of leaving a gap", async ({
+  page,
+}) => {
+  const plan = await historyMerge(page, (m) => {
+    const local = ["$ make", "building", "done", "$ ", "", ""];
+    // More than a tail's worth of new lines: only blank lines line up.
+    const tail = ["", "", ...Array.from({ length: 998 }, (_, i) => `new ${i}`)];
+    return m.planHistoryMerge({
+      local,
+      localInfo: null,
+      tail,
+      tailInfo: { size: 2000, limit: 2000 },
+    });
+  });
+  expect(plan).toEqual({ kind: "reload" });
+});
+
+test("history merge: repeating output is placed by the history size, never guessed", async ({
+  page,
+}) => {
+  const plans = await historyMerge(page, (m) => {
+    const local = Array.from({ length: 50 }, () => "y");
+    const tail = Array.from({ length: 80 }, () => "y");
+    return {
+      bySize: m.planHistoryMerge({
+        local,
+        localInfo: { size: 50, limit: 2000 },
+        tail,
+        tailInfo: { size: 80, limit: 2000 },
+      }),
+      atLimit: m.planHistoryMerge({
+        local,
+        localInfo: { size: 2000, limit: 2000 },
+        tail,
+        tailInfo: { size: 2000, limit: 2000 },
+      }),
+    };
+  });
+  expect(plans.bySize.kind).toBe("append");
+  expect(plans.bySize.lines.length).toBe(30);
+  expect(plans.atLimit).toEqual({ kind: "reload" });
+});
+
+test("history merge: coloured capture lines compare equal wherever the capture starts", async ({
+  page,
+}) => {
+  const result = await historyMerge(page, (m) => {
+    // capture-pane -e output: the background set on "bg4" carries into the
+    // next lines until "plain7" switches it off.
+    const whole = [
+      "\x1b[31mred1\x1b[39m",
+      "\x1b[31mred2\x1b[39m",
+      "\x1b[1m\x1b[31m\x1b[44mbold3\x1b[0m",
+      "\x1b[44mbg4",
+      "carried5",
+      "more6",
+      "\x1b[49mplain7",
+    ];
+    // The same lines captured from "carried5" on: tmux states the style the
+    // first line starts in.
+    const tail = ["\x1b[44mcarried5", "more6", "\x1b[49mplain7", "next8"];
+    const local = m.normalizeCapture(whole);
+    const normalizedTail = m.normalizeCapture(tail);
+    return {
+      local,
+      tail: normalizedTail,
+      plan: m.planHistoryMerge({
+        local,
+        localInfo: null,
+        tail: normalizedTail,
+        tailInfo: null,
+      }),
+    };
+  });
+  expect(result.local[1]).toBe("\x1b[0;31mred2");
+  expect(result.local[4]).toBe("\x1b[0;44mcarried5");
+  expect(result.local[6]).toBe("plain7");
+  expect(result.tail.slice(0, 3)).toEqual(result.local.slice(4, 7));
+  expect(result.plan).toEqual({ kind: "append", lines: ["next8"] });
 });
