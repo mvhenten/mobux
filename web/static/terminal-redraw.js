@@ -3,6 +3,8 @@
 // history and normal-screen scrollback lines are appended to the display's
 // scrollback once, and the viewport is repainted from the screen.
 
+import { isBlankCell, logicalLines } from "./terminal-buffer.js";
+
 const FLAGS = [
   ["isBold", 1],
   ["isDim", 2],
@@ -34,17 +36,6 @@ function colour(isRGB, isPalette, value, base) {
   return `${base + 8};5;${value}`;
 }
 
-function isBlank(cell) {
-  const ch = cell.getChars();
-  return (
-    (ch === "" || ch === " ") &&
-    cell.isBgDefault() &&
-    !cell.isInverse() &&
-    !cell.isUnderline() &&
-    !cell.isStrikethrough?.()
-  );
-}
-
 // The cells of one logical line: every row of a wrapped chain in full, the
 // last row with trailing blanks trimmed.
 function* lineCells(rows) {
@@ -57,7 +48,7 @@ function* lineCells(rows) {
       for (let x = 0; x < line.length; x++) {
         const cell = line.getCell(x);
         const w = cell.getWidth();
-        if (w > 0 && !isBlank(cell)) end = x + w;
+        if (w > 0 && !isBlankCell(cell)) end = x + w;
       }
     }
     for (let x = 0; x < end; x++) {
@@ -95,25 +86,6 @@ function serializeLine(rows, cols) {
   return out;
 }
 
-// A wrapped flag outlives the text that set it (a row rewritten shorter
-// after an autowrap keeps it), so a row only continues a line whose last
-// column still holds text.
-function reachesEdge(line) {
-  const cell = line?.getCell(line.length - 1);
-  return !!cell && (cell.getWidth() === 0 || !isBlank(cell));
-}
-
-// Group rows into logical lines by their wrapped flag.
-function logicalLines(rows) {
-  const lines = [];
-  for (const row of rows) {
-    const prev = lines.at(-1)?.at(-1);
-    if (row?.isWrapped && reachesEdge(prev)) lines.at(-1).push(row);
-    else lines.push([row]);
-  }
-  return lines;
-}
-
 // A display that keeps wrapped rows gets a long line in one write, so its
 // own autowrap marks the continuation rows; any other display gets each row
 // placed on its own.
@@ -122,6 +94,12 @@ export function createRedrawWriter(buffer, renderer) {
   let committedHistory = 0;
   let committedHistoryStart = 0;
   let committedScreen = 0;
+  let committedScreenLines = 0;
+  let lastScreenRow = null;
+  // The line key each display row starts, null on a row that continues a
+  // line: scrollback rows, then viewport rows.
+  let committedKeys = [];
+  let viewportKeys = [];
   let painted = [];
   let cursorKey = "";
   let drawnModes = new Map();
@@ -139,11 +117,16 @@ export function createRedrawWriter(buffer, renderer) {
     renderer.reset();
     committedHistory = 0;
     committedScreen = 0;
+    committedScreenLines = 0;
+    lastScreenRow = null;
+    committedKeys = [];
     painted = [];
     cursorKey = "";
     drawnModes = new Map();
     full = false;
   }
+
+  const keysFor = (key, count) => [key, ...Array(count - 1).fill(null)];
 
   // Erasing a whole row first clears a wrapped flag left on it.
   //
@@ -154,8 +137,9 @@ export function createRedrawWriter(buffer, renderer) {
     let out = "\x1b[0m";
     const commit = (text, count) =>
       `\x1b[1;1H\x1b[2K${text}\x1b[${rows};1H${"\n".repeat(count)}`;
-    for (const line of lines) {
+    for (const { rows: line, key } of lines) {
       const displayRows = serializeLine(line, cols);
+      committedKeys.push(...keysFor(key, displayRows.length));
       if (wraps && displayRows.length < rows) {
         out += commit(displayRows.join(""), displayRows.length);
       } else {
@@ -166,27 +150,30 @@ export function createRedrawWriter(buffer, renderer) {
   }
 
   function paintViewport(cols, rows) {
-    const viewport = [];
-    for (let r = 0; r < rows; r++) viewport.push(buffer.viewportRow(r));
+    const base = buffer.screenKeyBase();
+    const keys = [];
     let out = "";
     let r = 0;
-    for (const line of logicalLines(viewport)) {
+    let index = 0;
+    for (const line of logicalLines(buffer.viewportRows())) {
       const displayRows = serializeLine(line, cols).slice(0, rows - r);
-      const key = displayRows.join("\n");
-      if (painted[r] !== key) {
-        painted[r] = key;
+      keys.push(...keysFor(base + index++, displayRows.length));
+      const text = displayRows.join("\n");
+      if (painted[r] !== text) {
+        painted[r] = text;
         for (let i = 1; i < displayRows.length; i++) painted[r + i] = null;
         if (wraps) {
           out += `\x1b[${r + 1};1H\x1b[2K${displayRows.join("")}`;
         } else {
-          displayRows.forEach((text, i) => {
-            out += `\x1b[${r + i + 1};1H\x1b[2K${text}`;
+          displayRows.forEach((row, i) => {
+            out += `\x1b[${r + i + 1};1H\x1b[2K${row}`;
           });
         }
       }
       r += displayRows.length;
       if (r >= rows) break;
     }
+    viewportKeys = keys;
     return out;
   }
 
@@ -202,24 +189,29 @@ export function createRedrawWriter(buffer, renderer) {
     const historyRows = buffer.historyRowCount();
     const historyStart = buffer.historyStart();
     const screenRows = buffer.screenScrollbackCount();
+    const backlog = buffer.scrollbackRows(committedScreen);
     const redraw =
       full ||
       historyStart !== committedHistoryStart ||
       historyRows < committedHistory ||
       screenRows < committedScreen ||
-      (historyRows > committedHistory && committedScreen > 0);
+      (historyRows > committedHistory && committedScreen > 0) ||
+      logicalLines([lastScreenRow, ...backlog])[0].length > 1;
     if (redraw) resetDisplay();
     committedHistoryStart = historyStart;
 
     const fresh = [];
     for (let i = committedHistory; i < historyRows; i++) {
-      fresh.push([buffer.historyRow(i)]);
+      fresh.push({ rows: [buffer.historyRow(i)], key: historyStart + i });
     }
-    const screenBacklog = [];
-    for (let i = committedScreen; i < screenRows; i++) {
-      screenBacklog.push(buffer.screenScrollbackRow(i));
+    const screenRowsNew = redraw ? buffer.scrollbackRows() : backlog;
+    for (const line of logicalLines(screenRowsNew)) {
+      fresh.push({
+        rows: line,
+        key: historyStart + historyRows + committedScreenLines++,
+      });
+      lastScreenRow = line.at(-1);
     }
-    fresh.push(...logicalLines(screenBacklog));
     committedHistory = historyRows;
     committedScreen = screenRows;
 
@@ -260,6 +252,11 @@ export function createRedrawWriter(buffer, renderer) {
     },
     invalidate() {
       full = true;
+    },
+    // The line key display row `y` starts, or null.
+    lineKeyAt(y) {
+      if (y < committedKeys.length) return committedKeys[y];
+      return viewportKeys[y - committedKeys.length] ?? null;
     },
     dispose() {
       disposed = true;

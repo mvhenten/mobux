@@ -862,7 +862,8 @@ pub async fn install_bell_hook(port: u16, token: &str) -> Result<()> {
 }
 
 /// What `capture_history` returns: the history and the visible screen, or
-/// the history above the visible screen only.
+/// the history above the visible screen only, one line per logical line
+/// (wrapped rows joined).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HistoryScope {
@@ -876,11 +877,14 @@ fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<S
         "capture-pane",
         "-p", // print to stdout
         "-e", // include escape sequences (colors)
-        "-S",
     ]
     .iter()
     .map(|a| a.to_string())
     .collect();
+    if scope == HistoryScope::History {
+        args.push("-J".into()); // join wrapped rows into their line
+    }
+    args.push("-S".into());
     args.push(format!("-{}", lines)); // start N lines back
     if scope == HistoryScope::History {
         args.push("-E".into());
@@ -891,31 +895,10 @@ fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<S
     args
 }
 
-/// The pane's history size and limit, in lines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HistoryInfo {
-    pub size: u32,
-    pub limit: u32,
-}
-
-fn parse_history_info(out: &str) -> Option<HistoryInfo> {
-    let mut it = out.split_whitespace().map(str::parse::<u32>);
-    match (it.next(), it.next(), it.next()) {
-        (Some(Ok(size)), Some(Ok(limit)), None) => Some(HistoryInfo { size, limit }),
-        _ => None,
-    }
-}
-
-async fn history_info(session: &str, target: Option<&str>) -> Result<HistoryInfo> {
+async fn history_size(session: &str, target: Option<&str>) -> Result<u32> {
     let output = tmux_command(
         target,
-        &[
-            "display-message",
-            "-p",
-            "-t",
-            session,
-            "#{history_size} #{history_limit}",
-        ],
+        &["display-message", "-p", "-t", session, "#{history_size}"],
     )
     .output()
     .await
@@ -924,15 +907,22 @@ async fn history_info(session: &str, target: Option<&str>) -> Result<HistoryInfo
         let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(anyhow!("tmux display-message failed: {}", msg));
     }
-    parse_history_info(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| anyhow!("tmux reported an unreadable history size"))
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .context("tmux reported a non-numeric history_size")
 }
 
-/// A capture, and for `HistoryScope::History` the history size it was taken
-/// at (absent when the history grew while it was being captured).
-pub struct HistoryCapture {
-    pub text: String,
-    pub info: Option<HistoryInfo>,
+/// A capture that starts below the top of the history can start inside a
+/// wrapped line; that partial first line is dropped.
+fn drop_partial_first_line(text: String, truncated: bool) -> String {
+    if !truncated {
+        return text;
+    }
+    match text.find('\n') {
+        Some(i) => text[i + 1..].to_string(),
+        None => String::new(),
+    }
 }
 
 /// Capture the scrollback history of the active pane in a session.
@@ -942,33 +932,18 @@ pub async fn capture_history(
     lines: u32,
     scope: HistoryScope,
     target: Option<&str>,
-) -> Result<HistoryCapture> {
-    let before = match scope {
-        HistoryScope::All => None,
-        HistoryScope::History => Some(history_info(session, target).await?),
-    };
-    // `-E -1` on an empty history still prints the first visible line.
-    let lines = before.map_or(lines, |info| lines.min(info.size));
-    if lines == 0 {
-        return Ok(HistoryCapture {
-            text: String::new(),
-            info: before,
-        });
-    }
-    let text = capture_pane(session, lines, scope, target).await?;
-    let info = match before {
-        None => None,
-        Some(info) => Some(history_info(session, target).await?).filter(|after| *after == info),
-    };
-    Ok(HistoryCapture { text, info })
-}
-
-async fn capture_pane(
-    session: &str,
-    lines: u32,
-    scope: HistoryScope,
-    target: Option<&str>,
 ) -> Result<String> {
+    let (lines, truncated) = match scope {
+        HistoryScope::All => (lines, false),
+        HistoryScope::History => {
+            // `-E -1` on an empty history still prints the first visible line.
+            let size = history_size(session, target).await?;
+            (lines.min(size), lines < size)
+        }
+    };
+    if lines == 0 {
+        return Ok(String::new());
+    }
     let args = capture_history_args(session, lines, scope);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = tmux_command(target, &args)
@@ -981,7 +956,10 @@ async fn capture_pane(
         return Err(anyhow!("tmux capture-pane failed: {}", msg));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(drop_partial_first_line(
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        truncated,
+    ))
 }
 
 #[cfg(test)]
@@ -997,13 +975,14 @@ mod tests {
     }
 
     #[test]
-    fn capture_history_args_history_scope_ends_above_the_screen() {
+    fn capture_history_args_history_scope_joins_lines_above_the_screen() {
         assert_eq!(
             capture_history_args("main", 500, HistoryScope::History),
             vec![
                 "capture-pane",
                 "-p",
                 "-e",
+                "-J",
                 "-S",
                 "-500",
                 "-E",
@@ -1015,16 +994,16 @@ mod tests {
     }
 
     #[test]
-    fn history_info_parses_size_and_limit() {
+    fn a_truncated_capture_drops_its_partial_first_line() {
         assert_eq!(
-            parse_history_info("120 2000\n"),
-            Some(HistoryInfo {
-                size: 120,
-                limit: 2000
-            })
+            drop_partial_first_line("tail of a wrap\nwhole\n".into(), true),
+            "whole\n"
         );
-        assert_eq!(parse_history_info("120"), None);
-        assert_eq!(parse_history_info("x 2000"), None);
+        assert_eq!(
+            drop_partial_first_line("first\nwhole\n".into(), false),
+            "first\nwhole\n"
+        );
+        assert_eq!(drop_partial_first_line("only".into(), true), "");
     }
 
     #[test]

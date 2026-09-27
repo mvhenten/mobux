@@ -61,17 +61,34 @@ function oscInputToString(data) {
   return typeof data === "string" ? data : oscTextDecoder.decode(data);
 }
 
-// History catches up from the tmux tail once the stream has been quiet for
+// History syncs with tmux once the stream has been quiet for
 // HISTORY_QUIET_MS, and at least every HISTORY_MAX_WAIT_MS while it flows.
 const HISTORY_QUIET_MS = 400;
 const HISTORY_MAX_WAIT_MS = 2000;
-const HISTORY_TAIL_LINES = 1000;
 
-// OSC 10 / 11: foreground / background colour queries.
+// OSC 10 / 11 / 12: foreground / background / cursor colour queries.
 const COLOUR_QUERIES = {
   10: (theme) => theme.foreground || theme.palette?.[7],
   11: (theme) => theme.background || theme.palette?.[0],
+  12: (theme) => theme.cursor || theme.foreground || theme.palette?.[7],
 };
+
+const hex2 = (n) => n.toString(16).padStart(2, "0");
+
+// Indexed colour `n` as #rrggbb: the theme's 16, then xterm's 6×6×6 cube
+// and grey ramp.
+function paletteHex(theme, n) {
+  if (n < 16) return theme.palette?.[n];
+  if (n < 232) {
+    const level = (v) => (v === 0 ? 0 : 55 + v * 40);
+    const c = n - 16;
+    return `#${[Math.floor(c / 36), Math.floor(c / 6) % 6, c % 6]
+      .map((v) => hex2(level(v)))
+      .join("")}`;
+  }
+  if (n < 256) return `#${hex2(8 + (n - 232) * 10).repeat(3)}`;
+  return null;
+}
 
 function oscColour(hex) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
@@ -163,9 +180,11 @@ export class TerminalEngine extends EventTarget {
     this.view = createRedrawWriter(this.buffer, this.renderer);
     this._historyTimer = null;
     this._historyMaxTimer = null;
-    this._historyTail = null;
+    this._historySync = null;
+    this._historyAgain = false;
+    this._historyAbort = null;
+    this._historyGeneration = 0;
     this._theme = null;
-    this._historyTailAgain = false;
 
     this._oscSub = this.buffer.registerOscHandler(133, (data) => {
       const kind = (data || "").charAt(0);
@@ -189,6 +208,20 @@ export class TerminalEngine extends EventTarget {
         if (data !== "?") return false;
         const colour = this._theme && oscColour(pick(this._theme));
         if (colour) this.send(`\x1b]${id};${colour}\x1b\\`);
+        return true;
+      }),
+    );
+    this._colourSubs.push(
+      this.buffer.registerOscHandler(4, (data) => {
+        const parts = data.split(";");
+        if (parts.length % 2 || parts.some((p, i) => i % 2 && p !== "?")) {
+          return false;
+        }
+        for (let i = 0; i < parts.length; i += 2) {
+          const colour =
+            this._theme && oscColour(paletteHex(this._theme, Number(parts[i])));
+          if (colour) this.send(`\x1b]4;${parts[i]};${colour}\x1b\\`);
+        }
         return true;
       }),
     );
@@ -371,6 +404,8 @@ export class TerminalEngine extends EventTarget {
     this.renderer.scrollToBottom();
   }
   async clear() {
+    this._historyGeneration++;
+    this._historyAbort?.abort();
     this.oscMarkers.clear();
     await this.buffer.clearHistory();
     this.view.invalidate();
@@ -416,18 +451,21 @@ export class TerminalEngine extends EventTarget {
     this.oscMarkers.set(key, existing ? `${existing}|${marker}` : marker);
   }
 
-  // The marker on the display's `index`-th logical line.
-  oscMarkerForLine(index) {
-    return this.oscMarkers.get(this.buffer.historyStart() + index) || null;
+  // The marker on the line display row `y` starts, if any.
+  oscMarkerForRow(y) {
+    const key = this.view.lineKeyAt(y);
+    return key === null ? null : this.oscMarkers.get(key) || null;
   }
 
-  // A replaced history moves the screen by the change in history length;
-  // markers on the replaced lines have no counterpart and are dropped.
+  // Lines that lined up with the new history keep their key. Without an
+  // alignment the old lines are gone, and the screen moves with the change
+  // in history length.
   _rebaseMarkers({ replaced, before, after }) {
-    if (!replaced) return;
     const moved = new Map();
+    const first = this.buffer.historyStart();
     for (const [key, marker] of this.oscMarkers) {
-      if (key >= before) moved.set(key - before + after, marker);
+      if (replaced && key >= before) moved.set(key - before + after, marker);
+      if (!replaced && key >= first) moved.set(key, marker);
     }
     this.oscMarkers = moved;
   }
@@ -599,87 +637,65 @@ export class TerminalEngine extends EventTarget {
 
   // ── History ───────────────────────────────────────────────────────
   // History is the pane's tmux history above the visible screen
-  // (scope=history). A reload replaces it; while the stream flows it catches
-  // up from the tmux tail.
-  _historyUrl(params) {
-    const q = new URLSearchParams(params);
+  // (scope=history), fetched whole on every sync and lined up with the one
+  // held (terminal-buffer.js alignHistory).
+  _historyUrl() {
+    const q = new URLSearchParams({
+      scope: "history",
+      lines: String(this.buffer.historyLimit),
+    });
     if (this.node) q.set("node", this.node);
     return u(
       `api/sessions/${encodeURIComponent(this.session)}/history?${q.toString()}`,
     );
   }
 
-  async _fetchHistory(params) {
-    const res = await fetch(this._historyUrl(params)).catch(() => null);
-    if (!res || !res.ok) return null;
-    const size = res.headers.get("x-history-size");
-    const limit = res.headers.get("x-history-limit");
-    const info =
-      size !== null && limit !== null
-        ? { size: Number(size), limit: Number(limit) }
-        : null;
-    return { text: await res.text(), info };
+  reloadHistory() {
+    if (this._historySync) {
+      this._historyAgain = true;
+      return this._historySync;
+    }
+    this._historySync = this._runHistorySync().finally(() => {
+      this._historySync = null;
+      if (this._historyAgain && !this._disposed) {
+        this._historyAgain = false;
+        this.reloadHistory();
+      }
+    });
+    return this._historySync;
   }
 
-  async reloadHistory() {
-    const history = await this._fetchHistory({ scope: "history" });
-    if (history === null || this._disposed) return;
-    const moved = await this.buffer.setHistory(
-      splitCapture(history.text),
-      history.info,
+  async _runHistorySync() {
+    clearTimeout(this._historyTimer);
+    clearTimeout(this._historyMaxTimer);
+    this._historyMaxTimer = null;
+    const generation = this._historyGeneration;
+    const abort = new AbortController();
+    this._historyAbort = abort;
+    const res = await fetch(this._historyUrl(), { signal: abort.signal }).catch(
+      () => null,
     );
-    if (this._disposed) return;
+    const text = res && res.ok ? await res.text().catch(() => null) : null;
+    if (text === null || this._disposed) return;
+    if (generation !== this._historyGeneration) return;
+    const moved = await this.buffer.sync(splitCapture(text));
+    if (this._disposed || generation !== this._historyGeneration) return;
     this._rebaseMarkers(moved);
-    this.view.invalidate();
     await this.view.flush();
-    this.dispatchEvent(new CustomEvent("history", { detail: history.text }));
+    this.dispatchEvent(new CustomEvent("history", { detail: text }));
   }
 
   _scheduleHistoryTail() {
     clearTimeout(this._historyTimer);
     this._historyTimer = setTimeout(
-      () => this._extendHistory(),
+      () => this.reloadHistory(),
       HISTORY_QUIET_MS,
     );
     if (this._historyMaxTimer === null) {
       this._historyMaxTimer = setTimeout(
-        () => this._extendHistory(),
+        () => this.reloadHistory(),
         HISTORY_MAX_WAIT_MS,
       );
-    }
-  }
-
-  async _extendHistory() {
-    clearTimeout(this._historyTimer);
-    clearTimeout(this._historyMaxTimer);
-    this._historyMaxTimer = null;
-    if (this._historyTail) {
-      this._historyTailAgain = true;
-      return;
-    }
-    this._historyTail = this._fetchHistory({
-      scope: "history",
-      lines: String(HISTORY_TAIL_LINES),
-    });
-    const tail = await this._historyTail;
-    if (this._disposed) return;
-    if (tail !== null) {
-      const moved = await this.buffer.mergeHistoryTail(
-        splitCapture(tail.text),
-        tail.info,
-      );
-      if (this._disposed) return;
-      if (moved) {
-        this._rebaseMarkers(moved);
-        await this.view.flush();
-      } else {
-        await this.reloadHistory();
-      }
-    }
-    this._historyTail = null;
-    if (this._historyTailAgain) {
-      this._historyTailAgain = false;
-      this._scheduleHistoryTail();
     }
   }
 }

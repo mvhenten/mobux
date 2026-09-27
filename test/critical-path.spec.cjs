@@ -1319,66 +1319,70 @@ test("one copy: history catches up while output keeps flowing", async ({
   tmux(`send-keys -t ${SESSION} C-c`);
 });
 
-// planHistoryMerge / normalizeCapture, run in the page against the served
-// module.
-async function historyMerge(page, fn, arg) {
+// alignHistory / normalizeCapture / line keys, run in the page against the
+// served modules.
+async function inPage(page, fn) {
   await bootTerminal(page);
   return page.evaluate(
-    async ({ body, arg }) => {
+    async ({ body }) => {
       const m = await import("/static/terminal-buffer.js");
-      return new Function("m", "arg", body)(m, arg);
+      const r = await import("/static/terminal-redraw.js");
+      return new Function("m", "r", body)(m, r);
     },
-    { body: `return (${fn})(m, arg);`, arg },
+    { body: `return (${fn})(m, r);` },
   );
 }
 
-test("history merge: a tail that cannot be anchored reloads instead of leaving a gap", async ({
+// tmux keeps appending until the history reaches its limit, then drops a
+// tenth of the limit off the top (grid_collect_history): at a limit of 100,
+// 99 lines plus 6 new ones leaves lines 11..105.
+test("history sync: lines tmux drops off the top keep the rest in place", async ({
   page,
 }) => {
-  const plan = await historyMerge(page, (m) => {
-    const local = ["$ make", "building", "done", "$ ", "", ""];
-    // More than a tail's worth of new lines: only blank lines line up.
-    const tail = ["", "", ...Array.from({ length: 998 }, (_, i) => `new ${i}`)];
-    return m.planHistoryMerge({
-      local,
-      localInfo: null,
-      tail,
-      tailInfo: { size: 2000, limit: 2000 },
-    });
-  });
-  expect(plan).toEqual({ kind: "reload" });
-});
-
-test("history merge: repeating output is placed by the history size, never guessed", async ({
-  page,
-}) => {
-  const plans = await historyMerge(page, (m) => {
-    const local = Array.from({ length: 50 }, () => "y");
-    const tail = Array.from({ length: 80 }, () => "y");
+  const result = await inPage(page, (m) => {
+    const range = (a, b) =>
+      Array.from({ length: b - a + 1 }, (_, i) => `line ${a + i}`);
+    const held = range(1, 99);
     return {
-      bySize: m.planHistoryMerge({
-        local,
-        localInfo: { size: 50, limit: 2000 },
-        tail,
-        tailInfo: { size: 80, limit: 2000 },
-      }),
-      atLimit: m.planHistoryMerge({
-        local,
-        localInfo: { size: 2000, limit: 2000 },
-        tail,
-        tailInfo: { size: 2000, limit: 2000 },
-      }),
+      grown: m.alignHistory(held.slice(0, 93), held),
+      dropped: m.alignHistory(held, range(11, 105)),
+      paneGrew: m.alignHistory(held, range(1, 90)),
+      cleared: m.alignHistory(held, ["$ "]),
     };
   });
-  expect(plans.bySize.kind).toBe("append");
-  expect(plans.bySize.lines.length).toBe(30);
-  expect(plans.atLimit).toEqual({ kind: "reload" });
+  expect(result.grown).toEqual({ drop: 0, keep: 93 });
+  expect(result.dropped).toEqual({ drop: 10, keep: 89 });
+  expect(result.paneGrew).toEqual({ drop: 0, keep: 90 });
+  expect(result.cleared).toBeNull();
 });
 
-test("history merge: coloured capture lines compare equal wherever the capture starts", async ({
+test("history sync: repeating output ends as the captured history", async ({
   page,
 }) => {
-  const result = await historyMerge(page, (m) => {
+  const result = await inPage(page, async (m) => {
+    const buffer = m.createTerminalBuffer({
+      cols: 20,
+      rows: 5,
+      scrollback: 1000,
+    });
+    const ys = (n) => Array.from({ length: n }, () => "y");
+    await buffer.sync(ys(50));
+    await buffer.sync(["$ yes", ...ys(79)]);
+    await buffer.sync(ys(90));
+    const lines = [];
+    for (let i = 0; i < buffer.historyRowCount(); i++) {
+      lines.push(buffer.historyRow(i).translateToString(true));
+    }
+    buffer.dispose();
+    return lines;
+  });
+  expect(result).toEqual(Array.from({ length: 90 }, () => "y"));
+});
+
+test("history sync: coloured capture lines compare equal wherever the capture starts", async ({
+  page,
+}) => {
+  const result = await inPage(page, (m) => {
     // capture-pane -e output: the background set on "bg4" carries into the
     // next lines until "plain7" switches it off.
     const whole = [
@@ -1390,25 +1394,86 @@ test("history merge: coloured capture lines compare equal wherever the capture s
       "more6",
       "\x1b[49mplain7",
     ];
-    // The same lines captured from "carried5" on: tmux states the style the
-    // first line starts in.
-    const tail = ["\x1b[44mcarried5", "more6", "\x1b[49mplain7", "next8"];
-    const local = m.normalizeCapture(whole);
-    const normalizedTail = m.normalizeCapture(tail);
-    return {
-      local,
-      tail: normalizedTail,
-      plan: m.planHistoryMerge({
-        local,
-        localInfo: null,
-        tail: normalizedTail,
-        tailInfo: null,
-      }),
-    };
+    // The same lines captured after tmux dropped the first four: tmux states
+    // the style the first line starts in.
+    const next = ["\x1b[44mcarried5", "more6", "\x1b[49mplain7", "next8"];
+    const held = m.normalizeCapture(whole);
+    const captured = m.normalizeCapture(next);
+    return { held, captured, aligned: m.alignHistory(held, captured) };
   });
-  expect(result.local[1]).toBe("\x1b[0;31mred2");
-  expect(result.local[4]).toBe("\x1b[0;44mcarried5");
-  expect(result.local[6]).toBe("plain7");
-  expect(result.tail.slice(0, 3)).toEqual(result.local.slice(4, 7));
-  expect(result.plan).toEqual({ kind: "append", lines: ["next8"] });
+  expect(result.held[1]).toBe("\x1b[0;31mred2");
+  expect(result.held[4]).toBe("\x1b[0;44mcarried5");
+  expect(result.held[6]).toBe("plain7");
+  expect(result.captured.slice(0, 3)).toEqual(result.held.slice(4, 7));
+  expect(result.aligned).toEqual({ drop: 4, keep: 3 });
+});
+
+// capture-pane -J gives one history line per logical line; a line wrapped
+// on screen and the same line in history get one key, and every display
+// row maps back to it — joined by a display that keeps wrapped rows, one
+// key on its first row otherwise.
+test("line keys: a wrapped line is one line on the screen, in history and on both displays", async ({
+  page,
+}) => {
+  const result = await inPage(page, async (m, r) => {
+    const make = async (keepsWrappedRows) => {
+      const display = new window.XtermHeadless.Terminal({
+        cols: 10,
+        rows: 4,
+        scrollback: 100,
+        allowProposedApi: true,
+      });
+      const renderer = {
+        keepsWrappedRows,
+        get cols() {
+          return display.cols;
+        },
+        get rows() {
+          return display.rows;
+        },
+        buffer: display.buffer,
+        resize: (c, rw) => display.resize(c, rw),
+        reset: () => display.reset(),
+        scrollLines: (n) => display.scrollLines(n),
+        write: (d) => new Promise((res) => display.write(d, res)),
+      };
+      const buffer = m.createTerminalBuffer({
+        cols: 10,
+        rows: 4,
+        scrollback: 100,
+      });
+      const view = r.createRedrawWriter(buffer, renderer);
+      await buffer.sync(["short", "x".repeat(15), "after"]);
+      await buffer.writeScreen(`\x1b[H${"w".repeat(15)}\r\n$ `);
+      await view.flush();
+      const keys = [];
+      for (let y = 0; y < display.buffer.active.length; y++) {
+        keys.push(view.lineKeyAt(y));
+      }
+      const wrapped = [];
+      for (let y = 0; y < display.buffer.active.length; y++) {
+        wrapped.push(display.buffer.active.getLine(y).isWrapped);
+      }
+      const cursor = buffer.cursorLineKey();
+      buffer.dispose();
+      display.dispose();
+      return { keys, wrapped, cursor };
+    };
+    return { xterm: await make(true), sterk: await make(false) };
+  });
+  // history: short(0), xxx… over two rows(1), after(2); screen: www… over
+  // two rows(3), "$ "(4), then blank rows.
+  expect(result.xterm.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
+  expect(result.xterm.wrapped.slice(0, 7)).toEqual([
+    false,
+    false,
+    true,
+    false,
+    false,
+    true,
+    false,
+  ]);
+  expect(result.sterk.keys.slice(0, 7)).toEqual([0, 1, null, 2, 3, null, 4]);
+  expect(result.sterk.wrapped.slice(0, 7).every((w) => !w)).toBe(true);
+  expect(result.xterm.cursor).toBe(4);
 });

@@ -1194,15 +1194,14 @@ struct SessionHistoryQuery {
 }
 
 /// GET /api/sessions/{name}/history — the pane's tmux scrollback.
-/// `scope=history` leaves out the visible screen and reports the history
-/// size and limit it was captured at in `X-History-Size` /
-/// `X-History-Limit`; `lines` caps how many lines back the capture starts
+/// `scope=history` leaves out the visible screen and returns one line per
+/// logical line; `lines` caps how many lines back the capture starts
 /// (default and maximum 10000).
 async fn api_session_history(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<SessionHistoryQuery>,
-) -> Result<(HeaderMap, String), AppError> {
+) -> Result<String, AppError> {
     validate_session_name(&state, &name)?;
     let target = resolve_node_target(&state, q.node.as_deref()).await?;
     let lines = q
@@ -1213,12 +1212,7 @@ async fn api_session_history(
         tmux::capture_history(&name, lines, q.scope.unwrap_or_default(), target.as_deref())
             .await
             .map_err(AppError::bad_request)?;
-    let mut headers = HeaderMap::new();
-    if let Some(info) = history.info {
-        headers.insert("x-history-size", HeaderValue::from(info.size));
-        headers.insert("x-history-limit", HeaderValue::from(info.limit));
-    }
-    Ok((headers, history.text))
+    Ok(history)
 }
 
 #[derive(Deserialize)]

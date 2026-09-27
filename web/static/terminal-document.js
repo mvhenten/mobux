@@ -168,17 +168,19 @@ export function extractRuns(rowChain, cols) {
 function* logicalLines(buffer, endY) {
   const total = endY != null ? endY : buffer.length;
   let chain = [];
+  let startY = 0;
   for (let y = 0; y < total; y++) {
     const line = buffer.getLine(y);
     if (!line) continue;
     if (line.isWrapped && chain.length > 0) {
       chain.push(line);
     } else {
-      if (chain.length > 0) yield { chain };
+      if (chain.length > 0) yield { chain, startY };
       chain = [line];
+      startY = y;
     }
   }
-  if (chain.length > 0) yield { chain };
+  if (chain.length > 0) yield { chain, startY };
 }
 
 // Build the document contract over the engine. The engine owns the buffer read
@@ -195,11 +197,10 @@ export function createTerminalDocument(engine) {
     const statusEndY = total > 0 ? total - 1 : 0;
 
     const lines = [];
-    let index = 0;
-    for (const { chain } of logicalLines(buffer, statusEndY)) {
+    for (const { chain, startY } of logicalLines(buffer, statusEndY)) {
       const runs = extractRuns(chain, cols);
       const text = runs.map((r) => r.text).join("");
-      const osc = engine.oscMarkerForLine(index++);
+      const osc = engine.oscMarkerForRow(startY);
       lines.push({ runs, text, osc });
     }
     // Drop the run of empty rows the terminal pads below the last output up to
