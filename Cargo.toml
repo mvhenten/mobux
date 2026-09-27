@@ -72,6 +72,9 @@ web-push-native = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 vte = "0.15"
+# Screen model for the conversation recorder (session_history.rs): what a
+# full-screen app leaves on screen, not every repaint that drew it.
+vt100 = "0.16"
 serde_path_to_error = "0.1"
 schemars = "1"
 garde = { version = "0.22", features = ["derive"] }
