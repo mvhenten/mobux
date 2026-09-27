@@ -1877,6 +1877,49 @@ test("document: with the status line on top the pane's first row joins the strad
   expect(result.after.key).toBe(result.before.key);
 });
 
+// A wrapped line whose first row scrolls off the top is still on the
+// screen: until the next sync the lines below it keep their keys, so a
+// prompt's marker stays on the prompt.
+test("markers: a wrapped line half scrolled off moves no line key", async ({
+  page,
+}) => {
+  const result = await withDisplay(page, async (m, r, makeDisplay, d) => {
+    const { createMarkerBook } = await import("/static/terminal-markers.js");
+    const buffer = m.createTerminalBuffer({
+      cols: 10,
+      rows: 5,
+      scrollback: 100,
+    });
+    const book = createMarkerBook(buffer);
+    const doc = d.createTerminalDocument({ buffer, oscMarkers: book.map });
+    await buffer.writeScreen(
+      `\x1b[?1049h\x1b[1;4r\x1b[H${"w".repeat(15)}\r\nout\r\n$ `,
+    );
+    book.record("A");
+    const recorded = buffer.cursorLineKey();
+    const lines = () => doc.snapshot().lines.map((l) => [l.text, l.osc]);
+    // A linefeed on the region's last row scrolls the first w row off.
+    await buffer.writeScreen("cmd\r\n");
+    const linefeed = { key: buffer.rowKey(2), lines: lines() };
+    // A scroll-up takes the rest of that line and nothing more.
+    await buffer.writeScreen("\x1b[S");
+    const scrollUp = { key: buffer.rowKey(1), lines: lines() };
+    buffer.dispose();
+    return { recorded, linefeed, scrollUp };
+  });
+  expect(result.linefeed.key).toBe(result.recorded);
+  expect(result.linefeed.lines).toEqual([
+    ["wwwww", null],
+    ["out", null],
+    ["$ cmd", "A"],
+  ]);
+  expect(result.scrollUp.key).toBe(result.recorded);
+  expect(result.scrollUp.lines).toEqual([
+    ["out", null],
+    ["$ cmd", "A"],
+  ]);
+});
+
 // Markers recorded while history lags the screen: a command whose output
 // scrolls 30 lines past a 6-row screen, then its D and A markers, then a
 // sync. tmux scrolls its client with a linefeed at the bottom of a region

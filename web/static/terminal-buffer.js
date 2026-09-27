@@ -312,8 +312,14 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
   // Rows that left the top of the pane since the last sync: tmux scrolls
   // its client with a linefeed at the bottom of a scroll region that starts
   // at the pane's top row, or with scroll-up. Those rows are the pane lines
-  // entering tmux's history.
-  let scrolledRows = 0;
+  // entering tmux's history. Each is kept as whether it ended its line: a
+  // row whose line goes on in the next row moves no line key.
+  let scrolled = [];
+  const scrolledLines = () => scrolled.filter(Boolean).length;
+  const paneRow = (y) => {
+    const buf = screen.buffer.active;
+    return buf.getLine(buf.baseY + paneRows().first + y);
+  };
   let regionTop = 1;
   const scrollsHistory = () =>
     regionTop === paneRows().first + 1 &&
@@ -324,12 +330,16 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       return false;
     }),
     screen.parser.registerCsiHandler({ final: "S" }, (params) => {
-      if (scrollsHistory()) scrolledRows += scalar(params[0]) || 1;
+      if (!scrollsHistory()) return false;
+      const n = scalar(params[0]) || 1;
+      for (let y = 0; y < n; y++) {
+        scrolled.push(!continuesLine(paneRow(y), paneRow(y + 1)));
+      }
       return false;
     }),
     screen.onScroll(() => {
       if (switching) switching = false;
-      else if (scrollsHistory()) scrolledRows++;
+      else if (scrollsHistory()) scrolled.push(!paneRow(0)?.isWrapped);
     }),
     screen.onWriteParsed(() => {
       switching = false;
@@ -611,14 +621,15 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     // shares the last history line's key while it straddles. Status lines
     // have no key.
     screenKeyBase() {
-      const base = end() + logicalLines(scrollbackRows()).length + scrolledRows;
+      const base =
+        end() + logicalLines(scrollbackRows()).length + scrolledLines();
       return straddles() ? base - 1 : base;
     },
     scrolledRows() {
-      return scrolledRows;
+      return scrolled.length;
     },
     consumeScrolledRows(n) {
-      scrolledRows = Math.max(0, scrolledRows - n);
+      scrolled = scrolled.slice(n);
     },
     // The key of the line pane row `r` belongs to, or null.
     rowKey(r) {
@@ -654,7 +665,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
       }
       return {
         key: this.cursorLineKey(),
-        vrow: scrolledRows + y,
+        vrow: scrolled.length + y,
         snapshot: lines.map((l) => l.text),
         lineIndex,
       };
