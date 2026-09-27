@@ -32,7 +32,7 @@ const SWIPE_UP_EDGE_PX = 80;
 const SWIPE_UP_PX = 60;
 const SWIPE_UP_MS = 400;
 
-// callbacks: { onScroll(dy), onFling(), onTap(x,y), onDoubleTap(x,y),
+// callbacks: { onScroll(dy), onScrollStart(x,y), onFling(), onTap(x,y), onDoubleTap(x,y),
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
 //              onLongPress(), onSwipeUp(), onReconnect() }
@@ -42,6 +42,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
   let state = 'IDLE';
   let startX, startY, startTime;
+  let startClientX, startClientY;
   let lastY;
   let lastTapTime = 0;
   let longPressTimer = null;
@@ -81,6 +82,8 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
     const t = e.touches[0];
     startX = t.pageX;
     startY = t.pageY;
+    startClientX = t.clientX;
+    startClientY = t.clientY;
     lastY = t.pageY;
     startTime = performance.now();
     // Bottom-edge bookkeeping for swipe-up. `clientY` is viewport-relative,
@@ -188,6 +191,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
         // In passive mode we hand vertical scroll to the browser and
         // stop classifying — no momentum/fling injection.
         transition(passiveScroll ? 'IDLE' : 'SCROLL');
+        if (!passiveScroll) callbacks.onScrollStart?.(startClientX, startClientY);
       } else if (adx > TAP_PX && adx > ady) {
         clearLongPress();
         transition('HSWIPE');
@@ -254,6 +258,9 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
   overlay.addEventListener('touchcancel', onTouchCancel, { passive: false });
 
   return {
+    stopMomentum() {
+      physics.stopMomentum();
+    },
     destroy() {
       overlay.removeEventListener('touchstart', onTouchStart);
       overlay.removeEventListener('touchmove', onTouchMove);

@@ -51,13 +51,17 @@ export function createScrollPhysics(onScroll) {
     const speed = Math.abs(v0);
     const dir = v0 > 0 ? 1 : -1;
     const totalMs = Math.min(MAX_MOM_MS, (speed * 2) / DECEL);
-    const t0 = performance.now();
-    let prevT = t0;
+    // A frame timestamp is when the frame began, so the first one can predate
+    // the fling; timing starts at it rather than going negative and
+    // scrolling the wrong way.
+    let t0 = null;
+    let prevT = null;
 
     function tick(now) {
+      if (t0 === null) { t0 = now; prevT = now; }
       const elapsed = now - t0;
       if (elapsed >= totalMs) { momId = null; return; }
-      const dt = now - prevT;
+      const dt = Math.max(0, now - prevT);
       prevT = now;
       const vNow = speed * Math.pow(IOS_DECAY, elapsed);
       if (vNow < 0.03) { momId = null; return; }

@@ -105,6 +105,8 @@ function oscColour(hex) {
     .join("/")}`;
 }
 
+export const WINDOW_SETTLE_MS = 300;
+
 const WINDOW_SWITCH_CMDS = new Set([
   "next-window",
   "prev-window",
@@ -130,6 +132,12 @@ export class TerminalEngine extends EventTarget {
     this.ws = null;
     this.panes = [];
     this.activeIndex = 0;
+    this._panesAsked = 0;
+    this._panesApplied = 0;
+    // The panes answer describes the active pane's screen only when it was
+    // asked after the last window switch settled.
+    this._paneScreenFrom = 0;
+    this._paneScreenKnown = false;
 
     // Auto-reconnect state. `intentionalClose` guards the onclose backoff so
     // we don't reconnect after a deliberate teardown (page unload, a
@@ -528,6 +536,42 @@ export class TerminalEngine extends EventTarget {
   isAlternateScreenActive() {
     return this.buffer.isAlternate();
   }
+  // A scroll belongs to the pane app while the pane is on its alternate
+  // screen and tmux takes the mouse. The buffer holds tmux's client screen,
+  // which is always on its alternate screen once attached, so the pane's
+  // state comes from tmux.
+  wheelScrollsPane() {
+    if (!this._paneScreenKnown) return false;
+    const pane = this.panes[this.activeIndex];
+    return pane?.alternateOn === true && this.buffer.mouse().tracking;
+  }
+  // The client rows a wheel event may land on: tmux's status line switches
+  // windows on a wheel.
+  paneRows() {
+    const pane = this.panes[this.activeIndex];
+    const status = pane?.statusLines ?? 1;
+    const first = pane?.statusPosition === "top" ? status : 0;
+    return { first, last: Math.max(first, first + this.rows - status - 1) };
+  }
+  forgetPaneScreen(settleMs) {
+    this._paneScreenKnown = false;
+    this._paneScreenFrom = performance.now() + settleMs;
+  }
+  // One wheel notch at a 0-based cell, in the mouse format tmux asked its
+  // client for. tmux hands it to the pane app in the app's format, or
+  // scrolls copy-mode when the app tracks no mouse.
+  sendWheel(up, col, row) {
+    const button = up ? 64 : 65;
+    if (this.buffer.mouse().sgr) {
+      this.send(`\x1b[<${button};${col + 1};${row + 1}M`);
+      return;
+    }
+    // X10 bytes above 127 would not survive the text frame.
+    const cell = (n) => String.fromCharCode(33 + Math.min(n, 93));
+    this.send(
+      `\x1b[M${String.fromCharCode(32 + button)}${cell(col)}${cell(row)}`,
+    );
+  }
   focus() {
     this.renderer.focus();
   }
@@ -574,6 +618,8 @@ export class TerminalEngine extends EventTarget {
 
   // ── Panes (= tmux windows) ────────────────────────────────────────
   async refreshPanes() {
+    const asked = ++this._panesAsked;
+    const askedAt = performance.now();
     try {
       const res = await fetch(
         u(
@@ -581,7 +627,11 @@ export class TerminalEngine extends EventTarget {
         ),
       );
       if (!res.ok) return;
-      this.panes = await res.json();
+      const panes = await res.json();
+      if (asked < this._panesApplied) return;
+      this._panesApplied = asked;
+      this.panes = panes;
+      if (askedAt >= this._paneScreenFrom) this._paneScreenKnown = true;
       this.activeIndex = this.panes.findIndex((p) => p.active);
       if (this.activeIndex < 0) this.activeIndex = 0;
       this.dispatchEvent(
@@ -595,13 +645,14 @@ export class TerminalEngine extends EventTarget {
   switchWindow(direction) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.send(direction === "next" ? "\x02n" : "\x02p");
+    this.forgetPaneScreen(WINDOW_SETTLE_MS);
     this.clear();
     this.scrollToBottom();
     setTimeout(async () => {
       await this.refreshPanes();
       await this.reloadHistory();
       this._forceRedraw();
-    }, 300);
+    }, WINDOW_SETTLE_MS);
   }
 
   async runTmuxCmd(command) {
@@ -618,13 +669,14 @@ export class TerminalEngine extends EventTarget {
       );
     } catch (_) {}
     if (WINDOW_SWITCH_CMDS.has(command)) {
+      this.forgetPaneScreen(WINDOW_SETTLE_MS);
       this.clear();
       this.scrollToBottom();
     }
     setTimeout(() => {
       this.refreshPanes();
       this.reloadHistory();
-    }, 300);
+    }, WINDOW_SETTLE_MS);
   }
 
   // ── History ───────────────────────────────────────────────────────
@@ -707,10 +759,10 @@ export class TerminalEngine extends EventTarget {
 
   _scheduleHistoryTail() {
     clearTimeout(this._historyTimer);
-    this._historyTimer = setTimeout(
-      () => this._requestHistory("tail"),
-      HISTORY_QUIET_MS,
-    );
+    this._historyTimer = setTimeout(() => {
+      this._requestHistory("tail");
+      this.refreshPanes();
+    }, HISTORY_QUIET_MS);
     if (this._historyMaxTimer === null) {
       this._historyMaxTimer = setTimeout(
         () => this._requestHistory("tail"),

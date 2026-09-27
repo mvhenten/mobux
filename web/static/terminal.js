@@ -1,5 +1,5 @@
 import { u } from "./base.js";
-import { TerminalEngine } from "./terminal-engine.js";
+import { TerminalEngine, WINDOW_SETTLE_MS } from "./terminal-engine.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
@@ -292,7 +292,60 @@ export function createTerminal({
   on(cmdOverlayBg, "click", hideCmdList);
 
   // ── Touch gestures ──────────────────────────────────────────────────
+  // While the pane is on its alternate screen the display holds no history
+  // of it: a swipe scrolls the app instead, as wheel notches at the cell it
+  // started on, each worth WHEEL_NOTCH_LINES of drag. The display then shows
+  // the live screen, so it is pinned to the bottom.
+  const WHEEL_NOTCH_LINES = 3;
+  let wheelCell = { col: 0, row: 0 };
+  let wheelPx = 0;
+  let wheelPinned = false;
+  let wheelWasOn = false;
+
+  function startScroll(x, y) {
+    const cell = core.cellSize();
+    const rect = termEl.getBoundingClientRect();
+    const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+    const rows = core.paneRows();
+    wheelCell = {
+      col: clamp(Math.floor((x - rect.left) / cell.width), 0, core.cols - 1),
+      row: clamp(
+        Math.floor((y - rect.top) / cell.height),
+        rows.first,
+        rows.last,
+      ),
+    };
+    wheelPx = 0;
+    wheelPinned = false;
+  }
+
+  on(core, "panes", () => {
+    const wheelOn = core.wheelScrollsPane();
+    if (wheelOn && !wheelWasOn) core.scrollToBottom();
+    wheelWasOn = wheelOn;
+  });
+
+  function wheelByPixels(dy) {
+    const notch = core.cellSize().height * WHEEL_NOTCH_LINES;
+    wheelPx += dy;
+    while (Math.abs(wheelPx) >= notch) {
+      const up = wheelPx < 0;
+      core.sendWheel(up, wheelCell.col, wheelCell.row);
+      wheelPx += up ? notch : -notch;
+    }
+  }
+
   function scrollByPixels(dy) {
+    if (termEl.classList.contains("hidden")) {
+      gestures.stopMomentum();
+      return;
+    }
+    if (core.wheelScrollsPane()) {
+      if (!wheelPinned) core.scrollToBottom();
+      wheelPinned = true;
+      wheelByPixels(dy);
+      return;
+    }
     const lines = Math.round(dy / core.cellSize().height);
     if (lines !== 0) core.scrollLines(lines);
   }
@@ -312,7 +365,11 @@ export function createTerminal({
 
   const gestures = createGestureRecognizer(overlay, {
     onScroll: scrollByPixels,
-    onReconnect: () => core.reconnect(),
+    onScrollStart: startScroll,
+    onReconnect: () => {
+      core.reconnect();
+      core.refreshPanes();
+    },
     getFontSize: () => core.getFontSize(),
 
     onPinch(scale, startSize) {
@@ -592,6 +649,7 @@ export function createTerminal({
     },
     bufferLength: () => core.getActiveBuffer().length,
     isAlternate: () => core.isAlternateScreenActive(),
+    wheelScrollsPane: () => core.wheelScrollsPane(),
     terminalRows: () => core.rows,
     cols: () => core.cols,
     rows: () => core.rows,
@@ -691,12 +749,13 @@ export function createTerminal({
       { method: "POST" },
     )
       .then(() => {
+        core.forgetPaneScreen(WINDOW_SETTLE_MS);
         core.clear();
         core.scrollToBottom();
         later(() => {
           core.refreshPanes();
           core.reloadHistory();
-        }, 300);
+        }, WINDOW_SETTLE_MS);
       })
       .catch(() => {});
   }
