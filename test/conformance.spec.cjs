@@ -589,3 +589,45 @@ test("bell: a raw client-side BEL never triggers the chime", async ({
   );
   expect(chimed).toBe(false);
 });
+
+// Device queries are answered once, by the engine buffer: the display only
+// ever receives the redraw writer's output, so its own replies never reach
+// tmux. tmux queries the client when it attaches; those replies settle first.
+test("device queries: a DA query gets exactly one reply", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__sent = [];
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      window.__sent.push({ data, at: Date.now() });
+      return send.call(this, data);
+    };
+  });
+  const isDA = (d) => typeof d === "string" && /^\x1b\[[?>][\d;]*c$/.test(d);
+  const daReplies = () =>
+    page.evaluate(
+      (src) =>
+        window.__sent.filter(({ data }) =>
+          new Function(`return (${src})`)()(data),
+        ),
+      isDA.toString(),
+    );
+  await boot(page);
+  const booted = Date.now();
+  await expect
+    .poll(
+      async () => {
+        const last = (await daReplies()).at(-1);
+        return Date.now() - (last ? last.at : booted);
+      },
+      { timeout: 10000, intervals: [250] },
+    )
+    .toBeGreaterThan(1000);
+  await page.evaluate(async () => {
+    window.__sent.length = 0;
+    await window.__mobuxView.test.writeData("\x1b[c");
+  });
+  await page.waitForTimeout(500);
+  const replies = (await daReplies()).map(({ data }) => data);
+  expect(replies).toHaveLength(1);
+  expect(replies[0]).toMatch(/^\x1b\[\?[\d;]*c$/);
+});
