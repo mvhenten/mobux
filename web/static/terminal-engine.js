@@ -138,6 +138,8 @@ export class TerminalEngine extends EventTarget {
     // Is there a currently-open A cycle (seen the marker, no candidate row
     // committed for it yet)? See _ingestPtyData's doc comment.
     this._oscAOpen = false;
+    // Serializes _ingestPtyData calls — see that method's doc comment.
+    this._ingestChain = Promise.resolve();
 
     this.buffer = createTerminalBuffer({
       cols: this.renderer.cols,
@@ -164,6 +166,7 @@ export class TerminalEngine extends EventTarget {
     });
 
     this._inputSub = this.renderer.onInput((d) => this.send(d));
+    this._replySub = this.buffer.onData((d) => this.send(d));
 
     // The read-only document contract (issue #206, D2). The reader consumes
     // this instead of reaching into the buffer, `cols`, the OSC marker map,
@@ -286,6 +289,7 @@ export class TerminalEngine extends EventTarget {
     try {
       this._inputSub?.dispose();
     } catch (_) {}
+    this._replySub.dispose();
     this.view.dispose();
     try {
       this.renderer.dispose();
@@ -341,11 +345,11 @@ export class TerminalEngine extends EventTarget {
   }
   // Drop history and its markers (a window switch: the next window's
   // history replaces it, and tmux repaints the screen).
-  clear() {
-    this.buffer.clearHistory();
+  async clear() {
     this.oscMarkers.clear();
+    await this.buffer.clearHistory();
     this.view.invalidate();
-    return this.view.flush();
+    await this.view.flush();
   }
 
   get cols() {
@@ -372,8 +376,13 @@ export class TerminalEngine extends EventTarget {
   // is exactly one attribution path regardless of entry point. Nothing is
   // ever withheld from rendering — every byte is parsed into the screen as
   // soon as it's available; only the bookkeeping (which row is "the" prompt
-  // row) is deferred. The screen parser is synchronous, so each chunk is
-  // fully consumed before the next one starts.
+  // row) is deferred.
+  //
+  // Chunks are processed strictly one at a time through `_ingestChain`: a
+  // WS `onmessage` handler doesn't await the previous call before the next
+  // message's handler runs, and the screen parser writes asynchronously, so
+  // without this queue two chunks could interleave mid-cycle and corrupt
+  // `_oscAOpen`.
   // Record an OSC 133 marker on an absolute row, joining with whatever is
   // already there rather than clobbering it — see the `oscMarkers` doc
   // comment in the constructor for why two markers routinely share a row.
@@ -383,20 +392,25 @@ export class TerminalEngine extends EventTarget {
   }
 
   _ingestPtyData(raw) {
-    this._consumeChunk(oscInputToString(raw));
-    return this.view.flush();
+    const str = oscInputToString(raw);
+    const step = async () => {
+      await this._consumeChunk(str);
+      await this.view.flush();
+    };
+    this._ingestChain = this._ingestChain.then(step, step);
+    return this._ingestChain;
   }
 
-  _consumeChunk(text) {
+  async _consumeChunk(text) {
     let cursor = 0;
     for (;;) {
       if (!this._oscAOpen) {
         const markerEnd = findOsc133AEnd(text, cursor);
         if (markerEnd === -1) {
-          this._writeSlice(text, cursor, text.length);
+          await this._writeSlice(text, cursor, text.length);
           return;
         }
-        this._writeSlice(text, cursor, markerEnd);
+        await this._writeSlice(text, cursor, markerEnd);
         this._oscAOpen = true;
         cursor = markerEnd;
         continue;
@@ -408,7 +422,7 @@ export class TerminalEngine extends EventTarget {
         // envelope, or still mid tmux redraw boilerplate) — write it
         // through as-is and keep the cycle open for the next chunk to
         // retry, whether or not a next A was also seen here.
-        this._writeSlice(
+        await this._writeSlice(
           text,
           cursor,
           nextAEnd === -1 ? text.length : nextAEnd,
@@ -421,12 +435,12 @@ export class TerminalEngine extends EventTarget {
       // watch for a "better" one in a later chunk (typed command echo, its
       // output): see the module doc comment for why waiting would let that
       // later, unrelated content overwrite an already-correct row.
-      this._writeSlice(text, cursor, candidateEnd);
+      await this._writeSlice(text, cursor, candidateEnd);
       this._recordOscMarker(this.buffer.cursorDisplayRow(), "A");
       this._oscAOpen = false;
       cursor = candidateEnd;
       if (nextAEnd !== -1) {
-        this._writeSlice(text, cursor, nextAEnd);
+        await this._writeSlice(text, cursor, nextAEnd);
         this._oscAOpen = true;
         cursor = nextAEnd;
       }
@@ -434,7 +448,8 @@ export class TerminalEngine extends EventTarget {
   }
 
   _writeSlice(text, from, to) {
-    if (to > from) this.buffer.writeScreen(text.slice(from, to));
+    if (to <= from) return Promise.resolve();
+    return this.buffer.writeScreen(text.slice(from, to));
   }
   onBufferChanged(cb) {
     return this.renderer.onBufferChanged(cb);
@@ -561,7 +576,8 @@ export class TerminalEngine extends EventTarget {
   async reloadHistory() {
     const history = await this._fetchHistory({ scope: "history" });
     if (history === null || this._disposed) return;
-    this.buffer.setHistory(splitCapture(history));
+    await this.buffer.setHistory(splitCapture(history));
+    if (this._disposed) return;
     this.view.invalidate();
     await this.view.flush();
     this.scrollToBottom();
@@ -588,7 +604,7 @@ export class TerminalEngine extends EventTarget {
     const tail = await this._historyTail;
     if (this._disposed) return;
     if (tail !== null) {
-      if (this.buffer.mergeHistoryTail(splitCapture(tail))) {
+      if (await this.buffer.mergeHistoryTail(splitCapture(tail))) {
         await this.view.flush();
       } else {
         await this.reloadHistory();

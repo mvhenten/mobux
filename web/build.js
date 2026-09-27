@@ -5,7 +5,9 @@
 //
 // 1. Patches @xterm/xterm in-place (idempotent) and bundles it +
 //    @xterm/addon-web-links into web/static/vendor/xterm.bundle.js,
-//    plus copies xterm.css alongside.
+//    plus copies xterm.css alongside. Bundles @xterm/headless (the engine's
+//    text buffer, loaded under either renderer) into
+//    web/static/vendor/xterm-headless.bundle.js.
 // 2. Bundles @kattebak/sterk (which includes ace-builds) into
 //    web/static/vendor/sterk.bundle.js.
 //
@@ -62,6 +64,18 @@ if (fs.existsSync(XTERM_PKG)) {
     '--sourcemap',
     '--target=es2020',
     `--outfile=${path.join(VENDOR, 'xterm.bundle.js')}`,
+  ].join(' '), { cwd: ROOT, stdio: 'inherit' });
+
+  console.log('[build] Bundling xterm headless...');
+  execSync([
+    'npx esbuild',
+    path.join(ROOT, 'web', 'src', 'xterm-headless-entry.js'),
+    '--bundle',
+    '--format=iife',
+    '--minify',
+    '--sourcemap',
+    '--target=es2020',
+    `--outfile=${path.join(VENDOR, 'xterm-headless.bundle.js')}`,
   ].join(' '), { cwd: ROOT, stdio: 'inherit' });
 
   const xtermCssSrc = path.join(XTERM_PKG, 'css', 'xterm.css');
@@ -155,14 +169,17 @@ const STATIC = path.join(ROOT, 'web', 'static');
 
 const xtermBundle = path.join(VENDOR, 'xterm.bundle.js');
 const sterkBundle = path.join(VENDOR, 'sterk.bundle.js');
+const headlessBundle = path.join(VENDOR, 'xterm-headless.bundle.js');
 
 const xtermContents = fs.existsSync(xtermBundle) ? fs.readFileSync(xtermBundle) : Buffer.alloc(0);
 const sterkContents = fs.existsSync(sterkBundle) ? fs.readFileSync(sterkBundle) : Buffer.alloc(0);
+const headlessContents = fs.existsSync(headlessBundle) ? fs.readFileSync(headlessBundle) : Buffer.alloc(0);
 
 const hash = crypto
   .createHash('sha256')
   .update(xtermContents)
   .update(sterkContents)
+  .update(headlessContents)
   .digest('hex')
   .slice(0, 8);
 

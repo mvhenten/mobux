@@ -112,15 +112,15 @@ export function TerminalIsland({ node, session }) {
 
     // Resolve the renderer choice from the server-held preference (hydrated at
     // boot by main.jsx), then load the vendor bundles + css (once per
-    // document) before constructing the engine. The sterk bundle always
-    // loads: the engine's headless text buffer is sterk under either renderer.
+    // document) before constructing the engine. The headless xterm bundle
+    // always loads: it parses the engine's text buffer under either renderer.
     const renderer = getPref("renderer") === "sterk" ? "sterk" : "xterm";
 
     const v = `?v=${CACHE_BUST}`;
-    const bundles =
-      renderer === "sterk"
-        ? ["sterk.bundle.js"]
-        : ["sterk.bundle.js", "xterm.bundle.js"];
+    const bundles = [
+      "xterm-headless.bundle.js",
+      renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js",
+    ];
 
     if (renderer === "xterm") {
       ensureStylesheet(u(`/static/vendor/xterm.css${v}`));

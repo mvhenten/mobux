@@ -7,7 +7,7 @@ import { readLoadedBundleHash } from "../../lib/bundleHash.js";
 // (/api/build-info — unchanged, server-side), and the SPA's own bundle hash.
 //
 // The SPA hash is NOT re-derived from web/static/build-info.json: that file
-// only hashes the two terminal-renderer bundles (xterm/sterk, see
+// only hashes the terminal vendor bundles (xterm/sterk/headless, see
 // web/build.js), so it never matched this bundle and comparing them as
 // "server vs loaded" was comparing two unrelated builds. Instead this reads
 // the content hash Vite already baked into the currently-loaded script's

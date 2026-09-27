@@ -41,7 +41,7 @@ function isBlank(cell) {
 
 // A buffer row as display chunks at most `cols` cells wide, trailing blanks
 // trimmed. `limit` caps the number of chunks (the viewport takes one).
-export function serializeRow(line, cols, limit = Infinity) {
+function serializeRow(line, cols, limit = Infinity) {
   if (!line) return [{ text: "", width: 0 }];
   let end = 0;
   for (let x = 0; x < line.length; x++) {
@@ -170,7 +170,6 @@ export function createRedrawWriter(buffer, renderer) {
       drawnModes.set(mode, on);
       out += `\x1b[?${mode}${on ? "h" : "l"}`;
     }
-    out += buffer.takeQueries();
     return out ? renderer.write(out) : undefined;
   }
 
