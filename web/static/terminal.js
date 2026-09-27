@@ -292,7 +292,39 @@ export function createTerminal({
   on(cmdOverlayBg, "click", hideCmdList);
 
   // ── Touch gestures ──────────────────────────────────────────────────
+  // While the pane is on its alternate screen the display holds no history
+  // of it: a swipe scrolls the app instead, as wheel notches at the cell it
+  // started on, each worth WHEEL_NOTCH_LINES of drag.
+  const WHEEL_NOTCH_LINES = 3;
+  let wheelCell = { col: 0, row: 0 };
+  let wheelPx = 0;
+
+  function startScroll(x, y) {
+    const cell = core.cellSize();
+    const rect = termEl.getBoundingClientRect();
+    const clamp = (n, max) => Math.max(0, Math.min(max, n));
+    wheelCell = {
+      col: clamp(Math.floor((x - rect.left) / cell.width), core.cols - 1),
+      row: clamp(Math.floor((y - rect.top) / cell.height), core.rows - 2),
+    };
+    wheelPx = 0;
+  }
+
+  function wheelByPixels(dy) {
+    const notch = core.cellSize().height * WHEEL_NOTCH_LINES;
+    wheelPx += dy;
+    while (Math.abs(wheelPx) >= notch) {
+      const up = wheelPx < 0;
+      core.sendWheel(up, wheelCell.col, wheelCell.row);
+      wheelPx += up ? notch : -notch;
+    }
+  }
+
   function scrollByPixels(dy) {
+    if (core.wheelScrollsPane()) {
+      wheelByPixels(dy);
+      return;
+    }
     const lines = Math.round(dy / core.cellSize().height);
     if (lines !== 0) core.scrollLines(lines);
   }
@@ -312,7 +344,11 @@ export function createTerminal({
 
   const gestures = createGestureRecognizer(overlay, {
     onScroll: scrollByPixels,
-    onReconnect: () => core.reconnect(),
+    onScrollStart: startScroll,
+    onReconnect: () => {
+      core.reconnect();
+      core.refreshPanes();
+    },
     getFontSize: () => core.getFontSize(),
 
     onPinch(scale, startSize) {
@@ -592,6 +628,7 @@ export function createTerminal({
     },
     bufferLength: () => core.getActiveBuffer().length,
     isAlternate: () => core.isAlternateScreenActive(),
+    wheelScrollsPane: () => core.wheelScrollsPane(),
     terminalRows: () => core.rows,
     cols: () => core.cols,
     rows: () => core.rows,

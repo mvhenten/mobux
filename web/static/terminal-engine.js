@@ -528,6 +528,29 @@ export class TerminalEngine extends EventTarget {
   isAlternateScreenActive() {
     return this.buffer.isAlternate();
   }
+  // A scroll belongs to the pane app while the pane is on its alternate
+  // screen and tmux takes the mouse. The buffer holds tmux's client screen,
+  // which is always on its alternate screen once attached, so the pane's
+  // state comes from tmux.
+  wheelScrollsPane() {
+    const pane = this.panes[this.activeIndex];
+    return pane?.alternateOn === true && this.buffer.mouse().tracking;
+  }
+  // One wheel notch at a 0-based cell, in the mouse format tmux asked its
+  // client for. tmux hands it to the pane app in the app's format, or
+  // scrolls copy-mode when the app tracks no mouse.
+  sendWheel(up, col, row) {
+    const button = up ? 64 : 65;
+    if (this.buffer.mouse().sgr) {
+      this.send(`\x1b[<${button};${col + 1};${row + 1}M`);
+      return;
+    }
+    // X10 bytes above 127 would not survive the text frame.
+    const cell = (n) => String.fromCharCode(33 + Math.min(n, 93));
+    this.send(
+      `\x1b[M${String.fromCharCode(32 + button)}${cell(col)}${cell(row)}`,
+    );
+  }
   focus() {
     this.renderer.focus();
   }
@@ -707,10 +730,10 @@ export class TerminalEngine extends EventTarget {
 
   _scheduleHistoryTail() {
     clearTimeout(this._historyTimer);
-    this._historyTimer = setTimeout(
-      () => this._requestHistory("tail"),
-      HISTORY_QUIET_MS,
-    );
+    this._historyTimer = setTimeout(() => {
+      this._requestHistory("tail");
+      this.refreshPanes();
+    }, HISTORY_QUIET_MS);
     if (this._historyMaxTimer === null) {
       this._historyMaxTimer = setTimeout(
         () => this._requestHistory("tail"),

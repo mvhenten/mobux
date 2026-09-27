@@ -1782,3 +1782,150 @@ test("markers: a repaint with no scroll signal is placed by the line's text", as
   expect(result.markers[result.runKey]).toBe("C");
   expect(result.markers[result.promptKey]).toBe("D;0|A");
 });
+
+// ── Swipe on the alternate screen (issue #315, stage 2) ────────────
+// A full-screen app keeps no history in tmux or the display, so a swipe
+// scrolls the app: a wheel event through tmux, which forwards it to an app
+// that tracks the mouse and enters copy-mode for one that does not. On the
+// normal screen a swipe still scrolls the display's scrollback.
+
+const ALT_INPUT_SCRIPT = require("path").join(
+  __dirname,
+  "assets",
+  "alt-screen-input.sh",
+);
+
+// Finger down the middle of the terminal: reveals what is above.
+async function swipeDown(page) {
+  const fire = (type, y) =>
+    page.evaluate(
+      ({ type, y }) => {
+        const overlay = document.getElementById("touchOverlay");
+        overlay.style.pointerEvents = "auto";
+        const r = document.getElementById("terminal").getBoundingClientRect();
+        const x = r.left + r.width / 2;
+        const top = r.top + r.height / 3;
+        const t = new Touch({
+          identifier: 1,
+          target: overlay,
+          clientX: x,
+          clientY: top + y,
+          pageX: x,
+          pageY: top + y,
+        });
+        overlay.dispatchEvent(
+          new TouchEvent(type, {
+            touches: type === "touchend" ? [] : [t],
+            changedTouches: [t],
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      },
+      { type, y },
+    );
+  await fire("touchstart", 0);
+  for (let i = 1; i <= 10; i++) await fire("touchmove", i * 20);
+  await fire("touchend", 200);
+}
+
+async function startAltInputApp(page, mode) {
+  const out = `${SANDBOX_HOME}/alt-input-${Date.now()}`;
+  require("fs").mkdirSync(SANDBOX_HOME, { recursive: true });
+  require("fs").writeFileSync(out, "");
+  await bootTerminal(page);
+  tmux(
+    `send-keys -t ${SESSION} "bash ${ALT_INPUT_SCRIPT} ${out} ${mode}" Enter`,
+  );
+  await expect
+    .poll(
+      async () =>
+        (await terminalLines(page)).some((l) => l.trim() === "ALT-INPUT-READY"),
+      { timeout: 10000 },
+    )
+    .toBe(true);
+  await expect
+    .poll(
+      () => page.evaluate(() => window.__mobuxView.test.wheelScrollsPane()),
+      {
+        timeout: 10000,
+      },
+    )
+    .toBe(true);
+  return out;
+}
+
+const paneFlag = (flag) =>
+  tmux(`display -p -t ${SESSION} '#{${flag}}'`).toString().trim();
+
+// The page goes first: a fling keeps sending wheel events after the swipe.
+async function stopAltInputApp(page) {
+  await page.close();
+  if (paneFlag("pane_in_mode") === "1") {
+    tmux(`send-keys -t ${SESSION} -X cancel`);
+  }
+  tmux(`send-keys -t ${SESSION} C-c`);
+}
+
+test("alt-screen swipe: an app that tracks the mouse gets wheel events and the display stays put", async ({
+  page,
+}) => {
+  const out = await startAltInputApp(page, "mouse");
+  try {
+    expect(paneFlag("alternate_on")).toBe("1");
+    const viewportBefore = await page.evaluate(() =>
+      window.__mobuxView.test.viewportY(),
+    );
+    await swipeDown(page);
+    await expect
+      .poll(() => require("fs").readFileSync(out, "utf8"), { timeout: 5000 })
+      .toMatch(/\x1b\[<64;\d+;\d+M/);
+    expect(require("fs").readFileSync(out, "utf8")).not.toMatch(/\x1b\[<65;/);
+    expect(paneFlag("pane_in_mode")).toBe("0");
+    expect(await page.evaluate(() => window.__mobuxView.test.viewportY())).toBe(
+      viewportBefore,
+    );
+  } finally {
+    await stopAltInputApp(page);
+  }
+});
+
+test("alt-screen swipe: an app that ignores the mouse scrolls in tmux copy-mode", async ({
+  page,
+}) => {
+  const out = await startAltInputApp(page, "plain");
+  try {
+    expect(paneFlag("pane_in_mode")).toBe("0");
+    await swipeDown(page);
+    await expect
+      .poll(() => paneFlag("pane_in_mode"), { timeout: 5000 })
+      .toBe("1");
+    expect(require("fs").readFileSync(out, "utf8")).toBe("");
+  } finally {
+    await stopAltInputApp(page);
+  }
+});
+
+test("alt-screen swipe: on the normal screen a swipe scrolls the display's scrollback", async ({
+  page,
+}) => {
+  tmux(`send-keys -t ${SESSION} "seq 1 300" Enter`);
+  execSync("sleep 0.5");
+  await bootTerminal(page);
+  await expect
+    .poll(async () => numberCounts(await terminalLines(page))["300"], {
+      timeout: 10000,
+    })
+    .toBe(1);
+  expect(paneFlag("alternate_on")).toBe("0");
+  const viewportBefore = await page.evaluate(() =>
+    window.__mobuxView.test.viewportY(),
+  );
+  await swipeDown(page);
+  await expect
+    .poll(() => page.evaluate(() => window.__mobuxView.test.viewportY()), {
+      timeout: 5000,
+    })
+    .toBeLessThan(viewportBefore);
+  expect(paneFlag("pane_in_mode")).toBe("0");
+});

@@ -32,7 +32,7 @@ const SWIPE_UP_EDGE_PX = 80;
 const SWIPE_UP_PX = 60;
 const SWIPE_UP_MS = 400;
 
-// callbacks: { onScroll(dy), onFling(), onTap(x,y), onDoubleTap(x,y),
+// callbacks: { onScroll(dy), onScrollStart(x,y), onFling(), onTap(x,y), onDoubleTap(x,y),
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
 //              onLongPress(), onSwipeUp(), onReconnect() }
@@ -188,6 +188,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
         // In passive mode we hand vertical scroll to the browser and
         // stop classifying — no momentum/fling injection.
         transition(passiveScroll ? 'IDLE' : 'SCROLL');
+        if (!passiveScroll) callbacks.onScrollStart?.(startX, startY);
       } else if (adx > TAP_PX && adx > ady) {
         clearLongPress();
         transition('HSWIPE');

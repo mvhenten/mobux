@@ -16,6 +16,12 @@ const SCREEN_SCROLLBACK = 1000;
 
 const MIRRORED_MODES = [1, 25, 2004];
 
+// Mouse modes tmux asks of its client (`mouse on`). They are the format a
+// wheel event sent to tmux must take; tmux forwards it to the pane in the
+// pane app's own format, or scrolls copy-mode.
+const MOUSE_TRACKING_MODES = new Set([1000, 1002, 1003]);
+const MOUSE_SGR_MODE = 1006;
+
 const ESC_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|.)/g;
 
 const DEFAULT_STYLE = {
@@ -275,6 +281,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
   const screen = newTerminal({ cols, rows, scrollback: screenLimit });
 
   const modes = new Map(MIRRORED_MODES.map((m) => [m, m === 25]));
+  const mouseModes = new Map();
   const scalar = (p) => (Array.isArray(p) ? p[0] : p);
   // A screen switch reports a scroll of its own; it moves no rows.
   let switching = false;
@@ -283,6 +290,9 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     screen.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
       for (const m of params.map(scalar)) {
         if (modes.has(m)) modes.set(m, final === "h");
+        if (MOUSE_TRACKING_MODES.has(m) || m === MOUSE_SGR_MODE) {
+          mouseModes.set(m, final === "h");
+        }
         if (SCREEN_SWITCHES.has(m)) switching = true;
       }
       return false;
@@ -511,6 +521,10 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     },
     modes() {
       return modes;
+    },
+    mouse() {
+      const tracking = [...MOUSE_TRACKING_MODES].some((m) => mouseModes.get(m));
+      return { tracking, sgr: mouseModes.get(MOUSE_SGR_MODE) === true };
     },
 
     historyRowCount() {

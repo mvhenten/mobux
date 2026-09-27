@@ -777,6 +777,9 @@ pub struct Pane {
     pub index: String,
     pub title: String,
     pub active: bool,
+    /// The window's active pane is on its alternate screen: a full-screen
+    /// app (Claude Code, less, vim) owns it and keeps no scrollback of its own.
+    pub alternate_on: bool,
 }
 
 pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>> {
@@ -791,7 +794,7 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
             // Printable separator, free-text window name LAST — see the
             // separator note above list_sessions. `splitn` keeps any `:`
             // inside the window name intact.
-            "#{window_id}:#{window_index}:#{window_active}:#{window_name}",
+            "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{window_name}",
         ],
     )
     .output()
@@ -806,15 +809,16 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut out = vec![];
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(4, ':').collect();
-        if parts.len() != 4 {
+        let parts: Vec<&str> = line.splitn(5, ':').collect();
+        if parts.len() != 5 {
             continue;
         }
         out.push(Pane {
             id: parts[0].to_string(),
             index: parts[1].to_string(),
-            title: parts[3].to_string(),
+            title: parts[4].to_string(),
             active: parts[2] == "1",
+            alternate_on: parts[3] == "1",
         });
     }
     Ok(out)
