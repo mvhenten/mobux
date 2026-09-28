@@ -3,6 +3,7 @@ import { TerminalEngine, WINDOW_SETTLE_MS } from "./terminal-engine.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
+import { createTouchSelection } from "./touch-select.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
@@ -361,6 +362,7 @@ export function createTerminal({
     }
     const lines = Math.round(dy / core.cellSize().height);
     if (lines !== 0) core.scrollLines(lines);
+    selection.refresh();
   }
 
   // Two-finger pull-to-reload feedback. Shared with the reader: the SPA hands
@@ -375,6 +377,14 @@ export function createTerminal({
     if (pull > vh * 0.08) location.reload(true);
     else updatePaneUI();
   }
+
+  const selection = createTouchSelection({
+    core,
+    termEl,
+    overlay,
+    openExternal,
+  });
+  cleanups.push(() => selection.dispose());
 
   const gestures = createGestureRecognizer(overlay, {
     onScroll: scrollByPixels,
@@ -393,25 +403,9 @@ export function createTerminal({
     onTwoPullMove: twoPullMove,
     onTwoPullEnd: twoPullEnd,
 
-    onTap(x, y) {
-      // Detect URLs in terminal text at tap position and open them.
-      // WebLinksAddon uses hover-based links which don't work on mobile,
-      // so we read the buffer text directly.
-      const cell = core.cellSize();
-      const rect = termEl.getBoundingClientRect();
-      const col = Math.floor((x - rect.left) / cell.width);
-      const row = Math.floor((y - rect.top) / cell.height);
-      const text = core.rowText(core.viewport().top + row);
-      if (text === null) return;
-      const urlRe = /https?:\/\/[^\s)"'>]+/g;
-      let match;
-      while ((match = urlRe.exec(text)) !== null) {
-        if (col >= match.index && col < match.index + match[0].length) {
-          openExternal(match[0]);
-          return;
-        }
-      }
-    },
+    // A tap opens nothing: a link opens from its long-press sheet, so a
+    // scroll or the first tap of a double-tap never leaves the app.
+    onTap: (x, y) => selection.tap(x, y),
 
     onDoubleTap() {
       // This handler is wired on the touch overlay, so a double-tap here always
@@ -424,7 +418,10 @@ export function createTerminal({
 
     onHSwipe: (dir) => core.switchWindow(dir),
 
-    onLongPress: showCmdList,
+    onLongPress: (x, y) => selection.longPress(x, y),
+    onHandleStart: (x, y) => selection.handleStart(x, y),
+    onHandleMove: (x, y) => selection.handleMove(x, y),
+    onHandleEnd: () => selection.handleEnd(),
     onSwipeUp: showCmdList,
   });
 
@@ -691,6 +688,8 @@ export function createTerminal({
         });
       }),
     // ── Selection / links / bell probes (R12–R14) ─────────────────
+    touchSelection: () => selection.state(),
+    bracketedPaste: () => core.bracketedPaste(),
     getSelection: () => core.getSelection(),
     hasSelection: () => core.hasSelection(),
     clearSelection: () => core.clearSelection(),

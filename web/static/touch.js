@@ -3,6 +3,7 @@
 // Emits callbacks — no DOM manipulation, no xterm dependency.
 //
 // States: IDLE → TAP → SCROLL | HSWIPE | LONGPRESS
+//         IDLE → HANDLE (a touch that starts on a selection handle)
 //         IDLE → TWO → PINCH | TWOPULL
 //
 // Usage:
@@ -35,7 +36,9 @@ const SWIPE_UP_MS = 400;
 // callbacks: { onScroll(dy), onScrollStart(x,y), onFling(), onTap(x,y), onDoubleTap(x,y),
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
-//              onLongPress(), onSwipeUp(), onReconnect() }
+//              onLongPress(x,y), onSwipeUp(), onReconnect(),
+//              onHandleStart(x,y) → bool, onHandleMove(x,y), onHandleEnd() }
+// onLongPress and the handle callbacks take client coordinates.
 export function createGestureRecognizer(overlay, callbacks, options = {}) {
   const { passiveScroll = false } = options;
   const physics = createScrollPhysics(callbacks.onScroll);
@@ -92,6 +95,10 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
     // throw the edge calculation off.
     const vh = window.visualViewport?.height ?? window.innerHeight;
     startedAtBottomEdge = (vh - t.clientY) <= SWIPE_UP_EDGE_PX;
+    if (callbacks.onHandleStart?.(t.clientX, t.clientY)) {
+      transition('HANDLE');
+      return;
+    }
     transition('TAP');
     physics.reset();
     physics.addSample(t.pageY, startTime);
@@ -102,7 +109,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
       if (state === 'TAP') {
         transition('IDLE');
         if (navigator.vibrate) navigator.vibrate(30);
-        callbacks.onLongPress?.();
+        callbacks.onLongPress?.(startClientX, startClientY);
       }
     }, LONGPRESS_MS);
   }
@@ -140,6 +147,11 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
     // Single-finger — ignore ghost events after two-finger
     if (e.touches.length !== 1 || state === 'TWO' || state === 'PINCH' || state === 'TWOPULL') return;
+
+    if (state === 'HANDLE') {
+      callbacks.onHandleMove?.(e.touches[0].clientX, e.touches[0].clientY);
+      return;
+    }
 
     const y = e.touches[0].pageY;
     const x = e.touches[0].pageX;
@@ -215,6 +227,12 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
       return;
     }
 
+    if (state === 'HANDLE') {
+      callbacks.onHandleEnd?.();
+      transition('IDLE');
+      return;
+    }
+
     if (state === 'TWOPULL') {
       const endY = e.changedTouches[0]?.pageY ?? twoStartY;
       callbacks.onTwoPullEnd?.(endY - twoStartY, window.innerHeight);
@@ -248,6 +266,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
   function onTouchCancel() {
     clearLongPress();
+    if (state === 'HANDLE') callbacks.onHandleEnd?.();
     physics.stopMomentum();
     transition('IDLE');
   }

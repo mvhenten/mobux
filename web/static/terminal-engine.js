@@ -26,7 +26,7 @@
 //   R5  onInput(cb): Disposable               keystrokes / IME bound for the PTY
 //   R6  scrollLines(n), scrollToBottom()
 //   R7  viewport(): {length, top}             display rows, first one shown
-//       rowText(y): string | null             a display row's text (tap to open)
+//       rowText(y): string | null             a display row's text as drawn
 //   R11 setTheme(theme); setFontSize(px); getFontSize()
 //   R12 getSelection(); hasSelection(); clearSelection(); selectAll();
 //       onSelectionChange(cb): Disposable    native-DOM selection (#137)
@@ -35,7 +35,9 @@
 //   R16 reset()                              drop all content (full redraw)
 //
 // Alternate-screen state (R9), OSC handlers (R10), the bell (R14) and
-// buffer changes come from the buffer, not the renderer. The reader reads the
+// buffer changes come from the buffer, not the renderer, and so do the
+// display rows touch selection and long-press links read (textRows) and the
+// bracketed-paste mode a paste follows. The reader reads the
 // buffer through the document contract and never touches a display.
 //
 // The engine exposes the surface its consumers use: EventTarget events (open,
@@ -51,6 +53,7 @@ import { createTerminalDocument } from "./terminal-document.js";
 import { createTerminalBuffer, splitCapture } from "./terminal-buffer.js";
 import { createRedrawWriter } from "./terminal-redraw.js";
 import { createMarkerBook } from "./terminal-markers.js";
+import { rowsFromBottom } from "./terminal-text.js";
 import {
   findOsc133AEnd,
   scanForNextAAndCandidate,
@@ -631,6 +634,28 @@ export class TerminalEngine extends EventTarget {
   onLink(cb) {
     return this.renderer.onLink(cb);
   }
+
+  // `count` display rows from viewport() row `first`, read from the buffer
+  // (terminal-text.js); null past either end.
+  textRows(first, count) {
+    const depth = Math.max(0, this.renderer.viewport().length - first);
+    const rows = rowsFromBottom(this.buffer, depth);
+    const missing = depth - rows.length;
+    return Array.from({ length: count }, (_, i) => rows[i - missing] ?? null);
+  }
+
+  bracketedPaste() {
+    return this.buffer.bracketedPaste();
+  }
+
+  // Pasted text goes to the pty with each line break as Enter, bracketed when the
+  // application asked for it. Paste markers inside the text are dropped so
+  // it cannot end the bracket early.
+  paste(text) {
+    const body = text.replace(/\x1b\[20[01]~/g, "").replace(/\r\n|\n/g, "\r");
+    this.send(this.bracketedPaste() ? `\x1b[200~${body}\x1b[201~` : body);
+  }
+
   onBell(cb) {
     return this.buffer.onBell(cb);
   }
