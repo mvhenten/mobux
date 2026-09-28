@@ -151,6 +151,7 @@ export function createTerminal({
   const cmdPickList = $("cmdPickList");
   const cmdOverlayBg = $("cmdOverlayBg");
   const cmdCloseBtn = $("cmdCloseBtn");
+  const cmdSettingsBtn = $("cmdSettingsBtn");
 
   // Every teardown is registered here; dispose() drains it. `on`/`later`/
   // `every` are the tracked variants of addEventListener/setTimeout/
@@ -289,6 +290,12 @@ export function createTerminal({
     }
   });
   on(cmdCloseBtn, "click", hideCmdList);
+  // A hash-only change of the SPA document, so the settings route mounts
+  // without a reload; the query rides along so the path stays identical.
+  on(cmdSettingsBtn, "click", () => {
+    hideCmdList();
+    window.location.assign(`${u("app")}${location.search}#/settings`);
+  });
   on(cmdOverlayBg, "click", hideCmdList);
 
   // ── Touch gestures ──────────────────────────────────────────────────

@@ -300,46 +300,72 @@ export function TerminalIsland({ node, session }) {
       <div id="touchOverlay" />
       <div id="paneIndicator" />
       <div id="cmdOverlayBg" />
-      <div id="cmdPickList">
+      <div
+        id="cmdPickList"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cmdSheetTitle"
+      >
+        <div class="cmd-handle" aria-hidden="true" />
         <div class="cmd-header">
-          <h3>tmux</h3>
-          <button class="cmd-close" id="cmdCloseBtn" aria-label="Close">
-            Close
+          <h3 id="cmdSheetTitle">tmux</h3>
+          <button
+            type="button"
+            class="cmd-close"
+            id="cmdCloseBtn"
+            aria-label="Close"
+          >
+            ✕
           </button>
         </div>
-        <button class="cmd-item" data-cmd="new-window">
-          New window
-        </button>
-        <button class="cmd-item" data-cmd="kill-window">
-          Close window
-        </button>
-        <div class="cmd-separator" />
-        <button class="cmd-item" data-cmd="split-h">
-          Split horizontal
-        </button>
-        <button class="cmd-item" data-cmd="split-v">
-          Split vertical
-        </button>
-        <button class="cmd-item" data-cmd="kill-pane">
-          Close pane
-        </button>
-        <div class="cmd-separator" />
-        <button class="cmd-item" data-cmd="next-window">
-          Next window
-        </button>
-        <button class="cmd-item" data-cmd="prev-window">
-          Previous window
-        </button>
-        <button class="cmd-item" data-cmd="next-pane">
-          Next pane
-        </button>
-        <button class="cmd-item" data-cmd="prev-pane">
-          Previous pane
-        </button>
-        <div class="cmd-separator" />
-        <button class="cmd-item" data-cmd="zoom-pane">
-          Zoom pane
-        </button>
+        <section class="cmd-group" aria-labelledby="cmdGroupWindows">
+          <h4 class="cmd-group-title" id="cmdGroupWindows">
+            Windows
+          </h4>
+          <div class="cmd-group-body">
+            <button class="cmd-item" data-cmd="new-window">
+              New window
+            </button>
+            <button class="cmd-item" data-cmd="next-window">
+              Next window
+            </button>
+            <button class="cmd-item" data-cmd="prev-window">
+              Previous window
+            </button>
+            <button class="cmd-item" data-cmd="kill-window">
+              Close window
+            </button>
+          </div>
+        </section>
+        <section class="cmd-group" aria-labelledby="cmdGroupPanes">
+          <h4 class="cmd-group-title" id="cmdGroupPanes">
+            Panes
+          </h4>
+          <div class="cmd-group-body">
+            <button class="cmd-item" data-cmd="next-pane">
+              Next pane
+            </button>
+            <button class="cmd-item" data-cmd="prev-pane">
+              Previous pane
+            </button>
+            <button class="cmd-item" data-cmd="zoom-pane">
+              Zoom pane
+            </button>
+            <button class="cmd-item" data-cmd="kill-pane">
+              Close pane
+            </button>
+          </div>
+        </section>
+        <section class="cmd-group">
+          <div class="cmd-group-body">
+            <button type="button" class="cmd-item" id="cmdSettingsBtn">
+              <span class="cmd-glyph" aria-hidden="true">
+                ⚙
+              </span>
+              Settings
+            </button>
+          </div>
+        </section>
       </div>
 
       <div id="inputBar" class="input-bar hidden">

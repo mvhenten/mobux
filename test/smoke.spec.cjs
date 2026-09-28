@@ -898,6 +898,46 @@ test("mid-screen upward drag does not trigger the command menu", async ({
   await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
 });
 
+test("command menu offers no pane-split entries", async ({ page }) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+
+  const sheet = page.locator("#cmdPickList");
+  await expect(sheet.locator('[data-cmd="new-window"]')).toHaveCount(1);
+  await expect(sheet.locator('[data-cmd="split-h"]')).toHaveCount(0);
+  await expect(sheet.locator('[data-cmd="split-v"]')).toHaveCount(0);
+});
+
+test("the command menu's Settings row opens settings without a reload", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  const pathname = await page.evaluate(() => location.pathname);
+
+  await page.evaluate(() => {
+    window.__drawerNoReload = true;
+    document.getElementById("touchOverlay").style.pointerEvents = "auto";
+  });
+  const vh = await page.evaluate(() => window.innerHeight);
+  const xMid = await page.evaluate(() => window.innerWidth / 2);
+  await fireTouch(page, "#touchOverlay", "touchstart", xMid, vh - 20);
+  await fireTouch(page, "#touchOverlay", "touchmove", xMid, vh - 60);
+  await fireTouch(page, "#touchOverlay", "touchmove", xMid, vh - 100);
+  await fireTouch(page, "#touchOverlay", "touchend", xMid, vh - 100);
+  await expect(page.locator("#cmdPickList")).toHaveClass(/visible/);
+  await page.locator("#cmdSettingsBtn").click();
+
+  await expect(page.locator(".app-header h1")).toHaveText("settings");
+  expect(await page.evaluate(() => location.hash)).toBe("#/settings");
+  expect(await page.evaluate(() => location.pathname)).toBe(pathname);
+  expect(await page.evaluate(() => window.__drawerNoReload)).toBe(true);
+});
+
 test("reader view disables terminal touch overlay", async ({ page }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
