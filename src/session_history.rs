@@ -745,6 +745,7 @@ const BACKWARD_CHUNK: usize = 64 * 1024;
 struct SessionSlot {
     last_seq: u64,
     entry_count: u64,
+    markers_seen: bool,
 }
 
 pub struct SessionHistoryStore {
@@ -819,6 +820,7 @@ impl SessionHistoryStore {
     fn hydrate(path: &Path) -> SessionSlot {
         let mut last_seq = 0u64;
         let mut entry_count = 0u64;
+        let mut markers_seen = false;
         if let Ok(f) = File::open(path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
@@ -829,12 +831,14 @@ impl SessionHistoryStore {
                     if let Some(seq) = v.get("seq").and_then(|s| s.as_u64()) {
                         last_seq = last_seq.max(seq);
                     }
+                    markers_seen |= v.get("command").is_some();
                 }
             }
         }
         SessionSlot {
             last_seq,
             entry_count,
+            markers_seen,
         }
     }
 
@@ -859,11 +863,23 @@ impl SessionHistoryStore {
             .open(self.file_path(session))?;
         writeln!(f, "{line}")?;
         s.entry_count += 1;
+        s.markers_seen |= matches!(full, HistoryEntry::Command(_));
 
         if s.entry_count > MAX_ENTRIES_PER_SESSION + TRIM_MARGIN {
             self.trim(session, &mut s)?;
         }
         Ok(full)
+    }
+
+    /// Whether the recording holds a command block. Only an OSC 133 `C`
+    /// opens one, so this is the shell integration's footprint in the record,
+    /// and it lasts as long as the record does.
+    pub fn markers_seen(&self, session: &str) -> anyhow::Result<bool> {
+        let slot = self.slot(session)?;
+        let s = slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session history slot lock poisoned"))?;
+        Ok(s.markers_seen)
     }
 
     fn trim(&self, session: &str, s: &mut SessionSlot) -> anyhow::Result<()> {
@@ -1888,6 +1904,40 @@ mod tests {
             panic!()
         };
         assert_eq!(next.seq, 4);
+    }
+
+    #[test]
+    fn markers_seen_follows_the_first_command_block_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionHistoryStore::new(dir.path());
+        store
+            .append(
+                "s1",
+                PendingEntry::Raw {
+                    raw: "no markers".into(),
+                    ts: 1,
+                },
+            )
+            .unwrap();
+        assert!(!store.markers_seen("s1").unwrap());
+
+        store
+            .append(
+                "s1",
+                PendingEntry::Command {
+                    command: "$ ls".into(),
+                    output: "a\n".into(),
+                    exit_code: Some(0),
+                    started_at: 2,
+                    ended_at: 3,
+                },
+            )
+            .unwrap();
+        assert!(store.markers_seen("s1").unwrap());
+        assert!(!store.markers_seen("s2").unwrap());
+
+        let restarted = SessionHistoryStore::new(dir.path());
+        assert!(restarted.markers_seen("s1").unwrap());
     }
 
     // The append at which `entry_count` first exceeds CAP + MARGIN, forcing

@@ -15,7 +15,7 @@
 //   createReader({ host, document, handlers }) → reader handle
 //     host      the #reader element the reader owns.
 //     document  the terminal document contract: { snapshot, subscribe,
-//               onOscDetected, oscDetected }.
+//               onOscDetected, oscDetected, onPanes, alternateOn }.
 //     handlers  cross-cutting callbacks the reader's gestures call up to the
 //               owner (the terminal + the SPA view controller):
 //                 onCommandMenu()          long-press / swipe-up → tmux menu
@@ -73,6 +73,7 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
   let renderTimer = null;
   let changeSub = null;
   let oscSub = null;
+  let panesSub = null;
   let gestures = null;
   const postRenderCallbacks = [];
 
@@ -136,7 +137,9 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
   function refreshOscHint() {
     if (!oscHint) return;
     const dismissed = prefs.get("osc133_hint_dismissed") === true;
-    oscHint.hidden = doc.oscDetected || dismissed;
+    // A full-screen app hides the prompt, and with it any marker the shell
+    // would send, so the hint only speaks while a prompt is on screen.
+    oscHint.hidden = doc.oscDetected || doc.alternateOn !== false || dismissed;
   }
 
   function mountGestures() {
@@ -193,6 +196,7 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     // The hint can also disappear after the first OSC 133 marker arrives
     // mid-session (e.g. the user just enabled shell integration and reloaded).
     oscSub = doc.onOscDetected(() => refreshOscHint());
+    panesSub = doc.onPanes(() => refreshOscHint());
 
     scroller = createSyntheticScroller({ host, inner, footerEl: statusBar });
 
@@ -218,6 +222,10 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     if (changeSub) {
       changeSub.dispose();
       changeSub = null;
+    }
+    if (panesSub) {
+      panesSub.dispose();
+      panesSub = null;
     }
     if (oscSub) {
       oscSub.dispose();
