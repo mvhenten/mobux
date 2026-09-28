@@ -1528,6 +1528,46 @@ test("base: under a path prefix every URL moves with it", async ({ page }) => {
   expect(resolved.ws).toBe(`${origin.replace(/^http/, "ws")}${prefix}/ws/dev`);
 });
 
+test("base: the command menu's Settings row keeps a path prefix", async ({
+  page,
+}) => {
+  const origin = new URL(BASE).origin;
+  const prefix = "/proxy/workspace/8080";
+
+  // Mount the whole app under the prefix: every request below it is
+  // forwarded to the real server with the prefix stripped.
+  await page.route(`**${prefix}/**`, async (route) => {
+    const url = new URL(route.request().url());
+    url.pathname = url.pathname.slice(prefix.length);
+    const response = await route.fetch({ url: url.href });
+    await route.fulfill({ response });
+  });
+
+  await page.goto(`${origin}${prefix}/app?drawer=1#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 10000,
+  });
+  await page.evaluate(() => {
+    window.__drawerNoReload = true;
+    document.getElementById("cmdSettingsBtn").click();
+  });
+
+  await expect(page.locator(".app-header h1")).toHaveText("settings");
+  const after = await page.evaluate(() => ({
+    pathname: location.pathname,
+    search: location.search,
+    hash: location.hash,
+    noReload: window.__drawerNoReload,
+  }));
+  expect(after).toEqual({
+    pathname: `${prefix}/app`,
+    search: "?drawer=1",
+    hash: "#/settings",
+    noReload: true,
+  });
+  await page.unrouteAll({ behavior: "ignoreErrors" });
+});
+
 // ── One buffer, one copy (issue #315) ──────────────────────────────
 // The display draws the engine's buffer: tmux history above the screen,
 // then the screen parsed from the stream. Nothing may appear twice and

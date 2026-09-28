@@ -910,17 +910,8 @@ test("command menu offers no pane-split entries", async ({ page }) => {
   await expect(sheet.locator('[data-cmd="split-v"]')).toHaveCount(0);
 });
 
-test("the command menu's Settings row opens settings without a reload", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
-    timeout: 5000,
-  });
-  const pathname = await page.evaluate(() => location.pathname);
-
+async function openSheetBySwipe(page) {
   await page.evaluate(() => {
-    window.__drawerNoReload = true;
     document.getElementById("touchOverlay").style.pointerEvents = "auto";
   });
   const vh = await page.evaluate(() => window.innerHeight);
@@ -930,12 +921,60 @@ test("the command menu's Settings row opens settings without a reload", async ({
   await fireTouch(page, "#touchOverlay", "touchmove", xMid, vh - 100);
   await fireTouch(page, "#touchOverlay", "touchend", xMid, vh - 100);
   await expect(page.locator("#cmdPickList")).toHaveClass(/visible/);
+}
+
+test("the command menu takes focus and closes on Escape", async ({ page }) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await openSheetBySwipe(page);
+
+  await expect(page.locator("#cmdCloseBtn")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
+  await expect(page.locator("#cmdOverlayBg")).not.toHaveClass(/visible/);
+});
+
+test("the command menu's Settings row closes the sheet and opens settings without a reload", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app?drawer=1#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  const pathname = await page.evaluate(() => location.pathname);
+
+  await page.evaluate(() => {
+    window.__drawerNoReload = true;
+    window.__drawerEvents = [];
+    const sheet = document.getElementById("cmdPickList");
+    new MutationObserver(() => {
+      if (!sheet.classList.contains("visible"))
+        window.__drawerEvents.push("closed");
+    }).observe(sheet, { attributeFilter: ["class"] });
+    window.addEventListener("hashchange", () =>
+      window.__drawerEvents.push("navigated"),
+    );
+  });
+  await openSheetBySwipe(page);
   await page.locator("#cmdSettingsBtn").click();
 
   await expect(page.locator(".app-header h1")).toHaveText("settings");
-  expect(await page.evaluate(() => location.hash)).toBe("#/settings");
-  expect(await page.evaluate(() => location.pathname)).toBe(pathname);
-  expect(await page.evaluate(() => window.__drawerNoReload)).toBe(true);
+  const after = await page.evaluate(() => ({
+    hash: location.hash,
+    search: location.search,
+    pathname: location.pathname,
+    noReload: window.__drawerNoReload,
+    events: window.__drawerEvents,
+  }));
+  expect(after).toEqual({
+    hash: "#/settings",
+    search: "?drawer=1",
+    pathname,
+    noReload: true,
+    events: ["closed", "navigated"],
+  });
 });
 
 test("reader view disables terminal touch overlay", async ({ page }) => {

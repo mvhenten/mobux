@@ -1203,9 +1203,8 @@ h1, h2, h3 { margin: 0; }
 }
 
 /* ── Command sheet (tmux tool menu) ───────────────────────────────
-   A bottom sheet opened by the swipe-up from the bottom edge. It stays
-   mounted and slides in, so the open/close state is only the .visible
-   class on the sheet and its backdrop. */
+   Stays mounted and slides in, so the open/close state is only the
+   .visible class on the sheet and its backdrop. */
 #cmdOverlayBg {
   position: fixed;
   inset: 0;

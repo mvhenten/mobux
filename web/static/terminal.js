@@ -271,6 +271,7 @@ export function createTerminal({
     cmdPickList.classList.add("visible");
     cmdOverlayBg.classList.add("visible");
     overlay.style.pointerEvents = "none";
+    cmdCloseBtn.focus({ preventScroll: true });
   }
 
   function hideCmdList() {
@@ -297,6 +298,11 @@ export function createTerminal({
     window.location.assign(`${u("app")}${location.search}#/settings`);
   });
   on(cmdOverlayBg, "click", hideCmdList);
+  on(document, "keydown", (e) => {
+    if (e.key !== "Escape" || !cmdPickList.classList.contains("visible")) return;
+    e.preventDefault();
+    hideCmdList();
+  });
 
   // ── Touch gestures ──────────────────────────────────────────────────
   // While the pane is on its alternate screen the display holds no history
