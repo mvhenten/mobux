@@ -218,8 +218,14 @@ test-smoke:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/smoke.spec.cjs
 
+# Pure-Node tests of the browser modules that need no page (node:test). Run
+# ahead of the critical path so CI's e2e job covers them.
+.PHONY: test-node
+test-node:
+	node --test --test-timeout=30000 test/terminal-text.test.mjs
+
 .PHONY: test-critical-path
-test-critical-path:
+test-critical-path: test-node
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
@@ -235,6 +241,7 @@ test-touch-select:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/touch-select.spec.cjs
 

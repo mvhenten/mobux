@@ -53,7 +53,7 @@ import { createTerminalDocument } from "./terminal-document.js";
 import { createTerminalBuffer, splitCapture } from "./terminal-buffer.js";
 import { createRedrawWriter } from "./terminal-redraw.js";
 import { createMarkerBook } from "./terminal-markers.js";
-import { rowsFromBottom } from "./terminal-text.js";
+import { displayLength, rowsFromBottom } from "./terminal-text.js";
 import {
   findOsc133AEnd,
   scanForNextAAndCandidate,
@@ -635,13 +635,38 @@ export class TerminalEngine extends EventTarget {
     return this.renderer.onLink(cb);
   }
 
-  // `count` display rows from viewport() row `first`, read from the buffer
-  // (terminal-text.js); null past either end.
+  // The buffer's display rows (terminal-text.js), in their own row space:
+  // what the renderer shows, as far from the bottom as the renderer is
+  // scrolled. Depth and rows both come from the buffer, so a renderer a
+  // frame behind cannot shift them.
+  textViewport() {
+    const shown = this.renderer.viewport();
+    const scrolled = Math.max(0, shown.length - shown.top - this.renderer.rows);
+    const length = displayLength(this.buffer);
+    const rows = this.buffer.rows;
+    return { length, rows, top: Math.max(0, length - rows - scrolled) };
+  }
+
+  // `count` display rows from textViewport() row `first`; null past either
+  // end.
   textRows(first, count) {
-    const depth = Math.max(0, this.renderer.viewport().length - first);
+    const depth = Math.max(0, displayLength(this.buffer) - first);
     const rows = rowsFromBottom(this.buffer, depth);
     const missing = depth - rows.length;
     return Array.from({ length: count }, (_, i) => rows[i - missing] ?? null);
+  }
+
+  // Changes whenever display rows stop meaning the same text: a new width,
+  // lines dropped off the top of history, a history rebuild or a full
+  // redraw of the display.
+  textLayout() {
+    const b = this.buffer;
+    return [
+      b.cols,
+      b.historyStart(),
+      b.historyEpoch(),
+      this.view.fullRedraws(),
+    ].join(":");
   }
 
   bracketedPaste() {

@@ -41,9 +41,11 @@ function legacyCopy(text) {
     : Promise.reject(new Error("the browser refused to copy"));
 }
 
+// Inside the tap that asked for it: the clipboard API when there is one,
+// the textarea fallback only when there is none.
 function copyText(text) {
   if (!navigator.clipboard?.writeText) return legacyCopy(text);
-  return navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+  return navigator.clipboard.writeText(text);
 }
 
 const reason = (err) => err?.message || err?.name || String(err);
@@ -107,8 +109,7 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
       term,
       dx: term.left - box.left,
       dy: term.top - box.top,
-      top: core.viewport().top,
-      rows: core.rows,
+      ...core.textViewport(),
     };
   }
 
@@ -158,6 +159,7 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
 
   function render() {
     frame = null;
+    dropIfStale();
     const active = !!sel && !termEl.classList.contains("hidden");
     layer.classList.toggle("visible", active);
     bar.classList.toggle("visible", active);
@@ -198,8 +200,17 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
     schedule();
   }
 
+  // Display rows mean other text once the layout changes (a rotation, lines
+  // dropped off the top of history, a full redraw): the selection goes.
+  function dropIfStale() {
+    if (!sel || sel.layout === core.textLayout()) return;
+    sel = null;
+    drag = null;
+    barStatus.textContent = "";
+  }
+
   function select(a, b) {
-    sel = { a, b };
+    sel = { a, b, layout: core.textLayout() };
     barStatus.textContent = "";
     render();
   }
@@ -212,6 +223,7 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
   }
 
   function text() {
+    dropIfStale();
     if (!sel) return "";
     const { start, end } = ordered();
     const rows = core.textRows(start.row, end.row - start.row + 1);
@@ -259,6 +271,7 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
   }
 
   function tap(x, y) {
+    dropIfStale();
     if (!sel) return;
     const cell = cellAt(x, y);
     const { start, end } = ordered();
@@ -269,6 +282,7 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
   // A touch that starts on a handle drags it, keeping the finger's offset
   // from the cell it moves.
   function handleStart(x, y) {
+    dropIfStale();
     const points = handlePoints();
     if (!points) return false;
     const dist = (p) => (p ? Math.hypot(p.x - x, p.y - y) : Infinity);
@@ -299,11 +313,8 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
   }
 
   function selectAll() {
-    const top = core.viewport().top;
-    select(
-      { row: top, col: 0 },
-      { row: top + core.rows - 1, col: core.cols - 1 },
-    );
+    const { top, rows } = core.textViewport();
+    select({ row: top, col: 0 }, { row: top + rows - 1, col: core.cols - 1 });
   }
 
   function copySelection() {
@@ -390,10 +401,13 @@ export function createTouchSelection({ core, termEl, overlay, openExternal }) {
     refresh: () => {
       if (sel) schedule();
     },
+    clear: () => {
+      if (sel) clear();
+    },
     active: () => !!sel,
     state: () => ({
-      active: !!sel,
       text: text(),
+      active: !!sel,
       handles: handlePoints(),
       status: barStatus.textContent,
       sheetUrl: sheetLink,

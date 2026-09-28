@@ -29,6 +29,8 @@ const AUTH =
 const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-critical";
 
 const { createTmuxRunner } = require("./lib/tmux.cjs");
+const terminalPage = require("./lib/terminal-page.cjs");
+const { touch } = terminalPage;
 
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
@@ -44,23 +46,7 @@ test.use({
 // a different prompt. Every test therefore starts from the same session
 // shape: one window, one pane, no half-typed command line, a known prompt and
 // a cleared screen.
-function resetSession() {
-  const firstWindow = tmux(`list-windows -t ${SESSION} -F '#{window_id}'`)
-    .toString()
-    .trim()
-    .split("\n")[0];
-  tmux(`kill-window -a -t ${firstWindow}`);
-  const firstPane = tmux(`list-panes -t ${firstWindow} -F '#{pane_id}'`)
-    .toString()
-    .trim()
-    .split("\n")[0];
-  tmux(`kill-pane -a -t ${firstPane}`);
-  tmux(`select-pane -t ${firstPane}`);
-  tmux(`send-keys -t ${firstPane} C-c`);
-  tmux(`send-keys -t ${firstPane} "PS1='\\$ '" Enter`);
-  tmux(`send-keys -t ${firstPane} "clear" Enter`);
-  execSync("sleep 0.3");
-}
+const resetSession = () => terminalPage.resetSession(tmux, SESSION);
 
 test.beforeAll(() => {
   try {
@@ -122,31 +108,7 @@ function assertNoFailures(captured) {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-async function bootTerminal(page) {
-  await page.goto(`${BASE}/app#/s/${SESSION}`, { waitUntil: "load" });
-  // Wait for the renderer to mount AND have visible dimensions —
-  // renderer-agnostic.
-  await page.waitForFunction(
-    () => {
-      const t = document.getElementById("terminal");
-      if (!t || t.classList.contains("hidden")) return false;
-      const r = t.getBoundingClientRect();
-      return r.width > 50 && r.height > 50;
-    },
-    { timeout: 8000 },
-  );
-  // Wait for the WS to be open and the buffer to have at least the
-  // initial PS1 redraw.
-  await page.waitForFunction(
-    () => window.__mobuxView?.test?.wsReady?.() === true,
-    { timeout: 8000 },
-  );
-  // Sterk schedules the initial resize() inside ws.onopen which fires
-  // synchronously with the WS handshake. The PTY needs to receive the
-  // resize before keystrokes will be processed at the new dimensions;
-  // wait one beat for the resize round-trip.
-  await page.waitForTimeout(500);
-}
+const bootTerminal = (page) => terminalPage.bootTerminal(page, BASE, SESSION);
 
 async function visibleTerminalText(page) {
   return page.evaluate(() => {
@@ -2385,32 +2347,6 @@ function cellPoint(page, col, row) {
       };
     },
     { col, row },
-  );
-}
-
-function touch(page, type, x, y) {
-  return page.evaluate(
-    ({ type, x, y }) => {
-      const overlay = document.getElementById("touchOverlay");
-      overlay.style.pointerEvents = "auto";
-      const t = new Touch({
-        identifier: 1,
-        target: overlay,
-        clientX: x,
-        clientY: y,
-        pageX: x + window.scrollX,
-        pageY: y + window.scrollY,
-      });
-      overlay.dispatchEvent(
-        new TouchEvent(type, {
-          touches: type === "touchend" ? [] : [t],
-          changedTouches: [t],
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    },
-    { type, x, y },
   );
 }
 

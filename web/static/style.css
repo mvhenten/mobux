@@ -1339,7 +1339,8 @@ h1, h2, h3 { margin: 0; }
 
 /* ── Touch selection and link sheet (touch-select.js) ─────────────
    Drawn by mobux above the touch overlay so both renderers select the
-   same way. Handles and buttons are thumb-sized (44px and up). */
+   same way. Buttons are at least 44px; a handle draws at 28px and grabs
+   a touch within 32px of its centre (touch-select.js HANDLE_HIT_PX). */
 .touch-select-layer {
   display: none;
   position: absolute;

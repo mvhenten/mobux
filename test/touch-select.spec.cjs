@@ -6,10 +6,11 @@
 // Run with: make test-touch-select
 
 const { test, expect } = require("./fixtures.cjs");
-const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { createTmuxRunner } = require("./lib/tmux.cjs");
+const terminalPage = require("./lib/terminal-page.cjs");
+const { touch } = terminalPage;
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
 const USER = process.env.MOBUX_USER || "";
@@ -39,10 +40,13 @@ test.beforeEach(async ({ context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"], {
     origin: new URL(BASE).origin,
   });
-  tmux(`send-keys -t ${SESSION} C-c`);
-  tmux(`send-keys -t ${SESSION} "PS1='\\$ '" Enter`);
-  tmux(`send-keys -t ${SESSION} "clear" Enter`);
-  execSync("sleep 0.3");
+  terminalPage.resetSession(tmux, SESSION);
+});
+
+// A test that failed mid-paste leaves paste-capture.sh reading raw input;
+// a fresh shell keeps the next test's keys out of it.
+test.afterEach(() => {
+  tmux(`respawn-pane -k ${SHELL_ENV} -t ${SESSION} "bash --norc --noprofile"`);
 });
 
 test.afterAll(() => {
@@ -51,14 +55,7 @@ test.afterAll(() => {
   } catch (_) {}
 });
 
-async function bootTerminal(page) {
-  await page.goto(`${BASE}/app#/s/${SESSION}`, { waitUntil: "load" });
-  await page.waitForFunction(
-    () => window.__mobuxView?.test?.wsReady?.() === true,
-    { timeout: 8000 },
-  );
-  await page.waitForTimeout(500);
-}
+const bootTerminal = (page) => terminalPage.bootTerminal(page, BASE, SESSION);
 
 // The row (from the viewport's top) and column where `needle` is drawn on
 // the row whose text is exactly `line`.
@@ -98,32 +95,6 @@ function cellPoint(page, col, row) {
       };
     },
     { col, row },
-  );
-}
-
-function touch(page, type, x, y) {
-  return page.evaluate(
-    ({ type, x, y }) => {
-      const overlay = document.getElementById("touchOverlay");
-      overlay.style.pointerEvents = "auto";
-      const t = new Touch({
-        identifier: 1,
-        target: overlay,
-        clientX: x,
-        clientY: y,
-        pageX: x + window.scrollX,
-        pageY: y + window.scrollY,
-      });
-      overlay.dispatchEvent(
-        new TouchEvent(type, {
-          touches: type === "touchend" ? [] : [t],
-          changedTouches: [t],
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    },
-    { type, x, y },
   );
 }
 

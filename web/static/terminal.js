@@ -355,6 +355,9 @@ export function createTerminal({
       return;
     }
     if (core.wheelScrollsPane()) {
+      // The app redraws its own screen under the swipe, so a highlight
+      // would sit on text that has moved.
+      selection.clear();
       if (!wheelPinned) core.scrollToBottom();
       wheelPinned = true;
       wheelByPixels(dy);

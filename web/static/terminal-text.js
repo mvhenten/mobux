@@ -4,28 +4,55 @@
 // detection read cells from here, never from a renderer, so xterm and sterk
 // select the same text.
 
-import { logicalLines } from "./terminal-buffer.js";
+import { isBlankCell } from "./terminal-buffer.js";
 import { historyLine, lineCells } from "./terminal-lines.js";
 
 // A row is { cells, wrapped }: one string per column, "" for the second
-// column of a wide character; `wrapped` when it continues the row above.
-function rowOfCells(cells, cols, wrapped) {
+// column of a wide character and for the gap a wide character that did not
+// fit leaves at the end of a row; `wrapped` when it continues the row above.
+function rowOfCells(cells, cols, wrapped, continued) {
   const out = [];
   for (const cell of cells) {
     if (out.length >= cols) break;
     out.push(cell.getChars() || " ");
     if (cell.getWidth() === 2) out.push("");
   }
-  while (out.length < cols) out.push(" ");
+  while (out.length < cols) out.push(continued ? "" : " ");
   return { cells: out.slice(0, cols), wrapped };
 }
 
-function rowOfLine(line, cols, wrapped) {
+// An empty last cell is the gap before a wide character that went on to the
+// next row.
+const wideGap = (prev, row) => {
+  const last = prev.getCell(prev.length - 1);
+  return (
+    !!last &&
+    last.getWidth() === 1 &&
+    last.getChars() === "" &&
+    row.getCell(0)?.getWidth() === 2
+  );
+};
+
+// A wrapped flag outlives the text that set it, so a row continues the line
+// only when the row above ends in text (or in a wide character's gap).
+function continues(prev, row) {
+  if (!row?.isWrapped || !prev) return false;
+  const last = prev.getCell(prev.length - 1);
+  if (!last) return false;
+  return last.getWidth() === 0 || !isBlankCell(last) || wideGap(prev, row);
+}
+
+function rowOfLine(line, cols, wrapped, next) {
   const cells = [];
+  const gap = next && continues(line, next) && wideGap(line, next);
   for (let x = 0; x < cols; x++) {
     const cell = line?.getCell(x);
     if (!cell) {
       cells.push(" ");
+      continue;
+    }
+    if (gap && x === cols - 1) {
+      cells.push("");
       continue;
     }
     cells.push(cell.getWidth() === 0 ? "" : cell.getChars() || " ");
@@ -34,11 +61,9 @@ function rowOfLine(line, cols, wrapped) {
 }
 
 function groupedRows(rows, cols) {
-  const out = [];
-  for (const line of logicalLines(rows)) {
-    line.forEach((row, i) => out.push(rowOfLine(row, cols, i > 0)));
-  }
-  return out;
+  return rows.map((row, i) =>
+    rowOfLine(row, cols, i > 0 && continues(rows[i - 1], row), rows[i + 1]),
+  );
 }
 
 // A wide character that does not fit a row's end starts the next row.
@@ -54,7 +79,48 @@ function cutHistoryLine(buffer, i, cols) {
     rows.at(-1).push(cell);
     used += width;
   }
-  return rows.map((cells, r) => rowOfCells(cells, cols, r > 0));
+  return rows.map((cells, r) =>
+    rowOfCells(cells, cols, r > 0, r < rows.length - 1),
+  );
+}
+
+// The display rows each history line takes, kept per buffer and brought up
+// to date as lines come and go.
+const historyCounts = new WeakMap();
+
+function historyRowCount(buffer) {
+  const now = {
+    cols: buffer.cols,
+    epoch: buffer.historyEpoch(),
+    start: buffer.historyStart(),
+    revision: buffer.lastLineRevision(),
+    straddles: buffer.straddles(),
+  };
+  const count = buffer.historyRowCount();
+  let held = historyCounts.get(buffer);
+  if (
+    !held ||
+    held.cols !== now.cols ||
+    held.epoch !== now.epoch ||
+    now.start < held.start
+  ) {
+    held = { ...now, rows: [] };
+  }
+  const drop = now.start - held.start;
+  const lastChanged =
+    held.revision !== now.revision || held.straddles !== now.straddles;
+  const keep = Math.min(count, held.rows.length - drop) - (lastChanged ? 1 : 0);
+  const rows = held.rows.slice(drop, drop + Math.max(0, keep));
+  for (let i = rows.length; i < count; i++) {
+    rows.push(cutHistoryLine(buffer, i, now.cols).length);
+  }
+  historyCounts.set(buffer, { ...now, rows });
+  return rows.reduce((a, b) => a + b, 0);
+}
+
+// How many display rows the buffer holds.
+export function displayLength(buffer) {
+  return historyRowCount(buffer) + buffer.screenScrollbackCount() + buffer.rows;
 }
 
 // The last `count` display rows, top to bottom; fewer when the display
@@ -87,10 +153,8 @@ export function logicalLineAt(rows, index) {
   for (let r = first; r <= last; r++) {
     rows[r]?.cells.forEach((ch, col) => {
       if (ch === "") return;
-      for (const unit of ch) {
-        text += unit;
-        cells.push({ row: r, col });
-      }
+      text += ch;
+      for (let i = 0; i < ch.length; i++) cells.push({ row: r, col });
     });
   }
   return { text, cells };
