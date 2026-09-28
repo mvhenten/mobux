@@ -24,7 +24,7 @@
 //   onOscDetected(cb): Disposable   fires the first time an OSC 133 marker lands
 //   oscDetected: boolean
 
-import { isBlankCell, logicalLines } from "./terminal-buffer.js";
+import { bufferLines, lineCells } from "./terminal-lines.js";
 
 // ── ANSI 256-colour palette (xterm default) ────────────────────────
 // Index 0-15 are the basic ANSI colours, exposed via CSS variables so themes
@@ -118,21 +118,6 @@ function attrsEqual(a, b) {
   );
 }
 
-// `fill` rounds a trimmed row's end up to a multiple of it: the part of a
-// straddling line captured into history is whole screen rows, trailing
-// blanks included.
-function* rowCells(row, trim, fill) {
-  let end = row.length;
-  if (trim) {
-    while (end > 0 && isBlankCell(row.getCell(end - 1))) end--;
-    if (fill) end = Math.min(row.length, Math.ceil(end / fill) * fill);
-  }
-  for (let x = 0; x < end; x++) {
-    const cell = row.getCell(x);
-    if (cell && cell.getWidth() > 0) yield cell;
-  }
-}
-
 // ── Run extraction ─────────────────────────────────────────────────
 // Group a logical line's cells into runs of identical attrs. `segments` are
 // { rows, trim, fill }: the rows of a wrapped chain run on, a history row
@@ -140,19 +125,14 @@ function* rowCells(row, trim, fill) {
 function extractRuns(segments) {
   const runs = [];
   let cur = null;
-  for (const { rows, trim, fill } of segments) {
-    for (const row of rows) {
-      if (!row) continue;
-      for (const cell of rowCells(row, trim, fill)) {
-        const text = cell.getChars() || " ";
-        const attrs = cellAttrs(cell);
-        if (cur && attrsEqual(cur.attrs, attrs)) {
-          cur.text += text;
-        } else {
-          if (cur) runs.push(cur);
-          cur = { text, attrs };
-        }
-      }
+  for (const cell of lineCells(segments)) {
+    const text = cell.getChars() || " ";
+    const attrs = cellAttrs(cell);
+    if (cur && attrsEqual(cur.attrs, attrs)) {
+      cur.text += text;
+    } else {
+      if (cur) runs.push(cur);
+      cur = { text, attrs };
     }
   }
   if (cur) runs.push(cur);
@@ -168,33 +148,6 @@ function extractRuns(segments) {
     break;
   }
   return runs;
-}
-
-// The buffer's lines as { segments, key }.
-function bufferLines(buffer) {
-  const lines = [];
-  const start = buffer.historyStart();
-  const count = buffer.historyRowCount();
-  for (let i = 0; i < count; i++) {
-    lines.push({
-      segments: [{ rows: [buffer.historyRow(i)], trim: true }],
-      key: start + i,
-    });
-  }
-  logicalLines(buffer.scrollbackRows()).forEach((rows, j) => {
-    lines.push({ segments: [{ rows, trim: false }], key: start + count + j });
-  });
-  const straddles = buffer.straddles() && count > 0;
-  buffer.screenLines().forEach(({ rows, key }, index) => {
-    if (index === 0 && straddles) {
-      const last = lines[count - 1].segments;
-      last[0].fill = buffer.cols;
-      last.push({ rows, trim: false });
-      return;
-    }
-    lines.push({ segments: [{ rows, trim: false }], key });
-  });
-  return lines;
 }
 
 // Build the document contract over the engine: its buffer, its OSC marker

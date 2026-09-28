@@ -4,19 +4,11 @@
 // a single IIFE for the static site. Pins the constructor to `window.Sterk`
 // so renderer-sterk.js (loaded as an ES module) can import it.
 //
-// Sterk's API:
-// - `createTerminal(options)` → Terminal instance
-// - `term.open(container)` → mount to DOM
-// - `term.write(data)` → feed VT bytes
-// - `term.resize(cols, rows)` → resize terminal
-// - `term.onData(cb)` → outbound input
-// - `term.onWriteParsed(cb)` → "wrote N bytes" notifications
-// - `term.parser.registerOscHandler(133, handler)` → OSC 133 chains
-// - `term.buffer.active.cursorX/cursorY/baseY` → buffer access
-// - `term.getCellMetrics()` → {width, height} after open()
-// - `term.dispose()` → cleanup
+// mobux uses sterk's buffer view only: `createBufferView(container, source)`
+// draws the engine buffer through a ScreenSource, and
+// `screenLineFromCells(line, cols)` reads an @xterm/headless line into one.
 
-import { createTerminal } from '@kattebak/sterk';
+import { createBufferView, screenLineFromCells } from '@kattebak/sterk';
 
 // Pre-register Ace themes used by mobux so `editor.setTheme('ace/theme/X')`
 // finds them in the in-memory module registry instead of trying to fetch
@@ -33,4 +25,4 @@ import 'ace-builds/src-noconflict/theme-gruvbox_light_hard';
 import 'ace-builds/src-noconflict/theme-github_light_default';
 
 // Pin to window so renderer-sterk.js can reach it from the classic script
-window.Sterk = { createTerminal };
+window.Sterk = { createBufferView, screenLineFromCells };
