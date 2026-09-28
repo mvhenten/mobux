@@ -105,7 +105,7 @@ export function createRedrawWriter(buffer, renderer) {
   let cursorKey = "";
   let drawnModes = new Map();
   let full = true;
-  let queue = Promise.resolve();
+  let drawing = null;
   let disposed = false;
 
   function distanceFromBottom() {
@@ -261,24 +261,28 @@ export function createRedrawWriter(buffer, renderer) {
   }
 
   const frames = createPaintScheduler(buffer, () => {
-    queue = queue.then(draw);
-    return queue;
+    if (drawing) return drawing.then(() => frames.request());
+    drawing = draw().finally(() => {
+      drawing = null;
+    });
+    return drawing;
   });
 
   return {
-    // Bring the display up to date with the buffer on the next frame. Calls
-    // made before it share the draw; the promise resolves once the display
-    // reflects it.
+    // Bring the display up to date with the buffer: now, or on the next
+    // frame when this one is already painted or a draw is still reaching the
+    // display. The promise resolves once the display reflects it.
     flush() {
       return frames.request();
     },
     // Resolves once every requested draw has reached the display.
     settle() {
-      return Promise.resolve(frames.pending()).then(() => queue);
+      return Promise.resolve(frames.pending()).then(() => drawing);
     },
     invalidate() {
       full = true;
     },
+    setSyncHold: (ms) => frames.setSyncHold(ms),
     fullRedraws() {
       return fullRedraws;
     },

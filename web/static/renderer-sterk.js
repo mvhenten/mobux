@@ -124,12 +124,24 @@ export function createSterkRenderer(host, options = {}) {
       throw err;
     }
     cleanups.push(view.registerLinkProvider({ provideLinks }));
+    let rendered = Promise.resolve();
+    cleanups.push(
+      source.subscribe(() => {
+        rendered = new Promise((resolve) => {
+          const sub = view.onRender(() => {
+            sub.dispose();
+            resolve();
+          });
+        });
+      }),
+    );
     return {
-      flush: () => Promise.resolve(),
+      flush: () => source.settle().then(() => rendered),
       settle: () => source.settle().then(() => view.refresh()),
       invalidate() {},
       fullRedraws: () => source.fullRepaints(),
       paints: () => source.paints(),
+      setSyncHold: (ms) => source.setSyncHold(ms),
       dispose: () => source.dispose(),
     };
   }

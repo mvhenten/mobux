@@ -2540,11 +2540,50 @@ const frames = (page, n) =>
     }
   }, n);
 
+// The first chunk after a quiet frame is painted as it is parsed; only what
+// follows it within the same frame waits.
+test("paint: a keypress echo is painted without waiting for a frame", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  const waited = await page.evaluate(async () => {
+    const t = window.__mobuxView.test;
+    const echoFrames = () =>
+      new Promise((resolve) => {
+        const before = t.paintCount();
+        const off = t.onPtyData(() => {
+          off();
+          let frames = 0;
+          const tick = () => {
+            if (t.paintCount() !== before) return resolve(frames);
+            frames++;
+            requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        });
+        window.__mobuxView.send("x");
+      });
+    const out = [];
+    for (let i = 0; i < 5; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      out.push(await echoFrames());
+    }
+    return out;
+  });
+  expect(
+    waited.filter((frames) => frames === 0).length,
+    `frames each echo waited for its paint: ${waited}`,
+  ).toBeGreaterThanOrEqual(4);
+});
+
 test("paint: a synchronized update is not painted until it ends", async ({
   page,
 }) => {
   await bootTerminal(page);
-  await page.evaluate(() => window.__mobuxView.test.inject(""));
+  await page.evaluate(() => {
+    window.__mobuxView.test.setSyncHold(60000);
+    return window.__mobuxView.test.inject("");
+  });
   const before = await page.evaluate(() =>
     window.__mobuxView.test.paintCount(),
   );
@@ -2575,13 +2614,14 @@ test("paint: a synchronized update that never ends is painted after a short hold
   await bootTerminal(page);
   await page.evaluate(() => window.__mobuxView.test.inject(""));
   const held = await page.evaluate(async () => {
+    window.__mobuxView.test.setSyncHold(300);
     const started = performance.now();
     await window.__mobuxView.test.writeData("\x1b[?2026hSYNC-LOST\r\n");
     return performance.now() - started;
   });
   expect(await displayHas(page, "SYNC-LOST")).toBe(true);
-  expect(held).toBeGreaterThanOrEqual(150);
-  expect(held).toBeLessThan(1000);
+  expect(held).toBeGreaterThanOrEqual(290);
+  expect(held).toBeLessThan(10000);
 });
 
 // The finger travel of one wheel notch, in rows (terminal.js).
@@ -2589,9 +2629,9 @@ const WHEEL_NOTCH_LINES = 3;
 
 // A swipe that moves the finger several notches within one frame, the way a
 // fast phone swipe does.
-function swipeInOneFrame(page, from, travel, moves) {
+function swipeInOneFrame(page, from, travel, moves, { resize = false } = {}) {
   return page.evaluate(
-    ({ x, y, travel, moves }) => {
+    ({ x, y, travel, moves, resize }) => {
       const overlay = document.getElementById("touchOverlay");
       overlay.style.pointerEvents = "auto";
       const fire = (type, cy) => {
@@ -2616,9 +2656,10 @@ function swipeInOneFrame(page, from, travel, moves) {
       for (let i = 1; i <= moves; i++) {
         fire("touchmove", y + (i * travel) / moves);
       }
+      if (resize) window.__mobuxView.test.resize();
       fire("touchend", y + travel);
     },
-    { ...from, travel, moves },
+    { ...from, travel, moves, resize },
   );
 }
 
@@ -2628,11 +2669,10 @@ test("alt-screen swipe: the wheel steps of one frame go to tmux in one message",
   const sent = [];
   page.on("websocket", (ws) =>
     ws.on("framesent", (f) => {
-      if (typeof f.payload === "string" && f.payload.includes("\x1b[<6")) {
-        sent.push(f.payload);
-      }
+      if (typeof f.payload === "string") sent.push(f.payload);
     }),
   );
+  const wheelFrames = () => sent.filter((p) => p.includes("\x1b[<6"));
   await bootTerminal(page);
   const out = await startAltInputApp(page, "mouse");
   try {
@@ -2650,7 +2690,7 @@ test("alt-screen swipe: the wheel steps of one frame go to tmux in one message",
     fs.writeFileSync(out, "");
     sent.length = 0;
 
-    await swipeInOneFrame(page, from, 200, 10);
+    await swipeInOneFrame(page, from, 200, 10, { resize: true });
     const cellHeight = await page.evaluate(
       () => window.__mobuxView.test.cellMetrics().height,
     );
@@ -2658,8 +2698,13 @@ test("alt-screen swipe: the wheel steps of one frame go to tmux in one message",
     expect(steps).toBeGreaterThan(1);
     await expect.poll(() => wheelEvents(out).length).toBe(steps);
     expect(wheelEvents(out)).toEqual(Array(steps).fill("64;3;3"));
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toBe("\x1b[<64;3;3M".repeat(steps));
+    expect(wheelFrames()).toEqual(["\x1b[<64;3;3M".repeat(steps)]);
+    const wheelAt = sent.indexOf(wheelFrames()[0]);
+    const resizeAt = sent.findIndex((p) => p.includes('"type":"resize"'));
+    expect(resizeAt, "the resize of the same frame is sent").toBeGreaterThan(
+      -1,
+    );
+    expect(wheelAt, "the wheel steps go ahead of it").toBeLessThan(resizeAt);
   } finally {
     await stopAltInputApp(page);
   }

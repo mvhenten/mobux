@@ -394,7 +394,7 @@ export class TerminalEngine extends EventTarget {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const { cols, rows } = this.renderer.measure();
     this._resizeBuffer(cols, rows);
-    this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+    this.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
   _resizeBuffer(cols, rows) {
@@ -408,13 +408,13 @@ export class TerminalEngine extends EventTarget {
   _forceRedraw() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const { cols, rows } = this.renderer.measure();
-    this.ws.send(
+    this.send(
       JSON.stringify({ type: "resize", cols, rows: Math.max(2, rows - 1) }),
     );
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       this._resizeBuffer(cols, rows);
-      this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      this.send(JSON.stringify({ type: "resize", cols, rows }));
     }, 50);
   }
 
@@ -469,10 +469,10 @@ export class TerminalEngine extends EventTarget {
   // behind it (finalize on the first candidate found in a chunk; bound the
   // search by the next A, not B/C/D). Every PTY write funnels through here
   // (both the live WS stream and the public write() passthrough) so there
-  // is exactly one attribution path regardless of entry point. Nothing is
-  // ever withheld from rendering — every byte is parsed into the screen as
-  // soon as it's available; only the bookkeeping (which row is "the" prompt
-  // row) is deferred.
+  // is exactly one attribution path regardless of entry point. Attribution
+  // withholds nothing: every byte is parsed into the screen as soon as it's
+  // available; only the bookkeeping (which row is "the" prompt row) is
+  // deferred. When the display draws it is up to the view (paint-frame.js).
   //
   // Chunks are processed strictly one at a time through `_ingestChain`: a
   // WS `onmessage` handler doesn't await the previous call before the next

@@ -1,52 +1,55 @@
-// Paints the display at most once per screen refresh, so one app redraw that
-// tmux relays as several WebSocket frames is not painted half-done several
-// times.
-//
-// While the screen is inside a synchronized update (DECSET 2026) nothing is
-// painted until it ends. SYNC_HOLD_MS caps the hold so a lost `?2026l` costs
-// one short hitch rather than a frozen display: an update wraps one redraw,
-// which tmux writes in one burst, so its end lands within a frame or two even
-// over a phone link. xterm's own 1000 ms cap would read as a hang on a phone.
-//
-// requestAnimationFrame does not run in a hidden tab; the timeout keeps the
-// promises that wait on a paint (history syncs, clear) moving there.
 const SYNC_HOLD_MS = 200;
 const HIDDEN_FALLBACK_MS = 100;
 
 export function createPaintScheduler(buffer, paint) {
   let waiting = null;
+  let paintedThisFrame = false;
   let frame = null;
   let fallback = null;
   let holdTimer = null;
+  let holdMs = SYNC_HOLD_MS;
   let disposed = false;
 
-  function run() {
+  function nextFrame() {
     cancelAnimationFrame(frame);
     clearTimeout(fallback);
     frame = null;
     fallback = null;
+    paintedThisFrame = false;
+    if (waiting) run();
+  }
+
+  function awaitFrame() {
+    if (frame !== null) return;
+    frame = requestAnimationFrame(nextFrame);
+    fallback = setTimeout(nextFrame, HIDDEN_FALLBACK_MS);
+  }
+
+  function run() {
+    clearTimeout(holdTimer);
+    holdTimer = null;
     if (!waiting) return;
+    if (paintedThisFrame && !disposed) {
+      awaitFrame();
+      return;
+    }
     const held = buffer.synchronizedFor();
-    if (!disposed && held !== null && held < SYNC_HOLD_MS) {
-      holdTimer = setTimeout(arm, SYNC_HOLD_MS - held);
+    if (!disposed && held !== null && held < holdMs) {
+      holdTimer = setTimeout(run, holdMs - held);
       return;
     }
     const { resolve } = waiting;
     waiting = null;
-    resolve(disposed ? undefined : paint());
-  }
-
-  function arm() {
-    clearTimeout(holdTimer);
-    holdTimer = null;
-    if (frame !== null) return;
-    frame = requestAnimationFrame(run);
-    fallback = setTimeout(run, HIDDEN_FALLBACK_MS);
+    if (disposed) {
+      resolve(undefined);
+      return;
+    }
+    paintedThisFrame = true;
+    awaitFrame();
+    resolve(paint());
   }
 
   return {
-    // Resolves with the paint's result once the display shows the buffer as
-    // it is now.
     request() {
       if (disposed) return Promise.resolve();
       if (!waiting) {
@@ -54,16 +57,20 @@ export function createPaintScheduler(buffer, paint) {
         const promise = new Promise((r) => (resolve = r));
         waiting = { promise, resolve };
       }
-      arm();
-      return waiting.promise;
+      const { promise } = waiting;
+      run();
+      return promise;
     },
-    // The paint that is due, or null.
     pending() {
       return waiting?.promise ?? null;
     },
+    setSyncHold(ms) {
+      holdMs = ms;
+    },
     dispose() {
       disposed = true;
-      clearTimeout(holdTimer);
+      cancelAnimationFrame(frame);
+      clearTimeout(fallback);
       run();
     },
   };

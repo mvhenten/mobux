@@ -616,7 +616,6 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     modes() {
       return modes;
     },
-    // How long the screen has been inside a synchronized update, or null.
     synchronizedFor() {
       return syncSince === null ? null : performance.now() - syncSince;
     },

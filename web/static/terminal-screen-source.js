@@ -204,6 +204,7 @@ export function createScreenSource(buffer, toLine) {
     settle() {
       return Promise.resolve(frames.pending());
     },
+    setSyncHold: (ms) => frames.setSyncHold(ms),
     subscribe(listener) {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };

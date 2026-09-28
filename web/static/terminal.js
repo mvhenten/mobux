@@ -715,6 +715,12 @@ export function createTerminal({
     oscMarkerCount: () => core.oscMarkers.size,
     fullRedrawCount: () => core.view.fullRedraws(),
     paintCount: () => core.view.paints(),
+    setSyncHold: (ms) => core.view.setSyncHold(ms),
+    resize: () => core.resize(),
+    onPtyData: (cb) => {
+      core.addEventListener("data", cb);
+      return () => core.removeEventListener("data", cb);
+    },
   };
 
   refreshViewToggle();
