@@ -2,7 +2,8 @@ import { Router, Route, Switch, Link, useLocation } from "wouter-preact";
 import { useHashLocation } from "wouter-preact/use-hash-location";
 import { HomePage } from "./pages/Home.jsx";
 import { TerminalPage } from "./pages/Terminal.jsx";
-import { SettingsPage } from "./pages/Settings.jsx";
+import { SettingsPage, SettingsSubPage, SUB_PAGES } from "./pages/Settings.jsx";
+import { SettingsHeader, useSettingsNav } from "./components/settings/ui.jsx";
 import { InstallPage } from "./pages/Install.jsx";
 import { ErrorPage } from "./components/ErrorPage.jsx";
 import { fatalError } from "./lib/fatalError.js";
@@ -42,6 +43,9 @@ export function App() {
             <Switch>
               <Route path="/" component={HomePage} />
               <Route path="/settings" component={SettingsPage} />
+              <Route path="/settings/:section">
+                {(params) => <SettingsSubPage section={params.section} />}
+              </Route>
               <Route path="/install" component={InstallPage} />
               <Route>
                 <div class="settings-group">
@@ -67,9 +71,11 @@ export function App() {
 //   • home/install/etc: the old render_index header — a `mobux` wordmark
 //     (clicks home) + `⚙` gear. No Home/Install text tabs — Install stays
 //     reachable via Settings.
-//   • /settings: the old settings_page header — a `‹` back link + "settings".
+//   • /settings and its sub-pages: a sticky back chevron + title
+//     (SettingsHeader, components/settings/ui.jsx).
 function HomeHeader() {
   const [, navigate] = useLocation();
+  const { push } = useSettingsNav();
   return (
     <header class="app-header">
       <h1
@@ -88,7 +94,7 @@ function HomeHeader() {
         class="header-icon header-icon-btn"
         type="button"
         aria-label="Settings"
-        onClick={() => navigate("/settings")}
+        onClick={() => push("/settings")}
       >
         ⚙
       </button>
@@ -96,23 +102,9 @@ function HomeHeader() {
   );
 }
 
-function SettingsHeader() {
-  return (
-    <header class="app-header">
-      <Link href="/" class="header-back" aria-label="Back">
-        ‹
-      </Link>
-      <h1>settings</h1>
-      <ReloadButton />
-    </header>
-  );
-}
-
-// Single-action hard reload (#189), always within reach: it lives in both
-// app-shell headers (Home + Settings) and, separately, in the terminal
-// ribbon (TerminalIsland.jsx) — between the three, every SPA route has one
-// tap to a full `location.reload()`, the recovery hatch that refetches the
-// bundle and reboots the whole app.
+// Single-action hard reload (#189): in the Home header, the terminal ribbon
+// (TerminalIsland.jsx) and Settings → Software update — the recovery hatch
+// that refetches the bundle and reboots the whole app.
 function ReloadButton() {
   return (
     <button
@@ -127,12 +119,22 @@ function ReloadButton() {
   );
 }
 
+function settingsHeaderFor(location) {
+  if (location === "/settings")
+    return <SettingsHeader title="Settings" fallback="/" />;
+  const m = location.match(/^\/settings\/([^/]+)$/);
+  if (!m) return null;
+  const sub = SUB_PAGES[m[1]];
+  return (
+    <SettingsHeader title={sub ? sub.title : "Settings"} fallback="/settings" />
+  );
+}
+
 function Shell({ children }) {
   const [location] = useLocation();
-  const onSettings = location === "/settings";
   return (
     <div class="spa-shell">
-      {onSettings ? <SettingsHeader /> : <HomeHeader />}
+      {settingsHeaderFor(location) || <HomeHeader />}
       <main class="spa-main">{children}</main>
     </div>
   );

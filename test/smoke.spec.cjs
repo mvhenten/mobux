@@ -3066,7 +3066,7 @@ test("a failed speak says so rather than reading the raw block", async ({
 test("listen settings visible in settings page when speechSynthesis available", async ({
   page,
 }) => {
-  await page.goto(`${BASE}/app#/settings`);
+  await page.goto(`${BASE}/app#/settings/listen`);
   await page.waitForTimeout(300);
 
   const hasSpeech = await page.evaluate(() => "speechSynthesis" in window);
@@ -3114,7 +3114,7 @@ test("listen settings visible in settings page when speechSynthesis available", 
 test("settings page shows current version and update check button", async ({
   page,
 }) => {
-  await page.goto(`${BASE}/app#/settings`);
+  await page.goto(`${BASE}/app#/settings/update`);
   await page.waitForTimeout(300);
 
   // Section + controls present.

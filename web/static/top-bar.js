@@ -19,6 +19,7 @@
 // it and it never overlaps terminal output.
 
 import { createAttachAction, createDictateAction } from './input-actions.js';
+import { openSettings } from './settings-nav.js';
 
 const STYLE_ID = 'mobux-top-bar-style';
 
@@ -190,7 +191,7 @@ export function createTopBar({
 
   settingsBtn.addEventListener('click', (e) => {
     e.preventDefault();
-    window.location.href = '/settings';
+    openSettings();
   });
 
   // Mount at the TOP of the flex column so #terminal / #reader reflow below.

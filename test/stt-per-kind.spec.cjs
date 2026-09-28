@@ -13,14 +13,14 @@ const BASE = process.env.MOBUX_STT_URL || "https://localhost:5198";
 const USER = process.env.MOBUX_STT_USER || process.env.MOBUX_USER || "";
 const PASS = process.env.MOBUX_STT_PASS || process.env.MOBUX_PASS || "";
 
-// Helper: navigate to /app#/settings and wait for the STT section to hydrate.
+// Helper: navigate to /app#/settings/stt and wait for the STT section to hydrate.
 async function openSettings(page) {
   // Set HTTP credentials so the browser sends Basic auth on all requests in
   // this context, including the JS fetch('/api/settings/stt') inside the page.
   if (USER && PASS) {
     await page.context().setHTTPCredentials({ username: USER, password: PASS });
   }
-  await page.goto(`${BASE}/app#/settings`);
+  await page.goto(`${BASE}/app#/settings/stt`);
   // Wait for the kind dropdown to appear — rendered by the SPA component.
   await page.waitForSelector("#sttKind", { timeout: 5000 });
   // Give the initial fetch/populate a moment.

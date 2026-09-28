@@ -7,6 +7,17 @@ import {
   parseUrlIntoFields,
   fetchModels,
 } from "../../lib/stt.js";
+import {
+  ActionRow,
+  Actions,
+  Button,
+  FieldRow,
+  Group,
+  Lede,
+  NavRow,
+  SelectRow,
+  Status,
+} from "./ui.jsx";
 
 // ── State ────────────────────────────────────────────────────────────
 // Per-kind cache of the last-known field values, seeded from GET on mount and
@@ -132,6 +143,36 @@ async function refreshSttStatus() {
   try {
     sttStatus.value = await apiGet("/api/stt/status");
   } catch (_) {}
+}
+
+const KINDS = [
+  { value: "local", label: "On this machine" },
+  { value: "network", label: "Network (self-hosted)" },
+  { value: "openai", label: "OpenAI" },
+];
+const KIND_SHORT = {
+  local: "This machine",
+  network: "Network",
+  openai: "OpenAI",
+};
+const summaryKind = signal(null);
+
+export function SttRow() {
+  useEffect(() => {
+    apiGet("/api/settings/stt")
+      .then((cfg) => (summaryKind.value = cfg.activeKind || "local"))
+      .catch(() => (summaryKind.value = "unavailable"));
+  }, []);
+  const k = summaryKind.value;
+  return (
+    <NavRow
+      row="stt"
+      to="/settings/stt"
+      label="Speech to text"
+      secondary="Dictation from the 🎤 button"
+      value={k == null ? "…" : KIND_SHORT[k] || "Unavailable"}
+    />
+  );
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -291,30 +332,27 @@ export function SttCard() {
   const engineMissing = !localEngine.value || sttState === "unsupported";
   const downloaded = sttState === "ready" || sttState === "warming";
 
+  const modelOptions = models.value.map((m) => ({ value: m, label: m }));
+  if (!isLocal.value) modelOptions.push({ value: CUSTOM, label: "custom…" });
+
   return (
-    <section class="settings-group" id="stt-provider">
-      <h2>Speech to text</h2>
+    <div id="stt-provider">
+      <Lede>
+        Where dictation from the 🎤 button is transcribed. On this machine keeps
+        audio on the host; the others send it to the endpoint you set.
+      </Lede>
 
-      <label class="settings-row">
-        <span class="settings-label">Provider</span>
-        <select
+      <Group title="Provider">
+        <SelectRow
           id="sttKind"
-          class="settings-select"
+          label="Provider"
           value={kind.value}
+          options={KINDS}
           onChange={onKindChange}
-        >
-          <option value="local">On this machine</option>
-          <option value="network">Network (self-hosted)</option>
-          <option value="openai">OpenAI</option>
-        </select>
-      </label>
+        />
 
-      {/* Host + Port: only the self-hosted Network provider needs an endpoint.
-          The local provider runs in this process — there is nothing to point at. */}
-      {isNetwork.value && (
-        <>
-          <label class="settings-row settings-row--field" id="sttHostRow">
-            <span class="settings-label">Host</span>
+        {isNetwork.value && (
+          <FieldRow rowId="sttHostRow" label="Host">
             <input
               type="text"
               id="sttHost"
@@ -324,9 +362,10 @@ export function SttCard() {
               onInput={(e) => (host.value = e.target.value)}
               onBlur={onHostBlur}
             />
-          </label>
-          <label class="settings-row settings-row--field" id="sttPortRow">
-            <span class="settings-label">Port</span>
+          </FieldRow>
+        )}
+        {isNetwork.value && (
+          <FieldRow rowId="sttPortRow" label="Port">
             <input
               type="number"
               id="sttPort"
@@ -338,155 +377,111 @@ export function SttCard() {
               onInput={(e) => (port.value = e.target.value)}
               onChange={schedFetchModels}
             />
-          </label>
-        </>
-      )}
+          </FieldRow>
+        )}
 
-      <div class="settings-row settings-row--field" id="sttModelRow">
-        <span class="settings-label">Model</span>
-        <div style="display:flex;gap:0.5rem;flex:1;min-width:0">
-          <select
-            id="sttModel"
-            class="settings-input settings-select"
-            style="flex:1"
-            value={model.value}
-            onChange={onModelChange}
-          >
-            {models.value.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-            {!isLocal.value && <option value={CUSTOM}>custom…</option>}
-          </select>
-          <button
-            type="button"
-            id="sttRefreshModels"
-            class="settings-btn"
-            title="Refresh model list"
-            style="flex-shrink:0"
-            onClick={() => loadModels(effectiveModel())}
-          >
-            ↺
-          </button>
-        </div>
-      </div>
+        <SelectRow
+          id="sttModel"
+          rowId="sttModelRow"
+          label="Model"
+          value={model.value}
+          options={modelOptions}
+          onChange={onModelChange}
+        />
+
+        {!isLocal.value && isCustomModel.value && (
+          <FieldRow rowId="sttCustomModelRow" label="Custom model">
+            <input
+              type="text"
+              id="sttCustomModel"
+              class="settings-input"
+              placeholder="enter model id"
+              value={customModel.value}
+              onInput={(e) => (customModel.value = e.target.value)}
+              onChange={save}
+            />
+          </FieldRow>
+        )}
+
+        {isOpenai.value && (
+          <FieldRow rowId="sttApiKeyRow" label="API key">
+            <input
+              type="password"
+              id="sttApiKey"
+              class="settings-input"
+              placeholder={hasKey.value ? "•••• stored" : "sk-…"}
+              autocomplete="off"
+              value={apiKey.value}
+              onInput={(e) => (apiKey.value = e.target.value)}
+              onChange={schedSave}
+            />
+          </FieldRow>
+        )}
+
+        <ActionRow
+          id="sttRefreshModels"
+          label="Refresh model list"
+          onClick={() => loadModels(effectiveModel())}
+        />
+      </Group>
 
       {/* Weights are stored half-precision and run at full precision, so a
           checkpoint costs about twice its download once loaded — the number
           that decides whether a box can run it. */}
       {isLocal.value && (
-        <div class="settings-status" id="sttModelCost">
-          Runs at full precision: base.en needs ~290 MB of memory, tiny.en ~150
-          MB, small.en ~970 MB. Bigger transcribes better and slower.
-        </div>
+        <p class="settings-note" id="sttModelCost">
+          Memory at full precision: tiny.en ~150 MB, base.en ~290 MB, small.en
+          ~970 MB. Bigger transcribes better and slower.
+        </p>
       )}
 
-      {/* Custom model free-text: only when "custom…" is picked. The local
-          engine runs a fixed catalog, so there is nothing to type. */}
-      {!isLocal.value && isCustomModel.value && (
-        <label class="settings-row settings-row--field" id="sttCustomModelRow">
-          <span class="settings-label">Custom model</span>
-          <input
-            type="text"
-            id="sttCustomModel"
-            class="settings-input"
-            placeholder="enter model id"
-            value={customModel.value}
-            onInput={(e) => (customModel.value = e.target.value)}
-            onChange={save}
-          />
-        </label>
-      )}
+      <Status id="sttStatus" status={status.value} />
 
-      {/* API key: OpenAI only. */}
-      {isOpenai.value && (
-        <label class="settings-row settings-row--field" id="sttApiKeyRow">
-          <span class="settings-label">API key</span>
-          <input
-            type="password"
-            id="sttApiKey"
-            class="settings-input"
-            placeholder={hasKey.value ? "•••• stored" : "sk-…"}
-            autocomplete="off"
-            value={apiKey.value}
-            onInput={(e) => (apiKey.value = e.target.value)}
-            onChange={schedSave}
-          />
-        </label>
-      )}
-
-      {status.value && (
-        <div
-          id="sttStatus"
-          class="settings-status"
-          style={{ color: status.value.ok ? "#7ec87e" : "#c87e7e" }}
-        >
-          {status.value.msg}
-        </div>
-      )}
-
-      {/* What the local engine is actually doing. The first run fetches the
-          weights, which is progress, not a fault. */}
       {isLocal.value && sttState === "warming" && (
-        <div
-          class="settings-status"
+        <Status
           id="sttWarming"
-          style={{ color: "#7ec87e" }}
-        >
-          {stateMessage(sttStatus.value, WARMING_TEXT)}
-        </div>
+          kind="ok"
+          status={stateMessage(sttStatus.value, WARMING_TEXT)}
+        />
       )}
       {isLocal.value && engineMissing && (
-        <div
-          class="settings-status"
+        <Status
           id="sttEngineMissing"
-          style={{ color: "#c87e7e" }}
-        >
-          {stateMessage(
+          kind="error"
+          status={stateMessage(
             sttStatus.value,
             "This build has no in-process speech engine.",
           )}
-        </div>
+        />
       )}
       {isLocal.value && sttState === "failed" && (
-        <div
-          class="settings-status"
+        <Status
           id="sttModelFailed"
-          style={{ color: "#c87e7e" }}
-        >
-          {stateMessage(
+          kind="error"
+          status={stateMessage(
             sttStatus.value,
             "The speech model could not be prepared.",
           )}
-        </div>
+        />
       )}
 
-      <div class="settings-actions">
-        <button type="button" id="sttProbeBtn" onClick={onProbe}>
+      <Actions>
+        <Button id="sttProbeBtn" variant="secondary" onClick={onProbe}>
           Check status
-        </button>
+        </Button>
         {isLocal.value && (
-          <button
-            type="button"
+          <Button
             id="sttDownloadBtn"
+            variant="primary"
             onClick={onDownload}
             disabled={engineMissing}
           >
-            {downloaded ? "Re-check model" : "Download speech model"}
-          </button>
+            {downloaded ? "Re-check model" : "Download model"}
+          </Button>
         )}
-      </div>
+      </Actions>
 
-      {action.value && (
-        <div
-          class="settings-status"
-          id="sttActionStatus"
-          style={{ color: action.value.ok ? "#7ec87e" : "#c87e7e" }}
-        >
-          {action.value.msg}
-        </div>
-      )}
-    </section>
+      <Status id="sttActionStatus" status={action.value} />
+    </div>
   );
 }

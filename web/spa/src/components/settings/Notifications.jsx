@@ -1,30 +1,40 @@
 import { useEffect, useRef } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { localGet, localFetch } from "../../lib/api.js";
+import { Group, Status, SwitchRow } from "./ui.jsx";
 
-// Notifications card. Ports settings.js: reads + writes
-// GET|PUT /api/settings/notifications (snake_case fields), auto-saves on every
-// checkbox change. Prefs act on the host that served the page, so this uses the
-// host-pinned helpers.
+// Reads + writes GET|PUT /api/settings/notifications (snake_case fields) and
+// saves on every switch change. Acts on the host that served the page.
 
 const FIELDS = ["bell", "bell_emoji", "program_exit", "program_exit_nonzero"];
 const prefs = signal({});
-const status = signal(null); // { msg, ok }
+const status = signal(null);
+
+const ROWS = [
+  ["bell", "Terminal bell", "The BEL byte (\\x07) from any program"],
+  ["bell_emoji", "Bell emoji", "A 🔔 printed by a script or agent"],
+  ["program_exit", "Program exit", "Any exit code; needs OSC 133 prompts"],
+  [
+    "program_exit_nonzero",
+    "Failed program exit",
+    "Non-zero exits only; needs OSC 133",
+  ],
+];
 
 export function NotificationsCard() {
   const t = useRef(null);
-
-  useEffect(() => {
-    localGet("/api/settings/notifications")
-      .then((p) => (prefs.value = p || {}))
-      .catch((e) => flash("Load failed: " + e.message, false));
-  }, []);
 
   const flash = (msg, ok = true) => {
     status.value = { msg, ok };
     clearTimeout(t.current);
     t.current = setTimeout(() => (status.value = null), 1500);
   };
+
+  useEffect(() => {
+    localGet("/api/settings/notifications")
+      .then((p) => (prefs.value = p || {}))
+      .catch((e) => flash("Load failed: " + e.message, false));
+  }, []);
 
   const onToggle = (field) => async (e) => {
     prefs.value = { ...prefs.value, [field]: e.target.checked };
@@ -43,57 +53,21 @@ export function NotificationsCard() {
     }
   };
 
-  const row = (field, title, small) => (
-    <label class="settings-row">
-      <input
-        type="checkbox"
-        name={field}
-        checked={!!prefs.value[field]}
-        onChange={onToggle(field)}
-      />
-      <span class="settings-label">
-        <strong>{title}</strong>
-        <small>{small}</small>
-      </span>
-    </label>
-  );
-
   return (
-    <section class="settings-group">
-      <h2>Notifications</h2>
-      <p class="settings-lede">
-        Pick what fires a push to subscribed devices. Everything is detected by
-        parsing the PTY stream — no shell hooks needed except the OSC-133 prompt
-        for the exit toggles.
-      </p>
-      {row(
-        "bell",
-        "Terminal bell (\\x07)",
-        "Standard ASCII BEL byte. Most apps fire this on tab-complete failures, vim errors, irc highlights.",
-      )}
-      {row(
-        "bell_emoji",
-        "🔔 emoji in output",
-        "Used for intentional pings — Claude, scripts, anything that prints the bell glyph.",
-      )}
-      {row(
-        "program_exit",
-        "Program exit (any code)",
-        "Detected via OSC 133;D semantic prompt. Requires Starship, Powerlevel10k, or a PS1 that emits the exit marker.",
-      )}
-      {row(
-        "program_exit_nonzero",
-        "Program exit (non-zero only)",
-        "Same OSC 133;D detection, fires only on failures.",
-      )}
-      {status.value && (
-        <div
-          class="settings-status"
-          style={{ color: status.value.ok ? "" : "#f87171" }}
-        >
-          {status.value.msg}
-        </div>
-      )}
-    </section>
+    <>
+      <Group id="notifications" title="Notifications" data-row="notifications">
+        {ROWS.map(([field, title, small]) => (
+          <SwitchRow
+            key={field}
+            name={field}
+            label={title}
+            secondary={small}
+            checked={!!prefs.value[field]}
+            onChange={onToggle(field)}
+          />
+        ))}
+      </Group>
+      <Status id="notificationsStatus" status={status.value} />
+    </>
   );
 }

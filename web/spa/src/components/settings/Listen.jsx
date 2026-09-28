@@ -2,6 +2,16 @@ import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { u } from "../../lib/base.js";
 import { getPref, setPref } from "../../lib/prefs.js";
+import {
+  Actions,
+  Button,
+  Group,
+  Lede,
+  NavRow,
+  SelectRow,
+  SliderRow,
+  Status,
+} from "./ui.jsx";
 
 // Listen card. Rate and pitch are the server-held `listen_*` preferences,
 // global across devices.
@@ -32,12 +42,6 @@ function loadPrefs() {
   };
 }
 
-function savePrefs(prefs) {
-  setPref("listen_voice", typeof prefs.voice === "string" ? prefs.voice : "");
-  setPref("listen_rate", clamp(prefs.rate, RATE_MIN, RATE_MAX, 1.0));
-  setPref("listen_pitch", clamp(prefs.pitch, PITCH_MIN, PITCH_MAX, 1.0));
-}
-
 const available = signal(
   typeof window !== "undefined" && "speechSynthesis" in window,
 );
@@ -65,6 +69,28 @@ async function loadLocalVoice() {
   localVoice.value = await resp.json();
 }
 
+function voiceSummary() {
+  const lv = localVoice.value;
+  if (lv.enabled && lv.state === "ready") return "Host voice";
+  return prefs.value.voice || "Browser default";
+}
+
+export function ListenRow() {
+  useEffect(() => {
+    prefs.value = loadPrefs();
+    loadLocalVoice();
+  }, []);
+  return (
+    <NavRow
+      row="listen"
+      to="/settings/listen"
+      label="Listen"
+      secondary="Read the terminal aloud"
+      value={voiceSummary()}
+    />
+  );
+}
+
 export function ListenCard() {
   useEffect(() => {
     prefs.value = loadPrefs();
@@ -85,22 +111,21 @@ export function ListenCard() {
   }, []);
 
   function setVoice(e) {
-    const next = { ...prefs.value, voice: e.target.value };
-    prefs.value = next;
-    savePrefs(next);
+    const voice = e.target.value;
+    prefs.value = { ...prefs.value, voice };
+    setPref("listen_voice", voice);
   }
 
-  function setRate(e) {
-    const next = { ...prefs.value, rate: parseFloat(e.target.value) };
-    prefs.value = next;
-    savePrefs(next);
-  }
-
-  function setPitch(e) {
-    const next = { ...prefs.value, pitch: parseFloat(e.target.value) };
-    prefs.value = next;
-    savePrefs(next);
-  }
+  const dial = (key, min, max) => ({
+    onInput: (e) => {
+      prefs.value = { ...prefs.value, [key]: parseFloat(e.target.value) };
+    },
+    onCommit: (e) => {
+      const v = clamp(parseFloat(e.target.value), min, max, 1.0);
+      prefs.value = { ...prefs.value, [key]: v };
+      setPref(`listen_${key}`, v);
+    },
+  });
 
   async function prepare() {
     preparing.value = true;
@@ -163,96 +188,98 @@ export function ListenCard() {
     loadLocalVoice();
   }
 
+  const lv = localVoice.value;
+  const voiceOptions = [
+    { value: "", label: "Default" },
+    ...voices.value.map((v) => ({
+      value: v.name,
+      label: `${v.name} (${v.lang})`,
+    })),
+  ];
+
   return (
-    <section class="settings-group" id="listen-settings">
-      <h2>Listen</h2>
-      <div class="settings-row settings-row--field" id="listenLocalVoice">
-        <span class="settings-label">Voice on this host</span>
-        <span class="settings-row-control">
-          <span class="listen-value" data-state={localVoice.value.state}>
-            {localVoice.value.state}
+    <div id="listen-settings">
+      <Lede>
+        The reader speaks through the voice on this host when it is ready, and
+        falls back to this browser's voice. Voice and pitch apply to the browser
+        voice only.
+      </Lede>
+      <Group title="Voice on this host">
+        <div class="settings-row" id="listenLocalVoice">
+          <span class="settings-label">
+            <span class="settings-title">Host voice</span>
           </span>
-          {localVoice.value.enabled && localVoice.value.state !== "ready" ? (
-            <button
-              type="button"
+          <span class="settings-trail">
+            <span class="settings-value listen-value" data-state={lv.state}>
+              {lv.state}
+            </span>
+          </span>
+        </div>
+        {lv.enabled && lv.state !== "ready" ? (
+          <Actions>
+            <Button
               id="listenPrepare"
+              variant="primary"
               disabled={preparing.value}
               onClick={prepare}
             >
-              {preparing.value ? "Preparing…" : "Prepare"}
-            </button>
-          ) : null}
-        </span>
-      </div>
-      <p class="listen-unavailable" id="listenLocalVoiceMessage">
-        {localVoice.value.message}
-      </p>
+              {preparing.value ? "Preparing…" : "Prepare voice"}
+            </Button>
+          </Actions>
+        ) : null}
+      </Group>
+      {lv.message && (
+        <Status
+          id="listenLocalVoiceMessage"
+          kind={lv.state === "ready" || lv.state === "warming" ? "ok" : "error"}
+          status={lv.message}
+        />
+      )}
       {available.value ? (
         <div id="listenCapable">
-          <label class="settings-row settings-row--field">
-            <span class="settings-label">Voice</span>
-            <select
+          <Group title="Browser voice">
+            <SelectRow
               id="listenVoice"
-              class="settings-select"
+              label="Voice"
               value={prefs.value.voice}
+              options={voiceOptions}
               onChange={setVoice}
-            >
-              <option value="">Default</option>
-              {voices.value.map((v) => (
-                <option key={v.name} value={v.name}>
-                  {v.name} ({v.lang})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label class="settings-row">
-            <span class="settings-label">Rate</span>
-            <span class="settings-row-control">
-              <input
-                type="range"
-                id="listenRate"
-                min={RATE_MIN}
-                max={RATE_MAX}
-                step="0.1"
-                value={prefs.value.rate}
-                onInput={setRate}
-              />
-              <span class="listen-value" id="listenRateValue">
-                {prefs.value.rate.toFixed(1)}
-              </span>
-            </span>
-          </label>
-          <label class="settings-row">
-            <span class="settings-label">Pitch</span>
-            <span class="settings-row-control">
-              <input
-                type="range"
-                id="listenPitch"
-                min={PITCH_MIN}
-                max={PITCH_MAX}
-                step="0.1"
-                value={prefs.value.pitch}
-                onInput={setPitch}
-              />
-              <span class="listen-value" id="listenPitchValue">
-                {prefs.value.pitch.toFixed(1)}
-              </span>
-            </span>
-          </label>
-          <div class="settings-actions">
-            <button type="button" id="listenTest" onClick={test}>
-              Test
-            </button>
-          </div>
+            />
+            <SliderRow
+              id="listenRate"
+              valueId="listenRateValue"
+              label="Rate"
+              min={RATE_MIN}
+              max={RATE_MAX}
+              step="0.1"
+              value={prefs.value.rate}
+              {...dial("rate", RATE_MIN, RATE_MAX)}
+            />
+            <SliderRow
+              id="listenPitch"
+              valueId="listenPitchValue"
+              label="Pitch"
+              min={PITCH_MIN}
+              max={PITCH_MAX}
+              step="0.1"
+              value={prefs.value.pitch}
+              {...dial("pitch", PITCH_MIN, PITCH_MAX)}
+            />
+          </Group>
+          <Actions>
+            <Button id="listenTest" variant="secondary" onClick={test}>
+              Test voice
+            </Button>
+          </Actions>
         </div>
       ) : (
-        <div id="listenUnavailable" class="listen-unavailable">
-          <p>
-            This browser has no Web Speech synthesis, so the voice on this host
-            is the only one that can read the terminal aloud.
-          </p>
+        <div id="listenUnavailable">
+          <Status
+            kind="error"
+            status="This browser has no speech synthesis, so only the voice on this host can read aloud."
+          />
         </div>
       )}
-    </section>
+    </div>
   );
 }

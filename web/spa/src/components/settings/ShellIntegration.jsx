@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { localGet, localFetch } from "../../lib/api.js";
+import { Actions, Button, Group, Lede, NavRow, Status } from "./ui.jsx";
 
 // Shell integration installer. Ports shell-integration.js: reads
 // GET /api/shell-integration/status, drives Install/Uninstall via
@@ -35,6 +36,7 @@ const SHELLS = [
 
 const states = signal({}); // { bash: {state, version}, ... }
 const status = signal(null); // { msg, ok }
+const loaded = signal(false);
 
 function describe(s) {
   if (!s || !s.state) return { label: "unknown", cls: "" };
@@ -55,20 +57,46 @@ function describe(s) {
   }
 }
 
+let flashTimer = null;
+function flash(msg, ok = true) {
+  status.value = { msg, ok };
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => (status.value = null), ok ? 2000 : 6000);
+}
+
+function load() {
+  localGet("/api/shell-integration/status")
+    .then((p) => {
+      states.value = p || {};
+      loaded.value = true;
+    })
+    .catch((e) => flash("Load failed: " + e.message, false));
+}
+
+function installedSummary() {
+  if (!loaded.value) return "…";
+  const on = SHELLS.filter((sh) => {
+    const st = states.value[sh.id]?.state;
+    return st === "installed" || st === "outdated";
+  }).map((sh) => sh.id);
+  return on.length ? on.join(", ") : "None";
+}
+
+export function ShellIntegrationRow() {
+  useEffect(load, []);
+  return (
+    <NavRow
+      row="shell"
+      to="/settings/shell"
+      label="Shell integration"
+      secondary="OSC 133 prompt markers"
+      value={installedSummary()}
+    />
+  );
+}
+
 export function ShellIntegrationCard() {
-  const t = useRef(null);
-
-  useEffect(() => {
-    localGet("/api/shell-integration/status")
-      .then((p) => (states.value = p || {}))
-      .catch((e) => flash("Load failed: " + e.message, false));
-  }, []);
-
-  const flash = (msg, ok = true) => {
-    status.value = { msg, ok };
-    clearTimeout(t.current);
-    t.current = setTimeout(() => (status.value = null), 2000);
-  };
+  useEffect(load, []);
 
   const act = async (action, shell) => {
     try {
@@ -87,11 +115,9 @@ export function ShellIntegrationCard() {
   };
 
   return (
-    <section class="settings-group" id="shell-integration">
-      <h2>Shell integration</h2>
-      <p class="settings-lede">
-        The reader view classifies prompts and command output deterministically
-        when your shell emits{" "}
+    <div id="shell-integration">
+      <Lede>
+        The reader sorts prompts from output exactly when your shell emits{" "}
         <a
           href="https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md"
           target="_blank"
@@ -99,11 +125,9 @@ export function ShellIntegrationCard() {
         >
           OSC 133
         </a>{" "}
-        (FinalTerm) markers. Click install — mobux appends a managed, fenced
-        block to your rc file and keeps a timestamped backup. Nothing outside
-        the fence is touched. The snippet detects <code>$TMUX</code> and wraps
-        OSC 133 in tmux's DCS passthrough envelope.
-      </p>
+        markers. Install adds a fenced block to the rc file, backs the file up
+        first, and touches nothing outside the fence. Restart the shell after.
+      </Lede>
 
       {SHELLS.map((sh) => {
         const s = states.value[sh.id];
@@ -111,53 +135,53 @@ export function ShellIntegrationCard() {
         const isInstalled = s && s.state === "installed";
         const isOutdated = s && s.state === "outdated";
         return (
-          <div class="shell-card" data-shell={sh.id} key={sh.id}>
-            <div class="shell-card-head">
-              <strong>{sh.id}</strong> <code>{sh.rc}</code>
-              <span class={"shell-state " + d.cls} data-role="state">
-                {d.label}
-              </span>
+          <Group key={sh.id}>
+            <div class="shell-card" data-shell={sh.id}>
+              <div class="settings-row">
+                <span class="settings-label">
+                  <span class="settings-title">{sh.id}</span>
+                  <small>
+                    <code>{sh.rc}</code>
+                  </small>
+                </span>
+                <span class={"shell-state " + d.cls} data-role="state">
+                  {d.label}
+                </span>
+              </div>
+              <Actions>
+                <Button
+                  variant="primary"
+                  disabled={isInstalled}
+                  onClick={() => act("install", sh.id)}
+                >
+                  {isInstalled
+                    ? "Reinstall"
+                    : isOutdated
+                      ? "Update"
+                      : "Install"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={!(isInstalled || isOutdated)}
+                  onClick={() => act("uninstall", sh.id)}
+                >
+                  Uninstall
+                </Button>
+              </Actions>
+              <details class="settings-detail">
+                <summary class="settings-row">
+                  <span class="settings-title">Show snippet</span>
+                </summary>
+                <pre class="settings-snippet">
+                  <code>{sh.snippet}</code>
+                </pre>
+              </details>
             </div>
-            <div class="settings-actions">
-              <button
-                type="button"
-                disabled={isInstalled}
-                onClick={() => act("install", sh.id)}
-              >
-                {isInstalled ? "Reinstall" : isOutdated ? "Update" : "Install"}
-              </button>
-              <button
-                type="button"
-                disabled={!(isInstalled || isOutdated)}
-                onClick={() => act("uninstall", sh.id)}
-              >
-                Uninstall
-              </button>
-            </div>
-            <details class="settings-detail">
-              <summary>Show snippet</summary>
-              <pre class="settings-snippet">
-                <code>{sh.snippet}</code>
-              </pre>
-            </details>
-          </div>
+          </Group>
         );
       })}
 
-      {status.value && (
-        <div
-          class="settings-status"
-          style={{ color: status.value.ok ? "" : "#f87171" }}
-        >
-          {status.value.msg}
-        </div>
-      )}
-      <p class="settings-foot">
-        Reload the shell after installing. The fenced block is the contract —
-        mobux only ever modifies what's between the fences. A timestamped{" "}
-        <code>.mobux.bak.&lt;ts&gt;</code> is written next to the rc file before
-        any change.
-      </p>
-    </section>
+      <Status id="shellStatus" status={status.value} />
+    </div>
   );
 }

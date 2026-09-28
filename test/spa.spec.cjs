@@ -244,6 +244,7 @@ test("settings cards render the seeded server preferences, not built-in defaults
 
     await expect(page.locator("#renderer-picker select")).toHaveValue("sterk");
 
+    await page.goto(`${APP}#/settings/listen`, { waitUntil: "networkidle" });
     const capable = await page.locator("#listenCapable").isVisible();
     if (capable) {
       await expect(page.locator("#listenRate")).toHaveValue("1.4");
@@ -2383,13 +2384,10 @@ test("settings: every ported card renders and consumes its endpoint", async ({
 
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
 
-  // Update / Renderer / Theme / Shell-integration / STT / Install / Notifications.
-  await expect(page.locator("#update h2")).toHaveText("Software update");
+  // Top level: notification switches, renderer + theme pickers, and a
+  // chevron row per sub-page.
   await expect(page.locator("#renderer-picker")).toBeVisible();
   await expect(page.locator("#theme-picker")).toBeVisible();
-  await expect(page.locator("#shell-integration")).toBeVisible();
-  await expect(page.locator("#nodes-settings")).toBeVisible();
-  await expect(page.locator("#stt-provider")).toBeVisible();
   await expect(page.locator("section#install-app")).toBeVisible();
   await expect(page.locator('input[name="bell"]')).toHaveCount(1);
   await expect(page.locator('input[name="program_exit_nonzero"]')).toHaveCount(
@@ -2402,21 +2400,29 @@ test("settings: every ported card renders and consumes its endpoint", async ({
     { timeout: 6000 },
   );
 
-  // Shell-integration state resolved (not the initial "…").
+  // Update row resolved a current version.
+  await expect(
+    page.locator('[data-row="update"] .settings-value'),
+  ).not.toHaveText("…", { timeout: 8000 });
+
+  // Each sub-page renders its section.
+  await page.goto(`${APP}#/settings/update`, { waitUntil: "networkidle" });
+  await expect(page.locator("#updateCurrent")).not.toHaveText("…", {
+    timeout: 8000,
+  });
+  await page.goto(`${APP}#/settings/shell`, { waitUntil: "networkidle" });
   await expect(
     page.locator(
       '#shell-integration .shell-card[data-shell="bash"] [data-role="state"]',
     ),
   ).not.toHaveText("…", { timeout: 6000 });
-
-  // Update card resolved a current version.
-  await expect(page.locator("#update .settings-value").first()).not.toHaveText(
-    "…",
-    { timeout: 8000 },
-  );
-
-  // Listen + Build-info cards.
-  await expect(page.locator("#listen-settings h2")).toHaveText("Listen");
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
+  await expect(page.locator("#nodes-settings")).toBeVisible();
+  await page.goto(`${APP}#/settings/stt`, { waitUntil: "networkidle" });
+  await expect(page.locator("#stt-provider")).toBeVisible();
+  await page.goto(`${APP}#/settings/listen`, { waitUntil: "networkidle" });
+  await expect(page.locator("#listen-settings")).toBeVisible();
+  await page.goto(`${APP}#/settings/about`, { waitUntil: "networkidle" });
   await expect(page.locator("#build-info h2")).toHaveText("Build");
 
   // The cards consumed their endpoints. The frontend bundle hash is read
@@ -2517,7 +2523,7 @@ async function apiUninstall(page, shell) {
 // the same way a real user's click would — a raw fetch bypasses the
 // component's response handler and leaves the displayed state stale.
 async function verifySnippetMatchesInstalled(page, shell, rcPath) {
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/shell`, { waitUntil: "networkidle" });
   const card = page.locator(`.shell-card[data-shell="${shell}"]`);
   const stateEl = card.locator('[data-role="state"]');
   await stateEl.waitFor();
@@ -2822,7 +2828,7 @@ test.describe("OSC 133: zsh", () => {
 test("settings: STT provider switch shows the right fields and auto-saves", async ({
   page,
 }) => {
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/stt`, { waitUntil: "networkidle" });
   await page.waitForSelector("#stt-provider");
   const kind = page.locator("#sttKind");
 
@@ -2910,7 +2916,7 @@ test("settings: STT provider switch shows the right fields and auto-saves", asyn
 test("settings: build-info card shows version, server hash, and frontend hash", async ({
   page,
 }) => {
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/about`, { waitUntil: "networkidle" });
   await expect(page.locator("#build-info h2")).toHaveText("Build");
   await expect(page.locator("#buildVersion")).not.toHaveText("…", {
     timeout: 6000,
@@ -2938,7 +2944,9 @@ test("settings: build-info card shows version, server hash, and frontend hash", 
 // (Home + Settings) and, separately, the terminal ribbon. Both just call
 // `location.reload()` — the only clean boot of the terminal engine (#188).
 
-test("home and settings headers expose a reload button", async ({ page }) => {
+test("the home header and the software update page expose a reload", async ({
+  page,
+}) => {
   await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
   const homeReload = page.locator(
     'button.header-icon-btn[aria-label="Reload"]',
@@ -2949,9 +2957,11 @@ test("home and settings headers expose a reload button", async ({ page }) => {
   await expect(page.locator(".app-wordmark")).toBeVisible();
 
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
-  const settingsReload = page.locator(
-    'button.header-icon-btn[aria-label="Reload"]',
-  );
+  await expect(
+    page.locator('button.header-icon-btn[aria-label="Reload"]'),
+  ).toHaveCount(0);
+  await page.goto(`${APP}#/settings/update`, { waitUntil: "networkidle" });
+  const settingsReload = page.locator("#reloadAppRow");
   await expect(settingsReload).toBeVisible();
   await Promise.all([page.waitForEvent("load"), settingsReload.click()]);
 });
@@ -3522,7 +3532,7 @@ test("settings: nodes card lists, adds, and removes nodes via PUT /api/settings/
   });
   await mockHostSuggestions(page);
 
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
   await expect(card).toBeVisible();
 
@@ -3545,8 +3555,14 @@ test("settings: nodes card lists, adds, and removes nodes via PUT /api/settings/
     { name: "lab", target: "ubuntu@lab" },
   ]);
 
-  // REMOVE puts the list without the removed node.
-  await card.locator('.node-row[data-name="devbox"] .node-remove').click();
+  // REMOVE needs a second tap on the same button: the first only arms it.
+  const removeBtn = card.locator('.node-row[data-name="devbox"] .node-remove');
+  await removeBtn.click();
+  await expect(removeBtn).toHaveText("Remove?");
+  await page.waitForTimeout(300);
+  expect(puts.length).toBe(1);
+  await expect(card.locator(".node-row")).toHaveCount(2);
+  await removeBtn.click();
   await expect(card.locator(".node-row")).toHaveCount(1);
   expect(puts[1].nodes).toEqual([{ name: "lab", target: "ubuntu@lab" }]);
 });
@@ -3566,7 +3582,7 @@ test("settings: a failed nodes save is loud and keeps the old list", async ({
   });
   await mockHostSuggestions(page);
 
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
   await card.locator("#nodeName").fill("lab");
   await fillNodeTarget(card, page, "ubuntu@lab");
@@ -3602,7 +3618,7 @@ test("settings: a failed nodes load disables editing instead of offering an empt
     hosts: [{ name: "should-not-appear", source: "ssh" }],
   });
 
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
   await expect(card).toBeVisible();
 
@@ -3673,7 +3689,7 @@ test("host suggestion sheet: renders detected hosts with source + online, tap fi
     }),
   );
 
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
   await expect(card.locator("#nodeTarget")).toBeEnabled();
   await card.locator("#nodeTarget").click();
@@ -3709,7 +3725,7 @@ test("host suggestion sheet: no detections still allows manual typing", async ({
     }),
   );
 
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
   const card = page.locator("#nodes-settings");
   await card.locator("#nodeTarget").click();
 

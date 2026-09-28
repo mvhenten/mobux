@@ -9,6 +9,7 @@
 
 import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
+import { openSettings } from './settings-nav.js';
 
 export function createInputBar(engine, send, node = '') {
   const bar = document.getElementById('inputBar');
@@ -206,13 +207,13 @@ export function createInputBar(engine, send, node = '') {
     telemetry.log('mic.wire.missing');
   }
 
-  // Settings gear — direct navigation to /settings. Phones can't always rely
+  // Settings gear — in-app navigation to settings. Phones can't always rely
   // on Back to return here (incognito back-stack is flaky), so the bar needs
   // its own way in, mirroring the desktop top bar's gear.
   const settingsBtn = document.getElementById('settingsBtn');
   if (settingsBtn) {
     settingsBtn.addEventListener('mousedown', (e) => e.preventDefault());
-    settingsBtn.addEventListener('click', (e) => { e.preventDefault(); window.location.href = '/settings'; });
+    settingsBtn.addEventListener('click', (e) => { e.preventDefault(); openSettings(); });
   }
 
   // ── Public API ────────────────────────────────────────────────────
