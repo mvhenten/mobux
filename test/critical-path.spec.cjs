@@ -208,6 +208,69 @@ test("PTY roundtrip: typing in the browser produces real output in the buffer", 
   assertNoFailures(captured);
 });
 
+test("PTY roundtrip: leaving a full-screen app repaints the screen as one synchronized update", async ({
+  page,
+}) => {
+  // The browser holds painting between ?2026h and ?2026l, so a whole-screen
+  // redraw lands as one frame instead of chunk by chunk. tmux brackets its own
+  // redraws in those markers, but only for a client that advertises the
+  // `sync` terminal feature.
+  const captured = seedErrorCapture(page);
+  const received = [];
+  page.on("websocket", (ws) => {
+    ws.on("framereceived", (frame) => received.push(String(frame.payload)));
+  });
+  const stream = () => received.join("");
+  await bootTerminal(page);
+
+  // Markers are split in the typed commands so the command-line echo never
+  // matches them.
+  await page.evaluate(() => window.__mobuxView.send("echo SYNC''BASE\r"));
+  await expect
+    .poll(() => stream().includes("SYNCBASE"), { timeout: 10000 })
+    .toBe(true);
+  const mark = stream().length;
+
+  await page.evaluate(() =>
+    window.__mobuxView.send(
+      "printf '\\033[?1049h\\033[2J'; seq 1 20; echo SYNC''ALT; sleep 0.3; printf '\\033[?1049l'\r",
+    ),
+  );
+  const restored = () => {
+    const wire = stream().slice(mark);
+    const alt = wire.indexOf("SYNCALT");
+    const base = wire.indexOf("SYNCBASE", alt);
+    return { wire, alt, base };
+  };
+  await expect
+    .poll(
+      () => {
+        const { alt, base } = restored();
+        return alt >= 0 && base > alt;
+      },
+      { message: "tmux repaints the normal screen", timeout: 10000 },
+    )
+    .toBe(true);
+  await expect
+    .poll(
+      () => {
+        const { wire, base } = restored();
+        return wire.indexOf("\x1b[?2026l", base) > base;
+      },
+      { message: "a ?2026l closes the repaint", timeout: 5000 },
+    )
+    .toBe(true);
+
+  const { wire, base } = restored();
+  const opened = wire.lastIndexOf("\x1b[?2026h", base);
+  const closedBefore = wire.lastIndexOf("\x1b[?2026l", base);
+  expect(opened, "a ?2026h opens the repaint").toBeGreaterThanOrEqual(0);
+  expect(opened, "the repaint sits inside an open update").toBeGreaterThan(
+    closedBefore,
+  );
+  assertNoFailures(captured);
+});
+
 test("PTY roundtrip: tmux split-window produces a second pane", async ({
   page,
 }) => {
