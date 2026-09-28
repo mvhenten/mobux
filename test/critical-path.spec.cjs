@@ -1552,7 +1552,7 @@ test("base: the command menu's Settings row keeps a path prefix", async ({
     document.getElementById("cmdSettingsBtn").click();
   });
 
-  await expect(page.locator(".app-header h1")).toHaveText("settings");
+  await expect(page.locator(".app-header h1")).toHaveText("Settings");
   const after = await page.evaluate(() => ({
     pathname: location.pathname,
     search: location.search,

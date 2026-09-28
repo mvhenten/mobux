@@ -5,6 +5,7 @@ import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
+import { openSettings } from "./settings-nav.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
 import {
   navigateToUrl,
@@ -291,11 +292,9 @@ export function createTerminal({
     }
   });
   on(cmdCloseBtn, "click", hideCmdList);
-  // A hash-only change of the SPA document, so the settings route mounts
-  // without a reload; the query rides along so the path stays identical.
   on(cmdSettingsBtn, "click", () => {
     hideCmdList();
-    window.location.assign(`${u("app")}${location.search}#/settings`);
+    openSettings();
   });
   on(cmdOverlayBg, "click", hideCmdList);
   on(document, "keydown", (e) => {
