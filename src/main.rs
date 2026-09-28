@@ -1169,9 +1169,10 @@ struct PaneJson {
 }
 
 /// GET /api/sessions/{name}/panes — the session's windows. `markersSeen`
-/// says the session's recorded history holds OSC 133 command blocks, so a
-/// client that has not seen a marker live yet still knows the shell
-/// integration works.
+/// says the recorded history holds OSC 133 command blocks from this tmux
+/// session, so a client that has not seen a marker live yet still knows the
+/// shell integration works. The record is keyed by session name alone, so a
+/// `node` answer never claims it.
 async fn api_list_panes(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -1182,11 +1183,19 @@ async fn api_list_panes(
     let panes = tmux::list_panes(&name, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
-    let history = state.session_history.clone();
-    let markers_seen = tokio::task::spawn_blocking(move || history.markers_seen(&name))
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-        .map_err(AppError::internal)?;
+    let markers_seen = match (&target, panes.first()) {
+        (None, Some(pane)) => {
+            let history = state.session_history.clone();
+            // tmux counts in whole seconds: a block from a killed session
+            // can end within the second its successor was created.
+            let since_ms = (pane.session_created + 1) * 1000;
+            tokio::task::spawn_blocking(move || history.markers_seen(&name, since_ms))
+                .await
+                .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+                .map_err(AppError::internal)?
+        }
+        _ => false,
+    };
     Ok(Json(
         panes
             .into_iter()

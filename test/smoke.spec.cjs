@@ -1385,6 +1385,13 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       await page.evaluate(() => window.__mobuxView.test.oscDetected()),
     ).toBe(false);
     expect(await hintHidden()).toBe(true);
+
+    // The recording outlives the tmux session: a new session under the old
+    // name, without the integration, gets the hint back.
+    tmux(`kill-session -t ${ALT}`);
+    tmux(`new-session -d -s ${ALT} ${SHELL_ENV} "bash --norc --noprofile"`);
+    await openReader(ALT, () => page.reload());
+    await expect.poll(hintHidden).toBe(false);
   } finally {
     for (const name of [ALT, PLAIN]) {
       try {
