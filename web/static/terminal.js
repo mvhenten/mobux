@@ -151,6 +151,7 @@ export function createTerminal({
   const cmdPickList = $("cmdPickList");
   const cmdOverlayBg = $("cmdOverlayBg");
   const cmdCloseBtn = $("cmdCloseBtn");
+  const cmdSettingsBtn = $("cmdSettingsBtn");
 
   // Every teardown is registered here; dispose() drains it. `on`/`later`/
   // `every` are the tracked variants of addEventListener/setTimeout/
@@ -270,6 +271,7 @@ export function createTerminal({
     cmdPickList.classList.add("visible");
     cmdOverlayBg.classList.add("visible");
     overlay.style.pointerEvents = "none";
+    cmdCloseBtn.focus({ preventScroll: true });
   }
 
   function hideCmdList() {
@@ -289,7 +291,18 @@ export function createTerminal({
     }
   });
   on(cmdCloseBtn, "click", hideCmdList);
+  // A hash-only change of the SPA document, so the settings route mounts
+  // without a reload; the query rides along so the path stays identical.
+  on(cmdSettingsBtn, "click", () => {
+    hideCmdList();
+    window.location.assign(`${u("app")}${location.search}#/settings`);
+  });
   on(cmdOverlayBg, "click", hideCmdList);
+  on(document, "keydown", (e) => {
+    if (e.key !== "Escape" || !cmdPickList.classList.contains("visible")) return;
+    e.preventDefault();
+    hideCmdList();
+  });
 
   // ── Touch gestures ──────────────────────────────────────────────────
   // While the pane is on its alternate screen the display holds no history
