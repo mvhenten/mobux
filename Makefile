@@ -218,14 +218,32 @@ test-smoke:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/smoke.spec.cjs
 
+# Pure-Node tests of the browser modules that need no page (node:test). Run
+# ahead of the critical path so CI's e2e job covers them.
+.PHONY: test-node
+test-node:
+	node --test --test-timeout=30000 test/terminal-text.test.mjs
+
 .PHONY: test-critical-path
-test-critical-path:
+test-critical-path: test-node
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/critical-path.spec.cjs
+		npx playwright test test/critical-path.spec.cjs test/touch-select.spec.cjs
+
+# Touch selection and long-press links in the live terminal view: the link
+# sheet, word selection, handle drag, copy and paste into the pane. Runs as
+# part of `make test-critical-path`; standalone here for local iteration.
+.PHONY: test-touch-select
+test-touch-select:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		npx playwright test test/touch-select.spec.cjs
 
 # Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
 # against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,

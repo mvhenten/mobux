@@ -10,7 +10,8 @@
     "build": "node web/build.js",
     "postinstall": "node web/build.js",
     "fix": "npx prettier --write 'test/**/*.cjs' 'web/spa/src/**/*.{jsx,js}'",
-    "test": "npx playwright test"
+    "test": "npx playwright test",
+    "test:node": "make test-node"
   },
   "repository": {
     "type": "git",

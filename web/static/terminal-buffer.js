@@ -616,6 +616,11 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     modes() {
       return modes;
     },
+    // Whether the application asked for pasted text to be bracketed
+    // (DECSET 2004).
+    bracketedPaste() {
+      return modes.get(2004) === true;
+    },
     synchronizedFor() {
       return syncSince === null ? null : performance.now() - syncSince;
     },
