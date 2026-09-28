@@ -4,6 +4,8 @@ const HIDDEN_FALLBACK_MS = 100;
 export function createPaintScheduler(buffer, paint) {
   let waiting = null;
   let paintedThisFrame = false;
+  let requestedThisFrame = false;
+  let requestedLastFrame = false;
   let frame = null;
   let fallback = null;
   let holdTimer = null;
@@ -16,7 +18,10 @@ export function createPaintScheduler(buffer, paint) {
     frame = null;
     fallback = null;
     paintedThisFrame = false;
-    if (waiting) run();
+    requestedLastFrame = requestedThisFrame;
+    requestedThisFrame = false;
+    if (requestedLastFrame) awaitFrame();
+    if (waiting) run(true);
   }
 
   function awaitFrame() {
@@ -25,17 +30,20 @@ export function createPaintScheduler(buffer, paint) {
     fallback = setTimeout(nextFrame, HIDDEN_FALLBACK_MS);
   }
 
-  function run() {
+  // Outside a frame callback a paint goes out at once only when the previous
+  // frame saw no chunk: a lone echo, not the first piece of a redraw.
+  function run(framed) {
     clearTimeout(holdTimer);
     holdTimer = null;
     if (!waiting) return;
-    if (paintedThisFrame && !disposed) {
+    const flowing = !framed && requestedLastFrame;
+    if (!disposed && (paintedThisFrame || flowing)) {
       awaitFrame();
       return;
     }
     const held = buffer.synchronizedFor();
     if (!disposed && held !== null && held < holdMs) {
-      holdTimer = setTimeout(run, holdMs - held);
+      holdTimer = setTimeout(() => run(true), holdMs - held);
       return;
     }
     const { resolve } = waiting;
@@ -58,7 +66,9 @@ export function createPaintScheduler(buffer, paint) {
         waiting = { promise, resolve };
       }
       const { promise } = waiting;
-      run();
+      requestedThisFrame = true;
+      awaitFrame();
+      run(false);
       return promise;
     },
     pending() {
@@ -71,7 +81,7 @@ export function createPaintScheduler(buffer, paint) {
       disposed = true;
       cancelAnimationFrame(frame);
       clearTimeout(fallback);
-      run();
+      run(true);
     },
   };
 }

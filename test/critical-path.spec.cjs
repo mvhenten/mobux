@@ -2540,8 +2540,33 @@ const frames = (page, n) =>
     }
   }, n);
 
-// The first chunk after a quiet frame is painted as it is parsed; only what
-// follows it within the same frame waits.
+// A hidden tab runs no animation frames: the terminal still connects and a
+// history reload still completes.
+test("paint: a hidden tab connects and reloads its history", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(document, "visibilityState", { get: () => "hidden" });
+    Object.defineProperty(document, "hidden", { get: () => true });
+    window.requestAnimationFrame = () => 0;
+  });
+  await page.goto(`${BASE}/app#/s/${SESSION}`, { waitUntil: "load" });
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    null,
+    { timeout: 8000, polling: 100 },
+  );
+  const reload = await page.evaluate(() =>
+    Promise.race([
+      window.__mobuxView.test.reloadHistory().then(() => "done"),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 5000)),
+    ]),
+  );
+  expect(reload).toBe("done");
+});
+
+// A chunk after a quiet frame is painted as it is parsed; chunks that keep
+// flowing are painted once per frame.
 test("paint: a keypress echo is painted without waiting for a frame", async ({
   page,
 }) => {

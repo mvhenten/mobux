@@ -717,6 +717,7 @@ export function createTerminal({
     paintCount: () => core.view.paints(),
     setSyncHold: (ms) => core.view.setSyncHold(ms),
     resize: () => core.resize(),
+    reloadHistory: () => core.reloadHistory(),
     onPtyData: (cb) => {
       core.addEventListener("data", cb);
       return () => core.removeEventListener("data", cb);

@@ -261,7 +261,8 @@ export function createRedrawWriter(buffer, renderer) {
   }
 
   const frames = createPaintScheduler(buffer, () => {
-    if (drawing) return drawing.then(() => frames.request());
+    const again = () => frames.request();
+    if (drawing) return drawing.then(again, again);
     drawing = draw().finally(() => {
       drawing = null;
     });
