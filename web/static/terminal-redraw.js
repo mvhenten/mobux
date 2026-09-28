@@ -5,6 +5,7 @@
 // scrollback once, and the viewport is repainted from the screen.
 
 import { isBlankCell, logicalLines } from "./terminal-buffer.js";
+import { createPaintScheduler } from "./paint-frame.js";
 
 const FLAGS = [
   ["isBold", 1],
@@ -104,8 +105,7 @@ export function createRedrawWriter(buffer, renderer) {
   let cursorKey = "";
   let drawnModes = new Map();
   let full = true;
-  let queue = Promise.resolve();
-  let pending = null;
+  let drawing = null;
   let disposed = false;
 
   function distanceFromBottom() {
@@ -114,6 +114,7 @@ export function createRedrawWriter(buffer, renderer) {
   }
 
   let fullRedraws = 0;
+  let paints = 0;
 
   function resetDisplay() {
     fullRedraws++;
@@ -253,34 +254,45 @@ export function createRedrawWriter(buffer, renderer) {
       out += `\x1b[?${mode}${on ? "h" : "l"}`;
     }
     if (!out) return undefined;
+    paints++;
     const written = renderer.write(out);
     if (!redraw || keep === 0) return written;
     return written.then(() => renderer.scrollLines(-keep));
   }
 
+  const frames = createPaintScheduler(buffer, () => {
+    const again = () => frames.request();
+    if (drawing) return drawing.then(again, again);
+    drawing = draw().finally(() => {
+      drawing = null;
+    });
+    return drawing;
+  });
+
   return {
-    // Bring the display up to date with the buffer. Calls made while a draw
-    // is queued share it; the promise resolves once the display reflects it.
+    // Bring the display up to date with the buffer: now, or on the next
+    // frame when this one is already painted or a draw is still reaching the
+    // display. The promise resolves once the display reflects it.
     flush() {
-      if (pending) return pending;
-      pending = queue = queue.then(() => {
-        pending = null;
-        return draw();
-      });
-      return pending;
+      return frames.request();
     },
-    // Resolves once every queued draw has reached the display.
+    // Resolves once every requested draw has reached the display.
     settle() {
-      return queue;
+      return Promise.resolve(frames.pending()).then(() => drawing);
     },
     invalidate() {
       full = true;
     },
+    setSyncHold: (ms) => frames.setSyncHold(ms),
     fullRedraws() {
       return fullRedraws;
     },
+    paints() {
+      return paints;
+    },
     dispose() {
       disposed = true;
+      frames.dispose();
     },
   };
 }

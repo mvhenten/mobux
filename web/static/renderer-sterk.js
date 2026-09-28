@@ -24,6 +24,7 @@ import { createScreenSource } from "./terminal-screen-source.js";
 
 // The grid the engine starts its buffer at, before the first measure.
 const BOOT_GRID = { cols: 120, rows: 35 };
+const HIDDEN_FALLBACK_MS = 100;
 
 // Trailing punctuation is not part of the URL. xterm's WebLinks addon forbids
 // a URL ending in punctuation (its final character class excludes `.,:!?` and
@@ -124,11 +125,38 @@ export function createSterkRenderer(host, options = {}) {
       throw err;
     }
     cleanups.push(view.registerLinkProvider({ provideLinks }));
+    // The view renders on an animation frame, which a hidden tab never
+    // runs; there the change counts as drawn once the view has it.
+    const unrendered = new Set();
+    const settleRender = (wait) => {
+      unrendered.delete(wait);
+      clearTimeout(wait.timer);
+      wait.sub.dispose();
+      wait.resolve();
+    };
+    let rendered = Promise.resolve();
+    cleanups.push(
+      source.subscribe(() => {
+        rendered = new Promise((resolve) => {
+          const wait = { resolve };
+          wait.sub = view.onRender(() => settleRender(wait));
+          const whileHidden = () => {
+            if (document.visibilityState === "hidden") settleRender(wait);
+            else wait.timer = setTimeout(whileHidden, HIDDEN_FALLBACK_MS);
+          };
+          wait.timer = setTimeout(whileHidden, HIDDEN_FALLBACK_MS);
+          unrendered.add(wait);
+        });
+      }),
+      { dispose: () => [...unrendered].forEach(settleRender) },
+    );
     return {
-      flush: () => Promise.resolve(),
-      settle: () => view.refresh(),
+      flush: () => source.settle().then(() => rendered),
+      settle: () => source.settle().then(() => view.refresh()),
       invalidate() {},
       fullRedraws: () => source.fullRepaints(),
+      paints: () => source.paints(),
+      setSyncHold: (ms) => source.setSyncHold(ms),
       dispose: () => source.dispose(),
     };
   }

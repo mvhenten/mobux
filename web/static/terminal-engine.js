@@ -189,6 +189,12 @@ export class TerminalEngine extends EventTarget {
     this._oscAOpen = false;
     // Serializes _ingestPtyData calls — see that method's doc comment.
     this._ingestChain = Promise.resolve();
+    this._ingestQueued = [];
+    this._ingestNext = null;
+    // Wheel notches wait for the next frame and go to tmux as one message.
+    this._wheelQueued = "";
+    this._wheelFrame = null;
+    this._wheelFallback = null;
 
     this.buffer = createTerminalBuffer({
       scrollback,
@@ -340,6 +346,11 @@ export class TerminalEngine extends EventTarget {
   }
 
   send(data) {
+    this._sendWheels();
+    this._send(data);
+  }
+
+  _send(data) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(data);
     }
@@ -359,6 +370,8 @@ export class TerminalEngine extends EventTarget {
     } catch (_) {}
     this.ws = null;
     this._disposed = true;
+    cancelAnimationFrame(this._wheelFrame);
+    clearTimeout(this._wheelFallback);
     clearTimeout(this._historyTimer);
     clearTimeout(this._historyMaxTimer);
     try {
@@ -381,7 +394,7 @@ export class TerminalEngine extends EventTarget {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const { cols, rows } = this.renderer.measure();
     this._resizeBuffer(cols, rows);
-    this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+    this.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
   _resizeBuffer(cols, rows) {
@@ -395,13 +408,13 @@ export class TerminalEngine extends EventTarget {
   _forceRedraw() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const { cols, rows } = this.renderer.measure();
-    this.ws.send(
+    this.send(
       JSON.stringify({ type: "resize", cols, rows: Math.max(2, rows - 1) }),
     );
     setTimeout(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       this._resizeBuffer(cols, rows);
-      this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      this.send(JSON.stringify({ type: "resize", cols, rows }));
     }, 50);
   }
 
@@ -456,10 +469,10 @@ export class TerminalEngine extends EventTarget {
   // behind it (finalize on the first candidate found in a chunk; bound the
   // search by the next A, not B/C/D). Every PTY write funnels through here
   // (both the live WS stream and the public write() passthrough) so there
-  // is exactly one attribution path regardless of entry point. Nothing is
-  // ever withheld from rendering — every byte is parsed into the screen as
-  // soon as it's available; only the bookkeeping (which row is "the" prompt
-  // row) is deferred.
+  // is exactly one attribution path regardless of entry point. Attribution
+  // withholds nothing: every byte is parsed into the screen as soon as it's
+  // available; only the bookkeeping (which row is "the" prompt row) is
+  // deferred. When the display draws it is up to the view (paint-frame.js).
   //
   // Chunks are processed strictly one at a time through `_ingestChain`: a
   // WS `onmessage` handler doesn't await the previous call before the next
@@ -472,14 +485,20 @@ export class TerminalEngine extends EventTarget {
     return this.markers.map;
   }
 
+  // Chunks that arrive while one is being parsed are parsed together next,
+  // and the display is drawn on the next frame rather than per chunk.
   _ingestPtyData(raw) {
-    const str = oscInputToString(raw);
+    this._ingestQueued.push(oscInputToString(raw));
+    if (this._ingestNext) return this._ingestNext;
     const step = async () => {
-      await this._consumeChunk(str);
-      await this.view.flush();
+      this._ingestNext = null;
+      const text = this._ingestQueued.join("");
+      this._ingestQueued = [];
+      await this._consumeChunk(text);
+      this.view.flush();
     };
-    this._ingestChain = this._ingestChain.then(step, step);
-    return this._ingestChain;
+    this._ingestNext = this._ingestChain = this._ingestChain.then(step, step);
+    return this._ingestNext;
   }
 
   async _consumeChunk(text) {
@@ -558,18 +577,29 @@ export class TerminalEngine extends EventTarget {
   }
   // One wheel notch at a 0-based cell, in the mouse format tmux asked its
   // client for. tmux hands it to the pane app in the app's format, or
-  // scrolls copy-mode when the app tracks no mouse.
+  // scrolls copy-mode when the app tracks no mouse. The notches of one frame
+  // go out together, ahead of anything sent after them.
   sendWheel(up, col, row) {
     const button = up ? 64 : 65;
-    if (this.buffer.mouse().sgr) {
-      this.send(`\x1b[<${button};${col + 1};${row + 1}M`);
-      return;
-    }
     // X10 bytes above 127 would not survive the text frame.
     const cell = (n) => String.fromCharCode(33 + Math.min(n, 93));
-    this.send(
-      `\x1b[M${String.fromCharCode(32 + button)}${cell(col)}${cell(row)}`,
-    );
+    this._wheelQueued += this.buffer.mouse().sgr
+      ? `\x1b[<${button};${col + 1};${row + 1}M`
+      : `\x1b[M${String.fromCharCode(32 + button)}${cell(col)}${cell(row)}`;
+    if (this._wheelFrame !== null) return;
+    const flush = () => this._sendWheels();
+    this._wheelFrame = requestAnimationFrame(flush);
+    this._wheelFallback = setTimeout(flush, 100);
+  }
+
+  _sendWheels() {
+    cancelAnimationFrame(this._wheelFrame);
+    clearTimeout(this._wheelFallback);
+    this._wheelFrame = null;
+    this._wheelFallback = null;
+    const wheels = this._wheelQueued;
+    this._wheelQueued = "";
+    if (wheels) this._send(wheels);
   }
   focus() {
     this.renderer.focus();

@@ -23,6 +23,9 @@ const MIRRORED_MODES = [1, 25, 2004];
 const MOUSE_TRACKING_MODES = new Set([1000, 1002, 1003]);
 const MOUSE_SGR_MODE = 1006;
 
+// Synchronized output: the app asks for nothing to be drawn until it ends.
+const SYNC_MODE = 2026;
+
 const ESC_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|.)/g;
 
 const DEFAULT_STYLE = {
@@ -287,6 +290,7 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
   // A screen switch reports a scroll of its own; it moves no rows.
   let switching = false;
   const SCREEN_SWITCHES = new Set([47, 1047, 1049]);
+  let syncSince = null;
   const subs = ["h", "l"].map((final) =>
     screen.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
       for (const m of params.map(scalar)) {
@@ -295,6 +299,10 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
           mouseModes.set(m, final === "h");
         }
         if (SCREEN_SWITCHES.has(m)) switching = true;
+        if (m === SYNC_MODE) {
+          if (final === "l") syncSince = null;
+          else syncSince ??= performance.now();
+        }
       }
       return false;
     }),
@@ -607,6 +615,9 @@ export function createTerminalBuffer({ cols, rows, scrollback }) {
     },
     modes() {
       return modes;
+    },
+    synchronizedFor() {
+      return syncSince === null ? null : performance.now() - syncSince;
     },
     mouse() {
       const tracking = [...MOUSE_TRACKING_MODES].some((m) => mouseModes.get(m));
