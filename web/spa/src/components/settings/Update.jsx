@@ -31,7 +31,8 @@ function fmtCheckedAt(iso) {
   }
 }
 
-const show = (msg, kind) => (status.value = { msg, kind });
+const show = (msg, kind, reload = false) =>
+  (status.value = { msg, kind, reload });
 
 async function load(force) {
   const path = force ? "/api/update/check" : "/api/update/status";
@@ -67,8 +68,9 @@ async function watchForNewVersion(fromVersion, logPath) {
         const id = await res.json();
         if (id.version && id.version !== fromVersion) {
           show(
-            `Updated to ${id.version}. Reload the app to pick up the new UI.`,
+            `Updated to ${id.version}. Reload to pick up the new UI.`,
             "ok",
+            true,
           );
           busy.value = false;
           return;
@@ -197,7 +199,19 @@ export function UpdateCard() {
           )}
         </Actions>
       </Group>
-      <Status id="updateStatus" status={status.value} />
+      <Status
+        id="updateStatus"
+        status={status.value}
+        action={
+          status.value?.reload
+            ? {
+                id: "updateReloadBtn",
+                label: "Reload",
+                onClick: () => location.reload(),
+              }
+            : null
+        }
+      />
       {s.error && (
         <Status
           id="updateCheckError"

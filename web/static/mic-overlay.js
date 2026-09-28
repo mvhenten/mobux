@@ -16,6 +16,7 @@
 // House style: muted, low-contrast palette. Android-only target.
 
 import { u } from './base.js';
+import { linkToSettings } from './settings-nav.js';
 
 // One place for the fault-reason mapping so logs and UI agree. `kind` is a
 // stable short code; the overlay shows {title, detail}. Pass `extra` to fill
@@ -756,7 +757,11 @@ export function createMicOverlay(handlers) {
 
           const a = document.createElement('a');
           a.className = 'mo-action';
-          a.href = u('settings');
+          linkToSettings(a, '/settings/stt');
+          a.addEventListener('click', () => {
+            dismiss();
+            if (typeof handlers.onDismiss === 'function') handlers.onDismiss();
+          });
           a.textContent = 'Open settings';
           actionArea.appendChild(a);
         });

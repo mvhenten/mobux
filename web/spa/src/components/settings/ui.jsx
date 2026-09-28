@@ -4,7 +4,7 @@ import { useLocation } from "wouter-preact";
 // In-app pushes carry `mobuxBack` so a back control knows the previous
 // history entry is a screen of this app and can pop to it; a deep link or a
 // fresh load has no such entry, so back replaces with the parent instead.
-export const IN_APP = { mobuxBack: true };
+const IN_APP = { mobuxBack: true };
 
 export function useSettingsNav() {
   const [, navigate] = useLocation();
@@ -78,12 +78,12 @@ export function NavRow({ to, label, secondary, value, row }) {
   );
 }
 
-export function ActionRow({ id, label, onClick, disabled, tone }) {
+export function ActionRow({ id, label, onClick, disabled }) {
   return (
     <button
       type="button"
       id={id}
-      class={"settings-row settings-row--action" + (tone ? ` is-${tone}` : "")}
+      class="settings-row settings-row--action"
       disabled={disabled}
       onClick={onClick}
     >
@@ -274,7 +274,7 @@ export function ConfirmButton({
 // a Details toggle.
 const LONG = 60;
 
-export function Status({ id, status, kind }) {
+export function Status({ id, status, kind, action }) {
   if (!status) return null;
   const msg = typeof status === "string" ? status : status.msg;
   const k =
@@ -297,8 +297,22 @@ export function Status({ id, status, kind }) {
     );
   }
   return (
-    <div id={id} class={cls} role="status">
+    <div
+      id={id}
+      class={cls + (action ? " settings-status--action" : "")}
+      role="status"
+    >
       <span class="settings-status-line">{msg}</span>
+      {action && (
+        <Button
+          id={action.id}
+          variant="primary"
+          class="btn--inline"
+          onClick={action.onClick}
+        >
+          {action.label}
+        </Button>
+      )}
     </div>
   );
 }

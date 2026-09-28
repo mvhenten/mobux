@@ -40,6 +40,7 @@ import {
   refreshEngineState,
 } from "./speech.js";
 import * as prefs from "./prefs.js";
+import { linkToSettings } from "./settings-nav.js";
 
 const RENDER_THROTTLE_MS = 50;
 
@@ -116,8 +117,9 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
     el.className = "reader-osc-hint";
     el.hidden = true;
     el.innerHTML =
-      '<span>Reader uses heuristics. <a href="/settings#shell-integration">Set up OSC 133 →</a></span>' +
+      '<span>Reader uses heuristics. <a class="reader-osc-link">Set up OSC 133 →</a></span>' +
       '<button type="button" class="reader-osc-dismiss" aria-label="Dismiss">×</button>';
+    linkToSettings(el.querySelector(".reader-osc-link"), "/settings/shell");
     el.querySelector(".reader-osc-dismiss").addEventListener("click", () => {
       prefs.set("osc133_hint_dismissed", true);
       el.hidden = true;

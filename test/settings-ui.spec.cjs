@@ -41,9 +41,9 @@ test.afterAll(() => {
 const hash = (page) => page.evaluate(() => location.hash);
 
 const notificationsPut = (page) =>
-  page.waitForRequest(
+  page.waitForResponse(
     (r) =>
-      r.method() === "PUT" &&
+      r.request().method() === "PUT" &&
       new URL(r.url()).pathname === "/api/settings/notifications",
   );
 
@@ -125,12 +125,14 @@ test("a notification switch saves through PUT /api/settings/notifications", asyn
 
   const put = notificationsPut(page);
   await page.locator('[data-switch="bell"]').click();
-  expect(JSON.parse((await put).postData()).bell).toBe(!before);
+  expect(JSON.parse((await put).request().postData()).bell).toBe(!before);
   await expect(sw).toBeChecked({ checked: !before });
 
   const restore = notificationsPut(page);
   await page.locator('[data-switch="bell"]').click();
-  expect(JSON.parse((await restore).postData()).bell).toBe(before);
+  const restored = await restore;
+  expect(restored.ok()).toBe(true);
+  expect(JSON.parse(restored.request().postData()).bell).toBe(before);
 });
 
 test("the terminal gear opens settings without a reload and back returns to the terminal", async ({
@@ -160,4 +162,124 @@ test("the terminal gear opens settings without a reload and back returns to the 
     null,
     { timeout: 15000 },
   );
+});
+
+test("the desktop top-bar gear opens settings without a reload", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    hasTouch: false,
+    isMobile: false,
+    ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${APP}#/s/${SESSION}`, { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#mobux-top-bar")).toHaveCount(1);
+    await page.evaluate(() => (window.__settingsNoReload = true));
+
+    await page.locator('#mobux-top-bar button[title="Settings"]').click();
+    await expect.poll(() => hash(page)).toBe("#/settings");
+    await expect(page.locator('[data-row="about"]')).toBeVisible();
+    expect(await page.evaluate(() => window.__settingsNoReload)).toBe(true);
+
+    await page.locator(".settings-back").click();
+    await expect.poll(() => hash(page)).toBe(`#/s/${SESSION}`);
+    expect(await page.evaluate(() => window.__settingsNoReload)).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("dragging the Listen rate slider saves the preference once", async ({
+  page,
+}) => {
+  const puts = [];
+  page.on("request", (r) => {
+    if (
+      r.method() === "PUT" &&
+      new URL(r.url()).pathname === "/api/settings/preferences"
+    )
+      puts.push(JSON.parse(r.postData()));
+  });
+  await page.goto(`${APP}#/settings/listen`, { waitUntil: "networkidle" });
+  test.skip(
+    !(await page.locator("#listenCapable").isVisible()),
+    "no speech synthesis in this browser",
+  );
+
+  const slider = page.locator("#listenRate");
+  const box = await slider.boundingBox();
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + box.width * 0.33, y);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++) {
+    await page.mouse.move(box.x + box.width * (0.33 + i * 0.05), y);
+  }
+  await page.mouse.up();
+
+  await expect(page.locator("#listenRateValue")).not.toHaveText("1.0");
+  await expect.poll(() => puts.length).toBe(1);
+  await page.waitForTimeout(500);
+  expect(puts.length).toBe(1);
+  expect(puts[0].listen_rate).toBeGreaterThan(1.0);
+});
+
+test("an armed node Remove disarms after its timeout", async ({ page }) => {
+  await page.clock.install();
+  await page.route(/\/api\/settings\/nodes$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        nodes: [{ name: "devbox", target: "me@devbox" }],
+      }),
+    }),
+  );
+  await page.goto(`${APP}#/settings/nodes`, { waitUntil: "networkidle" });
+  const remove = page.locator('.node-row[data-name="devbox"] .node-remove');
+  await remove.click();
+  await expect(remove).toHaveText("Remove?");
+  await page.clock.fastForward(5000);
+  await expect(remove).toHaveText("Remove");
+});
+
+test("Update now needs a second tap and then starts the update", async ({
+  page,
+}) => {
+  const available = {
+    current: "0.1.0",
+    latest: "999.0.0",
+    available: true,
+    checkedAt: new Date().toISOString(),
+  };
+  await page.route(/\/api\/update\/(status|check)$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(available),
+    }),
+  );
+  let runs = 0;
+  await page.route(/\/api\/update\/run$/, (route) => {
+    runs += 1;
+    return route.fulfill({
+      status: 412,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { message: "updates disabled in tests" } }),
+    });
+  });
+
+  await page.goto(`${APP}#/settings/update`, { waitUntil: "networkidle" });
+  const run = page.locator("#updateRunBtn");
+  await expect(run).toHaveText("Update to 999.0.0");
+  await run.click();
+  await expect(run).toHaveText("Tap again to update");
+  expect(runs).toBe(0);
+  await run.click();
+  await expect(page.locator("#updateStatus")).toContainText(
+    "updates disabled in tests",
+  );
+  expect(runs).toBe(1);
 });

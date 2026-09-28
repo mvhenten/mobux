@@ -239,7 +239,6 @@ label.settings-row { cursor: pointer; }
 .settings-row--select:active,
 .settings-row--action:active:not(:disabled) { background: var(--surface-press); }
 .settings-row--action { color: var(--accent); }
-.settings-row--action.is-danger { color: var(--danger); }
 .settings-row--action:disabled { opacity: 0.4; cursor: not-allowed; }
 .settings-row--hint { color: var(--muted); font-size: 14px; }
 
@@ -252,13 +251,15 @@ label.settings-row { cursor: pointer; }
 }
 .settings-title { font-size: 16px; line-height: 1.3; }
 .settings-label small {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.35;
-  white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 .settings-label code,
 .settings-label small code {
@@ -413,6 +414,12 @@ label.settings-row { cursor: pointer; }
 .settings-label .settings-status { margin: 0; }
 .settings-status--ok { color: var(--ok); }
 .settings-status--error { color: var(--danger); }
+.settings-status--action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.settings-status--action .settings-status-line { flex: 1 1 auto; min-width: 0; }
 .settings-status-line {
   display: block;
   white-space: nowrap;
