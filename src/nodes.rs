@@ -24,16 +24,16 @@ pub fn build_attach_command(
     session_name: &str,
 ) -> CommandBuilder {
     // tmux wraps its redraws in synchronized-output markers (?2026h/?2026l)
-    // only for a client whose TERM has the `sync` feature, and it does not
-    // infer that for xterm-256color. The grep guard keeps repeated attaches
-    // from appending a duplicate entry to the server-wide array each time.
+    // only for a client with the `sync` feature, which it does not infer for
+    // xterm-256color. `-T` scopes the feature to this client; tmux older than
+    // 3.2 rejects the flag, so probe it and attach without it there.
     let tmux_setup = format!(
-        "{tmux} show-options -sv terminal-features 2>/dev/null | grep -qxF 'xterm-256color:sync' || \
-         {tmux} set-option -as terminal-features ',xterm-256color:sync' 2>/dev/null; \
-         {tmux} set-option -g mouse on 2>/dev/null; \
+        "{tmux} set-option -g mouse on 2>/dev/null; \
          {tmux} set-option -g allow-passthrough on 2>/dev/null; \
          {tmux} set-window-option -g aggressive-resize on 2>/dev/null; \
-         {tmux} attach-session -t {session}",
+         if {tmux} -T sync -V >/dev/null 2>&1; \
+         then {tmux} -T sync attach-session -t {session}; \
+         else {tmux} attach-session -t {session}; fi",
         tmux = tmux_bin,
         session = session_name,
     );
@@ -149,27 +149,23 @@ mod tests {
         assert!(argv[2].contains("tmux attach-session -t demo"));
     }
 
-    fn assert_advertises_sync_before_attach(script: &str) {
-        let sync = script
-            .find("tmux set-option -as terminal-features ',xterm-256color:sync' 2>/dev/null;")
-            .expect("sync terminal feature is set");
-        let guard = script
-            .find("tmux show-options -sv terminal-features 2>/dev/null | grep -qxF 'xterm-256color:sync' ||")
-            .expect("sync feature is only appended once");
-        let attach = script.find("tmux attach-session -t demo").unwrap();
-        assert!(guard < sync && sync < attach);
+    fn assert_attaches_with_sync_and_falls_back(script: &str) {
+        assert!(script.contains("if tmux -T sync -V >/dev/null 2>&1;"));
+        assert!(script.contains("then tmux -T sync attach-session -t demo;"));
+        assert!(script.contains("else tmux attach-session -t demo; fi"));
+        assert!(!script.contains("terminal-features"));
     }
 
     #[test]
     fn build_attach_command_local_advertises_sync() {
         let cmd = build_attach_command(None, "tmux", "demo");
-        assert_advertises_sync_before_attach(&argv(&cmd)[2]);
+        assert_attaches_with_sync_and_falls_back(&argv(&cmd)[2]);
     }
 
     #[test]
     fn build_attach_command_remote_advertises_sync() {
         let cmd = build_attach_command(Some("mvhenten@gpu-box"), "tmux", "demo");
-        assert_advertises_sync_before_attach(&argv(&cmd)[3]);
+        assert_attaches_with_sync_and_falls_back(&argv(&cmd)[3]);
     }
 
     #[test]

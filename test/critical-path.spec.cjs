@@ -208,45 +208,63 @@ test("PTY roundtrip: typing in the browser produces real output in the buffer", 
   assertNoFailures(captured);
 });
 
-test("PTY roundtrip: a full-screen repaint arrives wrapped in a synchronized update", async ({
+test("PTY roundtrip: leaving a full-screen app repaints the screen as one synchronized update", async ({
   page,
 }) => {
-  // The browser holds painting between ?2026h and ?2026l, so a full-screen
-  // app redraws once instead of chunk by chunk. tmux only emits those markers
-  // when the attach advertises the `sync` terminal feature.
+  // The browser holds painting between ?2026h and ?2026l, so a whole-screen
+  // redraw lands as one frame instead of chunk by chunk. tmux brackets its own
+  // redraws in those markers, but only for a client that advertises the
+  // `sync` terminal feature.
   const captured = seedErrorCapture(page);
   const received = [];
   page.on("websocket", (ws) => {
     ws.on("framereceived", (frame) => received.push(String(frame.payload)));
   });
+  const stream = () => received.join("");
   await bootTerminal(page);
 
-  // The painted marker is split in the typed command so the echo of the
-  // command line never matches it.
+  // Markers are split in the typed commands so the command-line echo never
+  // matches them.
+  await page.evaluate(() => window.__mobuxView.send("echo SYNC''BASE\r"));
+  await expect
+    .poll(() => stream().includes("SYNCBASE"), { timeout: 10000 })
+    .toBe(true);
+  const mark = stream().length;
+
   await page.evaluate(() =>
     window.__mobuxView.send(
-      "printf '\\033[?1049h'; for i in 1 2 3; do printf '\\033[H\\033[2J'; seq 1 20; echo SYNC''PAINT; sleep 0.2; done; printf '\\033[?1049l'\r",
+      "printf '\\033[?1049h\\033[2J'; seq 1 20; echo SYNC''ALT; sleep 0.3; printf '\\033[?1049l'\r",
     ),
   );
-
-  const stream = () => received.join("");
-  const closedAfterPaint = () => {
-    const wire = stream();
-    const paint = wire.indexOf("SYNCPAINT");
-    return paint >= 0 && wire.indexOf("\x1b[?2026l", paint) > paint;
+  const restored = () => {
+    const wire = stream().slice(mark);
+    const alt = wire.indexOf("SYNCALT");
+    const base = wire.indexOf("SYNCBASE", alt);
+    return { wire, alt, base };
   };
   await expect
-    .poll(closedAfterPaint, {
-      message: "a ?2026l closes the repaint",
-      timeout: 10000,
-    })
+    .poll(
+      () => {
+        const { alt, base } = restored();
+        return alt >= 0 && base > alt;
+      },
+      { message: "tmux repaints the normal screen", timeout: 10000 },
+    )
+    .toBe(true);
+  await expect
+    .poll(
+      () => {
+        const { wire, base } = restored();
+        return wire.indexOf("\x1b[?2026l", base) > base;
+      },
+      { message: "a ?2026l closes the repaint", timeout: 5000 },
+    )
     .toBe(true);
 
-  const wire = stream();
-  const paint = wire.indexOf("SYNCPAINT");
-  const opened = wire.lastIndexOf("\x1b[?2026h", paint);
-  const closedBefore = wire.lastIndexOf("\x1b[?2026l", paint);
-  expect(opened, "a ?2026h precedes the repaint").toBeGreaterThanOrEqual(0);
+  const { wire, base } = restored();
+  const opened = wire.lastIndexOf("\x1b[?2026h", base);
+  const closedBefore = wire.lastIndexOf("\x1b[?2026l", base);
+  expect(opened, "a ?2026h opens the repaint").toBeGreaterThanOrEqual(0);
   expect(opened, "the repaint sits inside an open update").toBeGreaterThan(
     closedBefore,
   );
