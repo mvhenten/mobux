@@ -1383,6 +1383,103 @@ test("OSC 133 ; A wrapped in tmux DCS passthrough reaches libterm", async ({
   }
 });
 
+// The reader's "install shell integration" hint must speak only while a
+// prompt is on screen and no marker was ever seen. A pane already inside a
+// full-screen app sends no marker until the app quits, and a reload drops
+// every marker seen live, so both cases lean on the server: the panes
+// answer's `alternateOn`, and `markersSeen` from the recorded history.
+test("reader hides the OSC 133 hint on the alternate screen and after a reload", async ({
+  page,
+}, testInfo) => {
+  // The recording outlives a session, so every run needs names no earlier
+  // run recorded under.
+  const run = `${testInfo.project.name}-${Date.now()}`;
+  const ALT = `${SESSION}-osc-alt-${run}`;
+  const PLAIN = `${SESSION}-osc-plain-${run}`;
+  for (const name of [ALT, PLAIN]) {
+    try {
+      tmux(`kill-session -t ${name}`);
+    } catch (_) {}
+  }
+
+  const hintHidden = () =>
+    page.evaluate(() => {
+      const el = document.querySelector("#reader .reader-osc-hint");
+      return el ? el.hidden : null;
+    });
+  const openReader = async (name, navigate) => {
+    const panes = page.waitForResponse((r) =>
+      r.url().includes(`/api/sessions/${name}/panes`),
+    );
+    await navigate();
+    await page.waitForFunction(
+      () => window.__mobuxView?.test?.wsReady?.() === true,
+      { timeout: 5000 },
+    );
+    await panes;
+    await page.evaluate(() => window.__mobuxView.swap("reader"));
+    await page.waitForTimeout(300);
+  };
+
+  tmux(`new-session -d -s ${PLAIN} ${SHELL_ENV} "bash --norc --noprofile"`);
+  const create = await page.request.post(`${BASE}/api/sessions`, {
+    data: { name: ALT },
+  });
+  expect(create.ok()).toBeTruthy();
+
+  try {
+    await openReader(PLAIN, () => page.goto(`${BASE}/app#/s/${PLAIN}`));
+    await expect.poll(hintHidden).toBe(false);
+
+    tmux(`send-keys -t ${ALT} "seq 1 5000 | less" Enter`);
+    await expect
+      .poll(() =>
+        tmux(`display-message -p -t ${ALT} "#{alternate_on}"`)
+          .toString()
+          .trim(),
+      )
+      .toBe("1");
+
+    await openReader(ALT, () => page.goto(`${BASE}/app#/s/${ALT}`));
+    expect(await hintHidden()).toBe(true);
+
+    await waitForClientAttached(tmux, ALT);
+    tmux(`send-keys -t ${ALT} q`);
+    tmux(`send-keys -t ${ALT} "echo recorded" Enter`);
+    await expect
+      .poll(
+        async () => {
+          const res = await page.request.get(
+            `${BASE}/api/sessions/${ALT}/panes`,
+          );
+          const panes = await res.json();
+          return panes.some((p) => p.markersSeen === true);
+        },
+        { timeout: 10000 },
+      )
+      .toBe(true);
+
+    await openReader(ALT, () => page.reload());
+    expect(
+      await page.evaluate(() => window.__mobuxView.test.oscDetected()),
+    ).toBe(false);
+    expect(await hintHidden()).toBe(true);
+
+    // The recording outlives the tmux session: a new session under the old
+    // name, without the integration, gets the hint back.
+    tmux(`kill-session -t ${ALT}`);
+    tmux(`new-session -d -s ${ALT} ${SHELL_ENV} "bash --norc --noprofile"`);
+    await openReader(ALT, () => page.reload());
+    await expect.poll(hintHidden).toBe(false);
+  } finally {
+    for (const name of [ALT, PLAIN]) {
+      try {
+        tmux(`kill-session -t ${name}`);
+      } catch (_) {}
+    }
+  }
+});
+
 test("reader strips trailing default-attr whitespace from lines", async ({
   page,
 }) => {

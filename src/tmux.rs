@@ -780,9 +780,12 @@ pub struct Pane {
     pub alternate_on: bool,
     pub status_lines: u16,
     pub status_position: String,
+    /// When tmux created the session, in seconds since the epoch.
+    #[serde(skip)]
+    pub session_created: i64,
 }
 
-const WINDOW_FORMAT: &str = "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{status}:#{status-position}:#{window_name}";
+const WINDOW_FORMAT: &str = "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{status}:#{status-position}:#{session_created}:#{window_name}";
 
 // `#{status}` is `on`, `off` or a line count.
 fn parse_status_lines(status: &str) -> u16 {
@@ -797,8 +800,8 @@ fn parse_windows(stdout: &str) -> Vec<Pane> {
     stdout
         .lines()
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(7, ':').collect();
-            let [id, index, active, alternate_on, status, status_position, title] =
+            let parts: Vec<&str> = line.splitn(8, ':').collect();
+            let [id, index, active, alternate_on, status, status_position, created, title] =
                 parts.as_slice()
             else {
                 return None;
@@ -811,6 +814,7 @@ fn parse_windows(stdout: &str) -> Vec<Pane> {
                 alternate_on: *alternate_on == "1",
                 status_lines: parse_status_lines(status),
                 status_position: status_position.to_string(),
+                session_created: created.parse().unwrap_or(0),
             })
         })
         .collect()
@@ -1420,7 +1424,9 @@ mod tests {
 
     #[test]
     fn parse_windows_reads_screen_status_and_a_name_with_colons() {
-        let panes = parse_windows("@1:0:1:1:on:bottom:claude: a:b\n@2:1:0:0:2:top:bash\n");
+        let panes = parse_windows(
+            "@1:0:1:1:on:bottom:1700000000:claude: a:b\n@2:1:0:0:2:top:1700000000:bash\n",
+        );
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[0].id, "@1");
         assert_eq!(panes[0].title, "claude: a:b");
@@ -1428,6 +1434,7 @@ mod tests {
         assert!(panes[0].alternate_on);
         assert_eq!(panes[0].status_lines, 1);
         assert_eq!(panes[0].status_position, "bottom");
+        assert_eq!(panes[0].session_created, 1_700_000_000);
         assert!(!panes[1].active);
         assert!(!panes[1].alternate_on);
         assert_eq!(panes[1].status_lines, 2);
@@ -1436,7 +1443,7 @@ mod tests {
 
     #[test]
     fn parse_windows_reads_status_off_and_skips_short_lines() {
-        let panes = parse_windows("@1:0:1:0:off:bottom:sh\n@2:1:0\n");
+        let panes = parse_windows("@1:0:1:0:off:bottom:1700000000:sh\n@2:1:0\n");
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].status_lines, 0);
     }

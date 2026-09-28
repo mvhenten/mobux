@@ -57,6 +57,8 @@ test("reader: plain text is proportional, prompt/code stay monospace", async ({
       snapshot: () => ({ lines: snapshotLines, status: null }),
       subscribe: () => ({ dispose: () => {} }),
       onOscDetected: () => ({ dispose: () => {} }),
+      onPanes: () => ({ dispose: () => {} }),
+      alternateOn: false,
       oscDetected: true,
     };
 

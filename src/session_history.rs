@@ -745,6 +745,15 @@ const BACKWARD_CHUNK: usize = 64 * 1024;
 struct SessionSlot {
     last_seq: u64,
     entry_count: u64,
+    last_command_at: Option<i64>,
+}
+
+/// When a recorded line's command block ended, if the line is one. Only an
+/// OSC 133 `C` opens a command block, so these are the shell integration's
+/// footprint in the record.
+fn command_ended_at(line: &serde_json::Value) -> Option<i64> {
+    line.get("command")?;
+    line.get("endedAt")?.as_i64()
 }
 
 pub struct SessionHistoryStore {
@@ -803,22 +812,28 @@ impl SessionHistoryStore {
     }
 
     fn slot(&self, session: &str) -> anyhow::Result<Arc<Mutex<SessionSlot>>> {
-        let mut slots = self
-            .slots
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session history slots lock poisoned"))?;
-        if let Some(existing) = slots.get(session) {
+        let lock = || {
+            self.slots
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session history slots lock poisoned"))
+        };
+        if let Some(existing) = lock()?.get(session) {
             return Ok(existing.clone());
         }
+        // Read the file without the lock every session shares. A racing
+        // caller may hydrate too; the first insert wins, and no append can
+        // land before a slot exists.
         let hydrated = Self::hydrate(&self.file_path(session));
-        let arc = Arc::new(Mutex::new(hydrated));
-        slots.insert(session.to_string(), arc.clone());
-        Ok(arc)
+        Ok(lock()?
+            .entry(session.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(hydrated)))
+            .clone())
     }
 
     fn hydrate(path: &Path) -> SessionSlot {
         let mut last_seq = 0u64;
         let mut entry_count = 0u64;
+        let mut last_command_at = None;
         if let Ok(f) = File::open(path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
@@ -829,12 +844,14 @@ impl SessionHistoryStore {
                     if let Some(seq) = v.get("seq").and_then(|s| s.as_u64()) {
                         last_seq = last_seq.max(seq);
                     }
+                    last_command_at = last_command_at.max(command_ended_at(&v));
                 }
             }
         }
         SessionSlot {
             last_seq,
             entry_count,
+            last_command_at,
         }
     }
 
@@ -859,11 +876,26 @@ impl SessionHistoryStore {
             .open(self.file_path(session))?;
         writeln!(f, "{line}")?;
         s.entry_count += 1;
+        if let HistoryEntry::Command(c) = &full {
+            s.last_command_at = s.last_command_at.max(Some(c.ended_at));
+        }
 
         if s.entry_count > MAX_ENTRIES_PER_SESSION + TRIM_MARGIN {
             self.trim(session, &mut s)?;
         }
         Ok(full)
+    }
+
+    /// Whether the recording holds a command block that ended at or after
+    /// `since_ms`. The record is keyed by session name and outlives the tmux
+    /// session, so a caller passes when the live session was created, and a
+    /// new session under an old name starts without the old one's blocks.
+    pub fn markers_seen(&self, session: &str, since_ms: i64) -> anyhow::Result<bool> {
+        let slot = self.slot(session)?;
+        let s = slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session history slot lock poisoned"))?;
+        Ok(s.last_command_at.is_some_and(|at| at >= since_ms))
     }
 
     fn trim(&self, session: &str, s: &mut SessionSlot) -> anyhow::Result<()> {
@@ -885,6 +917,11 @@ impl SessionHistoryStore {
         }
         fs::rename(&tmp_path, &path)?;
         s.entry_count = kept.len() as u64;
+        s.last_command_at = kept
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| command_ended_at(&v))
+            .max();
         Ok(())
     }
 
@@ -1888,6 +1925,57 @@ mod tests {
             panic!()
         };
         assert_eq!(next.seq, 4);
+    }
+
+    fn command_at(ended_at: i64) -> PendingEntry {
+        PendingEntry::Command {
+            command: "$ ls".into(),
+            output: "a\n".into(),
+            exit_code: Some(0),
+            started_at: ended_at - 1,
+            ended_at,
+        }
+    }
+
+    #[test]
+    fn markers_seen_holds_for_the_live_session_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionHistoryStore::new(dir.path());
+        store
+            .append(
+                "s1",
+                PendingEntry::Raw {
+                    raw: "no markers".into(),
+                    ts: 1,
+                },
+            )
+            .unwrap();
+        assert!(!store.markers_seen("s1", 0).unwrap());
+
+        store.append("s1", command_at(5_000)).unwrap();
+        assert!(store.markers_seen("s1", 4_000).unwrap());
+        assert!(!store.markers_seen("s2", 0).unwrap());
+
+        let restarted = SessionHistoryStore::new(dir.path());
+        assert!(restarted.markers_seen("s1", 4_000).unwrap());
+    }
+
+    #[test]
+    fn markers_seen_ignores_blocks_from_before_the_session_was_created() {
+        let (_dir, store) = temp_store();
+        store.append("s1", command_at(5_000)).unwrap();
+        assert!(!store.markers_seen("s1", 6_000).unwrap());
+    }
+
+    #[test]
+    fn markers_seen_after_a_trim_matches_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionHistoryStore::new(dir.path());
+        store.append("s1", command_at(5_000)).unwrap();
+        fill(&store, "s1", TRIGGER);
+        assert!(!store.markers_seen("s1", 0).unwrap());
+        let restarted = SessionHistoryStore::new(dir.path());
+        assert!(!restarted.markers_seen("s1", 0).unwrap());
     }
 
     // The append at which `entry_count` first exceeds CAP + MARGIN, forcing

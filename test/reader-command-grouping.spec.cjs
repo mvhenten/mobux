@@ -69,6 +69,8 @@ async function renderSnapshot(page, snapshotLines) {
       snapshot: () => ({ lines, status: null }),
       subscribe: () => ({ dispose: () => {} }),
       onOscDetected: () => ({ dispose: () => {} }),
+      onPanes: () => ({ dispose: () => {} }),
+      alternateOn: false,
       oscDetected: lines.some((l) => l.osc),
     };
 

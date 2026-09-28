@@ -1160,17 +1160,48 @@ async fn api_rename_session(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneJson {
+    #[serde(flatten)]
+    pane: tmux::Pane,
+    markers_seen: bool,
+}
+
+/// GET /api/sessions/{name}/panes — the session's windows. `markersSeen`
+/// says the recorded history holds OSC 133 command blocks from this tmux
+/// session, so a client that has not seen a marker live yet still knows the
+/// shell integration works. The record is keyed by session name alone, so a
+/// `node` answer never claims it.
 async fn api_list_panes(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<NodeQuery>,
-) -> Result<Json<Vec<tmux::Pane>>, AppError> {
+) -> Result<Json<Vec<PaneJson>>, AppError> {
     validate_session_name(&state, &name)?;
     let target = resolve_node_target(&state, q.node.as_deref()).await?;
     let panes = tmux::list_panes(&name, target.as_deref())
         .await
         .map_err(AppError::bad_request)?;
-    Ok(Json(panes))
+    let markers_seen = match (&target, panes.first()) {
+        (None, Some(pane)) => {
+            let history = state.session_history.clone();
+            // tmux counts in whole seconds: a block from a killed session
+            // can end within the second its successor was created.
+            let since_ms = (pane.session_created + 1) * 1000;
+            tokio::task::spawn_blocking(move || history.markers_seen(&name, since_ms))
+                .await
+                .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+                .map_err(AppError::internal)?
+        }
+        _ => false,
+    };
+    Ok(Json(
+        panes
+            .into_iter()
+            .map(|pane| PaneJson { pane, markers_seen })
+            .collect(),
+    ))
 }
 
 async fn api_select_pane(

@@ -22,7 +22,11 @@
 //             { rows: [{ runs }] } | null
 //   subscribe(cb): Disposable    fires after each buffer change
 //   onOscDetected(cb): Disposable   fires the first time an OSC 133 marker lands
-//   oscDetected: boolean
+//   oscDetected: boolean   a marker landed live, or the session's recorded
+//             history holds command blocks (`markersSeen` on the panes answer)
+//   onPanes(cb): Disposable   fires after each panes answer
+//   alternateOn: boolean | null   the active pane is on its alternate screen;
+//             null until the first panes answer
 
 import { bufferLines, lineCells } from "./terminal-lines.js";
 
@@ -184,14 +188,31 @@ export function createTerminalDocument(engine) {
     };
   }
 
+  function onPanes(cb) {
+    const handler = () => cb();
+    engine.addEventListener("panes", handler);
+    return {
+      dispose() {
+        engine.removeEventListener("panes", handler);
+      },
+    };
+  }
+
   return {
     snapshot,
     subscribe(cb) {
       return engine.onBufferChanged(cb);
     },
     onOscDetected,
+    onPanes,
     get oscDetected() {
-      return engine.oscDetected;
+      return (
+        engine.oscDetected || engine.panes.some((p) => p.markersSeen === true)
+      );
+    },
+    get alternateOn() {
+      if (engine.panes.length === 0) return null;
+      return engine.panes[engine.activeIndex]?.alternateOn === true;
     },
   };
 }
