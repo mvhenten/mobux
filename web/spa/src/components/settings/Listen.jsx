@@ -210,7 +210,7 @@ export function ListenCard() {
             <span class="settings-title">Host voice</span>
           </span>
           <span class="settings-trail">
-            <span class="settings-value listen-value" data-state={lv.state}>
+            <span class="settings-value" data-state={lv.state}>
               {lv.state}
             </span>
           </span>
