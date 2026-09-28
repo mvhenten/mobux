@@ -208,6 +208,51 @@ test("PTY roundtrip: typing in the browser produces real output in the buffer", 
   assertNoFailures(captured);
 });
 
+test("PTY roundtrip: a full-screen repaint arrives wrapped in a synchronized update", async ({
+  page,
+}) => {
+  // The browser holds painting between ?2026h and ?2026l, so a full-screen
+  // app redraws once instead of chunk by chunk. tmux only emits those markers
+  // when the attach advertises the `sync` terminal feature.
+  const captured = seedErrorCapture(page);
+  const received = [];
+  page.on("websocket", (ws) => {
+    ws.on("framereceived", (frame) => received.push(String(frame.payload)));
+  });
+  await bootTerminal(page);
+
+  // The painted marker is split in the typed command so the echo of the
+  // command line never matches it.
+  await page.evaluate(() =>
+    window.__mobuxView.send(
+      "printf '\\033[?1049h'; for i in 1 2 3; do printf '\\033[H\\033[2J'; seq 1 20; echo SYNC''PAINT; sleep 0.2; done; printf '\\033[?1049l'\r",
+    ),
+  );
+
+  const stream = () => received.join("");
+  const closedAfterPaint = () => {
+    const wire = stream();
+    const paint = wire.indexOf("SYNCPAINT");
+    return paint >= 0 && wire.indexOf("\x1b[?2026l", paint) > paint;
+  };
+  await expect
+    .poll(closedAfterPaint, {
+      message: "a ?2026l closes the repaint",
+      timeout: 10000,
+    })
+    .toBe(true);
+
+  const wire = stream();
+  const paint = wire.indexOf("SYNCPAINT");
+  const opened = wire.lastIndexOf("\x1b[?2026h", paint);
+  const closedBefore = wire.lastIndexOf("\x1b[?2026l", paint);
+  expect(opened, "a ?2026h precedes the repaint").toBeGreaterThanOrEqual(0);
+  expect(opened, "the repaint sits inside an open update").toBeGreaterThan(
+    closedBefore,
+  );
+  assertNoFailures(captured);
+});
+
 test("PTY roundtrip: tmux split-window produces a second pane", async ({
   page,
 }) => {
