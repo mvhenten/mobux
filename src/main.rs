@@ -64,6 +64,7 @@ mod transcribe;
 mod twa;
 mod update;
 mod update_cli;
+mod utf8_stream;
 
 #[derive(Clone, Debug, PartialEq)]
 enum InstallPhase {
@@ -2583,6 +2584,7 @@ async fn handle_ws(
     });
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
+    let mut ws_text = utf8_stream::Utf8Stream::new();
 
     loop {
         tokio::select! {
@@ -2687,12 +2689,21 @@ async fn handle_ws(
                                 record_history(&session_history, &session_name, produced).await;
                             }
                         }
-                        let text = String::from_utf8_lossy(&chunk).to_string();
+                        let text = ws_text.decode(&chunk);
+                        if text.is_empty() {
+                            continue;
+                        }
                         if ws_sender.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        let tail = ws_text.finish();
+                        if !tail.is_empty() {
+                            let _ = ws_sender.send(Message::Text(tail.into())).await;
+                        }
+                        break;
+                    }
                 }
             }
             maybe_in = ws_receiver.next() => {
