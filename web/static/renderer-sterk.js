@@ -126,9 +126,10 @@ export function createSterkRenderer(host, options = {}) {
     cleanups.push(view.registerLinkProvider({ provideLinks }));
     return {
       flush: () => Promise.resolve(),
-      settle: () => view.refresh(),
+      settle: () => source.settle().then(() => view.refresh()),
       invalidate() {},
       fullRedraws: () => source.fullRepaints(),
+      paints: () => source.paints(),
       dispose: () => source.dispose(),
     };
   }

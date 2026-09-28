@@ -5,6 +5,7 @@
 // scrollback once, and the viewport is repainted from the screen.
 
 import { isBlankCell, logicalLines } from "./terminal-buffer.js";
+import { createPaintScheduler } from "./paint-frame.js";
 
 const FLAGS = [
   ["isBold", 1],
@@ -105,7 +106,6 @@ export function createRedrawWriter(buffer, renderer) {
   let drawnModes = new Map();
   let full = true;
   let queue = Promise.resolve();
-  let pending = null;
   let disposed = false;
 
   function distanceFromBottom() {
@@ -114,6 +114,7 @@ export function createRedrawWriter(buffer, renderer) {
   }
 
   let fullRedraws = 0;
+  let paints = 0;
 
   function resetDisplay() {
     fullRedraws++;
@@ -253,25 +254,27 @@ export function createRedrawWriter(buffer, renderer) {
       out += `\x1b[?${mode}${on ? "h" : "l"}`;
     }
     if (!out) return undefined;
+    paints++;
     const written = renderer.write(out);
     if (!redraw || keep === 0) return written;
     return written.then(() => renderer.scrollLines(-keep));
   }
 
+  const frames = createPaintScheduler(buffer, () => {
+    queue = queue.then(draw);
+    return queue;
+  });
+
   return {
-    // Bring the display up to date with the buffer. Calls made while a draw
-    // is queued share it; the promise resolves once the display reflects it.
+    // Bring the display up to date with the buffer on the next frame. Calls
+    // made before it share the draw; the promise resolves once the display
+    // reflects it.
     flush() {
-      if (pending) return pending;
-      pending = queue = queue.then(() => {
-        pending = null;
-        return draw();
-      });
-      return pending;
+      return frames.request();
     },
-    // Resolves once every queued draw has reached the display.
+    // Resolves once every requested draw has reached the display.
     settle() {
-      return queue;
+      return Promise.resolve(frames.pending()).then(() => queue);
     },
     invalidate() {
       full = true;
@@ -279,8 +282,12 @@ export function createRedrawWriter(buffer, renderer) {
     fullRedraws() {
       return fullRedraws;
     },
+    paints() {
+      return paints;
+    },
     dispose() {
       disposed = true;
+      frames.dispose();
     },
   };
 }

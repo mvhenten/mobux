@@ -650,7 +650,8 @@ test("sterk: the screen source reports append, trim, row diffs, full and the str
       }
       return out;
     };
-    const take = () => {
+    const take = async () => {
+      await source.settle();
       const out = changes;
       changes = [];
       return out;
@@ -660,36 +661,36 @@ test("sterk: the screen source reports append, trim, row diffs, full and the str
     const out = {};
 
     await buffer.writeScreen("\x1b[?1049h\x1b[Hscreen");
-    take();
+    await take();
     await buffer.syncWhole(lines(80), false);
-    out.append = take();
+    out.append = await take();
     out.appendHistory = [history()[0], history()[79], source.history.length];
 
     await buffer.syncWhole(lines(91), false);
-    out.trim = take();
+    out.trim = await take();
     out.trimHistory = [history()[0], history().at(-1), source.history.length];
 
     await buffer.writeScreen("\x1b[3;1Hrow two");
-    out.row = take();
+    out.row = await take();
     out.rowText = text(source.screen.line(2)).trimEnd();
 
     await buffer.clearHistory();
-    out.clear = take();
+    out.clear = await take();
     out.clearLength = source.history.length;
 
     await buffer.syncWhole(["A".repeat(cols)], true);
-    out.straddle = take();
+    out.straddle = await take();
     out.straddleRow = source.screen.line(0).wrapped;
     buffer.setStatus(1, "top");
-    out.statusTop = take();
+    out.statusTop = await take();
     out.statusTopRow = source.screen.line(0).wrapped;
     buffer.setStatus(1, "bottom");
-    take();
+    await take();
     await buffer.writeScreen("\x1b[4;5H");
-    out.cursor = take();
+    out.cursor = await take();
     out.cursorAt = source.cursor;
     await buffer.syncWhole(["A".repeat(cols * 2)], false);
-    out.grown = take();
+    out.grown = await take();
     out.grownHistory = history();
     out.fullRepaints = source.fullRepaints();
     source.dispose();
@@ -758,7 +759,8 @@ test("sterk: the screen source follows the normal screen's scrollback", async ({
         .map((r) => r.text)
         .join("")
         .trimEnd();
-    const step = () => {
+    const step = async () => {
+      await source.settle();
       const held = [];
       for (let i = 0; i < source.history.length; i++) {
         held.push(text(source.history.line(i)));
@@ -778,22 +780,23 @@ test("sterk: the screen source follows the normal screen's scrollback", async ({
       Array.from({ length: n }, (_, i) => `n${from + i}\r\n`).join("");
     const out = {};
     await buffer.writeScreen(lines(12, 0));
-    out.grow = step();
+    out.grow = await step();
     await buffer.writeScreen(lines(5, 12));
-    out.trim = step();
+    out.trim = await step();
     await buffer.writeScreen("\x1b[?1049halt\x1b[?1049l");
-    out.switchOnce = step();
+    out.switchOnce = await step();
     await buffer.writeScreen("\x1b[?1049halt");
+    await source.settle();
     await buffer.writeScreen("\x1b[?1049l");
-    out.switchTwice = step();
+    out.switchTwice = await step();
     await buffer.writeScreen("\x1b[2;4r\x1b[4;1H\n\n\n\x1b[r\x1b[5;1H");
-    out.region = step();
+    out.region = await step();
     buffer.resize(30, 5);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    out.resize = step();
+    out.resize = await step();
     out.resizeCols = source.cols;
     await buffer.writeScreen(lines(3, 17));
-    out.after = step();
+    out.after = await step();
     source.dispose();
     buffer.dispose();
     return out;
@@ -2498,4 +2501,166 @@ test("alt-screen swipe: on the normal screen a swipe scrolls the display's scrol
     })
     .toBeLessThan(viewportBefore);
   expect(paneFlag("pane_in_mode")).toBe("0");
+});
+
+// Chunks the stream delivers faster than the screen refreshes are drawn
+// together: one app redraw that tmux relays as several frames is painted once,
+// not half-done several times.
+test("paint: a burst of chunks that arrives within one frame paints once", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  await page.evaluate(() => window.__mobuxView.test.inject(""));
+  const painted = await page.evaluate(async () => {
+    const t = window.__mobuxView.test;
+    const before = t.paintCount();
+    const writes = [];
+    for (let i = 0; i < 8; i++) writes.push(t.writeData(`burst ${i}\r\n`));
+    await Promise.all(writes);
+    return t.paintCount() - before;
+  });
+  expect(painted).toBe(1);
+  const lines = await terminalLines(page);
+  for (let i = 0; i < 8; i++) expect(lines).toContain(`burst ${i}`);
+});
+
+const displayHas = (page, text) =>
+  page.evaluate(async (text) => {
+    const t = window.__mobuxView.test;
+    for (let y = 0; y < t.bufferLength(); y++) {
+      if ((t.lineText(y) || "").includes(text)) return true;
+    }
+    return false;
+  }, text);
+
+const frames = (page, n) =>
+  page.evaluate(async (n) => {
+    for (let i = 0; i < n; i++) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  }, n);
+
+test("paint: a synchronized update is not painted until it ends", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  await page.evaluate(() => window.__mobuxView.test.inject(""));
+  const before = await page.evaluate(() =>
+    window.__mobuxView.test.paintCount(),
+  );
+  await page.evaluate(() => {
+    window.__syncWrite = window.__mobuxView.test.writeData(
+      "\x1b[?2026hSYNC-HELD\r\n",
+    );
+  });
+  await frames(page, 4);
+  expect(await displayHas(page, "SYNC-HELD")).toBe(false);
+  expect(await page.evaluate(() => window.__mobuxView.test.paintCount())).toBe(
+    before,
+  );
+  await page.evaluate(async () => {
+    await window.__mobuxView.test.writeData("SYNC-DONE\r\n\x1b[?2026l");
+    await window.__syncWrite;
+  });
+  expect(await displayHas(page, "SYNC-HELD")).toBe(true);
+  expect(await displayHas(page, "SYNC-DONE")).toBe(true);
+  expect(await page.evaluate(() => window.__mobuxView.test.paintCount())).toBe(
+    before + 1,
+  );
+});
+
+test("paint: a synchronized update that never ends is painted after a short hold", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  await page.evaluate(() => window.__mobuxView.test.inject(""));
+  const held = await page.evaluate(async () => {
+    const started = performance.now();
+    await window.__mobuxView.test.writeData("\x1b[?2026hSYNC-LOST\r\n");
+    return performance.now() - started;
+  });
+  expect(await displayHas(page, "SYNC-LOST")).toBe(true);
+  expect(held).toBeGreaterThanOrEqual(150);
+  expect(held).toBeLessThan(1000);
+});
+
+// The finger travel of one wheel notch, in rows (terminal.js).
+const WHEEL_NOTCH_LINES = 3;
+
+// A swipe that moves the finger several notches within one frame, the way a
+// fast phone swipe does.
+function swipeInOneFrame(page, from, travel, moves) {
+  return page.evaluate(
+    ({ x, y, travel, moves }) => {
+      const overlay = document.getElementById("touchOverlay");
+      overlay.style.pointerEvents = "auto";
+      const fire = (type, cy) => {
+        const t = new Touch({
+          identifier: 1,
+          target: overlay,
+          clientX: x,
+          clientY: cy,
+          pageX: x + window.scrollX,
+          pageY: cy + window.scrollY,
+        });
+        overlay.dispatchEvent(
+          new TouchEvent(type, {
+            touches: type === "touchend" ? [] : [t],
+            changedTouches: [t],
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      };
+      fire("touchstart", y);
+      for (let i = 1; i <= moves; i++) {
+        fire("touchmove", y + (i * travel) / moves);
+      }
+      fire("touchend", y + travel);
+    },
+    { ...from, travel, moves },
+  );
+}
+
+test("alt-screen swipe: the wheel steps of one frame go to tmux in one message", async ({
+  page,
+}) => {
+  const sent = [];
+  page.on("websocket", (ws) =>
+    ws.on("framesent", (f) => {
+      if (typeof f.payload === "string" && f.payload.includes("\x1b[<6")) {
+        sent.push(f.payload);
+      }
+    }),
+  );
+  await bootTerminal(page);
+  const out = await startAltInputApp(page, "mouse");
+  try {
+    const from = await cellPoint(page, 2, 2);
+    await expect
+      .poll(
+        async () => {
+          await swipeInOneFrame(page, from, 200, 10);
+          return wheelEvents(out).length;
+        },
+        { timeout: 10000, intervals: [1000] },
+      )
+      .toBeGreaterThan(0);
+    await page.waitForTimeout(500);
+    fs.writeFileSync(out, "");
+    sent.length = 0;
+
+    await swipeInOneFrame(page, from, 200, 10);
+    const cellHeight = await page.evaluate(
+      () => window.__mobuxView.test.cellMetrics().height,
+    );
+    const steps = Math.floor((200 * 2.5) / (cellHeight * WHEEL_NOTCH_LINES));
+    expect(steps).toBeGreaterThan(1);
+    await expect.poll(() => wheelEvents(out).length).toBe(steps);
+    expect(wheelEvents(out)).toEqual(Array(steps).fill("64;3;3"));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBe("\x1b[<64;3;3M".repeat(steps));
+  } finally {
+    await stopAltInputApp(page);
+  }
 });

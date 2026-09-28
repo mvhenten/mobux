@@ -7,6 +7,7 @@
 // `toLine` is sterk's screenLineFromCells.
 
 import { historyLine, lineCells } from "./terminal-lines.js";
+import { createPaintScheduler } from "./paint-frame.js";
 
 const BLANK = { runs: [], wrapped: false };
 
@@ -38,6 +39,7 @@ export function createScreenSource(buffer, toLine) {
   let cursorKey = "";
   let seen = null;
   let fullRepaints = 0;
+  let paints = 0;
 
   function rowsOfLine(i, cols) {
     const cells = [...lineCells(historyLine(buffer, i).segments)];
@@ -171,11 +173,13 @@ export function createScreenSource(buffer, toLine) {
   }
 
   refresh();
-  const sub = buffer.onChange(() => {
+  const frames = createPaintScheduler(buffer, () => {
     const change = refresh();
     if (!change) return;
+    paints++;
     for (const listener of [...listeners]) listener(change);
   });
+  const sub = buffer.onChange(() => frames.request());
 
   return {
     get rows() {
@@ -196,6 +200,10 @@ export function createScreenSource(buffer, toLine) {
     get cursor() {
       return cursor;
     },
+    // Resolves once every buffer change so far has been reported.
+    settle() {
+      return Promise.resolve(frames.pending());
+    },
     subscribe(listener) {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };
@@ -203,9 +211,13 @@ export function createScreenSource(buffer, toLine) {
     fullRepaints() {
       return fullRepaints;
     },
+    paints() {
+      return paints;
+    },
     dispose() {
       sub.dispose();
       listeners.clear();
+      frames.dispose();
     },
   };
 }

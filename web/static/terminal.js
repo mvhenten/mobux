@@ -714,6 +714,7 @@ export function createTerminal({
     documentSnapshot: () => core.document.snapshot(),
     oscMarkerCount: () => core.oscMarkers.size,
     fullRedrawCount: () => core.view.fullRedraws(),
+    paintCount: () => core.view.paints(),
   };
 
   refreshViewToggle();
