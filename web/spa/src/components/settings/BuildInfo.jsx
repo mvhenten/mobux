@@ -2,60 +2,65 @@ import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { localGet } from "../../lib/api.js";
 import { readLoadedBundleHash } from "../../lib/bundleHash.js";
+import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
 
-// Build-info card. Shows the backend version, the server's build_hash
-// (/api/build-info — unchanged, server-side), and the SPA's own bundle hash.
-//
-// The SPA hash is NOT re-derived from web/static/build-info.json: that file
-// only hashes the terminal vendor bundles (xterm/sterk/headless, see
-// web/build.js), so it never matched this bundle and comparing them as
-// "server vs loaded" was comparing two unrelated builds. Instead this reads
-// the content hash Vite already baked into the currently-loaded script's
-// filename (`assets/index-<hash>.js`) straight off the DOM (readLoadedBundleHash)
-// — the one hash that's actually guaranteed to describe the code running in
-// this tab, no extra request needed.
+// The server's build_hash is web/static/build-info.json, which web/build.js
+// computes over the terminal renderer bundles (xterm/sterk/headless) only.
+// The SPA hash is the content hash Vite baked into the loaded script's
+// filename. They describe two different builds, so they are shown side by
+// side, never compared.
 
-const info = signal(null); // { version, build_hash }
+const info = signal(null);
+
+function load() {
+  localGet("/api/build-info")
+    .then((d) => (info.value = d))
+    .catch(() => {});
+}
+
+export function AboutRow() {
+  useEffect(load, []);
+  return (
+    <NavRow
+      row="about"
+      to="/settings/about"
+      label="About"
+      value={info.value?.version || "…"}
+    />
+  );
+}
 
 export function BuildInfoCard() {
-  useEffect(() => {
-    localGet("/api/build-info")
-      .then((d) => (info.value = d))
-      .catch(() => {});
-  }, []);
+  useEffect(load, []);
 
   const srv = info.value;
   const feHash = readLoadedBundleHash();
 
   return (
-    <section class="settings-group" id="build-info">
-      <h2>Build</h2>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>App version</strong>
-        </span>
-        <span class="settings-value" id="buildVersion">
-          {srv?.version || "…"}
-        </span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Server build hash</strong>
-          <small>Hash of the frontend bundle this server has on disk.</small>
-        </span>
-        <span class="settings-value" id="buildServerHash">
-          {srv?.build_hash || "…"}
-        </span>
-      </div>
-      <div class="settings-row">
-        <span class="settings-label">
-          <strong>Frontend bundle hash</strong>
-          <small>Hash of the SPA bundle loaded in this browser tab.</small>
-        </span>
-        <span class="settings-value" id="buildFeHash">
-          {feHash || "dev"}
-        </span>
-      </div>
-    </section>
+    <div id="build-info">
+      <Lede>
+        The running binary and the bundles it serves. Quote these in a bug
+        report.
+      </Lede>
+      <Group title="Build">
+        <ValueRow
+          label="App version"
+          value={srv?.version || "…"}
+          valueId="buildVersion"
+        />
+        <ValueRow
+          label="Terminal bundle hash"
+          secondary="Renderer bundles embedded in this server"
+          value={srv?.build_hash || "…"}
+          valueId="buildServerHash"
+        />
+        <ValueRow
+          label="App bundle hash"
+          secondary="SPA bundle loaded in this tab"
+          value={feHash || "dev"}
+          valueId="buildFeHash"
+        />
+      </Group>
+    </div>
   );
 }

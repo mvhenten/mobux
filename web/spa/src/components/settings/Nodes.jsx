@@ -3,6 +3,16 @@ import { signal } from "@preact/signals";
 import { apiPutJSON } from "../../lib/api.js";
 import { u } from "../../lib/base.js";
 import { HostSuggestionSheet } from "../HostSuggestionSheet.jsx";
+import {
+  Actions,
+  Button,
+  ConfirmButton,
+  FieldRow,
+  Group,
+  Lede,
+  NavRow,
+  Status,
+} from "./ui.jsx";
 
 // Nodes card — the inventory behind the Home node picker (#176 phase 3).
 // A node is {name, target}; the whole list is replaced on every change
@@ -62,62 +72,82 @@ async function saveList(next) {
   return true;
 }
 
-export function NodesCard() {
-  const load = async () => {
+async function load() {
+  loadFailed.value = false;
+  let res;
+  try {
+    // redirect:"manual" — an absent route lands on the catch-all 307;
+    // following it leaves an abandoned body in flight (stalls the page's
+    // network-idle state).
+    res = await fetch(u("/api/settings/nodes"), {
+      headers: { Accept: "application/json" },
+      redirect: "manual",
+    });
+  } catch (e) {
+    markLoadFailed(`Failed to load nodes: ${e.message}`);
+    return;
+  }
+  if (res.status === 404 || res.type === "opaqueredirect") {
+    // A confirmed, stable signal (this exact server has no node route at
+    // all) — not the transient failure this guard is about — so it's safe
+    // to treat as a real, editable, empty list.
+    nodes.value = [];
     loadFailed.value = false;
-    let res;
-    try {
-      // redirect:"manual" — an absent route lands on the catch-all 307;
-      // following it leaves an abandoned body in flight (stalls the page's
-      // network-idle state).
-      res = await fetch(u("/api/settings/nodes"), {
-        headers: { Accept: "application/json" },
-        redirect: "manual",
-      });
-    } catch (e) {
-      markLoadFailed(`Failed to load nodes: ${e.message}`);
-      return;
-    }
-    if (res.status === 404 || res.type === "opaqueredirect") {
-      // A confirmed, stable signal (this exact server has no node route at
-      // all) — not the transient failure this guard is about — so it's safe
-      // to treat as a real, editable, empty list.
-      nodes.value = [];
-      loadFailed.value = false;
-      flash("This server has no node support — update mobux.", false);
-      return;
-    }
-    if (!res.ok) {
-      res.text().catch(() => {});
-      markLoadFailed(
-        `Failed to load nodes: GET /api/settings/nodes -> ${res.status}`,
-      );
-      return;
-    }
-    let d;
-    try {
-      d = await res.json();
-    } catch (e) {
-      markLoadFailed(`Failed to load nodes: ${e.message}`);
-      return;
-    }
-    nodes.value = d.nodes || [];
-    loadFailed.value = false;
-    status.value = null;
-  };
+    flash("This server has no node support — update mobux.", false);
+    return;
+  }
+  if (!res.ok) {
+    res.text().catch(() => {});
+    markLoadFailed(
+      `Failed to load nodes: GET /api/settings/nodes -> ${res.status}`,
+    );
+    return;
+  }
+  let d;
+  try {
+    d = await res.json();
+  } catch (e) {
+    markLoadFailed(`Failed to load nodes: ${e.message}`);
+    return;
+  }
+  nodes.value = d.nodes || [];
+  loadFailed.value = false;
+  status.value = null;
+}
 
-  useEffect(() => {
-    // `nodes`/`loadFailed` are module-level signals, so they persist across
-    // mounts — this page can unmount/remount via SPA navigation (Home <->
-    // Settings). Without resetting here, a remount would show the PREVIOUS
-    // mount's confirmed list as already editable before a fresh GET for
-    // THIS mount has confirmed anything, letting an Add/Remove fire against
-    // stale data. Force back to "loading, not yet editable" on every mount.
-    nodes.value = null;
-    loadFailed.value = false;
-    pickerOpen.value = false;
-    load();
-  }, []);
+// Every mount starts from "loading, not yet editable": the signals are
+// module-level and outlive a mount, so a remount must never offer the
+// previous mount's list for an Add/Remove before a fresh GET confirms it.
+function reload() {
+  nodes.value = null;
+  loadFailed.value = false;
+  pickerOpen.value = false;
+  load();
+}
+
+function countLabel() {
+  if (loadFailed.value) return "Unavailable";
+  const list = nodes.value;
+  if (list == null) return "…";
+  if (list.length === 0) return "None";
+  return list.length === 1 ? "1 node" : `${list.length} nodes`;
+}
+
+export function NodesRow() {
+  useEffect(reload, []);
+  return (
+    <NavRow
+      row="nodes"
+      to="/settings/nodes"
+      label="Nodes"
+      secondary="Remote hosts over SSH"
+      value={countLabel()}
+    />
+  );
+}
+
+export function NodesCard() {
+  useEffect(reload, []);
 
   const add = async (e) => {
     e.preventDefault();
@@ -151,66 +181,90 @@ export function NodesCard() {
   const editable = list != null;
 
   return (
-    <section class="settings-group" id="nodes-settings">
-      <h2>Nodes</h2>
-      <p class="settings-lede">
-        Remote hosts this hub can open tmux sessions on over SSH. SSH keys are
-        your job: the hub's key must already be authorized on the node — there
-        is no key management here.
-      </p>
+    <div id="nodes-settings">
+      <Lede>
+        Remote hosts this hub opens tmux sessions on over SSH. The hub's SSH key
+        must already be authorized on each node; there is no key management
+        here.
+      </Lede>
 
-      {list == null && !loadFailed.value && <p class="hint">Loading…</p>}
-      {list == null && loadFailed.value && (
-        <p class="hint">
-          Could not load the node list — editing is disabled until it does.{" "}
-          <button type="button" id="nodesRetryBtn" onClick={load}>
-            Retry
-          </button>
-        </p>
-      )}
-      {list &&
-        list.map((n) => (
-          <div class="settings-row node-row" data-name={n.name} key={n.name}>
-            <span class="node-name">{n.name}</span>
-            <span class="node-target">{n.target}</span>
-            <button
-              type="button"
-              class="node-remove"
-              aria-label={`Remove ${n.name}`}
-              onClick={() => remove(n.name)}
-            >
-              Remove
-            </button>
+      <Group title="Nodes">
+        {list == null && !loadFailed.value && (
+          <div class="settings-row settings-row--hint">Loading…</div>
+        )}
+        {list == null && loadFailed.value && (
+          <div class="settings-row settings-row--hint">
+            <span class="settings-label">
+              Could not load the node list — editing is disabled until it does.
+            </span>
+            <Button id="nodesRetryBtn" class="btn--inline" onClick={load}>
+              Retry
+            </Button>
           </div>
-        ))}
-      {list && list.length === 0 && (
-        <p class="hint">No nodes configured. Sessions run on this host.</p>
-      )}
+        )}
+        {list &&
+          list.map((n) => (
+            <div class="settings-row node-row" data-name={n.name} key={n.name}>
+              <span class="settings-label">
+                <span class="settings-title node-name">{n.name}</span>
+                <small class="node-target">{n.target}</small>
+              </span>
+              <ConfirmButton
+                class="btn--inline node-remove"
+                aria-label={`Remove ${n.name}`}
+                label="Remove"
+                confirmLabel="Remove?"
+                variant="secondary"
+                armedVariant="danger"
+                onConfirm={() => remove(n.name)}
+              />
+            </div>
+          ))}
+        {list && list.length === 0 && (
+          <div class="settings-row settings-row--hint">
+            No nodes configured. Sessions run on this host.
+          </div>
+        )}
+      </Group>
 
-      <form class="node-add" onSubmit={add}>
-        <input
-          id="nodeName"
-          class="settings-input"
-          placeholder="name (e.g. devbox)"
-          autocomplete="off"
-          disabled={!editable}
-          value={name.value}
-          onInput={(e) => (name.value = e.target.value)}
-        />
-        <input
-          id="nodeTarget"
-          class="settings-input"
-          placeholder="user@host"
-          autocomplete="off"
-          readOnly
-          disabled={!editable}
-          value={target.value}
-          onClick={() => editable && (pickerOpen.value = true)}
-        />
-        <button type="submit" id="nodeAddBtn" disabled={!editable}>
-          Add
-        </button>
-      </form>
+      <section class="settings-group">
+        <h2>Add a node</h2>
+        <form class="settings-card node-add" onSubmit={add}>
+          <FieldRow label="Name">
+            <input
+              id="nodeName"
+              class="settings-input"
+              placeholder="devbox"
+              autocomplete="off"
+              disabled={!editable}
+              value={name.value}
+              onInput={(e) => (name.value = e.target.value)}
+            />
+          </FieldRow>
+          <FieldRow label="SSH target">
+            <input
+              id="nodeTarget"
+              class="settings-input"
+              placeholder="user@host"
+              autocomplete="off"
+              readOnly
+              disabled={!editable}
+              value={target.value}
+              onClick={() => editable && (pickerOpen.value = true)}
+            />
+          </FieldRow>
+          <Actions>
+            <Button
+              type="submit"
+              id="nodeAddBtn"
+              variant="primary"
+              disabled={!editable}
+            >
+              Add node
+            </Button>
+          </Actions>
+        </form>
+      </section>
 
       <HostSuggestionSheet
         open={pickerOpen.value}
@@ -219,15 +273,7 @@ export function NodesCard() {
         onClose={() => (pickerOpen.value = false)}
       />
 
-      {status.value && (
-        <div
-          id="nodesStatus"
-          class="settings-status"
-          style={{ color: status.value.ok ? "#7ec87e" : "#c87e7e" }}
-        >
-          {status.value.msg}
-        </div>
-      )}
-    </section>
+      <Status id="nodesStatus" status={status.value} />
+    </div>
   );
 }

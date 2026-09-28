@@ -60,6 +60,7 @@
 // synthetic-scroll.js translates. See that module for why.
 
 import { u } from "./base.js";
+import { linkToSettings } from "./settings-nav.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createSyntheticScroller } from "./synthetic-scroll.js";
 
@@ -872,7 +873,7 @@ function buildEmptyState() {
   const wrap = makeEl("div", "cv-empty");
   wrap.appendChild(makeEl("p", "cv-empty-text", EMPTY_STATE_TEXT));
   const link = makeEl("a", "cv-empty-link", "Set up shell integration →");
-  link.href = u("settings#shell-integration");
+  linkToSettings(link, "/settings/shell");
   wrap.appendChild(link);
   return wrap;
 }

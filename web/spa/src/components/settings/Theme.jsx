@@ -1,29 +1,27 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { u } from "../../lib/base.js";
+import { SelectRow } from "./ui.jsx";
 
-// Theme picker. The theme catalogue + apply logic lives in the backend ES
-// module /static/themes.js (single source of truth, also used by the terminal
-// engine), so we dynamically import it at runtime rather than re-declare the
-// palettes here. On change: persist via the module (which writes the
-// server-held `theme` preference), apply live, and broadcast the same-doc
-// 'mobux:theme' event so an open terminal tab swaps without reload.
+// The theme catalogue + apply logic lives in the backend ES module
+// /static/themes.js (also used by the terminal engine), so it is imported at
+// runtime rather than re-declared here. On change: persist via the module,
+// apply live, and broadcast 'mobux:theme' so an open terminal swaps without
+// a reload.
 
-const themes = signal([]); // [{ id, label }]
+const themes = signal([]);
 const current = signal("");
 let mod = null;
 
-export function ThemeCard() {
+export function ThemeRow() {
   useEffect(() => {
-    // Load the backend ES module by absolute URL so it resolves to the running
-    // host in both dev (Vite proxy) and prod (served from /static). The URL is
-    // assembled at runtime so the bundler treats it as a genuine dynamic import
-    // and leaves it external (does not try to resolve /static/themes.js itself).
+    // Assembled at runtime so the bundler leaves it as a genuine dynamic
+    // import that resolves against the running host.
     const themesUrl = new URL(u("/static/themes.js"), location.origin).href;
     import(/* @vite-ignore */ themesUrl)
       .then((m) => {
         mod = m;
-        themes.value = m.THEMES.map((t) => ({ id: t.id, label: t.label }));
+        themes.value = m.THEMES.map((t) => ({ value: t.id, label: t.label }));
         current.value = m.getStoredThemeId();
       })
       .catch((e) => {
@@ -43,30 +41,14 @@ export function ThemeCard() {
   };
 
   return (
-    <section class="settings-group" id="theme-picker">
-      <h2>Theme</h2>
-      <p class="settings-lede">
-        Sets the editor theme, terminal palette and reader palette together. All
-        bundles are muted, low-contrast — picked for a phone screen at night.
-        Switching applies live to any open terminal tab.
-      </p>
-      <label class="settings-row">
-        <span class="settings-label">
-          <strong>Colour theme</strong>
-          <small>Synced to this mobux server.</small>
-        </span>
-        <select
-          class="settings-select"
-          value={current.value}
-          onChange={onChange}
-        >
-          {themes.value.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.label}
-            </option>
-          ))}
-        </select>
-      </label>
-    </section>
+    <SelectRow
+      rowId="theme-picker"
+      row="theme"
+      label="Colour theme"
+      secondary="Terminal, reader and editor"
+      value={current.value}
+      options={themes.value}
+      onChange={onChange}
+    />
   );
 }

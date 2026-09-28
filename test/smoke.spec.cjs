@@ -949,18 +949,18 @@ test("the command menu's Settings row closes the sheet and opens settings withou
     window.__drawerNoReload = true;
     window.__drawerEvents = [];
     const sheet = document.getElementById("cmdPickList");
-    new MutationObserver(() => {
-      if (!sheet.classList.contains("visible"))
-        window.__drawerEvents.push("closed");
-    }).observe(sheet, { attributeFilter: ["class"] });
     window.addEventListener("hashchange", () =>
-      window.__drawerEvents.push("navigated"),
+      window.__drawerEvents.push(
+        sheet.classList.contains("visible")
+          ? "navigated with the sheet open"
+          : "navigated after close",
+      ),
     );
   });
   await openSheetBySwipe(page);
   await page.locator("#cmdSettingsBtn").click();
 
-  await expect(page.locator(".app-header h1")).toHaveText("settings");
+  await expect(page.locator(".app-header h1")).toHaveText("Settings");
   const after = await page.evaluate(() => ({
     hash: location.hash,
     search: location.search,
@@ -973,8 +973,14 @@ test("the command menu's Settings row closes the sheet and opens settings withou
     search: "?drawer=1",
     pathname,
     noReload: true,
-    events: ["closed", "navigated"],
+    events: ["navigated after close"],
   });
+
+  await page.locator(".settings-back").click();
+  await expect
+    .poll(() => page.evaluate(() => location.hash))
+    .toBe(`#/s/${SESSION}`);
+  expect(await page.evaluate(() => window.__drawerNoReload)).toBe(true);
 });
 
 test("reader view disables terminal touch overlay", async ({ page }) => {
@@ -3163,7 +3169,7 @@ test("a failed speak says so rather than reading the raw block", async ({
 test("listen settings visible in settings page when speechSynthesis available", async ({
   page,
 }) => {
-  await page.goto(`${BASE}/app#/settings`);
+  await page.goto(`${BASE}/app#/settings/listen`);
   await page.waitForTimeout(300);
 
   const hasSpeech = await page.evaluate(() => "speechSynthesis" in window);
@@ -3211,7 +3217,7 @@ test("listen settings visible in settings page when speechSynthesis available", 
 test("settings page shows current version and update check button", async ({
   page,
 }) => {
-  await page.goto(`${BASE}/app#/settings`);
+  await page.goto(`${BASE}/app#/settings/update`);
   await page.waitForTimeout(300);
 
   // Section + controls present.

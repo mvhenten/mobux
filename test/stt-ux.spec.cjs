@@ -12,7 +12,7 @@ const PASS = process.env.MOBUX_STT_PASS || "testpin";
 
 async function openSettings(page) {
   await page.context().setHTTPCredentials({ username: USER, password: PASS });
-  await page.goto(`${BASE}/app#/settings`, { ignoreHTTPSErrors: true });
+  await page.goto(`${BASE}/app#/settings/stt`, { ignoreHTTPSErrors: true });
   await page.waitForSelector("#sttKind", { timeout: 5000 });
   // Allow JS fetch/populate to complete.
   await page.waitForTimeout(800);
