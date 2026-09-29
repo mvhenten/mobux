@@ -3,7 +3,7 @@
 // Emits callbacks — no DOM manipulation, no xterm dependency.
 //
 // States: IDLE → TAP → SCROLL | HSWIPE | LONGPRESS
-//         IDLE → HANDLE (a touch that starts on a selection handle)
+//         any → RELEASED (release(): the browser owns the touch until it ends)
 //         IDLE → TWO → PINCH | TWOPULL
 //
 // Usage:
@@ -16,7 +16,6 @@ const TAP_PX = 8;
 const TAP_MS = 300;
 const DTAP_MS = 400;
 const LONGPRESS_MS = 600;
-const LONGPRESS_MOVE_PX = 12;
 const FLICK_H_PX = 50;
 const FLICK_H_VEL = 0.3;    // px/ms
 const PINCH_SCALE_THRESHOLD = 0.08;
@@ -36,9 +35,7 @@ const SWIPE_UP_MS = 400;
 // callbacks: { onScroll(dy), onScrollStart(x,y), onFling(), onTap(x,y), onDoubleTap(x,y),
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
-//              onLongPress(x,y), onSwipeUp(), onReconnect(),
-//              onHandleStart(x,y) → bool, onHandleMove(x,y), onHandleEnd() }
-// onLongPress and the handle callbacks take client coordinates.
+//              onLongPress(), onSwipeUp(), onReconnect() }
 export function createGestureRecognizer(overlay, callbacks, options = {}) {
   const { passiveScroll = false } = options;
   const physics = createScrollPhysics(callbacks.onScroll);
@@ -95,26 +92,23 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
     // throw the edge calculation off.
     const vh = window.visualViewport?.height ?? window.innerHeight;
     startedAtBottomEdge = (vh - t.clientY) <= SWIPE_UP_EDGE_PX;
-    if (callbacks.onHandleStart?.(t.clientX, t.clientY)) {
-      transition('HANDLE');
-      return;
-    }
     transition('TAP');
     physics.reset();
     physics.addSample(t.pageY, startTime);
 
-    // Start long-press timer
+    if (!callbacks.onLongPress) return;
     longPressTimer = setTimeout(() => {
       longPressTimer = null;
       if (state === 'TAP') {
         transition('IDLE');
         if (navigator.vibrate) navigator.vibrate(30);
-        callbacks.onLongPress?.(startClientX, startClientY);
+        callbacks.onLongPress?.();
       }
     }, LONGPRESS_MS);
   }
 
   function onTouchMove(e) {
+    if (state === 'RELEASED') return;
     // In passiveScroll mode we let native scroll handle vertical drags
     // (so e.g. ReaderView can scroll its overflow box). We still detect
     // long-press, h-swipe, and tap classification.
@@ -147,11 +141,6 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
     // Single-finger — ignore ghost events after two-finger
     if (e.touches.length !== 1 || state === 'TWO' || state === 'PINCH' || state === 'TWOPULL') return;
-
-    if (state === 'HANDLE') {
-      callbacks.onHandleMove?.(e.touches[0].clientX, e.touches[0].clientY);
-      return;
-    }
 
     const y = e.touches[0].pageY;
     const x = e.touches[0].pageX;
@@ -207,8 +196,6 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
       } else if (adx > TAP_PX && adx > ady) {
         clearLongPress();
         transition('HSWIPE');
-      } else if (adx > LONGPRESS_MOVE_PX || ady > LONGPRESS_MOVE_PX) {
-        clearLongPress();
       }
       return;
     }
@@ -222,13 +209,12 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
   function onTouchEnd(e) {
     clearLongPress();
 
-    if (state === 'TWO' || state === 'PINCH') {
-      transition('IDLE');
+    if (state === 'RELEASED') {
+      if (e.touches.length === 0) transition('IDLE');
       return;
     }
 
-    if (state === 'HANDLE') {
-      callbacks.onHandleEnd?.();
+    if (state === 'TWO' || state === 'PINCH') {
       transition('IDLE');
       return;
     }
@@ -242,8 +228,12 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
     if (state === 'TAP' && (performance.now() - startTime) < TAP_MS) {
       const now = performance.now();
-      if (now - lastTapTime < DTAP_MS) {
-        callbacks.onDoubleTap?.(startX, startY);
+      if (now - lastTapTime < DTAP_MS && callbacks.onDoubleTap) {
+        // The double-tap is consumed here: no compatibility mouse events,
+        // so the click cannot land on whatever the callback just revealed
+        // under the finger.
+        e.preventDefault();
+        callbacks.onDoubleTap(startX, startY);
         lastTapTime = 0;
       } else {
         callbacks.onTap?.(startX, startY);
@@ -266,7 +256,6 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
   function onTouchCancel() {
     clearLongPress();
-    if (state === 'HANDLE') callbacks.onHandleEnd?.();
     physics.stopMomentum();
     transition('IDLE');
   }
@@ -277,6 +266,13 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
   overlay.addEventListener('touchcancel', onTouchCancel, { passive: false });
 
   return {
+    // Leaves the touch in progress to the browser: no gesture, no
+    // preventDefault, until every finger lifts.
+    release() {
+      clearLongPress();
+      physics.stopMomentum();
+      transition('RELEASED');
+    },
     stopMomentum() {
       physics.stopMomentum();
     },

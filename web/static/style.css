@@ -1424,134 +1424,39 @@ h1, h2, h3 { margin: 0; }
   text-align: center;
 }
 
-/* ── Touch selection and link sheet (touch-select.js) ─────────────
-   Drawn by mobux above the touch overlay so both renderers select the
-   same way. Buttons are at least 44px; a handle draws at 28px and grabs
-   a touch within 32px of its centre (touch-select.js HANDLE_HIT_PX). */
-.touch-select-layer {
+/* ── Select mode (native-select.js) ───────────────────────────────
+   The rows on screen as real text over the renderer's cell grid, above
+   the touch overlay; the browser does the selecting. */
+.select-layer {
   display: none;
   position: absolute;
-  inset: 0;
-  z-index: 11;
-  pointer-events: none;
-  overflow: hidden;
-}
-.touch-select-layer.visible { display: block; }
-.touch-select-rect {
-  position: absolute;
-  background: var(--primary);
-  opacity: 0.4;
-}
-.touch-select-handle {
-  display: none;
-  position: absolute;
-  width: 28px;
-  height: 28px;
-  background: var(--primary);
-  border: 2px solid var(--text);
-  box-sizing: border-box;
-}
-.touch-select-handle.visible { display: block; }
-.touch-select-handle-start { border-radius: 50% 0 50% 50%; }
-.touch-select-handle-end { border-radius: 0 50% 50% 50%; }
-
-.touch-select-bar {
-  display: none;
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  z-index: 12;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-family: var(--sans);
-  touch-action: manipulation;
-}
-.touch-select-bar.visible { display: flex; }
-.touch-select-btn {
-  flex: 1 1 auto;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 0 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: 14px;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-.touch-select-btn:active { border-color: var(--muted); }
-.touch-select-status {
-  flex-basis: 100%;
-  padding: 4px 8px;
-  color: var(--danger);
-  font-size: 13px;
-  line-height: 1.4;
-}
-.touch-select-status:empty { display: none; }
-.touch-select-clip {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-}
-
-.link-sheet-bg {
-  display: none;
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  background: rgba(0,0,0,0.35);
-}
-.link-sheet-bg.visible { display: block; }
-.link-sheet {
-  display: none;
-  position: fixed;
+  right: 0;
   bottom: 0;
+  z-index: 11;
+  overflow: hidden;
+  background: transparent;
+  color: var(--terminal-fg, var(--text));
+  font-kerning: none;
+  font-variant-ligatures: none;
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+  touch-action: manipulation;
+}
+.select-layer.visible { display: block; }
+#terminal.hidden ~ .select-layer { display: none; }
+.select-row {
+  position: absolute;
   left: 0;
   right: 0;
-  z-index: 101;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  padding: 4px 0 env(safe-area-inset-bottom, 8px);
-  font-family: var(--mono);
+  white-space: pre;
 }
-.link-sheet.visible { display: block; }
-.link-sheet-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6px 14px;
-  border-bottom: 1px solid var(--border);
+.select-row a {
+  color: inherit;
+  text-decoration: underline;
 }
-.link-sheet-header h3 {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  font-family: var(--mono);
-}
-.link-sheet-url {
-  padding: 12px 16px;
-  color: var(--panel-link);
-  font-size: 14px;
-  word-break: break-all;
-}
-.link-sheet-actions {
-  display: flex;
-  gap: 8px;
-  padding: 0 16px 12px;
-}
-.link-sheet .touch-select-status { padding: 0 16px 12px; }
+.select-wide { display: inline-block; }
+.select-probe { white-space: pre; }
 
 @media (max-width: 620px) {
   .container { padding: 12px; }

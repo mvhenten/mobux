@@ -110,6 +110,11 @@ export function createXtermRenderer(host, options = {}) {
       return { cols, rows, cellWidth: c.width, cellHeight: c.height };
     },
     cellSize,
+    cellOrigin() {
+      const screen = host.querySelector(".xterm-screen");
+      const r = (screen || host).getBoundingClientRect();
+      return { x: r.left, y: r.top };
+    },
 
     // R4 — current grid.
     get cols() {

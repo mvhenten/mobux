@@ -19,7 +19,14 @@ const { outputFiles } = buildSync({
   format: "esm",
   write: false,
 });
-const { displayLength, rowsFromBottom, textBetween, urlAt, wordAt } =
+const {
+  displayLength,
+  linkCells,
+  rowsFromBottom,
+  textBetween,
+  urlAt,
+  wordAt,
+} =
   await import(
     `data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString("base64")}`
   );
@@ -134,4 +141,28 @@ test("history lines count as the rows they are cut into", () => {
     textBetween(rows, { row: 0, col: 0 }, { row: 2, col: 3 }),
     "0123456789",
   );
+});
+
+test("a URL wrapped over two rows links its cells on both rows", () => {
+  const rows = screenRows(10, [["go https:/"], ["/a.b/c. x", true]]);
+
+  const links = linkCells(rows);
+  assert.deepEqual(
+    links[0].map((href) => !!href),
+    [false, false, false, true, true, true, true, true, true, true],
+  );
+  assert.equal(links[0][3], "https://a.b/c");
+  assert.equal(links[1][5], "https://a.b/c");
+  assert.equal(links[1][6], null);
+  assert.equal(links[1][8], null);
+});
+
+test("an emoji before a URL keeps the link on the columns the URL is drawn in", () => {
+  const rows = screenRows(20, [["🚀 https://a.b/c x"]]);
+
+  const links = linkCells(rows)[0];
+  assert.equal(links[2], null);
+  assert.equal(links[3], "https://a.b/c");
+  assert.equal(links[15], "https://a.b/c");
+  assert.equal(links[16], null);
 });

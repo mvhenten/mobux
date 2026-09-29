@@ -15,7 +15,7 @@
 // new-tab behavior.
 //
 // One external-open path for the whole app, across both frontends: the
-// classic terminal (the long-press link sheet, mic-overlay's report link,
+// classic terminal (select mode's link anchors, mic-overlay's report link,
 // xterm's own link clicks) and the Preact SPA (any rendered anchor to
 // another origin). `installExternalLinkHandler` wires a single delegated
 // click handler so every SPA anchor to a non-mobux origin escapes the

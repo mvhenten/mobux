@@ -1,5 +1,5 @@
 // Page and session helpers shared by the specs that drive a live terminal
-// through a real tmux session (critical-path, touch-select).
+// through a real tmux session (critical-path, native-select).
 
 const { execSync } = require("child_process");
 
