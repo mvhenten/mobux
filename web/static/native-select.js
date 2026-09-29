@@ -18,12 +18,16 @@ function element(tag, className) {
 
 // The row's cells as DOM, and per column the text node and offsets that
 // hold the character drawn there. A wide character gets a box two cells
-// wide, so the columns after it stay on the grid.
-function buildRow(row, hrefs, cellWidth) {
+// wide, so the columns after it stay on the grid. A row that ends its
+// logical line ends in a line break, so a copy across rows keeps the lines
+// apart; a row the next one continues keeps its trailing blanks instead.
+function buildRow(row, hrefs, cellWidth, continued) {
   const node = element("div", "select-row");
   const cells = row.cells;
   let last = cells.length - 1;
-  while (last >= 0 && (cells[last] === " " || cells[last] === "")) last--;
+  if (!continued) {
+    while (last >= 0 && (cells[last] === " " || cells[last] === "")) last--;
+  }
   const map = [];
   const runs = [];
   let parent = node;
@@ -69,19 +73,28 @@ function buildRow(row, hrefs, cellWidth) {
     box.append(r.node);
     r.parent.append(box);
   }
+  if (!continued) node.append(document.createTextNode("\n"));
   return { node, map };
 }
 
 const blankRow = (cols) => ({ cells: Array(cols).fill(" "), wrapped: false });
 
-export function createNativeSelection({ core, root, overlay, fontFamily }) {
+const rowKey = (row) => (row ? `${row.wrapped}:${row.cells.join("")}` : "");
+
+export function createNativeSelection({
+  core,
+  root,
+  overlay,
+  fontFamily,
+  releaseOverlay,
+}) {
   const layer = element("div", "select-layer");
   root.append(layer);
 
   let active = null;
 
-  // Everything the layer's rows stand for: once any of it changes, the rows
-  // no longer lie on the text drawn under them.
+  // Everything the layer's rows stand for besides their text: once any of it
+  // changes, the rows no longer lie on the text drawn under them.
   const layoutKey = () => {
     const pane = core.panes[core.activeIndex];
     return [
@@ -117,13 +130,14 @@ export function createNativeSelection({ core, root, overlay, fontFamily }) {
     layer.style.letterSpacing = `${cell.width - advance}px`;
 
     const maps = rows.map((row, i) => {
-      const built = buildRow(row, links[i], cell.width);
+      const continued = !!rows[i + 1]?.wrapped;
+      const built = buildRow(row, links[i], cell.width, continued);
       built.node.style.top = `${i * cell.height}px`;
       built.node.style.height = `${cell.height}px`;
       layer.append(built.node);
       return built.map;
     });
-    return { cell, origin, rows, maps };
+    return { cell, origin, rows, maps, top, keys: rows.map(rowKey) };
   }
 
   function selectWord(grid, x, y) {
@@ -169,15 +183,15 @@ export function createNativeSelection({ core, root, overlay, fontFamily }) {
       layer.replaceChildren();
       return false;
     }
-    active = { layout: layoutKey(), overlay: overlay.style.pointerEvents };
+    active = { layout: layoutKey(), top: grid.top, keys: grid.keys };
     overlay.style.pointerEvents = "none";
     return true;
   }
 
   function leave() {
     if (!active) return;
-    overlay.style.pointerEvents = active.overlay;
     active = null;
+    releaseOverlay();
     if (selectionInLayer()) getSelection().removeAllRanges();
     layer.classList.remove("visible");
     layer.replaceChildren();
@@ -189,8 +203,18 @@ export function createNativeSelection({ core, root, overlay, fontFamily }) {
   document.addEventListener("selectionchange", onSelectionChange);
   const onResize = () => leave();
   window.addEventListener("resize", onResize);
+  // The text drawn under the layer moved or changed: a new line, a status
+  // line tick, a redraw.
+  const rowsMoved = () => {
+    const { top, rows: count } = core.textViewport();
+    if (top !== active.top || count !== active.keys.length) return true;
+    return core
+      .textRows(top, count)
+      .some((row, i) => rowKey(row) !== active.keys[i]);
+  };
   const onLayout = () => {
-    if (active && active.layout !== layoutKey()) leave();
+    if (!active) return;
+    if (active.layout !== layoutKey() || rowsMoved()) leave();
   };
   const bufferSub = core.onBufferChanged(onLayout);
   core.addEventListener("panes", onLayout);

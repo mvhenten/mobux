@@ -35,6 +35,9 @@ test.beforeAll(() => {
     tmux(`kill-session -t ${SESSION}`);
   } catch (_) {}
   tmux(`new-session -d -s ${SESSION} ${SHELL_ENV} "bash --norc --noprofile"`);
+  // Select mode ends when the rows in view change, so no clock ticks in the
+  // status line under a test.
+  tmux(`set-option -t ${SESSION} status-right static`);
 });
 
 test.beforeEach(() => {
@@ -99,19 +102,46 @@ function cellPoint(page, col, row) {
   );
 }
 
-function longPress(page, { x, y }) {
-  return page.evaluate(
-    ({ x, y }) => {
+// The rows in view stop changing: the prompt after the output has arrived.
+async function quiet(page) {
+  const rows = () =>
+    page.evaluate(() => {
+      const t = window.__mobuxView.test;
+      const top = t.viewportY();
+      return Array.from({ length: t.rows() }, (_, r) => t.lineText(top + r));
+    });
+  let before = await rows();
+  await expect
+    .poll(
+      async () => {
+        await page.waitForTimeout(250);
+        const now = await rows();
+        const same = JSON.stringify(now) === JSON.stringify(before);
+        before = now;
+        return same;
+      },
+      { timeout: 8000 },
+    )
+    .toBe(true);
+}
+
+// The contextmenu Chrome fires for a long-press; `pointerType` "mouse" is a
+// right-click.
+async function longPress(page, { x, y }, pointerType = "touch") {
+  await quiet(page);
+  await page.evaluate(
+    ({ x, y, pointerType }) => {
       document.getElementById("touchOverlay").dispatchEvent(
-        new MouseEvent("contextmenu", {
+        new PointerEvent("contextmenu", {
           bubbles: true,
           cancelable: true,
           clientX: x,
           clientY: y,
+          pointerType,
         }),
       );
     },
-    { x, y },
+    { x, y, pointerType },
   );
 }
 
@@ -186,9 +216,13 @@ test("the layer's rows sit on the renderer's glyphs on the alternate screen abov
   page,
 }) => {
   await bootTerminal(page);
+  const cols = await page.evaluate(() => window.__mobuxView.test.cols());
+  const far = `grid-far${" ".repeat(cols - 1 - "grid-far".length - "edgeword".length)}edgeword`;
   tmux(
-    `send-keys -t ${SESSION} "bash ${ALT_TEXT_SCRIPT} 'grid-top alpha' 'grid-mid      bravo' 'grid-low charlie'" Enter`,
+    `send-keys -t ${SESSION} "bash ${ALT_TEXT_SCRIPT} 'grid-top alpha' 'grid-mid      bravo' '${far}' 'grid-low charlie'" Enter`,
   );
+  const edge = await findOnScreen(page, far, "edgeword");
+  expect(edge.col + "edgeword".length).toBe(cols - 1);
   const low = await findOnScreen(page, "grid-low charlie", "charlie");
   const top = await findOnScreen(page, "grid-top alpha", "alpha");
   await expect
@@ -221,7 +255,7 @@ test("the layer's rows sit on the renderer's glyphs on the alternate screen abov
   });
   expect(low.row).toBe(grid.screenRows - 2);
 
-  for (const needle of ["grid-top", "alpha", "bravo", "charlie"]) {
+  for (const needle of ["grid-top", "alpha", "bravo", "edgeword", "charlie"]) {
     const drawn = await glyphBox(page, "#terminal", needle);
     const layered = await glyphBox(page, ".select-layer", needle);
     expect(drawn, needle).not.toBeNull();
@@ -390,4 +424,62 @@ test("scrolled back, the layer shows the rows the renderer shows", async ({
   await longPress(page, await cellPoint(page, 2, 3));
 
   expect((await selectState(page)).text).toBe(expected);
+});
+
+test("a mouse right-click keeps the browser's menu and enters no select mode", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  echoLine("alpha bravo charlie");
+  const at = await findOnScreen(page, "alpha bravo charlie", "bravo");
+
+  await longPress(page, await cellPoint(page, at.col, at.row), "mouse");
+
+  expect((await selectState(page)).active).toBe(false);
+  await expect(page.locator(".select-layer")).toBeHidden();
+});
+
+test("a copy across two lines keeps them apart and a wrapped line whole", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  const cols = await page.evaluate(() => window.__mobuxView.test.cols());
+  const long = "w".repeat(cols + 6);
+  tmux(`send-keys -t ${SESSION} "printf 'copy-a\\ncopy-b\\n${long}\\n'" Enter`);
+  const a = await findOnScreen(page, "copy-a", "copy");
+
+  await longPress(page, await cellPoint(page, 2, a.row));
+  expect((await selectState(page)).text).toBe("copy-a");
+
+  const across = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll(".select-layer .select-row")];
+    const first = rows.find((r) => r.textContent.startsWith("copy-a"));
+    const second = rows.find((r) => r.textContent.startsWith("copy-b"));
+    getSelection().setBaseAndExtent(
+      first.firstChild,
+      0,
+      second.firstChild,
+      "copy-b".length,
+    );
+    return getSelection().toString();
+  });
+  expect(across).toBe("copy-a\ncopy-b");
+
+  await page.evaluate(() => getSelection().removeAllRanges());
+  await expect.poll(async () => (await selectState(page)).active).toBe(false);
+  await longPress(page, await cellPoint(page, 3, a.row + 2));
+  expect((await selectState(page)).text).toBe(long);
+});
+
+test("output while select mode is on ends it", async ({ page }) => {
+  await bootTerminal(page);
+  echoLine("alpha bravo charlie");
+  const at = await findOnScreen(page, "alpha bravo charlie", "bravo");
+  await longPress(page, await cellPoint(page, at.col, at.row));
+  expect((await selectState(page)).active).toBe(true);
+
+  echoLine("more output");
+
+  await expect.poll(async () => (await selectState(page)).active).toBe(false);
+  await expect(page.locator(".select-layer")).toBeHidden();
 });

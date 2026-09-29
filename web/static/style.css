@@ -58,6 +58,9 @@
   /* Inline link inside a dark panel — the reader's OSC 133 hint and read
      mode's empty state both point at /settings#shell-integration. */
   --panel-link: #7ec8ff;
+  /* Select mode's highlight: see-through, so the glyphs drawn under the
+     transparent text layer stay readable. */
+  --select-highlight: rgba(122, 138, 158, 0.45);
   /* Settings screens: an inset card one step above --bg, its pressed state,
      row hairlines, and the status colours. */
   --surface: #181b22;
@@ -1435,7 +1438,7 @@ h1, h2, h3 { margin: 0; }
   z-index: 11;
   overflow: hidden;
   background: transparent;
-  color: var(--terminal-fg, var(--text));
+  color: transparent;
   font-kerning: none;
   font-variant-ligatures: none;
   -webkit-user-select: text;
@@ -1452,8 +1455,13 @@ h1, h2, h3 { margin: 0; }
   white-space: pre;
 }
 .select-row a {
-  color: inherit;
+  color: transparent;
   text-decoration: underline;
+  text-decoration-color: var(--terminal-fg, var(--text));
+}
+.select-layer ::selection {
+  color: transparent;
+  background: var(--select-highlight);
 }
 .select-wide { display: inline-block; }
 .select-probe { white-space: pre; }

@@ -279,6 +279,11 @@ export function createTerminal({
   function hideCmdList() {
     cmdPickList.classList.remove("visible");
     cmdOverlayBg.classList.remove("visible");
+    restoreOverlay();
+  }
+
+  function restoreOverlay() {
+    if (cmdPickList.classList.contains("visible")) return;
     if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
       overlay.style.pointerEvents = "auto";
     }
@@ -381,6 +386,7 @@ export function createTerminal({
     root: overlay.parentNode,
     overlay,
     fontFamily: RENDERER_OPTIONS.fontFamily,
+    releaseOverlay: restoreOverlay,
   });
   cleanups.push(() => selection.dispose());
 
@@ -417,7 +423,9 @@ export function createTerminal({
 
   // Chrome fires contextmenu for a touch long-press; select mode takes it
   // from there and the rest of that touch belongs to the browser.
+  // A mouse right-click keeps the browser's own menu.
   on(overlay, "contextmenu", (e) => {
+    if (e.pointerType && e.pointerType !== "touch") return;
     if (termEl.classList.contains("hidden")) return;
     if (selection.enter(e.clientX, e.clientY)) gestures.release();
   });
