@@ -22,6 +22,8 @@
 //   R3  resize(cols, rows)
 //       measure(): {cols, rows, cellWidth, cellHeight}   authoritative fit
 //       cellSize(): {width, height}
+//       cellOrigin(): {x, y}                   client point of the first shown
+//                                             row's first cell
 //   R4  cols, rows                            current grid
 //   R5  onInput(cb): Disposable               keystrokes / IME bound for the PTY
 //   R6  scrollLines(n), scrollToBottom()
@@ -36,8 +38,7 @@
 //
 // Alternate-screen state (R9), OSC handlers (R10), the bell (R14) and
 // buffer changes come from the buffer, not the renderer, and so do the
-// display rows touch selection and long-press links read (textRows) and the
-// bracketed-paste mode a paste follows. The reader reads the
+// display rows the select layer reads (textRows). The reader reads the
 // buffer through the document contract and never touches a display.
 //
 // The engine exposes the surface its consumers use: EventTarget events (open,
@@ -429,6 +430,10 @@ export class TerminalEngine extends EventTarget {
     return this.renderer.cellSize();
   }
 
+  cellOrigin() {
+    return this.renderer.cellOrigin();
+  }
+
   // ── Display / scroll passthroughs ─────────────────────────────────
   viewport() {
     return this.renderer.viewport();
@@ -667,18 +672,6 @@ export class TerminalEngine extends EventTarget {
       b.historyEpoch(),
       this.view.fullRedraws(),
     ].join(":");
-  }
-
-  bracketedPaste() {
-    return this.buffer.bracketedPaste();
-  }
-
-  // Pasted text goes to the pty with each line break as Enter, bracketed when the
-  // application asked for it. Paste markers inside the text are dropped so
-  // it cannot end the bracket early.
-  paste(text) {
-    const body = text.replace(/\x1b\[20[01]~/g, "").replace(/\r\n|\n/g, "\r");
-    this.send(this.bracketedPaste() ? `\x1b[200~${body}\x1b[201~` : body);
   }
 
   onBell(cb) {

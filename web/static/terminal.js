@@ -3,7 +3,7 @@ import { TerminalEngine, WINDOW_SETTLE_MS } from "./terminal-engine.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
-import { createTouchSelection } from "./touch-select.js";
+import { createNativeSelection } from "./native-select.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { openSettings } from "./settings-nav.js";
@@ -279,6 +279,11 @@ export function createTerminal({
   function hideCmdList() {
     cmdPickList.classList.remove("visible");
     cmdOverlayBg.classList.remove("visible");
+    restoreOverlay();
+  }
+
+  function restoreOverlay() {
+    if (cmdPickList.classList.contains("visible")) return;
     if ("ontouchstart" in window || navigator.maxTouchPoints > 0) {
       overlay.style.pointerEvents = "auto";
     }
@@ -354,9 +359,6 @@ export function createTerminal({
       return;
     }
     if (core.wheelScrollsPane()) {
-      // The app redraws its own screen under the swipe, so a highlight
-      // would sit on text that has moved.
-      selection.clear();
       if (!wheelPinned) core.scrollToBottom();
       wheelPinned = true;
       wheelByPixels(dy);
@@ -364,7 +366,6 @@ export function createTerminal({
     }
     const lines = Math.round(dy / core.cellSize().height);
     if (lines !== 0) core.scrollLines(lines);
-    selection.refresh();
   }
 
   // Two-finger pull-to-reload feedback. Shared with the reader: the SPA hands
@@ -380,11 +381,12 @@ export function createTerminal({
     else updatePaneUI();
   }
 
-  const selection = createTouchSelection({
+  const selection = createNativeSelection({
     core,
-    termEl,
+    root: overlay.parentNode,
     overlay,
-    openExternal,
+    fontFamily: RENDERER_OPTIONS.fontFamily,
+    releaseOverlay: restoreOverlay,
   });
   cleanups.push(() => selection.dispose());
 
@@ -405,10 +407,6 @@ export function createTerminal({
     onTwoPullMove: twoPullMove,
     onTwoPullEnd: twoPullEnd,
 
-    // A tap opens nothing: a link opens from its long-press sheet, so a
-    // scroll or the first tap of a double-tap never leaves the app.
-    onTap: (x, y) => selection.tap(x, y),
-
     onDoubleTap() {
       // This handler is wired on the touch overlay, so a double-tap here always
       // comes from a touch device — exactly the case that wants the on-screen
@@ -420,11 +418,16 @@ export function createTerminal({
 
     onHSwipe: (dir) => core.switchWindow(dir),
 
-    onLongPress: (x, y) => selection.longPress(x, y),
-    onHandleStart: (x, y) => selection.handleStart(x, y),
-    onHandleMove: (x, y) => selection.handleMove(x, y),
-    onHandleEnd: () => selection.handleEnd(),
     onSwipeUp: showCmdList,
+  });
+
+  // Chrome fires contextmenu for a touch long-press; select mode takes it
+  // from there and the rest of that touch belongs to the browser.
+  // A mouse right-click keeps the browser's own menu.
+  on(overlay, "contextmenu", (e) => {
+    if (e.pointerType && e.pointerType !== "touch") return;
+    if (termEl.classList.contains("hidden")) return;
+    if (selection.enter(e.clientX, e.clientY)) gestures.release();
   });
 
   // ── Reveal on first output ──────────────────────────────────────────
@@ -658,6 +661,7 @@ export function createTerminal({
     },
     bufferLength: () => core.viewport().length,
     isAlternate: () => core.isAlternateScreenActive(),
+    paneAlternate: () => core.panes[core.activeIndex]?.alternateOn === true,
     wheelScrollsPane: () => core.wheelScrollsPane(),
     terminalRows: () => core.rows,
     cols: () => core.cols,
@@ -690,8 +694,8 @@ export function createTerminal({
         });
       }),
     // ── Selection / links / bell probes (R12–R14) ─────────────────
-    touchSelection: () => selection.state(),
-    bracketedPaste: () => core.bracketedPaste(),
+    nativeSelection: () => selection.state(),
+    cellOrigin: () => core.cellOrigin(),
     getSelection: () => core.getSelection(),
     hasSelection: () => core.hasSelection(),
     clearSelection: () => core.clearSelection(),

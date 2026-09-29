@@ -1,7 +1,7 @@
 // The engine buffer read as the display's rows (issue #315 keeps the buffer
 // the source of truth): history lines cut at the pane width, the normal
-// screen's scrollback, then the screen. Touch selection and long-press link
-// detection read cells from here, never from a renderer, so xterm and sterk
+// screen's scrollback, then the screen. The select layer (native-select.js)
+// reads cells and links from here, never from a renderer, so xterm and sterk
 // select the same text.
 
 import { isBlankCell } from "./terminal-buffer.js";
@@ -180,6 +180,26 @@ export function urlAt(rows, row, col) {
     if (at >= m.index && at < m.index + url.length) return url;
   }
   return null;
+}
+
+// Per row of `rows`, per column: the http(s) URL drawn in that cell, or
+// null. A URL wrapped across rows marks its cells on every row it covers.
+export function linkCells(rows) {
+  const out = rows.map((row) => row.cells.map(() => null));
+  rows.forEach((row, r) => {
+    if (r > 0 && row.wrapped) return;
+    const line = logicalLineAt(rows, r);
+    URL_RE.lastIndex = 0;
+    let m;
+    while ((m = URL_RE.exec(line.text)) !== null) {
+      const url = m[0].replace(TRAILING_PUNCT_RE, "");
+      for (let i = m.index; i < m.index + url.length; i++) {
+        const { row: at, col } = line.cells[i];
+        out[at][col] = url;
+      }
+    }
+  });
+  return out;
 }
 
 // The run of non-whitespace cells through (row, col) across the logical

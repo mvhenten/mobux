@@ -153,6 +153,10 @@ export function applyReaderVars(theme) {
 export function applyTheme(id, { engine } = {}) {
   const theme = getTheme(id);
   applyReaderVars(theme);
+  document.documentElement.style.setProperty(
+    '--terminal-fg',
+    theme.foreground || theme.palette[7] || '#c5c8c6',
+  );
   if (engine && typeof engine.setTheme === 'function') engine.setTheme(theme);
   return theme;
 }

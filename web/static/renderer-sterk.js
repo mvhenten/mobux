@@ -168,6 +168,15 @@ export function createSterkRenderer(host, options = {}) {
       : { width: 9, height: 18 };
   };
 
+  // Where Ace draws the first shown row, scroll offset and padding included.
+  const cellOrigin = () => {
+    if (!view) return { x: 0, y: 0 };
+    const at = view
+      .getEditor()
+      .renderer.textToScreenCoordinates(view.viewportY, 0);
+    return { x: at.pageX, y: at.pageY };
+  };
+
   const horizontalPadding = () => {
     const cs = getComputedStyle(host);
     return (
@@ -222,6 +231,7 @@ export function createSterkRenderer(host, options = {}) {
       return { cols, rows, cellWidth: cell.width, cellHeight: cell.height };
     },
     cellSize,
+    cellOrigin,
 
     // R4 — current grid.
     get cols() {
