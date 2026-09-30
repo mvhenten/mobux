@@ -102,6 +102,10 @@ pub struct CommandEntry {
     pub started_at: i64,
     #[serde(rename = "endedAt")]
     pub ended_at: i64,
+    /// The tmux session that ran the command (`tmux::session_stamp`). Lines
+    /// recorded before it existed read as empty, which names no session.
+    #[serde(rename = "tmuxSession", default)]
+    pub tmux_session: String,
 }
 
 /// A raw fallback entry for content that arrived outside any C..D span —
@@ -142,7 +146,7 @@ pub enum PendingEntry {
 }
 
 impl PendingEntry {
-    fn into_entry(self, seq: u64) -> HistoryEntry {
+    fn into_entry(self, seq: u64, tmux_session: &str) -> HistoryEntry {
         match self {
             PendingEntry::Command {
                 command,
@@ -157,6 +161,7 @@ impl PendingEntry {
                 exit_code,
                 started_at,
                 ended_at,
+                tmux_session: tmux_session.to_string(),
             }),
             PendingEntry::Raw { raw, ts } => HistoryEntry::Raw(RawEntry { seq, raw, ts }),
         }
@@ -237,6 +242,7 @@ pub struct Segmenter {
     last_fed_ms: i64,
     dirty_since_ms: Option<i64>,
     seen_marker: bool,
+    tmux_session: String,
 }
 
 impl Default for Segmenter {
@@ -270,7 +276,19 @@ impl Segmenter {
             last_fed_ms: 0,
             dirty_since_ms: None,
             seen_marker: false,
+            tmux_session: String::new(),
         }
+    }
+
+    /// Names the tmux session this segmenter records (`tmux::session_stamp`),
+    /// which the store keeps on each command block.
+    pub fn recording(mut self, tmux_session: String) -> Self {
+        self.tmux_session = tmux_session;
+        self
+    }
+
+    pub fn tmux_session(&self) -> &str {
+        &self.tmux_session
     }
 
     /// Follows the pane to a new size, recording first what a smaller screen
@@ -745,15 +763,16 @@ const BACKWARD_CHUNK: usize = 64 * 1024;
 struct SessionSlot {
     last_seq: u64,
     entry_count: u64,
-    last_command_at: Option<i64>,
+    last_command_session: Option<String>,
 }
 
-/// When a recorded line's command block ended, if the line is one. Only an
-/// OSC 133 `C` opens a command block, so these are the shell integration's
-/// footprint in the record.
-fn command_ended_at(line: &serde_json::Value) -> Option<i64> {
+/// Which tmux session ran a recorded line's command block, if the line is
+/// one. Only an OSC 133 `C` opens a command block, so these are the shell
+/// integration's footprint in the record.
+fn command_tmux_session(line: &serde_json::Value) -> Option<String> {
     line.get("command")?;
-    line.get("endedAt")?.as_i64()
+    let stamp = line.get("tmuxSession").and_then(|v| v.as_str());
+    Some(stamp.unwrap_or_default().to_string())
 }
 
 pub struct SessionHistoryStore {
@@ -833,7 +852,7 @@ impl SessionHistoryStore {
     fn hydrate(path: &Path) -> SessionSlot {
         let mut last_seq = 0u64;
         let mut entry_count = 0u64;
-        let mut last_command_at = None;
+        let mut last_command_session = None;
         if let Ok(f) = File::open(path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if line.trim().is_empty() {
@@ -844,14 +863,16 @@ impl SessionHistoryStore {
                     if let Some(seq) = v.get("seq").and_then(|s| s.as_u64()) {
                         last_seq = last_seq.max(seq);
                     }
-                    last_command_at = last_command_at.max(command_ended_at(&v));
+                    if let Some(stamp) = command_tmux_session(&v) {
+                        last_command_session = Some(stamp);
+                    }
                 }
             }
         }
         SessionSlot {
             last_seq,
             entry_count,
-            last_command_at,
+            last_command_session,
         }
     }
 
@@ -860,13 +881,18 @@ impl SessionHistoryStore {
     /// ever drops the oldest lines, so a cursor built from a `seq` stays
     /// meaningful (`give me everything after this point`) even once the
     /// entry it named has itself been trimmed away.
-    pub fn append(&self, session: &str, entry: PendingEntry) -> anyhow::Result<HistoryEntry> {
+    pub fn append(
+        &self,
+        session: &str,
+        tmux_session: &str,
+        entry: PendingEntry,
+    ) -> anyhow::Result<HistoryEntry> {
         let slot = self.slot(session)?;
         let mut s = slot
             .lock()
             .map_err(|_| anyhow::anyhow!("session history slot lock poisoned"))?;
         s.last_seq += 1;
-        let full = entry.into_entry(s.last_seq);
+        let full = entry.into_entry(s.last_seq, tmux_session);
 
         fs::create_dir_all(&self.root)?;
         let line = serde_json::to_string(&full)?;
@@ -877,7 +903,7 @@ impl SessionHistoryStore {
         writeln!(f, "{line}")?;
         s.entry_count += 1;
         if let HistoryEntry::Command(c) = &full {
-            s.last_command_at = s.last_command_at.max(Some(c.ended_at));
+            s.last_command_session = Some(c.tmux_session.clone());
         }
 
         if s.entry_count > MAX_ENTRIES_PER_SESSION + TRIM_MARGIN {
@@ -886,16 +912,17 @@ impl SessionHistoryStore {
         Ok(full)
     }
 
-    /// Whether the recording holds a command block that ended at or after
-    /// `since_ms`. The record is keyed by session name and outlives the tmux
-    /// session, so a caller passes when the live session was created, and a
-    /// new session under an old name starts without the old one's blocks.
-    pub fn markers_seen(&self, session: &str, since_ms: i64) -> anyhow::Result<bool> {
+    /// Whether the latest recorded command block ran in `tmux_session`. The
+    /// record is keyed by session name and outlives the tmux session, so a
+    /// new session under an old name starts without the old one's blocks. An
+    /// empty stamp (a node's recording, or one from before stamps) never
+    /// matches.
+    pub fn markers_seen(&self, session: &str, tmux_session: &str) -> anyhow::Result<bool> {
         let slot = self.slot(session)?;
         let s = slot
             .lock()
             .map_err(|_| anyhow::anyhow!("session history slot lock poisoned"))?;
-        Ok(s.last_command_at.is_some_and(|at| at >= since_ms))
+        Ok(!tmux_session.is_empty() && s.last_command_session.as_deref() == Some(tmux_session))
     }
 
     fn trim(&self, session: &str, s: &mut SessionSlot) -> anyhow::Result<()> {
@@ -917,11 +944,11 @@ impl SessionHistoryStore {
         }
         fs::rename(&tmp_path, &path)?;
         s.entry_count = kept.len() as u64;
-        s.last_command_at = kept
+        s.last_command_session = kept
             .iter()
+            .rev()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter_map(|v| command_ended_at(&v))
-            .max();
+            .find_map(|v| command_tmux_session(&v));
         Ok(())
     }
 
@@ -1392,6 +1419,8 @@ pub fn decode_cursor(cursor: &str) -> Option<PageCursor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TMUX_SESSION: &str = "$1@1700000000";
 
     fn feed_str(seg: &mut Segmenter, s: &str, t: i64) -> Vec<PendingEntry> {
         seg.feed(s.as_bytes(), t)
@@ -1870,6 +1899,7 @@ mod tests {
         let a = store
             .append(
                 "s1",
+                TMUX_SESSION,
                 PendingEntry::Raw {
                     raw: "one".into(),
                     ts: 1,
@@ -1879,6 +1909,7 @@ mod tests {
         let b = store
             .append(
                 "s1",
+                TMUX_SESSION,
                 PendingEntry::Raw {
                     raw: "two".into(),
                     ts: 2,
@@ -1902,6 +1933,7 @@ mod tests {
             store
                 .append(
                     "s1",
+                    TMUX_SESSION,
                     PendingEntry::Raw {
                         raw: format!("e{i}"),
                         ts: i,
@@ -1915,6 +1947,7 @@ mod tests {
         let next = store2
             .append(
                 "s1",
+                TMUX_SESSION,
                 PendingEntry::Raw {
                     raw: "e3".into(),
                     ts: 3,
@@ -1944,38 +1977,64 @@ mod tests {
         store
             .append(
                 "s1",
+                TMUX_SESSION,
                 PendingEntry::Raw {
                     raw: "no markers".into(),
                     ts: 1,
                 },
             )
             .unwrap();
-        assert!(!store.markers_seen("s1", 0).unwrap());
+        assert!(!store.markers_seen("s1", TMUX_SESSION).unwrap());
 
-        store.append("s1", command_at(5_000)).unwrap();
-        assert!(store.markers_seen("s1", 4_000).unwrap());
-        assert!(!store.markers_seen("s2", 0).unwrap());
+        store.append("s1", TMUX_SESSION, command_at(5_000)).unwrap();
+        assert!(store.markers_seen("s1", TMUX_SESSION).unwrap());
+        assert!(!store.markers_seen("s2", TMUX_SESSION).unwrap());
 
         let restarted = SessionHistoryStore::new(dir.path());
-        assert!(restarted.markers_seen("s1", 4_000).unwrap());
+        assert!(restarted.markers_seen("s1", TMUX_SESSION).unwrap());
     }
 
     #[test]
-    fn markers_seen_ignores_blocks_from_before_the_session_was_created() {
+    fn markers_seen_ignores_a_predecessor_created_in_the_same_second() {
         let (_dir, store) = temp_store();
-        store.append("s1", command_at(5_000)).unwrap();
-        assert!(!store.markers_seen("s1", 6_000).unwrap());
+        let successor = "$2@1700000000";
+        store.append("s1", TMUX_SESSION, command_at(5_000)).unwrap();
+        assert!(!store.markers_seen("s1", successor).unwrap());
+
+        store.append("s1", successor, command_at(5_100)).unwrap();
+        assert!(store.markers_seen("s1", successor).unwrap());
+        assert!(!store.markers_seen("s1", TMUX_SESSION).unwrap());
+    }
+
+    #[test]
+    fn markers_seen_never_matches_an_empty_stamp() {
+        let (_dir, store) = temp_store();
+        store.append("s1", "", command_at(5_000)).unwrap();
+        assert!(!store.markers_seen("s1", "").unwrap());
+    }
+
+    #[test]
+    fn markers_seen_skips_a_block_recorded_without_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("history")).unwrap();
+        fs::write(
+            dir.path().join("history/s1.jsonl"),
+            r#"{"seq":1,"command":"$ ls","output":"","exitCode":0,"startedAt":1,"endedAt":2}"#,
+        )
+        .unwrap();
+        let store = SessionHistoryStore::new(dir.path());
+        assert!(!store.markers_seen("s1", TMUX_SESSION).unwrap());
     }
 
     #[test]
     fn markers_seen_after_a_trim_matches_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionHistoryStore::new(dir.path());
-        store.append("s1", command_at(5_000)).unwrap();
+        store.append("s1", TMUX_SESSION, command_at(5_000)).unwrap();
         fill(&store, "s1", TRIGGER);
-        assert!(!store.markers_seen("s1", 0).unwrap());
+        assert!(!store.markers_seen("s1", TMUX_SESSION).unwrap());
         let restarted = SessionHistoryStore::new(dir.path());
-        assert!(!restarted.markers_seen("s1", 0).unwrap());
+        assert!(!restarted.markers_seen("s1", TMUX_SESSION).unwrap());
     }
 
     // The append at which `entry_count` first exceeds CAP + MARGIN, forcing
@@ -1989,6 +2048,7 @@ mod tests {
             store
                 .append(
                     session,
+                    TMUX_SESSION,
                     PendingEntry::Raw {
                         raw: format!("e{i}"),
                         ts: i as i64,
@@ -2072,6 +2132,7 @@ mod tests {
             store
                 .append(
                     "s1",
+                    TMUX_SESSION,
                     PendingEntry::Raw {
                         raw: format!("e{i}"),
                         ts: i as i64,
@@ -2113,6 +2174,7 @@ mod tests {
         store
             .append(
                 session,
+                TMUX_SESSION,
                 PendingEntry::Command {
                     command: "cmd".into(),
                     output,
@@ -2408,6 +2470,7 @@ mod tests {
         store
             .append(
                 "s1",
+                TMUX_SESSION,
                 PendingEntry::Raw {
                     raw: "x".repeat(MAX_PAGE_BYTES + 1),
                     ts: 1,
@@ -2417,6 +2480,7 @@ mod tests {
         store
             .append(
                 "s1",
+                TMUX_SESSION,
                 PendingEntry::Raw {
                     raw: "second".into(),
                     ts: 2,

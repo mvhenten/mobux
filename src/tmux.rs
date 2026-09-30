@@ -9,6 +9,16 @@ use tokio::process::Command;
 
 use crate::shell_integration::{detect_session_shell, rcfile_snippet, Shell};
 
+/// Names one tmux session exactly: `#{session_id}` is unique within a
+/// server, and `#{session_created}` tells apart a server that restarted and
+/// reused the id. A session killed and recreated under the same name gets a
+/// new stamp even within the same second.
+macro_rules! session_stamp_format {
+    () => {
+        "#{session_id}@#{session_created}"
+    };
+}
+
 /// Single-quote a shell word so it survives a remote shell's word-splitting
 /// unchanged (embedded `'` becomes `'\''`, the standard POSIX escape).
 fn shell_quote(s: &str) -> String {
@@ -132,27 +142,41 @@ pub struct PaneScreen {
 }
 
 pub async fn pane_screen(tmux_bin: &str, pane: &str) -> Result<PaneScreen> {
+    let reply = display_message(
+        tmux_bin,
+        pane,
+        "#{pane_height} #{pane_width} #{alternate_on}",
+    )
+    .await?;
+    parse_pane_screen(reply.as_bytes())
+}
+
+/// The stamp of the local session named exactly `session`.
+pub async fn session_stamp(tmux_bin: &str, session: &str) -> Result<String> {
+    let target = format!("={session}:");
+    let stamp = display_message(tmux_bin, &target, session_stamp_format!()).await?;
+    if stamp.is_empty() {
+        return Err(anyhow!("tmux has no session named {session}"));
+    }
+    Ok(stamp)
+}
+
+async fn display_message(tmux_bin: &str, target: &str, format: &str) -> Result<String> {
     let (program, args) =
         tmux_program_and_args(tmux_bin).ok_or_else(|| anyhow!("empty tmux command"))?;
     let output = Command::new(program)
         .args(&args)
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{pane_height} #{pane_width} #{alternate_on}",
-        ])
+        .args(["display-message", "-p", "-t", target, format])
         .output()
         .await
-        .with_context(|| format!("running tmux display-message for pane {pane}"))?;
+        .with_context(|| format!("running tmux display-message for {target}"))?;
     if !output.status.success() {
         return Err(anyhow!(
-            "tmux display-message for pane {pane} failed: {}",
+            "tmux display-message for {target} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    parse_pane_screen(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn parse_pane_screen(stdout: &[u8]) -> Result<PaneScreen> {
@@ -780,12 +804,16 @@ pub struct Pane {
     pub alternate_on: bool,
     pub status_lines: u16,
     pub status_position: String,
-    /// When tmux created the session, in seconds since the epoch.
+    /// Which tmux session this is, as [`session_stamp`] reads it.
     #[serde(skip)]
-    pub session_created: i64,
+    pub tmux_session: String,
 }
 
-const WINDOW_FORMAT: &str = "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{status}:#{status-position}:#{session_created}:#{window_name}";
+const WINDOW_FORMAT: &str = concat!(
+    "#{window_id}:#{window_index}:#{window_active}:#{alternate_on}:#{status}:#{status-position}:",
+    session_stamp_format!(),
+    ":#{window_name}"
+);
 
 // `#{status}` is `on`, `off` or a line count.
 fn parse_status_lines(status: &str) -> u16 {
@@ -801,7 +829,7 @@ fn parse_windows(stdout: &str) -> Vec<Pane> {
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.splitn(8, ':').collect();
-            let [id, index, active, alternate_on, status, status_position, created, title] =
+            let [id, index, active, alternate_on, status, status_position, stamp, title] =
                 parts.as_slice()
             else {
                 return None;
@@ -814,7 +842,7 @@ fn parse_windows(stdout: &str) -> Vec<Pane> {
                 alternate_on: *alternate_on == "1",
                 status_lines: parse_status_lines(status),
                 status_position: status_position.to_string(),
-                session_created: created.parse().unwrap_or(0),
+                tmux_session: stamp.to_string(),
             })
         })
         .collect()
@@ -1425,7 +1453,7 @@ mod tests {
     #[test]
     fn parse_windows_reads_screen_status_and_a_name_with_colons() {
         let panes = parse_windows(
-            "@1:0:1:1:on:bottom:1700000000:claude: a:b\n@2:1:0:0:2:top:1700000000:bash\n",
+            "@1:0:1:1:on:bottom:$3@1700000000:claude: a:b\n@2:1:0:0:2:top:$3@1700000000:bash\n",
         );
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[0].id, "@1");
@@ -1434,7 +1462,7 @@ mod tests {
         assert!(panes[0].alternate_on);
         assert_eq!(panes[0].status_lines, 1);
         assert_eq!(panes[0].status_position, "bottom");
-        assert_eq!(panes[0].session_created, 1_700_000_000);
+        assert_eq!(panes[0].tmux_session, "$3@1700000000");
         assert!(!panes[1].active);
         assert!(!panes[1].alternate_on);
         assert_eq!(panes[1].status_lines, 2);

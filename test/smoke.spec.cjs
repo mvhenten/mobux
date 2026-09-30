@@ -1413,10 +1413,16 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       const el = document.querySelector("#reader .reader-osc-hint");
       return el ? el.hidden : null;
     });
+  // A reload can catch the old page's last answer, whose body is gone by the
+  // time it is read; wait for one this page can still read.
   const openReader = async (name, navigate) => {
-    const panes = page.waitForResponse((r) =>
-      r.url().includes(`/api/sessions/${name}/panes`),
-    );
+    let answer;
+    const panes = page.waitForResponse(async (r) => {
+      if (!r.url().includes(`/api/sessions/${name}/panes`)) return false;
+      if (r.status() !== 200) return false;
+      answer = await r.json().catch(() => undefined);
+      return answer !== undefined;
+    });
     await navigate();
     await page.waitForFunction(
       () => window.__mobuxView?.test?.wsReady?.() === true,
@@ -1425,6 +1431,7 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
     await panes;
     await page.evaluate(() => window.__mobuxView.swap("reader"));
     await page.waitForTimeout(300);
+    return answer;
   };
 
   tmux(`new-session -d -s ${PLAIN} ${SHELL_ENV} "bash --norc --noprofile"`);
@@ -1465,7 +1472,17 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       )
       .toBe(true);
 
-    await openReader(ALT, () => page.reload());
+    // An attach that resizes the pane makes the shell redraw its prompt, which
+    // sends a marker live. Pin the size so only the recording can hide the hint.
+    const size = tmux(
+      `display-message -p -t ${ALT} "#{window_width} #{window_height}"`,
+    )
+      .toString()
+      .trim()
+      .split(" ");
+    tmux(`resize-window -t ${ALT} -x ${size[0]} -y ${size[1]}`);
+    const reloaded = await openReader(ALT, () => page.reload());
+    expect(reloaded.some((p) => p.markersSeen === true)).toBe(true);
     expect(
       await page.evaluate(() => window.__mobuxView.test.oscDetected()),
     ).toBe(false);
@@ -1475,7 +1492,8 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
     // name, without the integration, gets the hint back.
     tmux(`kill-session -t ${ALT}`);
     tmux(`new-session -d -s ${ALT} ${SHELL_ENV} "bash --norc --noprofile"`);
-    await openReader(ALT, () => page.reload());
+    const recreated = await openReader(ALT, () => page.reload());
+    expect(recreated.some((p) => p.markersSeen === true)).toBe(false);
     await expect.poll(hintHidden).toBe(false);
   } finally {
     for (const name of [ALT, PLAIN]) {
