@@ -142,42 +142,31 @@ pub struct PaneScreen {
 }
 
 pub async fn pane_screen(tmux_bin: &str, pane: &str) -> Result<PaneScreen> {
-    let (program, args) =
-        tmux_program_and_args(tmux_bin).ok_or_else(|| anyhow!("empty tmux command"))?;
-    let output = Command::new(program)
-        .args(&args)
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{pane_height} #{pane_width} #{alternate_on}",
-        ])
-        .output()
-        .await
-        .with_context(|| format!("running tmux display-message for pane {pane}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "tmux display-message for pane {pane} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    parse_pane_screen(&output.stdout)
+    let reply = display_message(
+        tmux_bin,
+        pane,
+        "#{pane_height} #{pane_width} #{alternate_on}",
+    )
+    .await?;
+    parse_pane_screen(reply.as_bytes())
 }
 
-/// The stamp of the session that `target` (a session or a pane) belongs to.
-pub async fn session_stamp(tmux_bin: &str, target: &str) -> Result<String> {
+/// The stamp of the local session named exactly `session`.
+pub async fn session_stamp(tmux_bin: &str, session: &str) -> Result<String> {
+    let target = format!("={session}:");
+    let stamp = display_message(tmux_bin, &target, session_stamp_format!()).await?;
+    if stamp.is_empty() {
+        return Err(anyhow!("tmux has no session named {session}"));
+    }
+    Ok(stamp)
+}
+
+async fn display_message(tmux_bin: &str, target: &str, format: &str) -> Result<String> {
     let (program, args) =
         tmux_program_and_args(tmux_bin).ok_or_else(|| anyhow!("empty tmux command"))?;
     let output = Command::new(program)
         .args(&args)
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            target,
-            session_stamp_format!(),
-        ])
+        .args(["display-message", "-p", "-t", target, format])
         .output()
         .await
         .with_context(|| format!("running tmux display-message for {target}"))?;

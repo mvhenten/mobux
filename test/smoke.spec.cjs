@@ -1413,16 +1413,22 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       const el = document.querySelector("#reader .reader-osc-hint");
       return el ? el.hidden : null;
     });
+  // A reload can catch the old page's last answer, whose body is gone by the
+  // time it is read; wait for one this page can still read.
   const openReader = async (name, navigate) => {
-    const panes = page.waitForResponse((r) =>
-      r.url().includes(`/api/sessions/${name}/panes`),
-    );
+    let answer;
+    const panes = page.waitForResponse(async (r) => {
+      if (!r.url().includes(`/api/sessions/${name}/panes`)) return false;
+      if (r.status() !== 200) return false;
+      answer = await r.json().catch(() => undefined);
+      return answer !== undefined;
+    });
     await navigate();
     await page.waitForFunction(
       () => window.__mobuxView?.test?.wsReady?.() === true,
       { timeout: 5000 },
     );
-    const answer = await (await panes).json();
+    await panes;
     await page.evaluate(() => window.__mobuxView.swap("reader"));
     await page.waitForTimeout(300);
     return answer;
@@ -1466,10 +1472,20 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       )
       .toBe(true);
 
-    // The attach resizes the pane, and the shell's prompt redraw can send a
-    // marker live, so the reloaded page's own panes answer is what counts.
+    // An attach that resizes the pane makes the shell redraw its prompt, which
+    // sends a marker live. Pin the size so only the recording can hide the hint.
+    const size = tmux(
+      `display-message -p -t ${ALT} "#{window_width} #{window_height}"`,
+    )
+      .toString()
+      .trim()
+      .split(" ");
+    tmux(`resize-window -t ${ALT} -x ${size[0]} -y ${size[1]}`);
     const reloaded = await openReader(ALT, () => page.reload());
     expect(reloaded.some((p) => p.markersSeen === true)).toBe(true);
+    expect(
+      await page.evaluate(() => window.__mobuxView.test.oscDetected()),
+    ).toBe(false);
     expect(await hintHidden()).toBe(true);
 
     // The recording outlives the tmux session: a new session under the old

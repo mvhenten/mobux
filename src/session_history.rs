@@ -914,13 +914,15 @@ impl SessionHistoryStore {
 
     /// Whether the latest recorded command block ran in `tmux_session`. The
     /// record is keyed by session name and outlives the tmux session, so a
-    /// new session under an old name starts without the old one's blocks.
+    /// new session under an old name starts without the old one's blocks. An
+    /// empty stamp (a node's recording, or one from before stamps) never
+    /// matches.
     pub fn markers_seen(&self, session: &str, tmux_session: &str) -> anyhow::Result<bool> {
         let slot = self.slot(session)?;
         let s = slot
             .lock()
             .map_err(|_| anyhow::anyhow!("session history slot lock poisoned"))?;
-        Ok(s.last_command_session.as_deref() == Some(tmux_session))
+        Ok(!tmux_session.is_empty() && s.last_command_session.as_deref() == Some(tmux_session))
     }
 
     fn trim(&self, session: &str, s: &mut SessionSlot) -> anyhow::Result<()> {
@@ -2002,6 +2004,13 @@ mod tests {
         store.append("s1", successor, command_at(5_100)).unwrap();
         assert!(store.markers_seen("s1", successor).unwrap());
         assert!(!store.markers_seen("s1", TMUX_SESSION).unwrap());
+    }
+
+    #[test]
+    fn markers_seen_never_matches_an_empty_stamp() {
+        let (_dir, store) = temp_store();
+        store.append("s1", "", command_at(5_000)).unwrap();
+        assert!(!store.markers_seen("s1", "").unwrap());
     }
 
     #[test]

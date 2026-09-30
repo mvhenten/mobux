@@ -1170,8 +1170,8 @@ struct PaneJson {
 
 /// GET /api/sessions/{name}/panes — the session's windows. `markersSeen`
 /// says the recorded history's latest OSC 133 command block ran in this
-/// tmux session, so a client that has not seen a marker live yet still knows the
-/// shell integration works. The record is keyed by session name alone, so a
+/// tmux session, so a client that has not seen a marker live yet still knows
+/// the shell integration works. The record is keyed by session name alone, so a
 /// `node` answer never claims it.
 async fn api_list_panes(
     State(state): State<AppState>,
@@ -2560,7 +2560,9 @@ async fn handle_ws(
     .await;
     let mut tap_started_at = tokio::time::Instant::now();
     let mut segmenter = match feeder_guard {
-        Some(_) => Some(new_segmenter(&tmux_bin, &session_name, history_tap.as_ref()).await),
+        Some(_) => {
+            Some(new_segmenter(&tmux_bin, &ssh_target, &session_name, history_tap.as_ref()).await)
+        }
         None => None,
     };
     let mut snapshot_at: Option<tokio::time::Instant> = None;
@@ -2651,7 +2653,7 @@ async fn handle_ws(
                                 history_rx = rx;
                                 tap_started_at = tokio::time::Instant::now();
                             }
-                            segmenter = Some(new_segmenter(&tmux_bin, &session_name, history_tap.as_ref()).await);
+                            segmenter = Some(new_segmenter(&tmux_bin, &ssh_target, &session_name, history_tap.as_ref()).await);
                             pane_check_at = history_tap
                                 .as_ref()
                                 .map(|_| tokio::time::Instant::now() + PANE_RECHECK);
@@ -2702,7 +2704,7 @@ async fn handle_ws(
                                 history_tap = tap;
                                 history_rx = rx;
                                 tap_started_at = tokio::time::Instant::now();
-                                segmenter = Some(new_segmenter(&tmux_bin, &session_name, history_tap.as_ref()).await);
+                                segmenter = Some(new_segmenter(&tmux_bin, &ssh_target, &session_name, history_tap.as_ref()).await);
                                 pane_check_at = history_tap
                                     .as_ref()
                                     .map(|_| tokio::time::Instant::now() + PANE_RECHECK);
@@ -2812,16 +2814,21 @@ const TAP_RESTART_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(
 /// whose size cannot be read is recorded without the model, and says so.
 async fn new_segmenter(
     tmux_bin: &str,
+    ssh_target: &Option<String>,
     session_name: &str,
     tap: Option<&tmux::PanePipeTap>,
 ) -> session_history::Segmenter {
-    let target = tap.map_or(session_name, |tap| tap.pane_id());
-    let tmux_session = match tmux::session_stamp(tmux_bin, target).await {
-        Ok(stamp) => stamp,
-        Err(err) => {
-            eprintln!("history: recording without a session stamp: {err:#}");
-            String::new()
-        }
+    // A node's sessions live on another tmux server, so a local stamp would
+    // name the wrong session; an empty one names none.
+    let tmux_session = match ssh_target {
+        Some(_) => String::new(),
+        None => match tmux::session_stamp(tmux_bin, session_name).await {
+            Ok(stamp) => stamp,
+            Err(err) => {
+                eprintln!("history: recording without a session stamp: {err:#}");
+                String::new()
+            }
+        },
     };
     let Some(tap) = tap else {
         return session_history::Segmenter::for_client_stream().recording(tmux_session);
