@@ -1422,9 +1422,10 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       () => window.__mobuxView?.test?.wsReady?.() === true,
       { timeout: 5000 },
     );
-    await panes;
+    const answer = await (await panes).json();
     await page.evaluate(() => window.__mobuxView.swap("reader"));
     await page.waitForTimeout(300);
+    return answer;
   };
 
   tmux(`new-session -d -s ${PLAIN} ${SHELL_ENV} "bash --norc --noprofile"`);
@@ -1465,17 +1466,18 @@ test("reader hides the OSC 133 hint on the alternate screen and after a reload",
       )
       .toBe(true);
 
-    await openReader(ALT, () => page.reload());
-    expect(
-      await page.evaluate(() => window.__mobuxView.test.oscDetected()),
-    ).toBe(false);
+    // The attach resizes the pane, and the shell's prompt redraw can send a
+    // marker live, so the reloaded page's own panes answer is what counts.
+    const reloaded = await openReader(ALT, () => page.reload());
+    expect(reloaded.some((p) => p.markersSeen === true)).toBe(true);
     expect(await hintHidden()).toBe(true);
 
     // The recording outlives the tmux session: a new session under the old
     // name, without the integration, gets the hint back.
     tmux(`kill-session -t ${ALT}`);
     tmux(`new-session -d -s ${ALT} ${SHELL_ENV} "bash --norc --noprofile"`);
-    await openReader(ALT, () => page.reload());
+    const recreated = await openReader(ALT, () => page.reload());
+    expect(recreated.some((p) => p.markersSeen === true)).toBe(false);
     await expect.poll(hintHidden).toBe(false);
   } finally {
     for (const name of [ALT, PLAIN]) {
