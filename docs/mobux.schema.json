@@ -110,6 +110,21 @@
       },
       "type": "object"
     },
+    "McpConfig": {
+      "additionalProperties": false,
+      "description": "The MCP server agents on the host reach at `http://127.0.0.1:<port>/mcp`.\nIt binds loopback only and takes no credentials.",
+      "properties": {
+        "port": {
+          "default": 0,
+          "description": "Loopback port the MCP server listens on. `0` turns it off.\nEnv: `MOBUX_MCP_PORT`. Flag: `--mcp-port`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "PathsConfig": {
       "additionalProperties": false,
       "description": "Where mobux keeps its state.",
@@ -294,6 +309,12 @@
       "default": {
         "listing": false,
         "roots": {}
+      }
+    },
+    "mcp": {
+      "$ref": "#/$defs/McpConfig",
+      "default": {
+        "port": 0
       }
     },
     "paths": {

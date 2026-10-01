@@ -85,6 +85,9 @@ vte = "0.15"
 vt100 = "0.16"
 serde_path_to_error = "0.1"
 schemars = "1"
+# The official MCP SDK: the loopback MCP server agents on the host reach
+# (src/mcp.rs), over Streamable HTTP mounted into axum.
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 garde = { version = "0.22", features = ["derive"] }
 # Pinned exactly: ort 2 is still a prerelease, and its release candidates move
 # the session API. The prebuilt onnxruntime it links is downloaded by its build

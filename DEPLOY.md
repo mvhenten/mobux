@@ -150,6 +150,7 @@ long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
 | `files.roots` | `MOBUX_FILES` | none | empty | Host directories served under `/files/<name>/` |
 | `files.listing` | none | none | `false` | List a served directory that has no `index.html` |
 | `proxy.targets` | `MOBUX_PROXY` | none | empty | Loopback ports proxied under `/proxy/<name>/` |
+| `mcp.port` | `MOBUX_MCP_PORT` | `--mcp-port` | `0` (off) | Loopback port for the MCP server at `/mcp`. Must differ from `server.port` and `access.port` |
 
 Config keys nest. `server.port` is `{"server": {"port": 5151}}`, and only the
 keys a file states override a default.
@@ -200,6 +201,27 @@ needs its base set to the mount, e.g. `vite --base /proxy/vite/`.
 ```json
 { "proxy": { "targets": { "vite": 5173 } } }
 ```
+
+### MCP server for agents on the host
+
+`mcp.port` turns on an MCP server at `http://127.0.0.1:<port>/mcp` (Streamable
+HTTP). Its tools list sessions, read a screen, run a tmux command, type into a
+pane, push a notification and push a page to the phone. Register it with
+Claude Code:
+
+```bash
+claude mcp add --transport http mobux http://127.0.0.1:8415/mcp
+```
+
+```json
+{ "mcp": { "port": 8415 } }
+```
+
+It takes no credentials. It binds 127.0.0.1 only, refuses a `Host` or `Origin`
+that is not loopback with a 403, and is never served on the public port or the
+Access listener, which answer 404 at `/mcp`. Anything that can open a loopback
+connection on this host can drive the sessions, so turn it on only where every
+local user is trusted.
 
 ### The schema
 

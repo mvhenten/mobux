@@ -97,19 +97,54 @@ pub struct Payload {
     pub url: Option<String>,
 }
 
+/// What a caller that must not fail silently reports when no device would
+/// receive a push.
+pub const NO_SUBSCRIBED_DEVICE: &str =
+    "no subscribed device: open mobux on the phone and turn on notifications in Settings";
+
+/// How one notification fared across the subscribed devices.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Delivery {
+    pub sent: usize,
+    pub failed: usize,
+    pub pruned: usize,
+}
+
+/// Deliver `payload` to every subscribed device and wait for the outcome.
+/// Fails when there is no device, or when no device took it, so a caller can
+/// say nothing arrived.
+pub async fn send_to_devices(
+    db: Arc<Db>,
+    contact: String,
+    payload: Payload,
+) -> anyhow::Result<Delivery> {
+    if db.list_subscriptions()?.is_empty() {
+        anyhow::bail!(NO_SUBSCRIBED_DEVICE);
+    }
+    let delivery = notify(db, contact, payload).await;
+    if delivery.sent == 0 {
+        anyhow::bail!(
+            "no device took the notification: failed={} pruned={}",
+            delivery.failed,
+            delivery.pruned
+        );
+    }
+    Ok(delivery)
+}
+
 /// Send `payload` as a Web Push notification to every subscribed device.
 /// `contact` is the resolved `push.vapid_contact` setting — RFC 8292 requires
 /// a `mailto:` or `https:` URL.
 ///
 /// Best-effort: errors are logged and swallowed. Dead subscriptions
-/// (HTTP 404 / 410) are pruned from the DB on the fly. Returns when all
-/// delivery attempts have completed.
-pub async fn notify(db: Arc<Db>, contact: String, payload: Payload) {
+/// (HTTP 404 / 410) are pruned from the DB on the fly. Returns the counts
+/// once all delivery attempts have completed.
+pub async fn notify(db: Arc<Db>, contact: String, payload: Payload) -> Delivery {
     let vapid = match db.vapid_keys() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("push: load vapid keys failed: {e:#}");
-            return;
+            return Delivery::default();
         }
     };
 
@@ -117,12 +152,12 @@ pub async fn notify(db: Arc<Db>, contact: String, payload: Payload) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("push: list subscriptions failed: {e:#}");
-            return;
+            return Delivery::default();
         }
     };
 
     if subs.is_empty() {
-        return;
+        return Delivery::default();
     }
 
     let payload_bytes = json!({
@@ -163,6 +198,11 @@ pub async fn notify(db: Arc<Db>, contact: String, payload: Payload) {
     }
 
     eprintln!("push: notify sent={sent} failed={failed} pruned={pruned}");
+    Delivery {
+        sent,
+        failed,
+        pruned,
+    }
 }
 
 enum DeliveryOutcome {

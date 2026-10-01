@@ -11,6 +11,8 @@ MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
 # Loopback port the smoke instance proxies as `up`; test/proxy.spec.cjs
 # starts its fixture server there.
 MOBUX_PROXY_FIXTURE_PORT ?= 8291
+# Loopback port the smoke instance serves MCP on; test/mcp.test.mjs drives it.
+MOBUX_SMOKE_MCP_PORT ?= $(shell expr $(MOBUX_SMOKE_PORT) + 13)
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
@@ -194,6 +196,7 @@ smoke-start: build
 		MOBUX_UPDATE_DISABLE_RUN=1 \
 		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site \
 		MOBUX_PROXY=up=$(MOBUX_PROXY_FIXTURE_PORT) \
+		MOBUX_MCP_PORT=$(MOBUX_SMOKE_MCP_PORT) \
 		MOBUX_PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > $(MOBUX_SMOKE_DATA)/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
@@ -241,7 +244,21 @@ test-critical-path: test-node
 		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		MOBUX_PROXY_FIXTURE_PORT=$(MOBUX_PROXY_FIXTURE_PORT) \
-		npx playwright test test/critical-path.spec.cjs test/native-select.spec.cjs test/files.spec.cjs test/proxy.spec.cjs
+		npx playwright test test/critical-path.spec.cjs test/native-select.spec.cjs test/files.spec.cjs test/proxy.spec.cjs && \
+		$(MCP_TEST)
+
+# The loopback MCP server, driven with the official MCP client against the
+# smoke instance. Runs as part of `make test-critical-path`; standalone here
+# for local iteration.
+MCP_TEST = MOBUX_MCP_URL=http://127.0.0.1:$(MOBUX_SMOKE_MCP_PORT)/mcp \
+	MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+	MOBUX_USER=smoke MOBUX_PASS=00000 \
+	node --test --test-timeout=30000 test/mcp.test.mjs
+
+.PHONY: test-mcp
+test-mcp:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; $(MCP_TEST)
 
 # Select mode in the live terminal view: long-press shows the rows as real
 # text on the renderer's grid for the browser's own selection and link
