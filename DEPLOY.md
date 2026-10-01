@@ -149,6 +149,7 @@ long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
 | `access.service_tokens` | `MOBUX_ACCESS_SERVICE_TOKENS` | `--access-service-token` | empty | Client ids of the service tokens the Access listener admits |
 | `files.roots` | `MOBUX_FILES` | none | empty | Host directories served under `/files/<name>/` |
 | `files.listing` | none | none | `false` | List a served directory that has no `index.html` |
+| `proxy.targets` | `MOBUX_PROXY` | none | empty | Loopback ports proxied under `/proxy/<name>/` |
 
 Config keys nest. `server.port` is `{"server": {"port": 5151}}`, and only the
 keys a file states override a default.
@@ -184,6 +185,20 @@ a directory in the config file instead.
 
 ```json
 { "files": { "roots": { "site": "/home/me/site" }, "listing": false } }
+```
+
+### Proxying local ports
+
+`proxy.targets` maps a name to a port on 127.0.0.1, proxied at
+`/proxy/<name>/` behind the same login as the UI, WebSockets included. The
+upstream never sees the mobux session cookie or `Authorization`, and gets
+`X-Forwarded-Prefix: /proxy/<name>`. A target that is not listening answers
+502 naming its port. `MOBUX_PROXY=vite=5173,docs=8000` replaces the file's
+targets, as `MOBUX_FILES` does. A dev server that emits root-absolute URLs
+needs its base set to the mount, e.g. `vite --base /proxy/vite/`.
+
+```json
+{ "proxy": { "targets": { "vite": 5173 } } }
 ```
 
 ### The schema

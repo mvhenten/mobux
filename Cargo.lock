@@ -2374,6 +2374,8 @@ dependencies = [
  "garde",
  "hostname",
  "html-escape",
+ "hyper",
+ "hyper-util",
  "instant-acme",
  "ort",
  "p256",

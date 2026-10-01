@@ -8,6 +8,9 @@ MOBUX_PORT       ?= 5151
 MOBUX_DEV_PORT   ?= 5152
 MOBUX_SMOKE_PORT ?= 8281
 MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
+# Loopback port the smoke instance proxies as `up`; test/proxy.spec.cjs
+# starts its fixture server there.
+MOBUX_PROXY_FIXTURE_PORT ?= 8291
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
@@ -190,6 +193,7 @@ smoke-start: build
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
 		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site \
+		MOBUX_PROXY=up=$(MOBUX_PROXY_FIXTURE_PORT) \
 		MOBUX_PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > $(MOBUX_SMOKE_DATA)/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
@@ -236,7 +240,8 @@ test-critical-path: test-node
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/critical-path.spec.cjs test/native-select.spec.cjs test/files.spec.cjs
+		MOBUX_PROXY_FIXTURE_PORT=$(MOBUX_PROXY_FIXTURE_PORT) \
+		npx playwright test test/critical-path.spec.cjs test/native-select.spec.cjs test/files.spec.cjs test/proxy.spec.cjs
 
 # Select mode in the live terminal view: long-press shows the rows as real
 # text on the renderer's grid for the browser's own selection and link
@@ -262,6 +267,19 @@ test-files:
 		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		npx playwright test test/files.spec.cjs
+
+# /proxy/<name>/: the smoke instance proxies `up` to the fixture server the
+# spec starts on MOBUX_PROXY_FIXTURE_PORT. Runs as part of
+# `make test-critical-path`; standalone here for local iteration.
+.PHONY: test-proxy
+test-proxy:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		MOBUX_PROXY_FIXTURE_PORT=$(MOBUX_PROXY_FIXTURE_PORT) \
+		npx playwright test test/proxy.spec.cjs
 
 # Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
 # against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,
