@@ -1,5 +1,51 @@
 {
   "$defs": {
+    "AccessConfig": {
+      "additionalProperties": false,
+      "description": "The Cloudflare Access listener: a second, loopback-only plain-HTTP port a\nCloudflare Tunnel points at, which admits only requests carrying a valid\nAccess JWT. Every field empty means the listener is off; stating any of them\nturns it on and every rule in [`check`] applies.",
+      "properties": {
+        "allowed_emails": {
+          "default": [],
+          "description": "Email addresses an Access user token may carry.\nEnv: `MOBUX_ACCESS_ALLOWED_EMAILS` (comma separated).\nFlag: `--access-allowed-email`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "aud": {
+          "default": "",
+          "description": "The Access application AUD tag tokens must carry.\nEnv: `MOBUX_ACCESS_AUD`. Flag: `--access-aud`.",
+          "type": "string"
+        },
+        "hostname": {
+          "default": "",
+          "description": "Public hostname the tunnel serves mobux on, a bare hostname.\nEnv: `MOBUX_ACCESS_HOSTNAME`. Flag: `--access-hostname`.",
+          "type": "string"
+        },
+        "port": {
+          "default": 0,
+          "description": "Loopback port the tunnel connects to. Must differ from `server.port`.\n`0` turns the listener off. Env: `MOBUX_ACCESS_PORT`. Flag: `--access-port`.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "service_tokens": {
+          "default": [],
+          "description": "Client ids of the Access service tokens admitted without a user.\nEnv: `MOBUX_ACCESS_SERVICE_TOKENS` (comma separated).\nFlag: `--access-service-token`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "team_domain": {
+          "default": "",
+          "description": "The Cloudflare Access team domain: a bare hostname such as\n`example.cloudflareaccess.com`, which means https, or an `https://`\norigin. `http://` is accepted only for `127.0.0.1` and `localhost`.\nNo path or query. Env: `MOBUX_ACCESS_TEAM_DOMAIN`.\nFlag: `--access-team-domain`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "AppConfig": {
       "additionalProperties": false,
       "description": "Identity of this instance.",
@@ -178,6 +224,17 @@
   "additionalProperties": false,
   "description": "Every setting mobux reads from a file. Absent state is a sentinel — an empty\nstring or an empty list — never a missing attribute, so a merged config is\nalways fully populated.",
   "properties": {
+    "access": {
+      "$ref": "#/$defs/AccessConfig",
+      "default": {
+        "allowed_emails": [],
+        "aud": "",
+        "hostname": "",
+        "port": 0,
+        "service_tokens": [],
+        "team_domain": ""
+      }
+    },
     "app": {
       "$ref": "#/$defs/AppConfig",
       "default": {

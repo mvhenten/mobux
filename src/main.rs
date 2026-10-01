@@ -681,12 +681,14 @@ fn resolve_config(options: &cli::RunOptions) -> Result<config::Config> {
         eprintln!("[config] {message}");
     }
 
-    Ok(config::resolve(
+    let settings = config::resolve(
         config::Config::default(),
         file,
         &env,
         options.overrides.clone(),
-    ))
+    );
+    config::check_access(&settings).map_err(|message| anyhow::anyhow!("config: {message}"))?;
+    Ok(settings)
 }
 
 fn resolve_data_dir(settings: &config::Config) -> Result<PathBuf> {
