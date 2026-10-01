@@ -245,7 +245,8 @@ every TLS start mobux checks the leaf and reissues it from the same CA when it
 expires within a year or no longer covers the current hostnames and IPs, so
 the CA installed on the phone stays trusted. mobux never replaces an existing
 CA; when the CA itself has under a year left it logs a warning, and replacing
-it means reinstalling it on every device.
+it means reinstalling it on every device. Installs created before this
+version keep their original CA expiry, and a leaf never outlives its CA.
 
 The Android APK is built from the `/install` page's **Generate package**
 button, which signs it for the address the request arrived on (override with
