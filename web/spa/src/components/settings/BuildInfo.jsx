@@ -1,7 +1,8 @@
 import { useEffect } from "preact/hooks";
 import {
   buildInfo as info,
-  loadBuildInfo as load,
+  buildInfoError,
+  loadBuildInfo,
 } from "../../lib/buildInfo.js";
 import { readLoadedBundleHash } from "../../lib/bundleHash.js";
 import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
@@ -13,19 +14,23 @@ import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
 // side, never compared.
 
 export function AboutRow() {
-  useEffect(load, []);
+  useEffect(() => {
+    loadBuildInfo();
+  }, []);
   return (
     <NavRow
       row="about"
       to="/settings/about"
       label="About"
-      value={info.value?.version || "…"}
+      value={buildInfoError.value ? "⚠" : info.value?.version || "…"}
     />
   );
 }
 
 export function BuildInfoCard() {
-  useEffect(load, []);
+  useEffect(() => {
+    loadBuildInfo();
+  }, []);
 
   const srv = info.value;
   const feHash = readLoadedBundleHash();

@@ -7,7 +7,6 @@ import { render } from "preact";
 import { App } from "./app.jsx";
 import { watchBuildHash } from "./lib/reload.js";
 import { u } from "./lib/base.js";
-import { loadExternalLink } from "./lib/externalLink.js";
 import "./app.css";
 
 // Auto-reload on server update (#189) — remembers the server's build_hash
@@ -29,7 +28,10 @@ import(
 // the app shell (system browser in the TWA) instead of navigating inside it.
 // Loads the same backend module the classic terminal engine uses — one
 // shared open-path, one delegated click handler for the whole SPA.
-loadExternalLink()
+import(
+  /* @vite-ignore */ new URL(u("/static/external-link.js"), location.origin)
+    .href
+)
   .then((m) => m.installExternalLinkHandler())
   .catch((e) => console.warn("external-link.js load failed", e));
 

@@ -3,8 +3,8 @@ import { useLocation } from "wouter-preact";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
 import { u } from "../lib/base.js";
-import { buildInfo, loadBuildInfo } from "../lib/buildInfo.js";
-import { PageRows, hasPages } from "../components/PagesList.jsx";
+import { buildInfo, buildInfoError, loadBuildInfo } from "../lib/buildInfo.js";
+import { PageRows, PagesError, hasPages } from "../components/PagesList.jsx";
 import { Group } from "../components/settings/ui.jsx";
 import { getSelectedNode, setSelectedNode, withNode } from "../lib/nodes.js";
 
@@ -305,10 +305,16 @@ export function HomePage() {
         })}
       </div>
 
-      {hasPages(buildInfo.value) && (
-        <Group id="pagesCard" title="Pages">
-          <PageRows info={buildInfo.value} />
-        </Group>
+      {(buildInfoError.value || hasPages(buildInfo.value)) && (
+        <div class="home-pages">
+          <Group id="pagesCard" title="Pages">
+            {buildInfoError.value ? (
+              <PagesError error={buildInfoError.value} />
+            ) : (
+              <PageRows info={buildInfo.value} />
+            )}
+          </Group>
+        </div>
       )}
 
       <button

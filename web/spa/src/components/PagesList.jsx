@@ -1,5 +1,4 @@
 import { u } from "../lib/base.js";
-import { openOutside } from "../lib/externalLink.js";
 
 const KINDS = [
   { key: "files", mount: "/files/", label: "files" },
@@ -18,8 +17,14 @@ export function hasPages(info) {
   return files + proxies > 0;
 }
 
-// One row per file root and proxy target, each opening its page outside the
-// app shell so it gets the whole phone screen.
+export function PagesError({ error }) {
+  return (
+    <div class="settings-row settings-row--hint" role="alert">
+      Couldn't load pages: {error}
+    </div>
+  );
+}
+
 export function PageRows({ info }) {
   return KINDS.flatMap(({ key, mount, label }) =>
     (info?.[key] || []).map((name) => (
@@ -31,7 +36,6 @@ export function PageRows({ info }) {
         href={u(`${mount}${encodeURIComponent(name)}/`)}
         target="_blank"
         rel="noopener"
-        onClick={openOutside}
       >
         <span class="settings-label">
           <span class="settings-title">{name}</span>

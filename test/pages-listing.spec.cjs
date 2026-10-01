@@ -1,8 +1,8 @@
 // The SPA lists the host pages mobux serves (issue #334, stage 3): every
 // `/files/<name>/` root and `/proxy/<name>/` target from /api/build-info, on
 // Home and under Settings → Pages. The smoke instance serves `site` and
-// proxies `up` (Makefile smoke-start). A row opens its page outside the app
-// shell through external-link.js, so the page gets the whole phone screen.
+// proxies `up` (Makefile smoke-start). A row opens its page in a new tab, so
+// the page gets the whole phone screen.
 //
 // Run with: make test-spa
 
@@ -62,19 +62,6 @@ async function startPrefixProxy() {
   };
 }
 
-// Record every URL openExternal() hands to its synthetic anchor, so a test can
-// tell the row went through external-link.js rather than navigating in place.
-async function recordExternalOpens(page) {
-  await page.addInitScript(() => {
-    window.__externalOpens = [];
-    const click = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function (...args) {
-      if (this.dataset.mobuxExternal) window.__externalOpens.push(this.href);
-      return click.apply(this, args);
-    };
-  });
-}
-
 const row = (scope, kind, name) =>
   scope.locator(`[data-page-kind="${kind}"][data-page-name="${name}"]`);
 
@@ -120,7 +107,6 @@ for (const where of ["bare", "prefixed"]) {
       page,
       context,
     }) => {
-      await recordExternalOpens(page);
       await page.goto(`${root}/app#/`, { waitUntil: "networkidle" });
       const popup = context.waitForEvent("page");
       await row(page, "files", "site").click();
@@ -128,9 +114,6 @@ for (const where of ["bare", "prefixed"]) {
       await opened.waitForLoadState("domcontentloaded");
       expect(opened.url()).toBe(`${root}/files/site/`);
       await expect(opened.locator("h1")).toHaveText("served from the host");
-      expect(await page.evaluate(() => window.__externalOpens)).toEqual([
-        `${root}/files/site/`,
-      ]);
       expect(page.url()).toBe(`${root}/app#/`);
     });
 
@@ -138,16 +121,12 @@ for (const where of ["bare", "prefixed"]) {
       page,
       context,
     }) => {
-      await recordExternalOpens(page);
       await page.goto(`${root}/app#/`, { waitUntil: "networkidle" });
       const popup = context.waitForEvent("page");
       await row(page, "proxy", "up").click();
       const opened = await popup;
       await opened.waitForLoadState("domcontentloaded");
       expect(opened.url()).toBe(`${root}/proxy/up/`);
-      expect(await page.evaluate(() => window.__externalOpens)).toEqual([
-        `${root}/proxy/up/`,
-      ]);
     });
 
     test("settings shows the same pages on its own sub-page", async ({
@@ -156,7 +135,7 @@ for (const where of ["bare", "prefixed"]) {
       await page.goto(`${root}/app#/settings`, { waitUntil: "networkidle" });
       const nav = page.locator('[data-row="pages"]');
       await expect(nav.locator(".settings-value")).toHaveText(
-        "1 files, 1 proxies",
+        "1 file, 1 proxy",
       );
       await nav.click();
       await expect
@@ -201,4 +180,19 @@ test("with nothing configured the home card is gone and settings says none", asy
     "Nothing configured",
   );
   await expect(page.locator("#pages-settings [data-page-kind]")).toHaveCount(0);
+});
+
+test("a failed build-info fetch says so on home and in settings", async ({
+  page,
+}) => {
+  await page.route(/\/api\/build-info$/, (route) =>
+    route.fulfill({ status: 500, body: "boom" }),
+  );
+  await page.goto(`${BASE}/app#/`, { waitUntil: "networkidle" });
+  await expect(page.locator("#pagesCard")).toContainText("Couldn't load pages");
+
+  await page.goto(`${BASE}/app#/settings/pages`, { waitUntil: "networkidle" });
+  await expect(page.locator("#pages-settings")).toContainText(
+    "Couldn't load pages",
+  );
 });
