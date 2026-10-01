@@ -122,6 +122,24 @@
       },
       "type": "object"
     },
+    "ProxyConfig": {
+      "additionalProperties": false,
+      "description": "Local ports reverse-proxied behind the same auth as the UI, at\n`/proxy/<name>/`.",
+      "properties": {
+        "targets": {
+          "additionalProperties": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Loopback ports to proxy, keyed by the `<name>` in `/proxy/<name>/`. A\nname is letters, digits, `-` and `_`; the port is on 127.0.0.1. Empty\nproxies nothing. Env: `MOBUX_PROXY` (`name=port` pairs, comma\nseparated).",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "PushConfig": {
       "additionalProperties": false,
       "description": "Web push.",
@@ -282,6 +300,12 @@
       "$ref": "#/$defs/PathsConfig",
       "default": {
         "data_dir": ""
+      }
+    },
+    "proxy": {
+      "$ref": "#/$defs/ProxyConfig",
+      "default": {
+        "targets": {}
       }
     },
     "push": {

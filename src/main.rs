@@ -50,6 +50,7 @@ mod host_suggestions;
 mod local_stt;
 mod local_tts;
 mod nodes;
+mod proxy;
 mod push;
 mod release_asset;
 mod screen_model;
@@ -331,6 +332,9 @@ struct AppState {
     session_history: Arc<session_history::SessionHistoryStore>,
 }
 
+/// The cookie that carries a logged-in session.
+const SESSION_COOKIE_NAME: &str = "mobux_session";
+
 #[derive(Clone)]
 struct AuthConfig {
     user: String,
@@ -377,6 +381,10 @@ async fn main() -> Result<()> {
         eprintln!("{}", config::NO_AUTH_WARNING);
     }
     let file_roots = Arc::new(files::FileRoots::from_config(&settings.files)?);
+    let proxy_targets = Arc::new(proxy::ProxyTargets::from_config(
+        &settings,
+        SESSION_COOKIE_NAME,
+    )?);
     let data_dir = resolve_data_dir(&settings)?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
@@ -591,6 +599,16 @@ async fn main() -> Result<()> {
         app.merge(files::router(file_roots))
     };
 
+    let app = if proxy_targets.is_empty() {
+        app
+    } else {
+        println!(
+            "proxy: forwarding {} target(s) under /proxy/",
+            proxy_targets.len()
+        );
+        app.merge(proxy::router(proxy_targets))
+    };
+
     let app = app
         // An unmatched path serves the SPA shell, which routes it client-side.
         // It used to redirect to `/`, which a path-prefixing proxy sends
@@ -797,7 +815,7 @@ fn load_auth_config(config_dir: &std::path::Path, settings: &config::Config) -> 
     Some(AuthConfig {
         user: credentials.user,
         pass: credentials.pass,
-        session_cookie_name: "mobux_session".to_string(),
+        session_cookie_name: SESSION_COOKIE_NAME.to_string(),
         session_cookie_value: ensure_session_cookie_value(config_dir),
     })
 }
@@ -4291,6 +4309,49 @@ mod tests {
 
         let request = |cookie: Option<&str>| {
             let mut builder = Request::builder().uri("/files/site/");
+            if let Some(cookie) = cookie {
+                builder = builder.header(axum::http::header::COOKIE, cookie);
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+        let response = app.clone().oneshot(request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(request(Some("mobux_session=cookie")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn proxied_ports_sit_behind_the_auth_layer() {
+        use tower::ServiceExt;
+
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(upstream, Router::new().route("/", get(|| async { "up" })))
+                .await
+                .unwrap()
+        });
+        let (mut state, _dir) = test_state(false);
+        state.auth = Some(AuthConfig {
+            user: "me".to_string(),
+            pass: "12345".to_string(),
+            session_cookie_name: SESSION_COOKIE_NAME.to_string(),
+            session_cookie_value: "cookie".to_string(),
+        });
+        let mut settings = config::Config::default();
+        settings.proxy.targets.insert("up".to_string(), port);
+        let targets =
+            Arc::new(proxy::ProxyTargets::from_config(&settings, SESSION_COOKIE_NAME).unwrap());
+        let app: Router = Router::new()
+            .merge(proxy::router(targets))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        let request = |cookie: Option<&str>| {
+            let mut builder = Request::builder().uri("/proxy/up/");
             if let Some(cookie) = cookie {
                 builder = builder.header(axum::http::header::COOKIE, cookie);
             }

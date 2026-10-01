@@ -79,6 +79,9 @@ pub struct Config {
     #[serde(default)]
     #[garde(dive)]
     pub files: FilesConfig,
+    #[serde(default)]
+    #[garde(dive)]
+    pub proxy: ProxyConfig,
 }
 
 /// Where the server listens.
@@ -321,6 +324,20 @@ pub struct FilesConfig {
     pub listing: bool,
 }
 
+/// Local ports reverse-proxied behind the same auth as the UI, at
+/// `/proxy/<name>/`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyConfig {
+    /// Loopback ports to proxy, keyed by the `<name>` in `/proxy/<name>/`. A
+    /// name is letters, digits, `-` and `_`; the port is on 127.0.0.1. Empty
+    /// proxies nothing. Env: `MOBUX_PROXY` (`name=port` pairs, comma
+    /// separated).
+    #[serde(default)]
+    #[garde(custom(proxy_targets_value))]
+    pub targets: BTreeMap<String, u16>,
+}
+
 fn default_port() -> u16 {
     DEFAULT_PORT
 }
@@ -430,6 +447,8 @@ pub struct PartialConfig {
     pub access: Option<PartialAccessConfig>,
     #[serde(default)]
     pub files: Option<PartialFilesConfig>,
+    #[serde(default)]
+    pub proxy: Option<PartialProxyConfig>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,6 +559,13 @@ pub struct PartialFilesConfig {
     pub listing: Option<bool>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialProxyConfig {
+    #[serde(default)]
+    pub targets: Option<BTreeMap<String, u16>>,
+}
+
 impl PartialConfig {
     pub fn server_port(&self) -> Option<u16> {
         self.server.as_ref().and_then(|server| server.port)
@@ -606,6 +632,9 @@ impl Config {
         if let Some(files) = partial.files {
             overlay(&mut self.files.roots, files.roots);
             overlay(&mut self.files.listing, files.listing);
+        }
+        if let Some(proxy) = partial.proxy {
+            overlay(&mut self.proxy.targets, proxy.targets);
         }
         self
     }
@@ -895,6 +924,9 @@ fn insert_field(
 /// `files.roots` is a map, which no flag spells, so its variable sits outside
 /// `FIELDS`.
 pub const FILES_ENV: &str = "MOBUX_FILES";
+
+/// `proxy.targets`, the same shape as `files.roots`.
+pub const PROXY_ENV: &str = "MOBUX_PROXY";
 
 /// Environment variables that deliberately have no file key: they locate the
 /// file itself, name a deprecated alias, or exist only for tests and the
@@ -1231,7 +1263,10 @@ impl EnvSnapshot {
 }
 
 fn is_known_env(key: &str) -> bool {
-    FIELDS.iter().any(|field| field.env == key) || ENV_ONLY.contains(&key) || key == FILES_ENV
+    FIELDS.iter().any(|field| field.env == key)
+        || ENV_ONLY.contains(&key)
+        || key == FILES_ENV
+        || key == PROXY_ENV
 }
 
 /// The credentials that unlock the web UI.
@@ -1321,6 +1356,9 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
         files: Some(PartialFilesConfig {
             roots: env.get(FILES_ENV).map(split_map),
             listing: None,
+        }),
+        proxy: Some(PartialProxyConfig {
+            targets: env.get(PROXY_ENV).map(split_port_map),
         }),
     }
 }
@@ -1413,6 +1451,15 @@ pub fn split_map(value: &str) -> BTreeMap<String, String> {
             Some((name, path)) => (name.trim().to_string(), path.trim().to_string()),
             None => (item, String::new()),
         })
+        .collect()
+}
+
+/// `name=port,name2=port2`. A port that does not parse becomes 0, which no
+/// target may use, so the server names the pair when it refuses to start.
+pub fn split_port_map(value: &str) -> BTreeMap<String, u16> {
+    split_map(value)
+        .into_iter()
+        .map(|(name, port)| (name, port.parse().unwrap_or(0)))
         .collect()
 }
 
@@ -1524,6 +1571,20 @@ pub fn file_roots_value(roots: &BTreeMap<String, String>, _: &()) -> garde::Resu
         if !Path::new(path).is_absolute() {
             return Err(garde::Error::new(format!(
                 "`{name}` must be an absolute path, got {path:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A target name is one URL segment, like a file root's; port 0 is never a
+/// listening server.
+pub fn proxy_targets_value(targets: &BTreeMap<String, u16>, _: &()) -> garde::Result {
+    for (name, port) in targets {
+        file_root_name_value(name)?;
+        if *port == 0 {
+            return Err(garde::Error::new(format!(
+                "`{name}` must name a port from 1 to 65535"
             )));
         }
     }
@@ -2871,6 +2932,28 @@ mod tests {
         assert!(message(r#"{"files": {"roots": {"site": "srv"}}}"#).contains("absolute"));
         assert!(message(r#"{"files": {"roots": {"a/b": "/srv"}}}"#).contains("letters"));
         assert!(message(r#"{"files": {"roots": {"..": "/srv"}}}"#).contains("letters"));
+    }
+
+    #[test]
+    fn proxy_targets_read_from_the_file_and_the_environment() {
+        let config = parse_str(r#"{"proxy": {"targets": {"vite": 5173}}}"#).unwrap();
+        assert_eq!(config.proxy.targets["vite"], 5173);
+
+        let config = resolved(
+            PartialConfig::default(),
+            &env(&[("MOBUX_PROXY", "vite=5173, docs=8000,bad=x")]),
+            PartialConfig::default(),
+        );
+        assert_eq!(config.proxy.targets.len(), 3);
+        assert_eq!(config.proxy.targets["docs"], 8000);
+        assert_eq!(config.proxy.targets["bad"], 0);
+    }
+
+    #[test]
+    fn a_proxy_target_needs_a_segment_name_and_a_port() {
+        assert!(message(r#"{"proxy": {"targets": {"vite": 0}}}"#).contains("port"));
+        assert!(message(r#"{"proxy": {"targets": {"a/b": 80}}}"#).contains("letters"));
+        assert!(message(r#"{"proxy": {"targets": {"vite": 70000}}}"#).contains("proxy"));
     }
 
     #[test]

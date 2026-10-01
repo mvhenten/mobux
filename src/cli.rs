@@ -433,6 +433,12 @@ Options:
         config::FILES_ENV,
         width = width
     );
+    let _ = writeln!(
+        out,
+        "  {:width$}Local ports proxied under /proxy/, as name=port,name2=port2",
+        config::PROXY_ENV,
+        width = width
+    );
 
     let _ = write!(
         out,
@@ -1048,6 +1054,10 @@ mod tests {
         assert!(
             help.contains(config::FILES_ENV),
             "help is missing MOBUX_FILES"
+        );
+        assert!(
+            help.contains(config::PROXY_ENV),
+            "help is missing MOBUX_PROXY"
         );
     }
 }
