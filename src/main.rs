@@ -616,18 +616,23 @@ async fn main() -> Result<()> {
         app.merge(proxy::router(proxy_targets))
     };
 
-    let app = app
+    let routes = app
         // An unmatched path serves the SPA shell, which routes it client-side.
         // It used to redirect to `/`, which a path-prefixing proxy sends
         // outside the mount entirely — and root-absolute is the one thing a
         // prefixed deployment cannot express. Serving the shell needs no URL
         // at all.
         .fallback(get(serve_spa_index))
-        .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(
-            state_for_mw,
-            auth_middleware,
-        ));
+        .with_state(state.clone());
+
+    if settings.access.is_configured() {
+        serve_access_listener(&settings.access, routes.clone()).await?;
+    }
+
+    let app = routes.layer(middleware::from_fn_with_state(
+        state_for_mw,
+        auth_middleware,
+    ));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
@@ -714,6 +719,40 @@ async fn spawn_mcp_server(state: &AppState, settings: &config::Config) -> Result
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("mcp listener error: {e:#}");
+        }
+    });
+    Ok(())
+}
+
+/// Binds the Cloudflare Access listener on loopback with the main router behind
+/// the Access guard. A port that cannot be bound stops startup, so a
+/// self-update that cannot serve the tunnel fails its health check and rolls
+/// back.
+async fn serve_access_listener(access_config: &config::AccessConfig, routes: Router) -> Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], access_config.port));
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| {
+        format!(
+            "access: cannot bind the Access listener on port {}",
+            access_config.port
+        )
+    })?;
+    let gate = Arc::new(access::AccessGuard::new(
+        access_config,
+        reqwest::Client::new(),
+    ));
+    let app = routes.layer(middleware::from_fn_with_state(gate, access::guard));
+    println!(
+        "access: listening on http://{addr} for Cloudflare Access team {}",
+        access_config.team_origin()
+    );
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
+            eprintln!("access listener error: {e:#}");
         }
     });
     Ok(())
@@ -2573,6 +2612,11 @@ async fn terminal_ws(
     }))
 }
 
+/// Server-side WebSocket ping cadence. Cloudflare closes a WebSocket idle for
+/// 100 s, and a quiet terminal sends nothing; browsers answer pings on their
+/// own, so the same ping is harmless on the tailnet listener.
+const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Deserialize)]
 struct ResizeMsg {
     #[serde(rename = "type")]
@@ -2683,9 +2727,19 @@ async fn handle_ws(
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let mut ws_text = utf8_stream::Utf8Stream::new();
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + WS_PING_INTERVAL,
+        WS_PING_INTERVAL,
+    );
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if ws_sender.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
             // Only armed while a local pipe-pane tap is live — disarmed
             // (`if history_rx.is_some()`) the instant it isn't, which is
             // also what un-gates the attach-relay branch's own feed below.
@@ -3915,6 +3969,26 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_access_port_in_use_stops_startup_naming_the_port() {
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = held.local_addr().unwrap().port();
+        let access = config::AccessConfig {
+            port,
+            team_domain: "http://127.0.0.1:1".to_string(),
+            aud: "aud".to_string(),
+            allowed_emails: vec!["owner@example.com".to_string()],
+            ..Default::default()
+        };
+        let error = serve_access_listener(&access, Router::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("port {port}")),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn a_block_too_long_to_speak_is_refused_with_a_413() {

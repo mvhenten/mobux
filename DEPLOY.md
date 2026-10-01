@@ -385,6 +385,40 @@ Set `app.domain` to the public address. Left unset, the APK is pinned to the
 host on the request's `Host` header, which behind a proxy is whatever the proxy
 forwards rather than the address the phone uses.
 
+## Cloudflare Access listener
+
+With the `access` block set, mobux opens a second plain-HTTP listener on
+`127.0.0.1:<access.port>`, next to the main one. It serves the same UI and API
+and is meant for a Cloudflare Tunnel: point cloudflared's ingress at
+`http://127.0.0.1:<access.port>`, never at the main port.
+
+```json
+{
+  "access": {
+    "port": 5153,
+    "team_domain": "example.cloudflareaccess.com",
+    "aud": "<Access application AUD tag>",
+    "allowed_emails": ["me@example.com"]
+  }
+}
+```
+
+Every request needs a valid Cloudflare Access token, in the
+`Cf-Access-Jwt-Assertion` header or the `CF_Authorization` cookie. mobux checks
+its signature against `<team>/cdn-cgi/access/certs`, the AUD, the issuer and the
+email or service-token allowlist. The PIN plays no part here. A refused request
+gets 401 with a one-line reason and `WWW-Authenticate: Bearer
+realm="cloudflare-access"`. A request whose `Origin` is neither the
+request host nor `https://<access.hostname>` gets 403, since Cloudflare sends
+its cookie on cross-site requests too. The paths the main listener leaves open
+(`/api/identify`, `/install`, `/.well-known/`, `/static/manifest.json`,
+`/static/icon-*`, `/sw.js`) stay open here too.
+
+Terminal WebSockets get a ping every 30 seconds, on both listeners, so
+Cloudflare does not close an idle terminal. A port that cannot be bound stops
+startup, so a self-update that breaks the listener rolls back. The main listener
+and its PIN are unchanged.
+
 ## Upgrade notes
 
 TLS is off by default. A deployment where mobux terminates HTTPS itself must ask

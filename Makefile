@@ -10,9 +10,16 @@ MOBUX_SMOKE_PORT ?= 8281
 MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
 # Loopback port the smoke instance proxies as `up`; test/proxy.spec.cjs
 # starts its fixture server there.
-MOBUX_PROXY_FIXTURE_PORT ?= 8291
+MOBUX_PROXY_FIXTURE_PORT ?= $(shell expr $(MOBUX_SMOKE_PORT) + 10)
 # Loopback port the smoke instance serves MCP on; test/mcp.test.mjs drives it.
 MOBUX_SMOKE_MCP_PORT ?= $(shell expr $(MOBUX_SMOKE_PORT) + 13)
+# The smoke instance runs the Cloudflare Access listener on
+# MOBUX_ACCESS_SMOKE_PORT against a team whose keys test/access.spec.cjs
+# serves on MOBUX_ACCESS_JWKS_PORT.
+MOBUX_ACCESS_SMOKE_PORT ?= $(shell expr $(MOBUX_SMOKE_PORT) + 12)
+MOBUX_ACCESS_JWKS_PORT  ?= $(shell expr $(MOBUX_SMOKE_PORT) + 11)
+MOBUX_ACCESS_SMOKE_AUD  ?= mobux-smoke-aud
+MOBUX_ACCESS_SMOKE_EMAIL ?= smoke@example.com
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
@@ -197,6 +204,10 @@ smoke-start: build
 		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site \
 		MOBUX_PROXY=up=$(MOBUX_PROXY_FIXTURE_PORT) \
 		MOBUX_MCP_PORT=$(MOBUX_SMOKE_MCP_PORT) \
+		MOBUX_ACCESS_PORT=$(MOBUX_ACCESS_SMOKE_PORT) \
+		MOBUX_ACCESS_TEAM_DOMAIN=http://127.0.0.1:$(MOBUX_ACCESS_JWKS_PORT) \
+		MOBUX_ACCESS_AUD=$(MOBUX_ACCESS_SMOKE_AUD) \
+		MOBUX_ACCESS_ALLOWED_EMAILS=$(MOBUX_ACCESS_SMOKE_EMAIL) \
 		MOBUX_PORT=$(MOBUX_SMOKE_PORT) MOBUX_AUTH_USER=smoke MOBUX_PIN=00000 \
 		./target/debug/mobux > $(MOBUX_SMOKE_DATA)/mobux.log 2>&1 < /dev/null &
 	@sleep 2 && lsof -i :$(MOBUX_SMOKE_PORT) >/dev/null 2>&1 \
@@ -244,7 +255,11 @@ test-critical-path: test-node
 		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		MOBUX_PROXY_FIXTURE_PORT=$(MOBUX_PROXY_FIXTURE_PORT) \
-		npx playwright test test/critical-path.spec.cjs test/native-select.spec.cjs test/files.spec.cjs test/proxy.spec.cjs && \
+		MOBUX_ACCESS_PORT=$(MOBUX_ACCESS_SMOKE_PORT) \
+		MOBUX_ACCESS_JWKS_PORT=$(MOBUX_ACCESS_JWKS_PORT) \
+		MOBUX_ACCESS_AUD=$(MOBUX_ACCESS_SMOKE_AUD) \
+		MOBUX_ACCESS_EMAIL=$(MOBUX_ACCESS_SMOKE_EMAIL) \
+		npx playwright test test/critical-path.spec.cjs test/native-select.spec.cjs test/files.spec.cjs test/proxy.spec.cjs test/access.spec.cjs && \
 		$(MCP_TEST)
 
 # The loopback MCP server, driven with the official MCP client against the
@@ -297,6 +312,24 @@ test-proxy:
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
 		MOBUX_PROXY_FIXTURE_PORT=$(MOBUX_PROXY_FIXTURE_PORT) \
 		npx playwright test test/proxy.spec.cjs
+
+# The Cloudflare Access listener: the smoke instance listens on
+# MOBUX_ACCESS_SMOKE_PORT and trusts the keys the spec serves on
+# MOBUX_ACCESS_JWKS_PORT. Runs as part of `make test-critical-path`;
+# standalone here for local iteration.
+.PHONY: test-access
+test-access:
+	@$(MAKE) smoke-start
+	@trap '$(MAKE) smoke-stop' EXIT; \
+		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
+		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
+		MOBUX_USER=smoke MOBUX_PASS=00000 \
+		MOBUX_PROXY_FIXTURE_PORT=$(MOBUX_PROXY_FIXTURE_PORT) \
+		MOBUX_ACCESS_PORT=$(MOBUX_ACCESS_SMOKE_PORT) \
+		MOBUX_ACCESS_JWKS_PORT=$(MOBUX_ACCESS_JWKS_PORT) \
+		MOBUX_ACCESS_AUD=$(MOBUX_ACCESS_SMOKE_AUD) \
+		MOBUX_ACCESS_EMAIL=$(MOBUX_ACCESS_SMOKE_EMAIL) \
+		npx playwright test test/access.spec.cjs
 
 # Self-updater script logic: snapshot / rollback / cargo-fail / abort paths
 # against a dummy binary and stub cargo, in --no-systemd mode (no systemctl,
