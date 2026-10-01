@@ -147,6 +147,8 @@ long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
 | `access.hostname` | `MOBUX_ACCESS_HOSTNAME` | `--access-hostname` | unset | Public hostname the Cloudflare Tunnel serves mobux on, a bare hostname |
 | `access.allowed_emails` | `MOBUX_ACCESS_ALLOWED_EMAILS` | `--access-allowed-email` | empty | Email addresses the Access listener admits |
 | `access.service_tokens` | `MOBUX_ACCESS_SERVICE_TOKENS` | `--access-service-token` | empty | Client ids of the service tokens the Access listener admits |
+| `files.roots` | `MOBUX_FILES` | none | empty | Host directories served under `/files/<name>/` |
+| `files.listing` | none | none | `false` | List a served directory that has no `index.html` |
 
 Config keys nest. `server.port` is `{"server": {"port": 5151}}`, and only the
 keys a file states override a default.
@@ -165,7 +167,20 @@ any value other than `0` and `false` as on; every other toggle variable wants
 `1` or `true`.
 
 List flags repeat, or take one comma-separated value. Their environment
-variables are comma separated.
+variables are comma separated. A map variable is comma-separated `name=path`
+pairs: `MOBUX_FILES=site=/srv/site,docs=/srv/docs`.
+
+### Serving host directories
+
+`files.roots` maps a name to an absolute directory, served at `/files/<name>/`
+behind the same login as the UI. mobux resolves each root at startup and stops
+if one is missing. A path that resolves outside its root, through `..` or a
+symlink, answers 404. A directory serves its `index.html`, or a plain list of
+its entries when `files.listing` is true.
+
+```json
+{ "files": { "roots": { "site": "/home/me/site" }, "listing": false } }
+```
 
 ### The schema
 

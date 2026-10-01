@@ -427,6 +427,12 @@ Options:
     for spec in FIELDS {
         let _ = writeln!(out, "  {:width$}{}", spec.env, spec.help, width = width);
     }
+    let _ = writeln!(
+        out,
+        "  {:width$}Host directories served under /files/, as name=path,name2=path2",
+        config::FILES_ENV,
+        width = width
+    );
 
     let _ = write!(
         out,
@@ -1039,5 +1045,9 @@ mod tests {
             assert!(help.contains(spec.env), "help is missing {}", spec.env);
         }
         assert!(help.contains("--no-tls"), "help is missing --no-tls");
+        assert!(
+            help.contains(config::FILES_ENV),
+            "help is missing MOBUX_FILES"
+        );
     }
 }

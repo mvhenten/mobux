@@ -76,6 +76,9 @@ pub struct Config {
     #[serde(default)]
     #[garde(dive)]
     pub access: AccessConfig,
+    #[serde(default)]
+    #[garde(dive)]
+    pub files: FilesConfig,
 }
 
 /// Where the server listens.
@@ -301,6 +304,23 @@ impl AccessConfig {
     }
 }
 
+/// Host directories served behind the same auth as the UI, at
+/// `/files/<name>/`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct FilesConfig {
+    /// Directories to serve, keyed by the `<name>` in `/files/<name>/`. A name
+    /// is letters, digits, `-` and `_`; a path is absolute. Empty serves
+    /// nothing. Env: `MOBUX_FILES` (`name=path` pairs, comma separated).
+    #[serde(default)]
+    #[garde(custom(file_roots_value))]
+    pub roots: BTreeMap<String, String>,
+    /// List a directory that has no `index.html`. Off answers 404 instead.
+    #[serde(default)]
+    #[garde(skip)]
+    pub listing: bool,
+}
+
 fn default_port() -> u16 {
     DEFAULT_PORT
 }
@@ -408,6 +428,8 @@ pub struct PartialConfig {
     pub update: Option<PartialUpdateConfig>,
     #[serde(default)]
     pub access: Option<PartialAccessConfig>,
+    #[serde(default)]
+    pub files: Option<PartialFilesConfig>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,6 +531,15 @@ pub struct PartialAccessConfig {
     pub service_tokens: Option<Vec<String>>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialFilesConfig {
+    #[serde(default)]
+    pub roots: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub listing: Option<bool>,
+}
+
 impl PartialConfig {
     pub fn server_port(&self) -> Option<u16> {
         self.server.as_ref().and_then(|server| server.port)
@@ -571,6 +602,10 @@ impl Config {
             overlay(&mut self.access.hostname, access.hostname);
             overlay(&mut self.access.allowed_emails, access.allowed_emails);
             overlay(&mut self.access.service_tokens, access.service_tokens);
+        }
+        if let Some(files) = partial.files {
+            overlay(&mut self.files.roots, files.roots);
+            overlay(&mut self.files.listing, files.listing);
         }
         self
     }
@@ -856,6 +891,10 @@ fn insert_field(
         }
     }
 }
+
+/// `files.roots` is a map, which no flag spells, so its variable sits outside
+/// `FIELDS`.
+pub const FILES_ENV: &str = "MOBUX_FILES";
 
 /// Environment variables that deliberately have no file key: they locate the
 /// file itself, name a deprecated alias, or exist only for tests and the
@@ -1192,7 +1231,7 @@ impl EnvSnapshot {
 }
 
 fn is_known_env(key: &str) -> bool {
-    FIELDS.iter().any(|field| field.env == key) || ENV_ONLY.contains(&key)
+    FIELDS.iter().any(|field| field.env == key) || ENV_ONLY.contains(&key) || key == FILES_ENV
 }
 
 /// The credentials that unlock the web UI.
@@ -1279,6 +1318,10 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
             allowed_emails: list("MOBUX_ACCESS_ALLOWED_EMAILS"),
             service_tokens: list("MOBUX_ACCESS_SERVICE_TOKENS"),
         }),
+        files: Some(PartialFilesConfig {
+            roots: env.get(FILES_ENV).map(split_map),
+            listing: None,
+        }),
     }
 }
 
@@ -1357,6 +1400,19 @@ pub fn split_list(value: &str) -> Vec<String> {
         .split(',')
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// `name=path,name2=path2`, the spelling of a map in the environment. A pair
+/// without `=` keeps its name with an empty path, so the server names it when
+/// it refuses to start.
+pub fn split_map(value: &str) -> BTreeMap<String, String> {
+    split_list(value)
+        .into_iter()
+        .map(|item| match item.split_once('=') {
+            Some((name, path)) => (name.trim().to_string(), path.trim().to_string()),
+            None => (item, String::new()),
+        })
         .collect()
 }
 
@@ -1458,6 +1514,33 @@ fn base_path_value(value: &str, ctx: &()) -> garde::Result {
         ));
     }
     Ok(())
+}
+
+/// A root name is one URL segment; a root path is absolute, since the server
+/// resolves it before any request arrives.
+pub fn file_roots_value(roots: &BTreeMap<String, String>, _: &()) -> garde::Result {
+    for (name, path) in roots {
+        file_root_name_value(name)?;
+        if !Path::new(path).is_absolute() {
+            return Err(garde::Error::new(format!(
+                "`{name}` must be an absolute path, got {path:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn file_root_name_value(name: &str) -> garde::Result {
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    if ok {
+        return Ok(());
+    }
+    Err(garde::Error::new(format!(
+        "{name:?} must be letters, digits, `-` or `_`"
+    )))
 }
 
 fn host_value(value: &str, _: &()) -> garde::Result {
@@ -2764,6 +2847,30 @@ mod tests {
             check_access(&config),
             Err("access.team_domain: required when the access block is set".to_string())
         );
+    }
+
+    #[test]
+    fn file_roots_read_from_the_file_and_the_environment() {
+        let config =
+            parse_str(r#"{"files": {"roots": {"site": "/srv/site"}, "listing": true}}"#).unwrap();
+        assert_eq!(config.files.roots["site"], "/srv/site");
+        assert!(config.files.listing);
+
+        let config = resolved(
+            PartialConfig::default(),
+            &env(&[("MOBUX_FILES", "site=/srv/site, docs=/srv/docs")]),
+            PartialConfig::default(),
+        );
+        assert_eq!(config.files.roots.len(), 2);
+        assert_eq!(config.files.roots["docs"], "/srv/docs");
+        assert!(!config.files.listing);
+    }
+
+    #[test]
+    fn a_file_root_needs_a_segment_name_and_an_absolute_path() {
+        assert!(message(r#"{"files": {"roots": {"site": "srv"}}}"#).contains("absolute"));
+        assert!(message(r#"{"files": {"roots": {"a/b": "/srv"}}}"#).contains("letters"));
+        assert!(message(r#"{"files": {"roots": {"..": "/srv"}}}"#).contains("letters"));
     }
 
     #[test]
