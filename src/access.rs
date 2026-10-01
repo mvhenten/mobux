@@ -23,6 +23,7 @@ pub const AUTHORIZATION_COOKIE: &str = "CF_Authorization";
 
 const CLOCK_LEEWAY_SECS: u64 = 30;
 const MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(60);
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Identity {
@@ -91,26 +92,39 @@ impl fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
-/// The raw Access JWT from the `Cf-Access-Jwt-Assertion` header, or failing
-/// that the `CF_Authorization` cookie.
-pub fn token_from_headers(headers: &HeaderMap) -> Result<String, Rejection> {
+/// The candidate Access JWTs a request carries: the `Cf-Access-Jwt-Assertion`
+/// header alone when present, otherwise every `CF_Authorization` cookie in
+/// the order sent.
+pub fn tokens_from_headers(headers: &HeaderMap) -> Result<Vec<String>, Rejection> {
     let assertion = headers
         .get(ASSERTION_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty());
     if let Some(token) = assertion {
-        return Ok(token.to_string());
+        return Ok(vec![token.to_string()]);
     }
-    headers
+    let cookies: Vec<String> = headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, value)| *name == AUTHORIZATION_COOKIE && !value.is_empty())
-        .map(|(_, value)| value.to_string())
-        .ok_or(Rejection::MissingToken)
+        .filter(|(name, _)| *name == AUTHORIZATION_COOKIE)
+        .map(|(_, value)| unquote(value.trim()).to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if cookies.is_empty() {
+        return Err(Rejection::MissingToken);
+    }
+    Ok(cookies)
+}
+
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +144,7 @@ struct RawJwkSet {
 struct KeyCache {
     keys: HashMap<String, DecodingKey>,
     last_fetch: Option<Instant>,
+    last_error: Option<String>,
 }
 
 pub struct Verifier {
@@ -140,6 +155,7 @@ pub struct Verifier {
     service_tokens: Vec<String>,
     client: reqwest::Client,
     min_refetch_interval: Duration,
+    fetch_timeout: Duration,
     cache: RwLock<KeyCache>,
     refetch: Mutex<()>,
 }
@@ -162,14 +178,23 @@ impl Verifier {
                 .collect(),
             client,
             min_refetch_interval: MIN_REFETCH_INTERVAL,
+            fetch_timeout: JWKS_FETCH_TIMEOUT,
             cache: RwLock::new(KeyCache::default()),
             refetch: Mutex::new(()),
         }
     }
 
     pub async fn verify_headers(&self, headers: &HeaderMap) -> Result<Verified, Rejection> {
-        let token = token_from_headers(headers)?;
-        self.verify(&token).await
+        let mut first_rejection = None;
+        for token in tokens_from_headers(headers)? {
+            match self.verify(&token).await {
+                Ok(verified) => return Ok(verified),
+                Err(rejection) => {
+                    first_rejection.get_or_insert(rejection);
+                }
+            }
+        }
+        Err(first_rejection.unwrap_or(Rejection::MissingToken))
     }
 
     pub async fn verify(&self, token: &str) -> Result<Verified, Rejection> {
@@ -213,27 +238,41 @@ impl Verifier {
         if let Some(key) = self.cache.read().await.keys.get(kid) {
             return Ok(key.clone());
         }
-        let may_refetch = self
-            .cache
-            .read()
-            .await
-            .last_fetch
-            .is_none_or(|at| at.elapsed() >= self.min_refetch_interval);
-        if !may_refetch {
-            return Err(Rejection::UnknownKey);
+        {
+            let cache = self.cache.read().await;
+            let may_refetch = cache
+                .last_fetch
+                .is_none_or(|at| at.elapsed() >= self.min_refetch_interval);
+            if !may_refetch {
+                return Err(match &cache.last_error {
+                    Some(error) => Rejection::KeysUnavailable(error.clone()),
+                    None => Rejection::UnknownKey,
+                });
+            }
         }
         self.cache.write().await.last_fetch = Some(Instant::now());
-        let keys = self.fetch_keys().await?;
-        let found = keys.get(kid).cloned();
-        self.cache.write().await.keys = keys;
-        found.ok_or(Rejection::UnknownKey)
+        let fetched = self.fetch_keys().await;
+        let mut cache = self.cache.write().await;
+        match fetched {
+            Ok(keys) => {
+                let found = keys.get(kid).cloned();
+                cache.keys = keys;
+                cache.last_error = None;
+                found.ok_or(Rejection::UnknownKey)
+            }
+            Err(error) => {
+                cache.last_error = Some(error.clone());
+                Err(Rejection::KeysUnavailable(error))
+            }
+        }
     }
 
-    async fn fetch_keys(&self) -> Result<HashMap<String, DecodingKey>, Rejection> {
-        let unavailable = |error: reqwest::Error| Rejection::KeysUnavailable(error.to_string());
+    async fn fetch_keys(&self) -> Result<HashMap<String, DecodingKey>, String> {
+        let unavailable = |error: reqwest::Error| error.to_string();
         let set: RawJwkSet = self
             .client
             .get(&self.jwks_url)
+            .timeout(self.fetch_timeout)
             .send()
             .await
             .map_err(unavailable)?
@@ -270,7 +309,7 @@ fn rejection_for(kind: &ErrorKind) -> Rejection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -300,6 +339,7 @@ mod tests {
         origin: String,
         keys: Arc<std::sync::Mutex<Vec<Value>>>,
         fetches: Arc<AtomicUsize>,
+        failing: Arc<AtomicBool>,
     }
 
     impl Jwks {
@@ -308,15 +348,20 @@ mod tests {
                 kids.iter().map(|kid| jwk(kid)).collect::<Vec<_>>(),
             ));
             let fetches = Arc::new(AtomicUsize::new(0));
-            let (served, counted) = (keys.clone(), fetches.clone());
+            let failing = Arc::new(AtomicBool::new(false));
+            let (served, counted, fails) = (keys.clone(), fetches.clone(), failing.clone());
             let app = axum::Router::new().route(
                 "/cdn-cgi/access/certs",
                 axum::routing::get(move || {
-                    let (served, counted) = (served.clone(), counted.clone());
+                    let (served, counted, fails) = (served.clone(), counted.clone(), fails.clone());
                     async move {
                         counted.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        if fails.load(Ordering::SeqCst) {
+                            return Err(axum::http::StatusCode::BAD_GATEWAY);
+                        }
                         let keys = served.lock().unwrap().clone();
-                        axum::Json(json!({ "keys": keys }))
+                        Ok(axum::Json(json!({ "keys": keys })))
                     }
                 }),
             );
@@ -327,6 +372,7 @@ mod tests {
                 origin,
                 keys,
                 fetches,
+                failing,
             }
         }
 
@@ -339,30 +385,38 @@ mod tests {
         }
 
         fn verifier(&self, refetch_interval: Duration) -> Verifier {
-            let config = AccessConfig {
-                port: 5153,
-                team_domain: self.origin.clone(),
-                aud: AUD.to_string(),
-                hostname: "mobux.example.com".to_string(),
-                allowed_emails: vec!["Owner@Example.com".to_string()],
-                service_tokens: vec!["robot.access".to_string()],
-            };
-            let mut verifier = Verifier::new(&config, reqwest::Client::new());
-            verifier.min_refetch_interval = refetch_interval;
-            verifier
+            verifier_for(&self.origin, refetch_interval)
         }
 
         fn claims(&self) -> Value {
-            let now = now();
-            json!({
-                "aud": [AUD],
-                "iss": self.origin,
-                "email": "owner@example.com",
-                "iat": now,
-                "nbf": now,
-                "exp": now + 600,
-            })
+            claims_for(&self.origin)
         }
+    }
+
+    fn verifier_for(origin: &str, refetch_interval: Duration) -> Verifier {
+        let config = AccessConfig {
+            port: 5153,
+            team_domain: origin.to_string(),
+            aud: AUD.to_string(),
+            hostname: "mobux.example.com".to_string(),
+            allowed_emails: vec!["Owner@Example.com".to_string()],
+            service_tokens: vec!["robot.access".to_string()],
+        };
+        let mut verifier = Verifier::new(&config, reqwest::Client::new());
+        verifier.min_refetch_interval = refetch_interval;
+        verifier
+    }
+
+    fn claims_for(origin: &str) -> Value {
+        let now = now();
+        json!({
+            "aud": [AUD],
+            "iss": origin,
+            "email": "owner@example.com",
+            "iat": now,
+            "nbf": now,
+            "exp": now + 600,
+        })
     }
 
     fn now() -> u64 {
@@ -547,13 +601,19 @@ mod tests {
     #[test]
     fn extracts_the_token_from_the_assertion_header() {
         let headers = headers(&[("cf-access-jwt-assertion", "from-header")]);
-        assert_eq!(token_from_headers(&headers), Ok("from-header".to_string()));
+        assert_eq!(
+            tokens_from_headers(&headers),
+            Ok(vec!["from-header".to_string()])
+        );
     }
 
     #[test]
     fn extracts_the_token_from_the_authorization_cookie() {
         let headers = headers(&[("cookie", "theme=dark; CF_Authorization=from-cookie; x=1")]);
-        assert_eq!(token_from_headers(&headers), Ok("from-cookie".to_string()));
+        assert_eq!(
+            tokens_from_headers(&headers),
+            Ok(vec!["from-cookie".to_string()])
+        );
     }
 
     #[test]
@@ -562,15 +622,155 @@ mod tests {
             ("cookie", "CF_Authorization=from-cookie"),
             ("cf-access-jwt-assertion", "from-header"),
         ]);
-        assert_eq!(token_from_headers(&headers), Ok("from-header".to_string()));
+        assert_eq!(
+            tokens_from_headers(&headers),
+            Ok(vec!["from-header".to_string()])
+        );
+    }
+
+    #[test]
+    fn unquotes_and_keeps_every_authorization_cookie() {
+        let headers = headers(&[(
+            "cookie",
+            "CF_Authorization=\"first\"; theme=dark; CF_Authorization=second",
+        )]);
+        assert_eq!(
+            tokens_from_headers(&headers),
+            Ok(vec!["first".to_string(), "second".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn tries_each_authorization_cookie_in_order() {
+        let jwks = Jwks::serve(&[KID]).await;
+        let cookie = format!(
+            "CF_Authorization=stale.token.value; CF_Authorization={}",
+            sign(KID, &jwks.claims())
+        );
+        let request = headers(&[("cookie", &cookie)]);
+        assert!(jwks
+            .verifier(MIN_REFETCH_INTERVAL)
+            .verify_headers(&request)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_token_whose_header_says_hs256() {
+        let jwks = Jwks::serve(&[KID]).await;
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(KID.to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &jwks.claims(),
+            &EncodingKey::from_secret(b"shared-secret"),
+        )
+        .unwrap();
+        assert_eq!(
+            jwks.verifier(MIN_REFETCH_INTERVAL).verify(&token).await,
+            Err(Rejection::Malformed)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_a_token_whose_header_says_none() {
+        use base64::Engine;
+        let jwks = Jwks::serve(&[KID]).await;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let token = format!(
+            "{}.{}.",
+            b64.encode(json!({ "alg": "none", "kid": KID }).to_string()),
+            b64.encode(jwks.claims().to_string())
+        );
+        assert_eq!(
+            jwks.verifier(MIN_REFETCH_INTERVAL).verify(&token).await,
+            Err(Rejection::Malformed)
+        );
+    }
+
+    #[tokio::test]
+    async fn admits_an_audience_given_as_a_plain_string() {
+        let jwks = Jwks::serve(&[KID]).await;
+        let claims = with(jwks.claims(), "aud", json!(AUD));
+        assert!(verify(&jwks, claims).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_token_without_an_expiry_as_malformed() {
+        let jwks = Jwks::serve(&[KID]).await;
+        let mut claims = jwks.claims();
+        claims.as_object_mut().unwrap().remove("exp");
+        assert_eq!(verify(&jwks, claims).await, Err(Rejection::Malformed));
+    }
+
+    #[tokio::test]
+    async fn admits_an_unlisted_email_with_a_listed_common_name_as_the_service_token() {
+        let jwks = Jwks::serve(&[KID]).await;
+        let claims = with(jwks.claims(), "email", json!("stranger@example.com"));
+        let claims = with(claims, "common_name", json!("robot.access"));
+        assert_eq!(
+            verify(&jwks, claims).await,
+            Ok(Verified {
+                identity: Identity::ServiceToken("robot.access".to_string())
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fetches_once_for_concurrent_requests_with_the_same_unknown_key() {
+        let jwks = Jwks::serve(&[KID]).await;
+        let verifier = jwks.verifier(Duration::ZERO);
+        let token = sign(KID, &jwks.claims());
+        let (first, second) = tokio::join!(verifier.verify(&token), verifier.verify(&token));
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(jwks.fetches(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_counts_against_the_limit_and_reports_keys_unavailable() {
+        let jwks = Jwks::serve(&[KID]).await;
+        jwks.failing.store(true, Ordering::SeqCst);
+        let verifier = jwks.verifier(MIN_REFETCH_INTERVAL);
+        for kid in [KID, "key-2"] {
+            let outcome = verifier.verify(&sign(kid, &jwks.claims())).await;
+            assert!(
+                matches!(outcome, Err(Rejection::KeysUnavailable(_))),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(jwks.fetches(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_key_server_that_never_answers_times_out_as_keys_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let mut verifier = verifier_for(&origin, MIN_REFETCH_INTERVAL);
+        verifier.fetch_timeout = Duration::from_millis(300);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            verifier.verify(&sign(KID, &claims_for(&origin))),
+        )
+        .await
+        .expect("the key fetch outlived its timeout");
+        assert!(
+            matches!(outcome, Err(Rejection::KeysUnavailable(_))),
+            "{outcome:?}"
+        );
     }
 
     #[test]
     fn reports_a_missing_token() {
         let headers = headers(&[("cookie", "theme=dark; CF_Authorization=")]);
-        assert_eq!(token_from_headers(&headers), Err(Rejection::MissingToken));
+        assert_eq!(tokens_from_headers(&headers), Err(Rejection::MissingToken));
         assert_eq!(
-            token_from_headers(&HeaderMap::new()),
+            tokens_from_headers(&HeaderMap::new()),
             Err(Rejection::MissingToken)
         );
     }
