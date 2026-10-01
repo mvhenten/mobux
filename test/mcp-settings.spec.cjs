@@ -29,12 +29,14 @@ const status = (port, listening) => ({
   listening,
   listening_port: listening ? port : null,
   managed_by: null,
+  managed_note: null,
+  error: null,
   default_port: 8415,
   command: command(port),
 });
 
-async function stub(page, onPut) {
-  let current = status(8415, false);
+async function stub(page, onPut, initial = status(8415, false)) {
+  let current = initial;
   const puts = [];
   await page.route(MCP, async (route) => {
     const req = route.request();
@@ -110,6 +112,9 @@ test("the switch turns the server on through PUT and shows it listening", async 
   const puts = await stub(page, (body) => ok(body.port));
   await page.goto(`${APP}#/settings/mcp`, { waitUntil: "networkidle" });
   await expect(page.locator("#mcpStatus")).toHaveText("Off");
+  await expect(page.locator("#mcpStatus")).not.toHaveClass(
+    /settings-status--ok/,
+  );
   await expect(page.locator("#mcpPort")).toHaveValue("8415");
 
   await page.locator('[data-switch="mcpEnabled"]').click();
@@ -162,4 +167,54 @@ test("moving the port of a running server takes a second tap", async ({
   await expect(page.locator("#mcpCommand")).toHaveText(command(9100));
   expect(puts).toEqual([{ port: 8415 }, { port: 9100 }]);
   await expect(apply).toHaveCount(0);
+});
+
+test("an empty or out-of-range port is refused with the rule and sends nothing", async ({
+  page,
+}) => {
+  const puts = await stub(page, (body) => ok(body.port));
+  await page.goto(`${APP}#/settings/mcp`, { waitUntil: "networkidle" });
+  await page.locator('[data-switch="mcpEnabled"]').click();
+  await expect(page.locator("#mcpStatus")).toHaveText(
+    "Listening on 127.0.0.1:8415",
+  );
+
+  for (const bad of ["", "80", "70000"]) {
+    await page.locator("#mcpPort").fill(bad);
+    await page.locator("#mcpPort").press("Enter");
+    await expect(page.locator("#mcpStatus")).toHaveText(
+      "Port must be a whole number from 1024 to 65535.",
+    );
+    await expect(page.locator("#mcpPortApply")).toHaveCount(0);
+  }
+  expect(puts).toEqual([{ port: 8415 }]);
+});
+
+test("a port that would not bind at startup shows why", async ({ page }) => {
+  const reason = "cannot listen on 127.0.0.1:8415: Address already in use";
+  await stub(page, (body) => ok(body.port), {
+    ...status(8415, false),
+    port: 8415,
+    error: reason,
+  });
+  await page.goto(`${APP}#/settings/mcp`, { waitUntil: "networkidle" });
+  await expect(page.locator("#mcpStatus .settings-status-line")).toHaveText(
+    `Failed to start: ${reason}`,
+  );
+});
+
+test("a refused clipboard says Copy failed and selects the command", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: () => Promise.reject(new Error("denied")) },
+    });
+  });
+  await page.goto(`${APP}#/settings/mcp`, { waitUntil: "networkidle" });
+  await page.locator("#mcpCopy").click();
+  await expect(page.locator("#mcpCopy")).toHaveText("Copy failed");
+  expect(await page.evaluate(() => String(window.getSelection()))).toBe(
+    await page.locator("#mcpCommand").textContent(),
+  );
 });

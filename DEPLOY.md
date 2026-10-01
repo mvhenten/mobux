@@ -221,7 +221,7 @@ Settings → MCP server, which writes this block, starts the listener and shows
 the registration command. Register it with Claude Code:
 
 ```bash
-claude mcp add --transport http mobux http://127.0.0.1:8415/mcp
+claude mcp add --scope user --transport http mobux http://127.0.0.1:8415/mcp
 ```
 
 ```json

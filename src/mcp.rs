@@ -21,6 +21,7 @@ use rmcp::{
     ServerHandler,
 };
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::{config, db::Db, push, tmux};
 
@@ -56,8 +57,10 @@ impl Context {
 }
 
 /// The router serving MCP at [`PATH`]. Mount it on a loopback listener only.
-pub fn router(context: Context) -> Router {
+/// Cancelling `shutdown` ends every MCP session it holds.
+pub fn router(context: Context, shutdown: CancellationToken) -> Router {
     let config = StreamableHttpServerConfig::default()
+        .with_cancellation_token(shutdown)
         .with_allowed_hosts(LOOPBACK_HOSTS)
         .with_allowed_origins(LOOPBACK_ORIGINS)
         .enforce_origin_validation();
@@ -346,7 +349,7 @@ mod tests {
             db,
             &config::Config::default(),
         );
-        (router(context), dir)
+        (router(context, CancellationToken::new()), dir)
     }
 
     async fn post(host: &str, origin: Option<&str>) -> (StatusCode, String) {

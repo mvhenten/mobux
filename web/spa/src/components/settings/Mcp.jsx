@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiSend, localGet } from "../../lib/api.js";
 import {
@@ -21,10 +21,13 @@ const loadError = signal(null);
 const saveError = signal(null);
 const busy = signal(false);
 
-const MANAGED_NOTE = {
-  env: "MOBUX_MCP_PORT sets the port; unset it to use this switch.",
-  flag: "--mcp-port sets the port; drop it to use this switch.",
-};
+const PORT_RULE = "Port must be a whole number from 1024 to 65535.";
+
+function parsePort(text) {
+  if (!/^\d+$/.test(text.trim())) return null;
+  const port = Number(text);
+  return port >= 1024 && port <= 65535 ? port : null;
+}
 
 const errorText = (e) => (e.body || e.message || String(e)).trim();
 
@@ -69,7 +72,8 @@ function statusLine() {
   if (!s) return null;
   if (s.listening)
     return { msg: `Listening on 127.0.0.1:${s.listening_port}`, kind: "ok" };
-  return { msg: "Off" };
+  if (s.error) return { msg: `Failed to start: ${s.error}`, kind: "error" };
+  return "Off";
 }
 
 export function McpRow() {
@@ -89,27 +93,30 @@ export function McpRow() {
 
 function CommandRow({ command }) {
   const [copy, setCopy] = useState("idle");
-  const onCopy = async (e) => {
+  const code = useRef(null);
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const onCopy = async () => {
+    clearTimeout(timer.current);
     try {
       await navigator.clipboard.writeText(command);
       setCopy("copied");
-      setTimeout(() => setCopy("idle"), 2000);
+      timer.current = setTimeout(() => setCopy("idle"), 2000);
     } catch (_) {
-      const code = e.currentTarget.parentElement.querySelector("code");
-      window.getSelection().selectAllChildren(code);
-      setCopy("selected");
+      if (code.current) window.getSelection().selectAllChildren(code.current);
+      setCopy("failed");
     }
   };
   return (
     <div class="settings-row settings-row--command" data-row="mcp-command">
-      <code id="mcpCommand" class="settings-command">
+      <code id="mcpCommand" class="settings-command" ref={code}>
         {command}
       </code>
       <Button id="mcpCopy" class="btn--inline" onClick={onCopy}>
         {copy === "copied"
           ? "Copied"
-          : copy === "selected"
-            ? "Selected"
+          : copy === "failed"
+            ? "Copy failed"
             : "Copy"}
       </Button>
     </div>
@@ -136,11 +143,27 @@ export function McpCard() {
 
   const onToggle = (e) => {
     setPending(null);
-    save(e.target.checked ? Number(draft) || s.default_port : 0);
+    if (!e.target.checked) {
+      save(0);
+      return;
+    }
+    const port = parsePort(draft);
+    if (port == null) {
+      saveError.value = PORT_RULE;
+      e.target.checked = false;
+      return;
+    }
+    save(port);
   };
 
   const commitPort = () => {
-    const port = Number(draft);
+    const port = parsePort(draft);
+    if (port == null) {
+      setPending(null);
+      saveError.value = PORT_RULE;
+      return;
+    }
+    if (saveError.value === PORT_RULE) saveError.value = null;
     if (!on || port === s.listening_port) {
       setPending(null);
       return;
@@ -164,7 +187,7 @@ export function McpCard() {
         <SwitchRow
           name="mcpEnabled"
           label="MCP server"
-          secondary={s && s.managed_by ? MANAGED_NOTE[s.managed_by] : null}
+          secondary={s ? s.managed_note : null}
           checked={on}
           disabled={locked}
           onChange={onToggle}

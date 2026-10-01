@@ -5,19 +5,24 @@
 
 use std::io::Write;
 use std::net::Ipv4Addr;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use indexmap::IndexMap;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::{config, mcp};
 
 /// The port the switch offers when the file names none.
 pub const DEFAULT_PORT: u16 = 8415;
+
+/// How long a stopped listener gets to close its connections before its
+/// task is aborted.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// Which layer above the file sets the port, if any. The Settings switch only
 /// writes the file, so it is read-only while one of these wins.
@@ -42,21 +47,29 @@ impl ManagedBy {
         None
     }
 
-    fn reason(self) -> &'static str {
+    pub fn reason(self) -> &'static str {
         match self {
-            ManagedBy::Env => "MOBUX_MCP_PORT sets the MCP port; unset it to use this switch",
-            ManagedBy::Flag => "--mcp-port sets the MCP port; drop it to use this switch",
+            ManagedBy::Env => "MOBUX_MCP_PORT sets the port; unset it to use this switch.",
+            ManagedBy::Flag => "--mcp-port sets the port; drop it to use this switch.",
         }
     }
 }
 
+/// What `GET /api/settings/mcp` answers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Status {
-    /// `mcp.port` as the file states it; 0 is off.
+    /// `mcp.port` as config.json states it; 0 is off. While `managed_by` is
+    /// set this is still the file's value, not the port in use.
     pub port: u16,
     pub listening: bool,
+    /// The port the listener is bound to right now, whichever layer set it.
     pub listening_port: Option<u16>,
     pub managed_by: Option<ManagedBy>,
+    /// Why the switch is read-only, when `managed_by` is set.
+    pub managed_note: Option<String>,
+    /// Why the listener is not running although it should be: a port that
+    /// would not bind at startup.
+    pub error: Option<String>,
     pub default_port: u16,
     pub command: String,
 }
@@ -71,16 +84,26 @@ pub enum SetError {
 
 struct Running {
     port: u16,
+    shutdown: CancellationToken,
     task: JoinHandle<()>,
 }
 
 impl Running {
+    /// Ends the MCP sessions and the open connections, not only the accept
+    /// loop, and returns once the port is free.
     async fn stop(self) {
-        self.task.abort();
-        // The task ends cancelled; awaiting it is what guarantees the listener
-        // is dropped and its port free before the caller moves on.
-        let _ = self.task.await;
+        self.shutdown.cancel();
+        let abort = self.task.abort_handle();
+        if tokio::time::timeout(STOP_GRACE, self.task).await.is_err() {
+            abort.abort();
+        }
     }
+}
+
+#[derive(Default)]
+struct Listener {
+    running: Option<Running>,
+    error: Option<String>,
 }
 
 pub struct McpServer {
@@ -88,7 +111,7 @@ pub struct McpServer {
     config: Arc<config::Config>,
     path: PathBuf,
     managed_by: Option<ManagedBy>,
-    running: Mutex<Option<Running>>,
+    listener: Mutex<Listener>,
 }
 
 impl McpServer {
@@ -103,27 +126,38 @@ impl McpServer {
             config,
             path,
             managed_by,
-            running: Mutex::new(None),
+            listener: Mutex::new(Listener::default()),
         }
     }
 
-    /// Start on the port the instance resolved at startup. A port that cannot
-    /// be bound stops startup, as it always has.
-    pub async fn start_configured(&self) -> anyhow::Result<()> {
-        let mut running = self.running.lock().await;
-        self.apply(&mut running, self.config.mcp.port)
-            .await
-            .map_err(|reason| anyhow::anyhow!("binding the MCP server: {reason}"))
+    /// Start on the port the instance resolved at startup. A port that will
+    /// not bind leaves MCP off and the rest of mobux running; the Settings
+    /// page shows why.
+    pub async fn start_configured(&self) {
+        let port = self.config.mcp.port;
+        if port == 0 {
+            return;
+        }
+        let mut listener = self.listener.lock().await;
+        match bind(port).await {
+            Ok(bound) => listener.running = Some(self.serve(port, bound)),
+            Err(reason) => {
+                eprintln!("mcp: NOT STARTED — {reason}");
+                listener.error = Some(reason);
+            }
+        }
     }
 
     pub async fn status(&self) -> Result<Status, String> {
-        let running = self.running.lock().await;
-        self.status_of(running.as_ref().map(|r| r.port))
+        let listener = self.listener.lock().await;
+        self.status_of(&listener)
     }
 
-    /// Write `port` (0 is off) to the file, then make the listener match it.
+    /// Bind the new port, write `port` (0 is off) to the file, then swap the
+    /// listener. The file only ever names a port that was just bound, so a
+    /// crash part way never leaves one mobux cannot start with.
     pub async fn set(&self, port: u16) -> Result<Status, SetError> {
-        let mut running = self.running.lock().await;
+        let mut listener = self.listener.lock().await;
         if let Some(managed) = self.managed_by {
             return Err(SetError::Managed(managed.reason().to_string()));
         }
@@ -135,21 +169,33 @@ impl McpServer {
         effective.mcp.port = port;
         config::check_mcp(&effective).map_err(SetError::Invalid)?;
 
+        let current = listener.running.as_ref().map(|r| r.port);
+        let bound = match port {
+            0 => None,
+            port if current == Some(port) => None,
+            port => Some(bind(port).await.map_err(SetError::Bind)?),
+        };
         write_atomic(&self.path, &next).map_err(|e| SetError::Io(e.to_string()))?;
-        if let Err(reason) = self.apply(&mut running, port).await {
-            restore(&self.path, previous.as_deref()).map_err(|e| SetError::Io(e.to_string()))?;
-            return Err(SetError::Bind(reason));
+
+        listener.error = None;
+        let replaced = match bound {
+            Some(bound) => listener.running.replace(self.serve(port, bound)),
+            None if port == 0 => listener.running.take(),
+            None => None,
+        };
+        if let Some(old) = replaced {
+            old.stop().await;
         }
-        self.status_of(running.as_ref().map(|r| r.port))
-            .map_err(SetError::Io)
+        self.status_of(&listener).map_err(SetError::Io)
     }
 
-    fn status_of(&self, listening_port: Option<u16>) -> Result<Status, String> {
+    fn status_of(&self, listener: &Listener) -> Result<Status, String> {
         let port = config::load_partial_from(&self.path)
             .map_err(|e| e.to_string())?
             .and_then(|partial| partial.mcp)
             .and_then(|mcp| mcp.port)
             .unwrap_or(0);
+        let listening_port = listener.running.as_ref().map(|r| r.port);
         let shown = listening_port
             .or(Some(port).filter(|p| *p != 0))
             .unwrap_or(DEFAULT_PORT);
@@ -158,38 +204,35 @@ impl McpServer {
             listening: listening_port.is_some(),
             listening_port,
             managed_by: self.managed_by,
+            managed_note: self.managed_by.map(|m| m.reason().to_string()),
+            error: listener.error.clone(),
             default_port: DEFAULT_PORT,
             command: registration_command(shown),
         })
     }
 
-    /// Bind the new port before the old listener goes, so a failed bind
-    /// leaves the running one alone.
-    async fn apply(&self, running: &mut Option<Running>, port: u16) -> Result<(), String> {
-        if port == 0 {
-            if let Some(old) = running.take() {
-                old.stop().await;
-            }
-            return Ok(());
-        }
-        if running.as_ref().map(|r| r.port) == Some(port) {
-            return Ok(());
-        }
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-            .await
-            .map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))?;
-        let app = mcp::router(self.context.clone());
+    fn serve(&self, port: u16, bound: tokio::net::TcpListener) -> Running {
+        let shutdown = CancellationToken::new();
+        let app = mcp::router(self.context.clone(), shutdown.clone());
+        let signal = shutdown.clone().cancelled_owned();
         let task = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+            if let Err(e) = axum::serve(bound, app).with_graceful_shutdown(signal).await {
                 eprintln!("mcp listener error: {e:#}");
             }
         });
         println!("mcp: http://127.0.0.1:{port}{}", mcp::PATH);
-        if let Some(old) = running.replace(Running { port, task }) {
-            old.stop().await;
+        Running {
+            port,
+            shutdown,
+            task,
         }
-        Ok(())
     }
+}
+
+async fn bind(port: u16) -> Result<tokio::net::TcpListener, String> {
+    tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))
 }
 
 pub fn registration_command(port: u16) -> String {
@@ -199,19 +242,23 @@ pub fn registration_command(port: u16) -> String {
     )
 }
 
-/// The file's top two levels in their written order; serde_json's own map
-/// would sort every key.
-type Document = IndexMap<String, Option<IndexMap<String, serde_json::Value>>>;
-
+/// Set `mcp.port` and leave every other key where it was; serde_json keeps
+/// insertion order (`preserve_order`).
 fn with_mcp_port(raw: Option<&str>, port: u16) -> Result<String, String> {
-    let mut document: Document = match raw {
+    let mut document: serde_json::Value = match raw {
         Some(raw) => serde_json::from_str(raw).map_err(|e| format!("config.json: {e}"))?,
-        None => IndexMap::new(),
+        None => serde_json::json!({}),
     };
-    document
-        .entry("mcp".to_string())
-        .or_insert(None)
-        .get_or_insert_with(IndexMap::new)
+    let root = document
+        .as_object_mut()
+        .ok_or("config.json: the top level must be an object")?;
+    let block = root.entry("mcp").or_insert_with(|| serde_json::json!({}));
+    if !block.is_object() {
+        *block = serde_json::json!({});
+    }
+    block
+        .as_object_mut()
+        .expect("just made an object")
         .insert("port".to_string(), port.into());
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
     Ok(format!("{text}\n"))
@@ -225,15 +272,16 @@ fn read_optional(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-/// Replace the file in one rename, through a symlink to the file it names.
+/// Replace the file in one rename, through a symlink to the file it names,
+/// at mode 600 because it can hold the PIN.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Some(parent) = target
+    let parent = target
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    std::fs::create_dir_all(&parent)?;
     let mut staging = target.clone().into_os_string();
     staging.push(".tmp");
     let staging = PathBuf::from(staging);
@@ -243,16 +291,11 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(&staging)?;
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
-    std::fs::rename(&staging, &target)
-}
-
-fn restore(path: &Path, previous: Option<&str>) -> std::io::Result<()> {
-    match previous {
-        Some(text) => write_atomic(path, text),
-        None => std::fs::remove_file(path),
-    }
+    std::fs::rename(&staging, &target)?;
+    std::fs::File::open(&parent)?.sync_all()
 }
 
 #[cfg(test)]
@@ -262,6 +305,8 @@ mod tests {
     use regex::Regex;
 
     const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#;
+    const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    const LIST_TOOLS: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
 
     struct Fixture {
         dir: tempfile::TempDir,
@@ -326,19 +371,117 @@ mod tests {
 
     #[tokio::test]
     async fn the_switch_writes_the_mcp_block_and_keeps_every_other_key_in_order() {
-        let fx = fixture(Some(
-            "{\n  \"server\": {\n    \"port\": 7000\n  },\n  \"auth\": {\n    \"user\": \"me\",\n    \"pin\": \"12345\"\n  }\n}\n",
-        ));
+        let original = r#"{
+  "server": {
+    "port": 7000
+  },
+  "auth": {
+    "user": "me",
+    "pin": "12345"
+  },
+  "proxy": {
+    "targets": {
+      "zeta": 5173,
+      "alpha": 3000
+    }
+  }
+}
+"#;
+        let fx = fixture(Some(original));
         let port = free_port();
         fx.server.set(port).await.unwrap();
-        assert_eq!(
-            fx.file().unwrap(),
-            format!(
-                "{{\n  \"server\": {{\n    \"port\": 7000\n  }},\n  \"auth\": {{\n    \"user\": \"me\",\n    \"pin\": \"12345\"\n  }},\n  \"mcp\": {{\n    \"port\": {port}\n  }}\n}}\n"
-            )
-        );
+        let expected = format!(
+            "{}{}",
+            original.trim_end().trim_end_matches('}'),
+            format_args!("  ,\n  \"mcp\": {{\n    \"port\": {port}\n  }}\n}}\n")
+        )
+        .replace("  }\n  ,\n", "  },\n");
+        assert_eq!(fx.file().unwrap(), expected);
         fx.server.set(0).await.unwrap();
         assert!(fx.file().unwrap().contains("\"port\": 0"));
+    }
+
+    #[tokio::test]
+    async fn turning_it_off_ends_a_connected_session() {
+        let fx = fixture(None);
+        let port = free_port();
+        fx.server.set(port).await.unwrap();
+        let url = format!("http://127.0.0.1:{port}{}", mcp::PATH);
+        let client = reqwest::Client::new();
+        let post = |body: &'static str, session: Option<&str>| {
+            let mut request = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(body);
+            if let Some(session) = session {
+                request = request.header("mcp-session-id", session.to_string());
+            }
+            request.send()
+        };
+
+        let init = post(INITIALIZE, None).await.unwrap();
+        let session = init.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        init.text().await.unwrap();
+        let ack = post(INITIALIZED, Some(&session)).await.unwrap();
+        assert!(ack.status().is_success(), "{}", ack.status());
+        let stream = client
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", &session)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream.status(), reqwest::StatusCode::OK);
+
+        fx.server.set(0).await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), stream.text()).await;
+        assert!(ended.is_ok(), "the open stream outlived the switch");
+        let next = post(LIST_TOOLS, Some(&session)).await;
+        assert!(next.is_err(), "a request after off was answered: {next:?}");
+    }
+
+    #[tokio::test]
+    async fn a_port_that_will_not_bind_at_startup_leaves_mcp_off_and_says_why() {
+        let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let fx = fixture(Some(&format!("{{\"mcp\": {{\"port\": {port}}}}}")));
+        fx.server.start_configured().await;
+
+        let status = fx.server.status().await.unwrap();
+        assert!(!status.listening);
+        assert_eq!(status.port, port);
+        let error = status.error.unwrap();
+        assert!(
+            error.contains(&format!("cannot listen on 127.0.0.1:{port}")),
+            "{error}"
+        );
+
+        let free = free_port();
+        let status = fx.server.set(free).await.unwrap();
+        assert!(status.listening);
+        assert_eq!(status.error, None);
+    }
+
+    #[tokio::test]
+    async fn an_env_managed_port_reports_the_running_port_apart_from_the_file() {
+        let fx = fixture_with(Some("{\"mcp\": {\"port\": 9200}}"), Some(ManagedBy::Env));
+        let running = free_port();
+        {
+            let mut listener = fx.server.listener.lock().await;
+            let bound = bind(running).await.unwrap();
+            listener.running = Some(fx.server.serve(running, bound));
+        }
+        let status = fx.server.status().await.unwrap();
+        assert_eq!(status.port, 9200);
+        assert_eq!(status.listening_port, Some(running));
+        assert_eq!(
+            status.managed_note.as_deref(),
+            Some("MOBUX_MCP_PORT sets the port; unset it to use this switch.")
+        );
     }
 
     #[tokio::test]
@@ -399,7 +542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_port_in_use_is_refused_and_the_file_is_put_back() {
+    async fn a_port_in_use_is_refused_and_the_file_is_left_alone() {
         let original = "{\"server\": {\"port\": 7000}}";
         let fx = fixture(Some(original));
         let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

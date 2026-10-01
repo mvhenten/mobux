@@ -484,7 +484,7 @@ async fn main() -> Result<()> {
     } else {
         println!("tmux alert-bell hook installed (internal port {internal_port})");
     }
-    state.mcp.start_configured().await?;
+    state.mcp.start_configured().await;
 
     let state_for_mw = state.clone();
     let app = Router::new()
