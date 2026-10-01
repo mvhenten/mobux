@@ -3,9 +3,10 @@
 //! Two modes:
 //!
 //! 1. **Default (CA mode)**: Generate a long-lived local root CA at
-//!    `<config dir>/ca.{crt,key}` (10 years, ECDSA P-256, CN=`mobux local CA`)
-//!    and a 90-day per-host leaf cert. The CA cert is later served by the
-//!    install page so users can install it on their devices.
+//!    `<config dir>/ca.{crt,key}` (30 years, ECDSA P-256, CN=`mobux local CA`)
+//!    and a 20-year per-host leaf cert, reissued from the same CA when it
+//!    nears expiry or stops covering the host. The CA cert is later served by
+//!    the install page so users can install it on their devices.
 //! 2. **ACME mode**: When `tls.acme_domains` is non-empty, obtain a real
 //!    Let's Encrypt cert via HTTP-01. Renew automatically.
 //!
@@ -30,9 +31,10 @@ use rcgen::{
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use time::OffsetDateTime;
 
-const CA_VALIDITY_DAYS: i64 = 365 * 10;
-const LEAF_VALIDITY_DAYS: i64 = 90;
-const LEAF_REISSUE_THRESHOLD_DAYS: i64 = 14;
+const CA_VALIDITY_DAYS: i64 = 365 * 30;
+const CA_EXPIRY_WARNING_DAYS: i64 = 365;
+const LEAF_VALIDITY_DAYS: i64 = 365 * 20;
+const LEAF_REISSUE_THRESHOLD_DAYS: i64 = 365;
 const ACME_RENEW_THRESHOLD_DAYS: i64 = 30;
 const ACME_RENEW_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
@@ -128,18 +130,6 @@ fn leaf_key_path(config_dir: &Path) -> PathBuf {
     config_dir.join("leaf.key")
 }
 
-fn leaf_meta_path(config_dir: &Path) -> PathBuf {
-    // Stores hash of the SAN list so we can detect host-set changes
-    // without re-parsing the leaf cert.
-    config_dir.join("leaf.meta")
-}
-
-fn leaf_expiry_path(config_dir: &Path) -> PathBuf {
-    // Stores the leaf's not_after as a unix timestamp (seconds, decimal).
-    // This avoids pulling in x509-parser just to read the validity field.
-    config_dir.join("leaf.expiry")
-}
-
 fn acme_expiry_path(config_dir: &Path) -> PathBuf {
     acme_dir(config_dir).join("cert.expiry")
 }
@@ -167,14 +157,12 @@ fn acme_key_path(config_dir: &Path) -> PathBuf {
 struct CaMaterial {
     cert: rcgen::Certificate,
     key: KeyPair,
+    pem: String,
+    not_after: OffsetDateTime,
 }
 
 fn ensure_ca_mode(config_dir: &Path, extra_hosts: &[String]) -> Result<CertPaths> {
-    fs::create_dir_all(config_dir)
-        .with_context(|| format!("creating config dir: {}", config_dir.display()))?;
-
-    let ca = ensure_ca(config_dir)?;
-    issue_leaf_if_needed(config_dir, &ca, extra_hosts)?;
+    ensure_ca_mode_for_hosts(config_dir, &collect_hosts(extra_hosts))?;
 
     Ok(CertPaths {
         cert: leaf_cert_path(config_dir),
@@ -183,21 +171,62 @@ fn ensure_ca_mode(config_dir: &Path, extra_hosts: &[String]) -> Result<CertPaths
     })
 }
 
-/// Read or generate the local root CA (`mobux local CA`).
-fn ensure_ca(config_dir: &Path) -> Result<CaMaterial> {
+fn ensure_ca_mode_for_hosts(config_dir: &Path, hosts: &[String]) -> Result<()> {
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("creating config dir: {}", config_dir.display()))?;
+
+    let (ca, ca_created) = ensure_ca(config_dir)?;
+    warn_if_ca_expiring(&ca);
+
+    let status = if ca_created {
+        LeafStatus::Reissue("a new CA was generated".to_string())
+    } else {
+        inspect_leaf(config_dir, hosts)
+    };
+
+    match status {
+        LeafStatus::Reuse { remaining_days } => {
+            eprintln!(
+                "[ssl] Reusing leaf cert at {} ({} day(s) remaining)",
+                leaf_cert_path(config_dir).display(),
+                remaining_days
+            );
+            Ok(())
+        }
+        LeafStatus::Reissue(reason) => {
+            eprintln!("[ssl] Issuing leaf cert: {reason}");
+            issue_leaf(
+                config_dir,
+                &ca,
+                hosts,
+                time::Duration::days(LEAF_VALIDITY_DAYS),
+            )
+        }
+    }
+}
+
+fn ensure_ca(config_dir: &Path) -> Result<(CaMaterial, bool)> {
     let cert_path = ca_cert_path(config_dir);
     let key_path = ca_key_path(config_dir);
 
     if cert_path.exists() && key_path.exists() {
         let key_pem = fs::read_to_string(&key_path)
             .with_context(|| format!("reading {}", key_path.display()))?;
-        let cert_pem = fs::read_to_string(&cert_path)
+        let pem = fs::read_to_string(&cert_path)
             .with_context(|| format!("reading {}", cert_path.display()))?;
         let key = KeyPair::from_pem(&key_pem).context("parsing CA key PEM")?;
-        let params =
-            CertificateParams::from_ca_cert_pem(&cert_pem).context("parsing CA cert PEM")?;
+        let params = CertificateParams::from_ca_cert_pem(&pem).context("parsing CA cert PEM")?;
+        let not_after = params.not_after;
         let cert = params.self_signed(&key).context("re-binding CA cert")?;
-        return Ok(CaMaterial { cert, key });
+        return Ok((
+            CaMaterial {
+                cert,
+                key,
+                pem,
+                not_after,
+            },
+            false,
+        ));
     }
 
     eprintln!(
@@ -221,54 +250,119 @@ fn ensure_ca(config_dir: &Path) -> Result<CaMaterial> {
     ];
 
     let now = OffsetDateTime::now_utc();
-    params.not_before = now;
-    params.not_after = now
+    let not_after = now
         .checked_add(time::Duration::days(CA_VALIDITY_DAYS))
         .ok_or_else(|| anyhow!("CA not_after overflow"))?;
+    params.not_before = now;
+    params.not_after = not_after;
 
     let cert = params.self_signed(&key).context("self-signing CA cert")?;
+    let pem = cert.pem();
 
     write_secret(&key_path, key.serialize_pem().as_bytes())?;
-    fs::write(&cert_path, cert.pem()).context("writing CA cert")?;
+    fs::write(&cert_path, &pem).context("writing CA cert")?;
 
     eprintln!("[ssl] CA written: {}", cert_path.display());
     eprintln!("[ssl] CA key:     {} (mode 0600)", key_path.display());
 
-    Ok(CaMaterial { cert, key })
+    Ok((
+        CaMaterial {
+            cert,
+            key,
+            pem,
+            not_after,
+        },
+        true,
+    ))
 }
 
-/// Issue a fresh leaf cert if none exists, or if SAN set changed, or if the
-/// existing leaf is within the reissue threshold of expiry.
-fn issue_leaf_if_needed(config_dir: &Path, ca: &CaMaterial, extra_hosts: &[String]) -> Result<()> {
-    let hosts = collect_hosts(extra_hosts);
-    let want_hash = hash_hosts(&hosts);
+fn warn_if_ca_expiring(ca: &CaMaterial) {
+    let remaining = (ca.not_after - OffsetDateTime::now_utc()).whole_days();
+    if remaining >= CA_EXPIRY_WARNING_DAYS {
+        return;
+    }
+    eprintln!(
+        "[ssl] WARNING: the local root CA expires in {remaining} day(s) ({}). \
+         mobux will not replace it: delete ca.crt and ca.key to generate a new one, \
+         then reinstall it on every device from the install page.",
+        ca.not_after.date()
+    );
+}
 
-    let cert_path = leaf_cert_path(config_dir);
-    let meta_path = leaf_meta_path(config_dir);
+#[derive(Debug, PartialEq)]
+enum LeafStatus {
+    Reuse { remaining_days: i64 },
+    Reissue(String),
+}
 
-    let same_hosts = fs::read_to_string(&meta_path)
-        .map(|s| s.trim() == want_hash)
-        .unwrap_or(false);
-
-    let remaining = remaining_days_from_sidecar(&leaf_expiry_path(config_dir)).unwrap_or(-1);
-    let fresh = cert_path.exists() && remaining > LEAF_REISSUE_THRESHOLD_DAYS;
-
-    if same_hosts && fresh {
-        eprintln!(
-            "[ssl] Reusing leaf cert at {} ({} day(s) remaining)",
-            cert_path.display(),
-            remaining
-        );
-        return Ok(());
+fn inspect_leaf(config_dir: &Path, hosts: &[String]) -> LeafStatus {
+    let Ok(pem) = fs::read_to_string(leaf_cert_path(config_dir)) else {
+        return LeafStatus::Reissue("no leaf cert found".to_string());
+    };
+    let Ok(params) = CertificateParams::from_ca_cert_pem(&pem) else {
+        return LeafStatus::Reissue("the existing leaf cert is unreadable".to_string());
+    };
+    let Ok(key_pem) = fs::read_to_string(leaf_key_path(config_dir)) else {
+        return LeafStatus::Reissue("no leaf key found".to_string());
+    };
+    let Ok(key) = KeyPair::from_pem(&key_pem) else {
+        return LeafStatus::Reissue("the existing leaf key is unreadable".to_string());
+    };
+    if leaf_public_key_der(&pem).as_deref() != Some(key.public_key_der().as_slice()) {
+        return LeafStatus::Reissue("the existing leaf key does not match its cert".to_string());
     }
 
-    issue_leaf(config_dir, ca, &hosts)?;
-    fs::write(&meta_path, want_hash).context("writing leaf meta")?;
-    Ok(())
+    let remaining_days = (params.not_after - OffsetDateTime::now_utc()).whole_days();
+    if remaining_days < LEAF_REISSUE_THRESHOLD_DAYS {
+        return LeafStatus::Reissue(format!(
+            "the existing leaf expires in {remaining_days} day(s)"
+        ));
+    }
+
+    let covered: Vec<String> = params
+        .subject_alt_names
+        .iter()
+        .filter_map(|san| match san {
+            SanType::DnsName(name) => Some(name.as_str().to_ascii_lowercase()),
+            SanType::IpAddress(ip) => Some(ip.to_string()),
+            _ => None,
+        })
+        .collect();
+    let missing: Vec<String> = hosts
+        .iter()
+        .map(|h| normalize_host(h))
+        .filter(|h| !covered.contains(h))
+        .collect();
+    if !missing.is_empty() {
+        return LeafStatus::Reissue(format!(
+            "the existing leaf does not cover {}",
+            missing.join(", ")
+        ));
+    }
+
+    LeafStatus::Reuse { remaining_days }
 }
 
-/// Generate a 90-day leaf cert covering `hosts` (DNS names + IP literals).
-fn issue_leaf(config_dir: &Path, ca: &CaMaterial, hosts: &[String]) -> Result<()> {
+fn leaf_public_key_der(pem: &str) -> Option<Vec<u8>> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
+    let cert = block.parse_x509().ok()?;
+    Some(cert.public_key().raw.to_vec())
+}
+
+fn normalize_host(host: &str) -> String {
+    match host.parse::<IpAddr>() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => host.to_ascii_lowercase(),
+    }
+}
+
+/// Sign a leaf cert covering `hosts` (DNS names + IP literals) with the CA.
+fn issue_leaf(
+    config_dir: &Path,
+    ca: &CaMaterial,
+    hosts: &[String],
+    validity: time::Duration,
+) -> Result<()> {
     let sans = build_sans(hosts)?;
 
     let san_display: Vec<String> = sans
@@ -279,9 +373,8 @@ fn issue_leaf(config_dir: &Path, ca: &CaMaterial, hosts: &[String]) -> Result<()
             _ => "?".to_string(),
         })
         .collect();
-    eprintln!("[ssl] Issuing leaf cert");
     eprintln!("[ssl]   SANs: {}", san_display.join(", "));
-    eprintln!("[ssl]   Validity: {} days", LEAF_VALIDITY_DAYS);
+    eprintln!("[ssl]   Validity: {} days", validity.whole_days());
 
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).context("generating leaf key")?;
     let mut params = CertificateParams::default();
@@ -300,11 +393,11 @@ fn issue_leaf(config_dir: &Path, ca: &CaMaterial, hosts: &[String]) -> Result<()
     ];
 
     let now = OffsetDateTime::now_utc();
-    let not_after = now
-        .checked_add(time::Duration::days(LEAF_VALIDITY_DAYS))
-        .ok_or_else(|| anyhow!("leaf not_after overflow"))?;
     params.not_before = now;
-    params.not_after = not_after;
+    params.not_after = now
+        .checked_add(validity)
+        .ok_or_else(|| anyhow!("leaf not_after overflow"))?
+        .min(ca.not_after);
 
     let leaf = params
         .signed_by(&leaf_key, &ca.cert, &ca.key)
@@ -314,20 +407,31 @@ fn issue_leaf(config_dir: &Path, ca: &CaMaterial, hosts: &[String]) -> Result<()
     // some HTTP clients that don't otherwise build the chain.
     let mut chain = leaf.pem();
     chain.push('\n');
-    chain.push_str(&ca.cert.pem());
+    chain.push_str(&ca.pem);
 
-    write_secret(
-        &leaf_key_path(config_dir),
-        leaf_key.serialize_pem().as_bytes(),
-    )?;
-    fs::write(leaf_cert_path(config_dir), chain).context("writing leaf cert")?;
-    fs::write(
-        leaf_expiry_path(config_dir),
-        not_after.unix_timestamp().to_string(),
-    )
-    .context("writing leaf expiry sidecar")?;
+    let key_path = leaf_key_path(config_dir);
+    let cert_path = leaf_cert_path(config_dir);
+    let key_tmp = key_path.with_extension("key.tmp");
+    let cert_tmp = cert_path.with_extension("crt.tmp");
+    write_secret(&key_tmp, leaf_key.serialize_pem().as_bytes())?;
+    fs::write(&cert_tmp, chain).context("writing leaf cert")?;
+    fs::rename(&key_tmp, &key_path).context("moving leaf key into place")?;
+    fs::rename(&cert_tmp, &cert_path).context("moving leaf cert into place")?;
+
+    for sidecar in ["leaf.expiry", "leaf.meta"] {
+        remove_if_present(&config_dir.join(sidecar))?;
+    }
 
     Ok(())
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn collect_hosts(extra_hosts: &[String]) -> Vec<String> {
@@ -367,17 +471,6 @@ fn build_sans(hosts: &[String]) -> Result<Vec<SanType>> {
         }
     }
     Ok(sans)
-}
-
-fn hash_hosts(hosts: &[String]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    for h in hosts {
-        h.hash(&mut hasher);
-        0u8.hash(&mut hasher); // separator so ["a","bc"] != ["ab","c"]
-    }
-    format!("{:016x}", hasher.finish())
 }
 
 fn write_secret(path: &Path, contents: &[u8]) -> Result<()> {
@@ -680,5 +773,167 @@ mod tests {
         assert_eq!(ca_cert_path(dir), dir.join("ca.crt"));
         assert_eq!(leaf_cert_path(dir), dir.join("leaf.crt"));
         assert_eq!(acme_cert_path(dir), dir.join("acme/cert.pem"));
+    }
+
+    fn hosts(names: &[&str]) -> Vec<String> {
+        names.iter().map(|h| h.to_string()).collect()
+    }
+
+    fn read_cert(path: &Path) -> CertificateParams {
+        CertificateParams::from_ca_cert_pem(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn validity_days(params: &CertificateParams) -> i64 {
+        (params.not_after - params.not_before).whole_days()
+    }
+
+    fn leaf_remaining_days(dir: &Path) -> i64 {
+        (read_cert(&leaf_cert_path(dir)).not_after - OffsetDateTime::now_utc()).whole_days()
+    }
+
+    #[test]
+    fn a_fresh_issue_gives_a_30_year_ca_and_a_20_year_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_ca_mode_for_hosts(dir.path(), &hosts(&["localhost", "127.0.0.1"])).unwrap();
+
+        assert_eq!(
+            validity_days(&read_cert(&ca_cert_path(dir.path()))),
+            365 * 30
+        );
+        assert_eq!(
+            validity_days(&read_cert(&leaf_cert_path(dir.path()))),
+            365 * 20
+        );
+    }
+
+    #[test]
+    fn a_leaf_expiring_in_six_months_is_reissued_from_the_same_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = hosts(&["localhost", "127.0.0.1"]);
+        let (ca, _) = ensure_ca(dir.path()).unwrap();
+        issue_leaf(dir.path(), &ca, &wanted, time::Duration::days(180)).unwrap();
+        let ca_bytes = fs::read(ca_cert_path(dir.path())).unwrap();
+        let ca_key_bytes = fs::read(ca_key_path(dir.path())).unwrap();
+
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+
+        assert!(leaf_remaining_days(dir.path()) > 365 * 19);
+        assert_eq!(fs::read(ca_cert_path(dir.path())).unwrap(), ca_bytes);
+        assert_eq!(fs::read(ca_key_path(dir.path())).unwrap(), ca_key_bytes);
+    }
+
+    #[test]
+    fn a_leaf_with_twenty_years_left_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = hosts(&["localhost", "127.0.0.1", "::1"]);
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+        let leaf_bytes = fs::read(leaf_cert_path(dir.path())).unwrap();
+
+        assert!(matches!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reuse { .. }
+        ));
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+
+        assert_eq!(fs::read(leaf_cert_path(dir.path())).unwrap(), leaf_bytes);
+    }
+
+    #[test]
+    fn a_leaf_missing_a_current_host_is_reissued() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_ca_mode_for_hosts(dir.path(), &hosts(&["localhost", "old-host"])).unwrap();
+        let ca_bytes = fs::read(ca_cert_path(dir.path())).unwrap();
+        let wanted = hosts(&["localhost", "new-host.tailnet.ts.net", "100.64.0.7"]);
+
+        assert_eq!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reissue(
+                "the existing leaf does not cover new-host.tailnet.ts.net, 100.64.0.7".to_string()
+            )
+        );
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+
+        assert!(matches!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reuse { .. }
+        ));
+        assert_eq!(fs::read(ca_cert_path(dir.path())).unwrap(), ca_bytes);
+    }
+
+    #[test]
+    fn a_corrupt_leaf_key_is_reissued() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = hosts(&["localhost"]);
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+        fs::write(
+            leaf_key_path(dir.path()),
+            "-----BEGIN PRIVATE KEY-----\ntrunc",
+        )
+        .unwrap();
+
+        assert_eq!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reissue("the existing leaf key is unreadable".to_string())
+        );
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+
+        assert!(matches!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reuse { .. }
+        ));
+    }
+
+    #[test]
+    fn a_leaf_key_that_does_not_match_the_cert_is_reissued() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = hosts(&["localhost"]);
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+        let other = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        fs::write(leaf_key_path(dir.path()), other.serialize_pem()).unwrap();
+
+        assert_eq!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reissue("the existing leaf key does not match its cert".to_string())
+        );
+        ensure_ca_mode_for_hosts(dir.path(), &wanted).unwrap();
+
+        assert!(matches!(
+            inspect_leaf(dir.path(), &wanted),
+            LeafStatus::Reuse { .. }
+        ));
+    }
+
+    #[test]
+    fn a_leaf_never_outlives_its_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ca, _) = ensure_ca(dir.path()).unwrap();
+        ca.not_after = OffsetDateTime::now_utc() + time::Duration::days(365 * 5);
+
+        issue_leaf(
+            dir.path(),
+            &ca,
+            &hosts(&["localhost"]),
+            time::Duration::days(LEAF_VALIDITY_DAYS),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_cert(&leaf_cert_path(dir.path()))
+                .not_after
+                .unix_timestamp(),
+            ca.not_after.unix_timestamp()
+        );
+    }
+
+    #[test]
+    fn reissuing_the_leaf_removes_the_old_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("leaf.expiry"), "0").unwrap();
+        fs::write(dir.path().join("leaf.meta"), "0").unwrap();
+
+        ensure_ca_mode_for_hosts(dir.path(), &hosts(&["localhost"])).unwrap();
+
+        assert!(!dir.path().join("leaf.expiry").exists());
+        assert!(!dir.path().join("leaf.meta").exists());
     }
 }

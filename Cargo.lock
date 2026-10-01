@@ -2396,6 +2396,7 @@ dependencies = [
  "vt100",
  "vte",
  "web-push-native",
+ "x509-parser 0.16.0",
 ]
 
 [[package]]
