@@ -1206,12 +1206,20 @@ pub fn check(config: &Config) -> Result<(), String> {
     check_mcp(config)
 }
 
+/// Ports below this need root to bind.
+pub const MCP_MIN_PORT: u16 = 1024;
+
 /// The MCP port shares the loopback interface with the other listeners, so it
 /// must not collide with either of them.
 pub fn check_mcp(config: &Config) -> Result<(), String> {
     let port = config.mcp.port;
     if port == 0 {
         return Ok(());
+    }
+    if port < MCP_MIN_PORT {
+        return Err(format!(
+            "mcp.port: must be 0 (off) or from {MCP_MIN_PORT} to 65535"
+        ));
     }
     if port == config.server.port {
         return Err(format!(
@@ -3041,6 +3049,14 @@ mod tests {
         assert_eq!(
             message(r#"{"server": {"port": 5151}, "mcp": {"port": 5151}}"#),
             "config.json: mcp.port: must differ from server.port (5151)"
+        );
+    }
+
+    #[test]
+    fn an_mcp_port_below_1024_is_rejected() {
+        assert_eq!(
+            message(r#"{"mcp": {"port": 80}}"#),
+            "config.json: mcp.port: must be 0 (off) or from 1024 to 65535"
         );
     }
 

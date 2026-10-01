@@ -216,8 +216,9 @@ needs its base set to the mount, e.g. `vite --base /proxy/vite/`.
 
 `mcp.port` turns on an MCP server at `http://127.0.0.1:<port>/mcp` (Streamable
 HTTP). Its tools list sessions, read a screen, run a tmux command, type into a
-pane, push a notification and push a page to the phone. Register it with
-Claude Code:
+pane, push a notification and push a page to the phone. The simpler route is
+Settings → MCP server, which writes this block, starts the listener and shows
+the registration command. Register it with Claude Code:
 
 ```bash
 claude mcp add --transport http mobux http://127.0.0.1:8415/mcp

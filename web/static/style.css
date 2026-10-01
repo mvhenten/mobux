@@ -340,6 +340,7 @@ label.settings-row { cursor: pointer; }
 }
 .settings-switch:checked { background: var(--accent); }
 .settings-switch:checked::before { transform: translateX(20px); background: var(--on-accent); }
+.settings-switch:disabled { opacity: 0.4; cursor: not-allowed; }
 .settings-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .settings-row--field .settings-label { flex: 0 0 auto; max-width: 40%; }
@@ -359,6 +360,17 @@ label.settings-row { cursor: pointer; }
 .settings-input::placeholder { color: var(--muted); }
 .settings-input:disabled { opacity: 0.4; }
 #nodeTarget[readonly] { cursor: pointer; }
+
+.settings-row--command { gap: 12px; }
+.settings-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
 
 .settings-row--slider {
   flex-direction: column;

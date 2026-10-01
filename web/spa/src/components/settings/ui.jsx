@@ -92,7 +92,14 @@ export function ActionRow({ id, label, onClick, disabled }) {
   );
 }
 
-export function SwitchRow({ name, label, secondary, checked, onChange }) {
+export function SwitchRow({
+  name,
+  label,
+  secondary,
+  checked,
+  onChange,
+  disabled,
+}) {
   return (
     <label class="settings-row" data-switch={name}>
       <Label label={label} secondary={secondary} />
@@ -102,6 +109,7 @@ export function SwitchRow({ name, label, secondary, checked, onChange }) {
         class="settings-switch"
         name={name}
         checked={checked}
+        disabled={disabled}
         aria-checked={checked ? "true" : "false"}
         onChange={onChange}
       />
