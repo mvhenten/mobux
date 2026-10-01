@@ -21,6 +21,7 @@ export async function collectDiagnostics() {
     route: location.hash || location.pathname,
     ...terminalTarget(),
     userAgent: navigator.userAgent,
+    ...bootReason(),
     recentErrors: recentErrors(),
   };
 }
@@ -34,6 +35,17 @@ function terminalTarget() {
   return {
     node: m[1] ? decodeURIComponent(m[1]) : null,
     session: decodeURIComponent(m[2]),
+  };
+}
+
+// How this document came to be: a tab the browser discarded and brought back
+// reads as a reload, so `wasDiscarded` tells the two apart.
+function bootReason() {
+  const wasDiscarded = document.wasDiscarded === true;
+  const navigation = performance.getEntriesByType?.("navigation")?.[0];
+  return {
+    wasDiscarded,
+    bootReason: wasDiscarded ? "discarded" : (navigation?.type ?? null),
   };
 }
 

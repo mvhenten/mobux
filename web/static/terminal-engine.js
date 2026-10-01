@@ -285,9 +285,10 @@ export class TerminalEngine extends EventTarget {
       this._reconnectTimer = null;
     }
     this.intentionalClose = false;
-    this.ws = new WebSocket(
+    const ws = new WebSocket(
       wsUrl(`ws/${encodeURIComponent(this.session)}${this._wsQuery()}`),
     );
+    this.ws = ws;
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => {
       // A clean open resets the backoff window.
@@ -303,7 +304,10 @@ export class TerminalEngine extends EventTarget {
       this._scheduleHistoryTail();
       this.dispatchEvent(new CustomEvent("data", { detail: bytes }));
     };
+    // A socket closed after a newer one replaced it must not arm a retry
+    // that would in turn replace the live one.
     this.ws.onclose = () => {
+      if (this.ws !== ws) return;
       this.dispatchEvent(new Event("close"));
       this._scheduleReconnect();
     };
@@ -347,6 +351,20 @@ export class TerminalEngine extends EventTarget {
       } catch (_) {}
     }
     this.connect();
+  }
+
+  // A backgrounded tab: close the socket on purpose, with no retry armed.
+  // reconnect() brings it back, and the first message after it catches the
+  // history up.
+  suspend() {
+    this.intentionalClose = true;
+    if (this._reconnectTimer !== null) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    try {
+      this.ws?.close();
+    } catch (_) {}
   }
 
   send(data) {

@@ -24,7 +24,10 @@ body.term-body #app {
   display: flex;
   flex-direction: column;
 }
+/* Positioned, so the engine's absolute layers (#touchOverlay above all)
+   cover the island and not the update bar above it. */
 .term-body-spa {
+  position: relative;
   flex: 1;
   min-height: 0;
   width: 100%;
@@ -309,4 +312,15 @@ body.term-body #app {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 6px;
+}
+
+/* In flow as the first child of #app, so on the terminal route it takes its
+   own row above the island instead of covering the terminal's top bar. */
+.update-bar {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
 }

@@ -155,16 +155,15 @@ export function createTerminal({
   const cmdCloseBtn = $("cmdCloseBtn");
   const cmdSettingsBtn = $("cmdSettingsBtn");
 
-  // Every teardown is registered here; dispose() drains it. `on`/`later`/
-  // `every` are the tracked variants of addEventListener/setTimeout/
-  // setInterval.
+  // Every teardown is registered here; dispose() drains it. `on`/`later` are
+  // the tracked variants of addEventListener/setTimeout.
   let disposed = false;
   const cleanups = [];
   const on = (target, type, fn, opts) => {
     target.addEventListener(type, fn, opts);
     cleanups.push(() => target.removeEventListener(type, fn, opts));
   };
-  // Both no-op after dispose: a straggler event (an in-flight WS message, a
+  // It no-ops after dispose: a straggler event (an in-flight WS message, a
   // resolving fetch) must not create new timers — `cleanups` has already
   // been drained, so anything registered now would never be torn down.
   const later = (fn, ms) => {
@@ -173,11 +172,6 @@ export function createTerminal({
       if (!disposed) fn();
     }, ms);
     cleanups.push(() => clearTimeout(t));
-  };
-  const every = (fn, ms) => {
-    if (disposed) return;
-    const t = setInterval(fn, ms);
-    cleanups.push(() => clearInterval(t));
   };
 
   {
@@ -736,6 +730,11 @@ export function createTerminal({
     setSyncHold: (ms) => core.view.setSyncHold(ms),
     resize: () => core.resize(),
     reloadHistory: () => core.reloadHistory(),
+    suspended: () => suspended,
+    panesPollActive: () => panesPoll !== null,
+    historyRowCount: () => core.buffer.historyRowCount(),
+    reconnect: () => core.reconnect(),
+    reconnectPending: () => core._reconnectTimer !== null,
     onPtyData: (cb) => {
       core.addEventListener("data", cb);
       return () => core.removeEventListener("data", cb);
@@ -790,24 +789,45 @@ export function createTerminal({
   // boot's own connect() has run there's nothing to reconnect, and firing
   // reconnect() while `core.ws` is still null would open a competing
   // socket that boot then immediately replaces.
+  //
+  // The `?w=` window, selected once the first socket is up — by boot, or by
+  // the resume of a tab hidden while it booted.
+  let pendingWindow = windowFromUrl(location.href);
+  function selectPendingWindow() {
+    if (pendingWindow == null) return;
+    const w = pendingWindow;
+    pendingWindow = null;
+    // Brief wait so the WS attach completes before we ask tmux to switch
+    // windows; refreshPanes after the switch then sees the new active window.
+    later(() => selectWindow(w), 500);
+  }
+
   let booted = false;
+  let suspended = false;
   (async () => {
     await core.reloadHistory();
     if (disposed) return;
-    core.connect();
     booted = true;
-    const w = windowFromUrl(location.href);
-    if (w != null) {
-      // Brief wait so the WS attach completes before we ask tmux to
-      // switch windows; refreshPanes after the switch then sees the new
-      // active window.
-      later(() => selectWindow(w), 500);
-    }
+    if (suspended) return;
+    core.connect();
+    selectPendingWindow();
   })();
 
   on(window, "resize", () => core.resize());
   later(() => core.resize(), 100);
-  every(() => core.refreshPanes(), 5000);
+
+  let panesPoll = null;
+  const startPanesPoll = () => {
+    if (panesPoll === null && !disposed) {
+      panesPoll = setInterval(() => core.refreshPanes(), 5000);
+    }
+  };
+  const stopPanesPoll = () => {
+    clearInterval(panesPoll);
+    panesPoll = null;
+  };
+  cleanups.push(stopPanesPoll);
+  startPanesPoll();
 
   // ── Auto-reconnect ──────────────────────────────────────────────────
   // Renderer-agnostic. The tmux session persists server-side, so
@@ -823,25 +843,46 @@ export function createTerminal({
   // stays as a manual fallback.
 
   function autoReconnect() {
-    if (!booted || disposed) return;
+    if (!booted || disposed || suspended) return;
     core.reconnect();
   }
 
-  // Primary path: screen/tab is visible again → reconnect now.
+  // ── Page lifecycle ──────────────────────────────────────────────────
+  // A hidden or frozen tab holds no socket and no polls. Coming back
+  // reconnects in place, and the first message catches the history up as
+  // after a network blip; the page never reloads.
+  function suspend() {
+    if (disposed || suspended) return;
+    suspended = true;
+    stopPanesPoll();
+    core.suspend();
+  }
+
+  function resume() {
+    if (disposed || document.visibilityState !== "visible") return;
+    startPanesPoll();
+    if (!suspended) {
+      autoReconnect();
+      return;
+    }
+    suspended = false;
+    if (!booted) return;
+    core.reconnect();
+    selectPendingWindow();
+  }
+
   on(document, "visibilitychange", () => {
-    if (document.visibilityState === "visible") autoReconnect();
+    if (document.visibilityState === "visible") resume();
+    else suspend();
   });
+  on(document, "freeze", suspend);
+  on(document, "resume", resume);
   // Network came back.
   on(window, "online", autoReconnect);
   // Android bfcache restore (app swapped back into the foreground).
-  on(window, "pageshow", autoReconnect);
-
-  // A real navigation away / unload is an intentional teardown — mark it
-  // so the socket's onclose doesn't arm a (pointless) backoff retry on a
-  // page that's going away.
-  on(window, "pagehide", () => {
-    core.intentionalClose = true;
-  });
+  on(window, "pageshow", resume);
+  // Navigating away, or into the bfcache: the socket's close is deliberate.
+  on(window, "pagehide", suspend);
 
   // ── Soft keyboard (visualViewport) handler ──────────────────────────
   // Renderer-agnostic. On Android Chrome (the TWA target) the soft

@@ -3,10 +3,15 @@ import { useHashLocation } from "wouter-preact/use-hash-location";
 import { HomePage } from "./pages/Home.jsx";
 import { TerminalPage } from "./pages/Terminal.jsx";
 import { SettingsPage, SettingsSubPage, SUB_PAGES } from "./pages/Settings.jsx";
-import { SettingsHeader, useSettingsNav } from "./components/settings/ui.jsx";
+import {
+  Button,
+  SettingsHeader,
+  useSettingsNav,
+} from "./components/settings/ui.jsx";
 import { InstallPage } from "./pages/Install.jsx";
 import { ErrorPage } from "./components/ErrorPage.jsx";
 import { fatalError } from "./lib/fatalError.js";
+import { dismissUpdate, updateAvailable } from "./lib/reload.js";
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -23,6 +28,46 @@ export function App() {
   // Hash routing. The SPA is mounted under a sub-path (/static/spa/) parallel
   // to the existing Rust-rendered pages, so hash-based locations avoid needing
   // server-side history fallback and work identically in dev and prod.
+  return (
+    <>
+      <UpdateBar />
+      <Routes />
+    </>
+  );
+}
+
+// A new server build while a terminal is open: offered, never forced.
+function UpdateBar() {
+  if (!updateAvailable.value) return null;
+  return (
+    <div
+      id="updateBar"
+      class="update-bar settings-status settings-status--action"
+      role="status"
+    >
+      <span class="settings-status-line">New version available</span>
+      <Button
+        id="updateBarReload"
+        variant="primary"
+        class="btn--inline"
+        onClick={() => location.reload()}
+      >
+        Reload
+      </Button>
+      <Button
+        id="updateBarDismiss"
+        variant="secondary"
+        class="btn--inline"
+        aria-label="Dismiss"
+        onClick={dismissUpdate}
+      >
+        ✕
+      </Button>
+    </div>
+  );
+}
+
+function Routes() {
   return (
     <Router hook={useHashLocation}>
       <Switch>
