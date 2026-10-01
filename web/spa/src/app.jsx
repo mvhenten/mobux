@@ -3,12 +3,15 @@ import { useHashLocation } from "wouter-preact/use-hash-location";
 import { HomePage } from "./pages/Home.jsx";
 import { TerminalPage } from "./pages/Terminal.jsx";
 import { SettingsPage, SettingsSubPage, SUB_PAGES } from "./pages/Settings.jsx";
-import { SettingsHeader, useSettingsNav } from "./components/settings/ui.jsx";
+import {
+  Button,
+  SettingsHeader,
+  useSettingsNav,
+} from "./components/settings/ui.jsx";
 import { InstallPage } from "./pages/Install.jsx";
 import { ErrorPage } from "./components/ErrorPage.jsx";
 import { fatalError } from "./lib/fatalError.js";
-import { updateAvailable } from "./lib/reload.js";
-import { Button } from "./components/settings/ui.jsx";
+import { dismissUpdate, updateAvailable } from "./lib/reload.js";
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -50,6 +53,15 @@ function UpdateBar() {
         onClick={() => location.reload()}
       >
         Reload
+      </Button>
+      <Button
+        id="updateBarDismiss"
+        variant="secondary"
+        class="btn--inline"
+        aria-label="Dismiss"
+        onClick={dismissUpdate}
+      >
+        ✕
       </Button>
     </div>
   );

@@ -21,7 +21,6 @@ const { outputFiles } = buildSync({
 });
 const {
   displayLength,
-  lineDepths,
   linkCells,
   rowsFromBottom,
   textBetween,
@@ -166,45 +165,4 @@ test("an emoji before a URL keeps the link on the columns the URL is drawn in", 
   assert.equal(links[3], "https://a.b/c");
   assert.equal(links[15], "https://a.b/c");
   assert.equal(links[16], null);
-});
-
-// A pane line per screen row, keyed after the history.
-function anchorBuffer({ cols, screen, history }) {
-  const buffer = fakeBuffer({ cols, screen, history });
-  return {
-    ...buffer,
-    paneRows: () => ({ first: 0, last: screen.length - 1 }),
-    screenLines: () =>
-      buffer.viewportRows().map((row, i) => ({
-        key: history.length + i,
-        row: i,
-        rows: [row],
-      })),
-  };
-}
-
-test("line depths count each line's display rows up from the bottom", () => {
-  const buffer = anchorBuffer({
-    cols: 4,
-    screen: [["$"], [""]],
-    history: ["0123456789", "ab"],
-  });
-
-  assert.deepEqual(lineDepths(buffer), [
-    { key: 3, depth: 1 },
-    { key: 2, depth: 2 },
-    { key: 1, depth: 3 },
-    { key: 0, depth: 6 },
-  ]);
-});
-
-test("line depths stop at the line holding the row asked for", () => {
-  const buffer = anchorBuffer({
-    cols: 4,
-    screen: [["$"], [""]],
-    history: ["0123456789", "ab"],
-  });
-
-  assert.deepEqual(lineDepths(buffer, 4).at(-1), { key: 0, depth: 6 });
-  assert.deepEqual(lineDepths(buffer, 3).at(-1), { key: 1, depth: 3 });
 });

@@ -125,12 +125,6 @@ const RENDERER_OPTIONS = {
 //              toggle, so read mode is one tap from either other view. The
 //              engine knows no more about a "read mode" than it does about a
 //              reader. Absent ⇒ no read-mode button is shown.
-//   restore    optional `{ anchor }` from a scrollAnchor() saved before the
-//              tab was discarded; the display scrolls back to it once the
-//              history has loaded.
-//   onSuspend  called as a hidden tab suspends, before its history is
-//              released, so the owner can save what a discard would lose.
-//   onResume   called as a suspended tab comes back.
 //
 // The engine used to be a self-booting module: it read window.MOBUX_* at
 // eval time, so a second (node, session) in the same document silently kept
@@ -147,9 +141,6 @@ export function createTerminal({
   build = "",
   viewToggle = null,
   readToggle = null,
-  restore = null,
-  onSuspend = null,
-  onResume = null,
 } = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
 
@@ -740,9 +731,10 @@ export function createTerminal({
     resize: () => core.resize(),
     reloadHistory: () => core.reloadHistory(),
     suspended: () => suspended,
+    panesPollActive: () => panesPoll !== null,
     historyRowCount: () => core.buffer.historyRowCount(),
-    scrollAnchor: () => core.scrollAnchor(),
-    scrollToAnchor: (anchor) => core.scrollToAnchor(anchor),
+    reconnect: () => core.reconnect(),
+    reconnectPending: () => core._reconnectTimer !== null,
     onPtyData: (cb) => {
       core.addEventListener("data", cb);
       return () => core.removeEventListener("data", cb);
@@ -797,22 +789,28 @@ export function createTerminal({
   // boot's own connect() has run there's nothing to reconnect, and firing
   // reconnect() while `core.ws` is still null would open a competing
   // socket that boot then immediately replaces.
+  //
+  // The `?w=` window, selected once the first socket is up — by boot, or by
+  // the resume of a tab hidden while it booted.
+  let pendingWindow = windowFromUrl(location.href);
+  function selectPendingWindow() {
+    if (pendingWindow == null) return;
+    const w = pendingWindow;
+    pendingWindow = null;
+    // Brief wait so the WS attach completes before we ask tmux to switch
+    // windows; refreshPanes after the switch then sees the new active window.
+    later(() => selectWindow(w), 500);
+  }
+
   let booted = false;
   let suspended = false;
   (async () => {
     await core.reloadHistory();
     if (disposed) return;
     booted = true;
-    if (restore?.anchor) core.scrollToAnchor(restore.anchor);
     if (suspended) return;
     core.connect();
-    const w = windowFromUrl(location.href);
-    if (w != null) {
-      // Brief wait so the WS attach completes before we ask tmux to
-      // switch windows; refreshPanes after the switch then sees the new
-      // active window.
-      later(() => selectWindow(w), 500);
-    }
+    selectPendingWindow();
   })();
 
   on(window, "resize", () => core.resize());
@@ -850,13 +848,12 @@ export function createTerminal({
   }
 
   // ── Page lifecycle ──────────────────────────────────────────────────
-  // A hidden or frozen tab holds no socket, no polls and no history, so the
-  // phone has little reason to discard it. Coming back reconnects and
-  // refetches the history in place; the page never reloads.
+  // A hidden or frozen tab holds no socket and no polls. Coming back
+  // reconnects in place, and the first message catches the history up as
+  // after a network blip; the page never reloads.
   function suspend() {
     if (disposed || suspended) return;
     suspended = true;
-    onSuspend?.();
     stopPanesPoll();
     core.suspend();
   }
@@ -869,11 +866,9 @@ export function createTerminal({
       return;
     }
     suspended = false;
-    onResume?.();
     if (!booted) return;
-    if (core.historyStale) core.reloadHistory();
     core.reconnect();
-    core.refreshPanes();
+    selectPendingWindow();
   }
 
   on(document, "visibilitychange", () => {

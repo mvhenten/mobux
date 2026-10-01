@@ -54,7 +54,7 @@ import { createTerminalDocument } from "./terminal-document.js";
 import { createTerminalBuffer, splitCapture } from "./terminal-buffer.js";
 import { createRedrawWriter } from "./terminal-redraw.js";
 import { createMarkerBook } from "./terminal-markers.js";
-import { displayLength, lineDepths, rowsFromBottom } from "./terminal-text.js";
+import { displayLength, rowsFromBottom } from "./terminal-text.js";
 import {
   findOsc133AEnd,
   scanForNextAAndCandidate,
@@ -215,8 +215,6 @@ export class TerminalEngine extends EventTarget {
     this._historyNext = null;
     this._historyAbort = null;
     this._historyGeneration = 0;
-    // Set while the history is released (suspend) and not yet fetched back.
-    this.historyStale = false;
     this._theme = null;
 
     this._oscSub = this.buffer.registerOscHandler(133, (data) => {
@@ -355,8 +353,9 @@ export class TerminalEngine extends EventTarget {
     this.connect();
   }
 
-  // A backgrounded tab: close the socket on purpose and release the history,
-  // keeping the screen. reconnect() and reloadHistory() bring both back.
+  // A backgrounded tab: close the socket on purpose, with no retry armed.
+  // reconnect() brings it back, and the first message after it catches the
+  // history up.
   suspend() {
     this.intentionalClose = true;
     if (this._reconnectTimer !== null) {
@@ -366,22 +365,6 @@ export class TerminalEngine extends EventTarget {
     try {
       this.ws?.close();
     } catch (_) {}
-    return this.releaseHistory();
-  }
-
-  async releaseHistory() {
-    this._historyGeneration++;
-    this._historyAbort?.abort();
-    clearTimeout(this._historyTimer);
-    clearTimeout(this._historyMaxTimer);
-    this._historyMaxTimer = null;
-    this._historyNext = null;
-    this.historyStale = true;
-    const moved = await this.buffer.clearHistory();
-    if (this._disposed) return;
-    this.markers.place(moved, this.buffer.scrolledRows());
-    this.view.invalidate();
-    this.view.flush();
   }
 
   send(data) {
@@ -709,31 +692,6 @@ export class TerminalEngine extends EventTarget {
     ].join(":");
   }
 
-  // Where the display is scrolled to: the line its top row is on, counted
-  // back from the last line by line key. null at the bottom.
-  scrollAnchor() {
-    const { length, rows, top } = this.textViewport();
-    const depth = length - top;
-    if (depth <= rows) return null;
-    const lines = lineDepths(this.buffer, depth);
-    if (!lines.length) return null;
-    return { linesUp: lines[0].key - lines[lines.length - 1].key };
-  }
-
-  // Scroll so the anchored line is the top row; a line no longer held is
-  // left alone.
-  scrollToAnchor(anchor) {
-    if (!anchor || !(anchor.linesUp > 0)) return false;
-    const lines = lineDepths(this.buffer);
-    if (!lines.length) return false;
-    const key = lines[0].key - anchor.linesUp;
-    const line = lines.find((l) => l.key === key);
-    if (!line) return false;
-    const { length, top } = this.textViewport();
-    this.scrollLines(length - line.depth - top);
-    return true;
-  }
-
   onBell(cb) {
     return this.buffer.onBell(cb);
   }
@@ -887,7 +845,6 @@ export class TerminalEngine extends EventTarget {
       if (!current()) return;
     }
     this.markers.place(moved, scrolled);
-    this.historyStale = false;
     await this.view.flush();
     this.dispatchEvent(new Event("history"));
   }

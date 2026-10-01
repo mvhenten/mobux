@@ -311,12 +311,10 @@ body.term-body #app {
   padding: 1px 6px;
 }
 
+/* In flow as the first child of #app, so on the terminal route it takes its
+   own row above the island instead of covering the terminal's top bar. */
 .update-bar {
-  position: fixed;
-  top: env(safe-area-inset-top, 0);
-  left: 0;
-  right: 0;
-  z-index: 1000;
+  flex: 0 0 auto;
   margin: 0;
   padding: 8px 16px;
   background: var(--panel);

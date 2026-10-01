@@ -23,8 +23,6 @@
 //     createReader the reader factory (from /static/reader.js).
 //     createReadMode the read-mode factory (from /static/read-mode.js), wired
 //                 here to apiGet so its poll loop has a fetcher (#236).
-//     restore     optional { views, current } from snapshot(), saved before
-//                 the tab was discarded.
 
 import { apiGet } from "./api.js";
 import { getPref, setPref } from "./prefs.js";
@@ -37,7 +35,6 @@ export function createViewController({
   terminal,
   createReader,
   createReadMode,
-  restore = null,
 }) {
   const { core } = terminal;
   const termEl = root.querySelector("#terminal");
@@ -51,11 +48,9 @@ export function createViewController({
   // The per-window override — which view a specific tmux window was last left
   // in — is mid-session tab state, not a durable preference: an in-memory map
   // keyed on the volatile tmux window id, scoped to this mount, pruned when the
-  // window dies. A discarded tab gets it back through snapshot() and
-  // `restore`. The default view is the server-held `default_view` preference.
-  const windowViews = new Map(
-    (restore?.views || []).filter(([, mode]) => VIEWS.includes(mode)),
-  );
+  // window dies. Losing it on reload is fine. The default view is the
+  // server-held `default_view` preference.
+  const windowViews = new Map();
 
   function activeWindowId() {
     const p = core.panes[core.activeIndex];
@@ -175,9 +170,7 @@ export function createViewController({
 
   // Land in the preferred view at boot, before the first /panes refresh
   // resolves. The per-window override (if any) is applied by onPanes later.
-  const bootView = VIEWS.includes(restore?.current)
-    ? restore.current
-    : storedDefaultView();
+  const bootView = storedDefaultView();
   if (bootView !== "xterm") {
     setTimeout(() => {
       if (!disposed) applyView(bootView, { persist: false });
@@ -193,13 +186,8 @@ export function createViewController({
     readMode.dispose();
   }
 
-  function snapshot() {
-    return { views: [...windowViews], current };
-  }
-
   return {
     swap,
-    snapshot,
     get current() {
       return current;
     },

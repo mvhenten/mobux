@@ -6,8 +6,9 @@ import { localGet } from "./api.js";
 // a tab never keeps running stale bundles unnoticed.
 //
 // An open terminal is never reloaded under the user: a changed hash raises
-// `updateAvailable`, and the update bar offers the reload. Without a
-// terminal open nothing is lost, so the tab reloads at once.
+// `updateAvailable`, and the update bar offers the reload. Dismissing the bar
+// hides it until the tab is next shown. Without a terminal open nothing is lost, so
+// the tab reloads at once.
 //
 // An in-memory module variable remembers the last hash this tab observed —
 // no client-side storage, so it resets on every load, which is exactly right:
@@ -22,16 +23,22 @@ const POLL_MS = 60000;
 export const updateAvailable = signal(false);
 
 let seen = null;
+let stale = false;
 let poll = null;
 
 const onTerminal = () => /^#\/s\//.test(location.hash);
 
 function reloadOrOffer() {
+  stale = true;
   if (onTerminal()) updateAvailable.value = true;
   else location.reload();
 }
 
-async function checkBuildHash() {
+export function dismissUpdate() {
+  updateAvailable.value = false;
+}
+
+async function checkBuildHash({ shown = false } = {}) {
   let hash;
   try {
     hash = (await localGet("/api/build-info"))?.build_hash;
@@ -42,7 +49,10 @@ async function checkBuildHash() {
   // not evidence of staleness (mirrors BuildInfoCard's `stale` computation).
   if (!hash || hash === "unknown") return;
 
-  if (seen === hash) return;
+  if (seen === hash) {
+    if (stale && shown) reloadOrOffer();
+    return;
+  }
 
   const hadBaseline = seen !== null;
   seen = hash;
@@ -51,7 +61,7 @@ async function checkBuildHash() {
 }
 
 function startPoll() {
-  if (poll === null) poll = setInterval(checkBuildHash, POLL_MS);
+  if (poll === null) poll = setInterval(() => checkBuildHash(), POLL_MS);
 }
 
 function stopPoll() {
@@ -62,7 +72,7 @@ function stopPoll() {
 function onVisible() {
   if (document.visibilityState !== "visible") return;
   startPoll();
-  checkBuildHash();
+  checkBuildHash({ shown: true });
 }
 
 export function watchBuildHash() {
@@ -76,11 +86,11 @@ export function watchBuildHash() {
   document.addEventListener("resume", onVisible);
   // Leaving the terminal with an update pending: nothing is lost any more.
   window.addEventListener("hashchange", () => {
-    if (updateAvailable.value && !onTerminal()) location.reload();
+    if (stale && !onTerminal()) location.reload();
   });
   // Exposed for the SPA e2e suite (test/spa.spec.cjs) to force a check
   // without waiting out the poll interval — mirrors terminal.js's
   // window.__mobux* test hooks (e.g. forceDrop for auto-reconnect).
-  window.__mobuxCheckBuildHash = checkBuildHash;
+  window.__mobuxCheckBuildHash = () => checkBuildHash();
   window.__mobuxBuildPollActive = () => poll !== null;
 }
