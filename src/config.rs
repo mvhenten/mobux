@@ -2586,7 +2586,7 @@ mod tests {
             "example.cloudflareaccess.com:443",
         ] {
             let error = access_message(&format!(
-                r#"{VALID_ACCESS}, "team_domain": "{team_domain}""#
+                r#""port": 5153, "team_domain": "{team_domain}", "aud": "aud-tag-sample", "allowed_emails": ["user@example.com"]"#
             ));
             assert!(error.contains("access.team_domain"), "{error}");
             assert!(error.contains("must be a bare hostname"), "{error}");
@@ -2604,9 +2604,9 @@ mod tests {
 
     #[test]
     fn a_malformed_allowed_email_is_rejected() {
-        let error = access_message(&format!(
-            r#"{VALID_ACCESS}, "allowed_emails": ["user@example.com", "nobody"]"#
-        ));
+        let error = access_message(
+            r#""port": 5153, "team_domain": "example.cloudflareaccess.com", "aud": "aud-tag-sample", "allowed_emails": ["user@example.com", "nobody"]"#,
+        );
         assert!(error.contains("access.allowed_emails[1]"), "{error}");
         assert!(error.contains("must be an email address"), "{error}");
     }
