@@ -84,6 +84,8 @@ pub enum ConfigureCommand {
     Schema,
     /// Validate a config file: the named one, or the one in the config dir.
     Check(Option<String>),
+    /// Print the cloudflared ingress and the Access application settings.
+    Cloudflared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +201,7 @@ fn parse_update<I: Iterator<Item = String>>(mut args: I) -> Parsed {
     Parsed::Update(command)
 }
 
-/// `configure` does one of three things, so the flag naming it may appear only
+/// `configure` does one of four things, so the flag naming it may appear only
 /// once. `--force` is not one of them; it qualifies the walkthrough.
 fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
     let mut mode: Option<ConfigureCommand> = None;
@@ -215,6 +217,7 @@ fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
             }
             "--interactive" | "-i" => ConfigureCommand::Interactive { force: false },
             "--schema" => ConfigureCommand::Schema,
+            "--cloudflared" => ConfigureCommand::Cloudflared,
             "--check" => {
                 let path = args.next_if(|next| !next.starts_with('-'));
                 ConfigureCommand::Check(path)
@@ -222,13 +225,14 @@ fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
             _ => {
                 return Parsed::Invalid(format!(
                     "unknown argument {arg:?} — `mobux configure` takes --interactive, --schema, \
-                     --check [PATH] or --force"
+                     --check [PATH], --cloudflared or --force"
                 ))
             }
         };
         if mode.is_some() {
             return Parsed::Invalid(
-                "configure takes one of --interactive, --schema or --check".to_string(),
+                "configure takes one of --interactive, --schema, --check or --cloudflared"
+                    .to_string(),
             );
         }
         mode = Some(chosen);
@@ -242,6 +246,7 @@ fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
             "--force applies to the walkthrough, not to {}",
             match other {
                 ConfigureCommand::Schema => "--schema",
+                ConfigureCommand::Cloudflared => "--cloudflared",
                 _ => "--check",
             }
         )),
@@ -381,7 +386,7 @@ pub fn help_text(version: &str) -> String {
 Usage: mobux [OPTIONS]
        mobux service <install|uninstall|status> [OPTIONS]
        mobux update [--check]
-       mobux configure [--force | --schema | --check [PATH]]
+       mobux configure [--force | --schema | --check [PATH] | --cloudflared]
 
 Commands:
   service install     Install and start a systemd --user service that survives
@@ -401,6 +406,9 @@ Commands:
                       overwrite an existing one without --force
   configure --schema  Print the JSON schema for config.json
   configure --check   Validate a config file and report what is wrong with it
+  configure --cloudflared
+                      Print the cloudflared config.yml for the access block and
+                      the Cloudflare Access application settings
 
 Options:
 "
@@ -737,6 +745,10 @@ mod tests {
             parse(args(&["configure", "--check", "/etc/mobux.json"])),
             Parsed::Configure(ConfigureCommand::Check(some("/etc/mobux.json")))
         );
+        assert_eq!(
+            parse(args(&["configure", "--cloudflared"])),
+            Parsed::Configure(ConfigureCommand::Cloudflared)
+        );
     }
 
     #[test]
@@ -744,6 +756,8 @@ mod tests {
         assert!(invalid(&["configure", "--schema", "--check"]).contains("one of"));
         assert!(invalid(&["configure", "--schema", "--force"]).contains("--schema"));
         assert!(invalid(&["configure", "--check", "--force"]).contains("--check"));
+        assert!(invalid(&["configure", "--cloudflared", "--force"]).contains("--cloudflared"));
+        assert!(invalid(&["configure", "--cloudflared", "--schema"]).contains("one of"));
         assert!(invalid(&["configure", "--pin", "12345"]).contains("--pin"));
     }
 
@@ -759,6 +773,7 @@ mod tests {
             "configure",
             "configure --schema",
             "configure --check",
+            "configure --cloudflared",
             "--config",
             "--port",
             "--pin",

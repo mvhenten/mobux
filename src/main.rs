@@ -906,19 +906,40 @@ fn load_auth_config(config_dir: &std::path::Path, settings: &config::Config) -> 
 /// `/api/identify` is intentionally unauthenticated: the self-update health
 /// check polls it on a freshly-restarted binary before any credentials exist.
 /// It leaks nothing beyond "this is mobux, version X".
+///
+/// `PUBLIC_PATHS` is also what `mobux configure --cloudflared` prints as the
+/// Access bypass paths, so the tunnel setup cannot drift from the guards.
 fn is_public_path(path: &str) -> bool {
-    path == "/api/identify"
-        // Test-only update-index fixture: the background poller fetches it
-        // without credentials, so it must bypass auth. Only ever routed when
-        // MOBUX_UPDATE_TEST_INDEX is set (see router construction).
-        || path == "/api/update/test-index"
-        || path == "/install"
-        || path.starts_with("/install/")
-        || path.starts_with("/.well-known/")
-        || path.starts_with("/static/icon-")
-        || path == "/static/manifest.json"
-        || path == "/sw.js"
+    // Test-only update-index fixture: the background poller fetches it
+    // without credentials, so it must bypass auth. Only ever routed when
+    // MOBUX_UPDATE_TEST_INDEX is set (see router construction).
+    path == "/api/update/test-index" || PUBLIC_PATHS.iter().any(|public| public.matches(path))
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicPath {
+    Exact(&'static str),
+    Prefix(&'static str),
+}
+
+impl PublicPath {
+    fn matches(self, path: &str) -> bool {
+        match self {
+            PublicPath::Exact(exact) => path == exact,
+            PublicPath::Prefix(prefix) => path.starts_with(prefix),
+        }
+    }
+}
+
+pub const PUBLIC_PATHS: &[PublicPath] = &[
+    PublicPath::Exact("/api/identify"),
+    PublicPath::Exact("/install"),
+    PublicPath::Prefix("/install/"),
+    PublicPath::Prefix("/.well-known/"),
+    PublicPath::Prefix("/static/icon-"),
+    PublicPath::Exact("/static/manifest.json"),
+    PublicPath::Exact("/sw.js"),
+];
 
 /// The startup warning for the one combination that leaks credentials: auth is
 /// on, TLS is off, and nothing else terminates it, so the password and the

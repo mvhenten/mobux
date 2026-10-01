@@ -419,6 +419,57 @@ Cloudflare does not close an idle terminal. A port that cannot be bound stops
 startup, so a self-update that breaks the listener rolls back. The main listener
 and its PIN are unchanged.
 
+## Cloudflare Tunnel and Access
+
+Serves mobux on a public hostname through a Cloudflare Tunnel, with Cloudflare
+Access in front and mobux checking every Access token itself.
+
+1. Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+   and create a named tunnel:
+
+   ```bash
+   cloudflared tunnel login
+   cloudflared tunnel create mobux
+   cloudflared tunnel route dns mobux mobux.example.com
+   ```
+
+2. Set the `access` block in `config.json` ([config reference](#config-reference)):
+   `port`, `team_domain`, `hostname` and `allowed_emails`. Put any placeholder
+   in `aud` for now; step 4 replaces it.
+
+3. Print the tunnel config and write it to `~/.cloudflared/config.yml`:
+
+   ```bash
+   mobux configure --cloudflared > ~/.cloudflared/config.yml
+   ```
+
+   Fill in `<TUNNEL-ID>` and `<user>` from step 1. The ingress points at
+   `http://127.0.0.1:<access.port>` and answers 404 for any other hostname.
+   WebSockets need no extra setting. Start it with `cloudflared tunnel run mobux`
+   or `cloudflared service install`.
+
+4. In Zero Trust, add the two self-hosted applications the output lists:
+   - the hostname, with an Allow policy for the printed emails. Set the session
+     duration to 24 hours or longer; when it lapses, mobux shows "Sign in
+     again". Copy the application's AUD tag into `access.aud` and restart mobux.
+   - the printed bypass paths, with a Bypass policy that includes Everyone. The
+     install page, the asset-links file, the manifest, the icons, the service
+     worker and `/api/identify` must load without a sign-in, or the Android app
+     and the self-update check fail.
+
+5. For scripts, create a service token under Access > Service Auth, add its
+   client ID to `access.service_tokens`, and add a Service Auth policy for it
+   to the first application. A script sends the `CF-Access-Client-Id` and
+   `CF-Access-Client-Secret` headers; Cloudflare swaps them for a token whose
+   `common_name` is the client ID, which mobux matches against
+   `access.service_tokens`.
+
+Cloudflare caps a request body at 100 MB on the Free and Pro plans, so an
+upload over 100 MB fails through the tunnel. Send large files over the tailnet,
+where the limit is 200 MB.
+
+The tailnet listener, its CA and the PIN keep working alongside the tunnel.
+
 ## Upgrade notes
 
 TLS is off by default. A deployment where mobux terminates HTTPS itself must ask
