@@ -141,9 +141,21 @@ long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
 | `app.service_name` | `MOBUX_SERVICE_NAME` | `--service-name` | `mobux` | systemd unit the self-updater restarts |
 | `push.vapid_contact` | `MOBUX_VAPID_CONTACT` | `--vapid-contact` | `mailto:admin@example.com` | VAPID contact, a `mailto:` address or an `https://` URL |
 | `update.check_url` | `MOBUX_UPDATE_CHECK_URL` | `--update-check-url` | `https://index.crates.io/mo/bu/mobux` | Where the version list is fetched from |
+| `access.port` | `MOBUX_ACCESS_PORT` | `--access-port` | unset | Loopback port for the Cloudflare Access listener. Must differ from `server.port` |
+| `access.team_domain` | `MOBUX_ACCESS_TEAM_DOMAIN` | `--access-team-domain` | unset | Cloudflare Access team domain, a bare hostname such as `example.cloudflareaccess.com` |
+| `access.aud` | `MOBUX_ACCESS_AUD` | `--access-aud` | unset | AUD tag of the Cloudflare Access application |
+| `access.hostname` | `MOBUX_ACCESS_HOSTNAME` | `--access-hostname` | unset | Public hostname the Cloudflare Tunnel serves mobux on, a bare hostname |
+| `access.allowed_emails` | `MOBUX_ACCESS_ALLOWED_EMAILS` | `--access-allowed-email` | empty | Email addresses the Access listener admits |
+| `access.service_tokens` | `MOBUX_ACCESS_SERVICE_TOKENS` | `--access-service-token` | empty | Client ids of the service tokens the Access listener admits |
 
 Config keys nest. `server.port` is `{"server": {"port": 5151}}`, and only the
 keys a file states override a default.
+
+The `access` block is off while every key in it is unset. Setting any one of
+them turns it on, and mobux then refuses to start until `access.port`,
+`access.team_domain` and `access.aud` are set, `access.port` differs from
+`server.port`, and `access.allowed_emails` or `access.service_tokens` lists at
+least one entry.
 
 Toggles take `--flag` to turn on and `--no-flag` to turn off. `--flag=` also
 takes `1`, `true`, `yes`, `on`, `0`, `false`, `no` and `off`. `MOBUX_TLS` reads
