@@ -19,6 +19,11 @@
 
 const { execSync } = require("child_process");
 
+// The tmux server (-L) the smoke instance drives. The Makefile exports
+// MOBUX_SMOKE_TMUX to both the instance and the specs, so a parallel checkout
+// can run its own.
+const SMOKE_TMUX_SOCKET = process.env.MOBUX_SMOKE_TMUX || "mobux-test";
+
 function sanitizedEnv(base = process.env) {
   const env = { ...base };
   delete env.TMUX;
@@ -102,6 +107,7 @@ async function waitForClientAttached(tmux, session, { timeoutMs = 8000 } = {}) {
 
 module.exports = {
   createTmuxRunner,
+  SMOKE_TMUX_SOCKET,
   sanitizedEnv,
   assertIsolated,
   buildInvocation,

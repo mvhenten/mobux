@@ -17,6 +17,7 @@
 // those as the single command that fixes them.
 
 import { useEffect, useRef, useState } from "preact/hooks";
+import { signal } from "@preact/signals";
 import { renderSVG } from "uqr";
 import { localFetch, localGet } from "../lib/api.js";
 import { buildInfo, buildInfoError, loadBuildInfo } from "../lib/buildInfo.js";
@@ -27,6 +28,18 @@ const TAIL_LINES = 12;
 
 // Phases with a process behind them: both stream output, so both poll fast.
 const WORKING_PHASES = ["running", "installing_tools"];
+
+// The latest build status, shared with the CA step: whether the installed
+// app needs this server's CA depends on the host the package was built for.
+const apkStatus = signal(null);
+
+// The package on disk opens another host than this page, such as the
+// Cloudflare hostname the server pins it to.
+function apkOpensElsewhere(status) {
+  const built = status?.apk_domain;
+  if (!built || typeof window === "undefined") return false;
+  return built !== window.location.host;
+}
 
 function QrCode({ url }) {
   const svg = renderSVG(url, {
@@ -106,6 +119,7 @@ function ApkSection({ apkUrl, step }) {
       if (next) {
         setRequestError(null);
         setStatus(next);
+        apkStatus.value = next;
       }
       timer = setTimeout(
         tick,
@@ -186,9 +200,9 @@ function ApkSection({ apkUrl, step }) {
             </a>
             <QrCode url={apkUrl} />
           </div>
-          {domain && (
+          {status?.apk_domain && (
             <p id="apkBoundHost" class="install-hint">
-              The app opens <code>{domain}</code>.
+              The app opens <code>{status.apk_domain}</code>.
             </p>
           )}
         </>
@@ -270,7 +284,7 @@ function ApkSection({ apkUrl, step }) {
                   ? "Rebuild package"
                   : "Generate package"}
           </button>
-          {available && !running && (
+          {available && !running && status?.apk_domain !== domain && (
             <span class="install-hint">
               Rebuild if you reach this server on a different address.
             </span>
@@ -322,11 +336,18 @@ function CaSection({ caUrl }) {
   return (
     <section id="installCaStep" class="install-card">
       <h2>1. Install the CA certificate</h2>
-      <p class="install-lede">
-        Do this <strong>first</strong>. Without the CA, Android won't trust this
-        server, the APK download will be blocked, and the installed app won't
-        connect.
-      </p>
+      {apkOpensElsewhere(apkStatus.value) ? (
+        <p class="install-lede">
+          Do this <strong>first</strong>. Without the CA, Android won't trust
+          this server and the APK download will be blocked.
+        </p>
+      ) : (
+        <p class="install-lede">
+          Do this <strong>first</strong>. Without the CA, Android won't trust
+          this server, the APK download will be blocked, and the installed app
+          won't connect.
+        </p>
+      )}
       <div class="install-grid">
         <a
           class="install-btn"

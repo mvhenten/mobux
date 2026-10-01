@@ -10,7 +10,7 @@
 
 const { test, expect } = require("./fixtures.cjs");
 const path = require("path");
-const { createTmuxRunner } = require("./lib/tmux.cjs");
+const { createTmuxRunner, SMOKE_TMUX_SOCKET } = require("./lib/tmux.cjs");
 const terminalPage = require("./lib/terminal-page.cjs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
@@ -24,7 +24,7 @@ const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-native-select";
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
 const ALT_TEXT_SCRIPT = path.join(__dirname, "assets", "alt-screen-text.sh");
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),

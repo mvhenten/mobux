@@ -7,6 +7,7 @@ import { render } from "preact";
 import { App } from "./app.jsx";
 import { watchBuildHash } from "./lib/reload.js";
 import { u } from "./lib/base.js";
+import { restoreSignInRoute } from "./lib/accessSession.js";
 import "./app.css";
 
 // Auto-reload on server update (#189) — remembers the server's build_hash
@@ -41,6 +42,7 @@ import(
 // storage. hydrate() never rejects (it falls back to defaults if the server is
 // unreachable), so a brief blocking fetch here can't wedge boot.
 async function boot() {
+  restoreSignInRoute();
   try {
     const prefs = await import(
       /* @vite-ignore */ new URL(u("/static/prefs.js"), location.origin).href

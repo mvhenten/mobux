@@ -13,6 +13,7 @@
 // callbacks so behavior stays identical per surface.
 
 import { u } from './base.js';
+import { accessFetch, signedOutResponse } from './access-session.js';
 import telemetry from './telemetry.js';
 import { createMicOverlay, faultMessage } from './mic-overlay.js';
 import { openExternal } from './external-link.js';
@@ -49,41 +50,38 @@ function uploadLimitBytes() {
   return uploadLimit;
 }
 
-const megabytes = (bytes) => Math.ceil(bytes / 1e6);
+// Cloudflare limits the whole request body, so the multipart boundaries and
+// part headers around the file count against the limit too.
+const MULTIPART_ALLOWANCE_BYTES = 64 * 1024;
 
-export function uploadTooLargeMessage(size, limit) {
-  return `the file is ${megabytes(size)} MB, over the ${megabytes(limit)} MB upload limit on this connection`;
-}
+const megabytes = (bytes) => Math.floor(bytes / (1024 * 1024));
 
-// A redirect on an API call is Cloudflare Access sending a lapsed session to
-// its login page; the SPA listens for this event and shows its signed-out
-// notice with the "Sign in again" control.
-function signedOut(res) {
-  return (
-    res.type === 'opaqueredirect' ||
-    (res.status === 401 &&
-      (res.headers.get('www-authenticate') || '').includes('cloudflare-access'))
-  );
+export function uploadTooLargeMessage(limit) {
+  return `upload refused: over the ${megabytes(limit)} MB limit on this connection`;
 }
 
 // POST one file to /api/upload. Refuses a file over the limit before sending
-// a byte, and turns a lapsed Access session into the app's signed-out notice.
+// a byte, turns a lapsed Access session into the app's signed-out notice, and
+// names the limit when Cloudflare's own HTML 413 page answers instead of
+// mobux.
 async function postUpload(file, filename, node) {
   const limit = await uploadLimitBytes();
-  if (limit !== null && file.size > limit) {
-    throw new Error(uploadTooLargeMessage(file.size, limit));
+  if (limit !== null && file.size > limit - MULTIPART_ALLOWANCE_BYTES) {
+    throw new Error(uploadTooLargeMessage(limit));
   }
   const form = new FormData();
   if (filename) form.append('file', file, filename);
   else form.append('file', file);
-  const res = await fetch(withNode(u('api/upload'), node), {
+  const res = await accessFetch(withNode(u('api/upload'), node), {
     method: 'POST',
     body: form,
-    redirect: 'manual',
   });
-  if (signedOut(res)) {
-    window.dispatchEvent(new Event('mobux:signed-out'));
+  if (signedOutResponse(res)) {
     throw new Error('signed out of Cloudflare Access; sign in again');
+  }
+  if (res.status === 413 && (res.headers.get('content-type') || '').includes('html')) {
+    res.body?.cancel().catch(() => {});
+    throw new Error(limit !== null ? uploadTooLargeMessage(limit) : 'upload refused: the file is over the upload limit');
   }
   return res;
 }

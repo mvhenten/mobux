@@ -1,7 +1,7 @@
 // STT helpers ported 1:1 from the inline IIFE in src/main.rs. Kept framework-
 // free so the behaviour is auditable against the original.
 
-import { u } from "./base.js";
+import { apiGet } from "./api.js";
 
 export const FALLBACK_MODELS = {
   openai: ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"],
@@ -63,9 +63,9 @@ export async function fetchModels(kind, host, port) {
     "&port=" +
     encodeURIComponent(port || "");
   try {
-    const resp = await fetch(u("/api/stt/models") + query);
-    if (!resp.ok) throw new Error("not ok");
-    const data = await resp.json();
+    // apiGet raises the signed-out notice on a lapsed Access session; the
+    // static list still fills the picker behind it.
+    const data = await apiGet("/api/stt/models" + query);
     if (!data.models || !data.models.length) throw new Error("empty");
     return data.models;
   } catch (_) {

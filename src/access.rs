@@ -401,18 +401,24 @@ pub async fn guard(
         Err(rejection) => {
             match rejection.detail() {
                 Some(detail) => eprintln!(
-                    "[access] 401 {}: {rejection}: {detail}",
+                    "[access] 503 {}: {rejection}: {detail}",
                     request.uri().path()
                 ),
                 None => eprintln!("[access] 401 {}: {rejection}", request.uri().path()),
             }
-            unauthorized(&rejection)
+            refused(&rejection)
         }
     }
 }
 
-fn unauthorized(rejection: &Rejection) -> Response {
+/// A key-fetch outage is mobux failing, not the user signing out: it answers
+/// 503 without the challenge, so the client shows an error and not the
+/// signed-out notice.
+fn refused(rejection: &Rejection) -> Response {
     let body = format!("{rejection}\n");
+    if matches!(rejection, Rejection::KeysUnavailable(_)) {
+        return (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+    }
     let mut response = (StatusCode::UNAUTHORIZED, body).into_response();
     response.headers_mut().insert(
         header::WWW_AUTHENTICATE,
@@ -1112,12 +1118,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn keeps_the_key_fetch_error_out_of_the_response() {
+        async fn answers_a_key_fetch_outage_with_a_503_and_no_challenge() {
             let jwks = Jwks::serve(&[KID]).await;
             jwks.failing.store(true, Ordering::SeqCst);
             let token = sign(KID, &jwks.claims());
             let response = call(&jwks, "/api/sessions", &[(ASSERTION_HEADER, &token)]).await;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
             let body = body(response).await;
             assert_eq!(body, "the team's signing keys could not be fetched\n");
             assert!(!body.contains(&jwks.origin), "{body}");

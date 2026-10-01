@@ -170,7 +170,7 @@ is signed for that hostname whichever address builds it, and the install page
 names the host it opens. Uploads through the tunnel stop at 100 MB, the body
 limit on Cloudflare's Free and Pro plans: the app refuses a larger file before
 sending it, and the listener answers 413. When the Access session lapses, the
-app shows a notice with a "Sign in again" control that reloads the page through
+app shows a notice with a "Sign in again" control that loads the page again through
 Cloudflare's login and returns to the same screen.
 
 Toggles take `--flag` to turn on and `--no-flag` to turn off. `--flag=` also

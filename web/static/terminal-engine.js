@@ -49,6 +49,7 @@
 // has no knowledge of it.
 
 import { u, wsUrl } from "./base.js";
+import { accessFetch } from "./access-session.js";
 import { openExternal } from "./external-link.js";
 import { createTerminalDocument } from "./terminal-document.js";
 import { createTerminalBuffer, splitCapture } from "./terminal-buffer.js";
@@ -711,7 +712,7 @@ export class TerminalEngine extends EventTarget {
     const asked = ++this._panesAsked;
     const askedAt = performance.now();
     try {
-      const res = await fetch(
+      const res = await accessFetch(
         u(
           `api/sessions/${encodeURIComponent(this.session)}/panes${this._nodeQuery()}`,
         ),
@@ -749,7 +750,7 @@ export class TerminalEngine extends EventTarget {
 
   async runTmuxCmd(command) {
     try {
-      await fetch(
+      await accessFetch(
         u(
           `api/sessions/${encodeURIComponent(this.session)}/command${this._nodeQuery()}`,
         ),
@@ -803,7 +804,7 @@ export class TerminalEngine extends EventTarget {
   }
 
   async _fetchHistory(lines, signal) {
-    const res = await fetch(this._historyUrl(lines), { signal }).catch(
+    const res = await accessFetch(this._historyUrl(lines), { signal }).catch(
       () => null,
     );
     if (!res || !res.ok) return null;

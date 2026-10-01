@@ -8,8 +8,10 @@ MOBUX_PORT       ?= 5151
 MOBUX_DEV_PORT   ?= 5152
 MOBUX_SMOKE_PORT ?= 8281
 MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
-# tmux server (-L) the smoke instance drives; distinct per parallel checkout.
+# tmux server (-L) the smoke instance and the specs drive (exported to both);
+# set it per checkout to run smoke instances side by side.
 MOBUX_SMOKE_TMUX ?= mobux-test
+export MOBUX_SMOKE_TMUX
 # Loopback port the smoke instance proxies as `up`; test/proxy.spec.cjs
 # starts its fixture server there.
 MOBUX_PROXY_FIXTURE_PORT ?= $(shell expr $(MOBUX_SMOKE_PORT) + 10)

@@ -194,10 +194,11 @@ export function TerminalIsland({ node, session }) {
 
       // A socket that closes may be a lapsed Cloudflare Access session, which
       // a WebSocket cannot tell apart from a network blip. One probe per close
-      // decides; signed out, the reconnect loop stops and the app shows the
+      // decides (a close the engine asked for needs none); signed out, the reconnect loop stops and the app shows the
       // signed-out notice instead of a dead terminal.
       const core = engine.core;
       core.addEventListener("close", async () => {
+        if (core.intentionalClose) return;
         if (await probeSession()) core.suspend();
       });
 

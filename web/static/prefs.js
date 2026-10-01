@@ -13,6 +13,7 @@
 // by URL, so `get()` reads the same in-memory blob the SPA hydrated at boot.
 
 import { u } from "./base.js";
+import { accessFetch } from "./access-session.js";
 
 const ENDPOINT = u("api/settings/preferences");
 
@@ -41,7 +42,7 @@ export function snapshot() {
 // synchronous get() from the engine returns server values, not defaults.
 export async function hydrate() {
   try {
-    const resp = await fetch(ENDPOINT, {
+    const resp = await accessFetch(ENDPOINT, {
       headers: { Accept: "application/json" },
     });
     if (resp.ok) {
@@ -69,7 +70,7 @@ async function persist(key, value) {
   // versioning needed.
   let base = state;
   try {
-    const resp = await fetch(ENDPOINT, {
+    const resp = await accessFetch(ENDPOINT, {
       headers: { Accept: "application/json" },
     });
     if (resp.ok) {
@@ -84,7 +85,7 @@ async function persist(key, value) {
   state = merged;
 
   try {
-    await fetch(ENDPOINT, {
+    await accessFetch(ENDPOINT, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(merged),

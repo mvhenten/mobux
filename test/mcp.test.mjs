@@ -12,13 +12,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const require = createRequire(import.meta.url);
-const { createTmuxRunner } = require("./lib/tmux.cjs");
+const { createTmuxRunner, SMOKE_TMUX_SOCKET } = require("./lib/tmux.cjs");
 
 const MCP_URL = process.env.MOBUX_MCP_URL || "http://127.0.0.1:8294/mcp";
 const BASE = process.env.MOBUX_URL || "http://127.0.0.1:8281";
 const USER = process.env.MOBUX_USER || "";
 const PASS = process.env.MOBUX_PASS || "";
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 const SESSION = `mcp-e2e-${process.pid}`;
 
 const TOOLS = [

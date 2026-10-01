@@ -1155,7 +1155,7 @@ async fn api_build_info(
 const UPLOAD_LIMIT_BYTES: u64 = 200 * 1024 * 1024;
 /// Largest file `/api/upload` takes through the Cloudflare tunnel, whose
 /// Free and Pro plans refuse a request body over 100 MB.
-const ACCESS_UPLOAD_LIMIT_BYTES: u64 = 100 * 1000 * 1000;
+const ACCESS_UPLOAD_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 /// Room for the multipart boundaries and part headers around the file.
 const MULTIPART_ENVELOPE_BYTES: u64 = 64 * 1024;
 
@@ -1171,7 +1171,7 @@ fn upload_too_large(limit: u64) -> AppError {
         status: StatusCode::PAYLOAD_TOO_LARGE,
         message: format!(
             "upload refused: the file is larger than the {} MB limit on this connection",
-            limit.div_ceil(1000 * 1000)
+            limit / (1024 * 1024)
         ),
     }
 }
@@ -3736,7 +3736,14 @@ async fn api_install_apk_build(
             .env("TWA_WORK_DIR", &work_dir)
             .env("TWA_INSTALL_DIR", &install_dir)
             .env("TWA_WELLKNOWN_DIR", &wellknown_dir);
-        run_twa_build_job(job, setup, build).await;
+        run_twa_build_job(job.clone(), setup, build).await;
+        let mut guard = job.lock().await;
+        if guard.phase != InstallPhase::Success {
+            return;
+        }
+        if let Err(e) = twa::record_build(&data_dir, &build_domain) {
+            guard.phase = InstallPhase::Failed(format!("{e:#}"));
+        }
     });
 
     Ok((
@@ -3768,6 +3775,7 @@ async fn api_install_apk_status(
         .is_file(),
         "domain": domain.as_deref().ok(),
         "domain_error": domain.err(),
+        "apk_domain": twa::built_domain(&state.data_dir),
     })))
 }
 
@@ -4532,7 +4540,7 @@ mod tests {
     async fn build_info_reports_the_access_listener_and_its_upload_limit() {
         let info = build_info(true).await;
         assert_eq!(info["via_access"], json!(true));
-        assert_eq!(info["upload_limit_bytes"], json!(100_000_000));
+        assert_eq!(info["upload_limit_bytes"], json!(100 * 1024 * 1024));
     }
 
     #[tokio::test]

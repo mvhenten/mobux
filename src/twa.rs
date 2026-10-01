@@ -34,6 +34,27 @@ pub fn apk_path(data_dir: &Path) -> PathBuf {
     data_dir.join("install").join("mobux.apk")
 }
 
+/// What a finished build records next to the package: the host it was
+/// signed for, so the install page names what the installed app opens rather
+/// than what a new build would use.
+pub fn build_record_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("install").join("mobux.apk.json")
+}
+
+pub fn record_build(data_dir: &Path, domain: &str) -> Result<()> {
+    let path = build_record_path(data_dir);
+    let record = serde_json::json!({ "domain": domain });
+    std::fs::write(&path, record.to_string()).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The host the package on disk was built for. `None` for a package with no
+/// record, such as one a checkout's `make twa` produced.
+pub fn built_domain(data_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(build_record_path(data_dir)).ok()?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    record["domain"].as_str().map(str::to_owned)
+}
+
 pub fn assetlinks_path(data_dir: &Path) -> PathBuf {
     data_dir.join(".well-known").join("assetlinks.json")
 }
@@ -340,6 +361,18 @@ mod tests {
                 "should reject {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_finished_build_records_the_host_it_was_signed_for() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(built_domain(dir.path()), None);
+        std::fs::create_dir_all(dir.path().join("install")).unwrap();
+        record_build(dir.path(), "mobux.example.com").unwrap();
+        assert_eq!(
+            built_domain(dir.path()).as_deref(),
+            Some("mobux.example.com")
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
 // app.
 //
 // Rides the same isolated smoke instance as the rest of the suite
-// (MOBUX_URL, tmux socket "mobux-test", SANDBOX_HOME) — see Makefile's
+// (MOBUX_URL, tmux socket MOBUX_SMOKE_TMUX, SANDBOX_HOME) — see Makefile's
 // test-spa target, which this file is appended to (same "no need for its
 // own CI step" reasoning as reader-font.spec.cjs / reader-command-grouping
 // .spec.cjs).
@@ -18,7 +18,11 @@
 const fs = require("fs");
 const path = require("path");
 const { test, expect } = require("./fixtures.cjs");
-const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
+const {
+  createTmuxRunner,
+  SMOKE_TMUX_SOCKET,
+  waitForClientAttached,
+} = require("./lib/tmux.cjs");
 const { resolveZshBin } = require("./lib/zsh.cjs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
@@ -41,7 +45,7 @@ const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const BASH_PROMPT = "sessionhisttest: ";
 const ZSH_PROMPT = "mobuxtest: ";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 
 async function apiInstall(page, shell) {
   await page.evaluate(async (shell) => {
