@@ -283,9 +283,9 @@ const ACCESS_CERTS_PATH: &str = "/cdn-cgi/access/certs";
 impl AccessConfig {
     /// The team domain as an origin, `https://` unless it states a scheme.
     pub fn team_origin(&self) -> String {
-        let domain = self.team_domain.trim().trim_end_matches('/');
+        let domain = self.team_domain.trim().trim_end_matches('/').to_lowercase();
         if domain.contains("://") {
-            return domain.to_string();
+            return domain;
         }
         format!("https://{domain}")
     }
@@ -2810,6 +2810,14 @@ mod tests {
             access.jwks_url(),
             "https://example.cloudflareaccess.com/cdn-cgi/access/certs"
         );
+    }
+
+    #[test]
+    fn a_mixed_case_team_domain_yields_a_lower_case_issuer() {
+        let access = with_team_domain("https://Example.CloudflareAccess.com")
+            .unwrap()
+            .access;
+        assert_eq!(access.issuer(), "https://example.cloudflareaccess.com");
     }
 
     #[test]

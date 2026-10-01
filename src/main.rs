@@ -41,6 +41,7 @@ use serde_json::json;
 #[exclude = ".well-known/*"]
 struct StaticAssets;
 
+mod access;
 mod cli;
 mod config;
 mod configure;
