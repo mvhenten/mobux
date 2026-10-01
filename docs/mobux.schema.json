@@ -90,6 +90,26 @@
       },
       "type": "object"
     },
+    "FilesConfig": {
+      "additionalProperties": false,
+      "description": "Host directories served behind the same auth as the UI, at\n`/files/<name>/`.",
+      "properties": {
+        "listing": {
+          "default": false,
+          "description": "List a directory that has no `index.html`. Off answers 404 instead.",
+          "type": "boolean"
+        },
+        "roots": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Directories to serve, keyed by the `<name>` in `/files/<name>/`. A name\nis letters, digits, `-` and `_`; a path is absolute. Empty serves\nnothing. Env: `MOBUX_FILES` (`name=path` pairs, comma separated).",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "PathsConfig": {
       "additionalProperties": false,
       "description": "Where mobux keeps its state.",
@@ -249,6 +269,13 @@
         "pass": "",
         "pin": "",
         "user": ""
+      }
+    },
+    "files": {
+      "$ref": "#/$defs/FilesConfig",
+      "default": {
+        "listing": false,
+        "roots": {}
       }
     },
     "paths": {

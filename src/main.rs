@@ -45,6 +45,7 @@ mod cli;
 mod config;
 mod configure;
 mod db;
+mod files;
 mod host_suggestions;
 mod local_stt;
 mod local_tts;
@@ -375,6 +376,7 @@ async fn main() -> Result<()> {
     if auth.is_none() {
         eprintln!("{}", config::NO_AUTH_WARNING);
     }
+    let file_roots = Arc::new(files::FileRoots::from_config(&settings.files)?);
     let data_dir = resolve_data_dir(&settings)?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir: {}", data_dir.display()))?;
@@ -580,6 +582,13 @@ async fn main() -> Result<()> {
         app.route("/api/update/test-index", get(api_update_test_index))
     } else {
         app
+    };
+
+    let app = if file_roots.is_empty() {
+        app
+    } else {
+        println!("files: serving {} root(s) under /files/", file_roots.len());
+        app.merge(files::router(file_roots))
     };
 
     let app = app
@@ -4254,6 +4263,46 @@ mod tests {
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
         };
         (state, dir)
+    }
+
+    #[tokio::test]
+    async fn served_files_sit_behind_the_auth_layer() {
+        use tower::ServiceExt;
+
+        let (mut state, dir) = test_state(false);
+        state.auth = Some(AuthConfig {
+            user: "me".to_string(),
+            pass: "12345".to_string(),
+            session_cookie_name: "mobux_session".to_string(),
+            session_cookie_value: "cookie".to_string(),
+        });
+        let root = dir.path().join("site");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html"), "home").unwrap();
+        let mut files = config::FilesConfig::default();
+        files
+            .roots
+            .insert("site".to_string(), root.display().to_string());
+        let roots = Arc::new(files::FileRoots::from_config(&files).unwrap());
+        let app: Router = Router::new()
+            .merge(files::router(roots))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        let request = |cookie: Option<&str>| {
+            let mut builder = Request::builder().uri("/files/site/");
+            if let Some(cookie) = cookie {
+                builder = builder.header(axum::http::header::COOKIE, cookie);
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+        let response = app.clone().oneshot(request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(request(Some("mobux_session=cookie")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     // /api/telemetry accepts the body (204) regardless of dev mode — it's an
