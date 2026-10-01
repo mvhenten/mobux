@@ -179,6 +179,10 @@ smoke-start: build
 	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke already running (pid $(SMOKE_PID)) on $(MOBUX_SMOKE_PORT)"; exit 1; fi
 	@if [ "$(MOBUX_SMOKE_PORT)" = "$(MOBUX_PORT)" ]; then echo "MOBUX_SMOKE_PORT must differ from MOBUX_PORT"; exit 1; fi
 	@mkdir -p $(MOBUX_SMOKE_DATA)/home
+	@# The tests create and kill sessions on this server; with exit-empty on,
+	@# killing the last one would take the server down under the next test.
+	@env -u TMUX -u TMUX_PANE HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
+		tmux -L mobux-test start-server \; set-option -s exit-empty off
 	@nohup env MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) MOBUX_TLS=0 \
 		HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
 		MOBUX_TMUX_SOCKET=mobux-test \
