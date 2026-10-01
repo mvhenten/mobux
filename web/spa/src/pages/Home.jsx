@@ -2,6 +2,7 @@ import { useEffect, useRef } from "preact/hooks";
 import { useLocation } from "wouter-preact";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
+import { isSignedOutResponse, markSignedOut } from "../lib/accessSession.js";
 import { u } from "../lib/base.js";
 import { buildInfo, buildInfoError, loadBuildInfo } from "../lib/buildInfo.js";
 import { PageRows, PagesError, hasPages } from "../components/PagesList.jsx";
@@ -38,9 +39,9 @@ async function refresh() {
 }
 
 // Never rejects — refresh() must run regardless of node support.
-// redirect:"manual" because an absent API route lands on the server's
-// catch-all 307; following it would leave an abandoned response body in
-// flight, which stalls the page's network-idle state.
+// redirect:"manual": no API route redirects, so a redirect is a lapsed
+// Cloudflare Access session, which must read as signed out, never as "no
+// nodes".
 async function loadNodes() {
   let res;
   try {
@@ -54,7 +55,12 @@ async function loadNodes() {
   }
   // A backend without node support means zero nodes configured — same UI as
   // today, not an error.
-  if (res.status === 404 || res.type === "opaqueredirect") {
+  if (isSignedOutResponse(res)) {
+    markSignedOut();
+    nodeError.value = "GET /api/nodes: signed out of Cloudflare Access";
+    return;
+  }
+  if (res.status === 404) {
     nodes.value = [];
     return;
   }
@@ -262,7 +268,7 @@ export function HomePage() {
           <p class="hint">Failed to load sessions: {error.value}</p>
         )}
         {list == null && !error.value && <p class="hint">Loading…</p>}
-        {list && list.length === 0 && (
+        {list && list.length === 0 && !error.value && (
           <p class="hint">No tmux sessions. Tap + to create one.</p>
         )}
         {(list || []).map((s) => {

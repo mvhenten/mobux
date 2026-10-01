@@ -225,6 +225,19 @@ pub fn resolve_domain(
     validate_domain(domain).map(|_| domain.to_string())
 }
 
+/// [`resolve_domain`] with the Cloudflare Access hostname ahead of both: a
+/// package bound to the tunnel opens one origin, whichever address built it.
+pub fn pinned_domain(
+    access_hostname: Option<&str>,
+    configured: Option<&str>,
+    host_header: Option<&str>,
+) -> Result<String, String> {
+    match access_hostname.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(hostname) => resolve_domain(Some(hostname), None),
+        None => resolve_domain(configured, host_header),
+    }
+}
+
 fn validate_domain(domain: &str) -> Result<(), String> {
     if domain.is_empty() {
         return Err("empty domain".to_string());
@@ -273,6 +286,31 @@ mod tests {
         assert_eq!(
             resolve_domain(Some("  "), Some("box.example.com")).unwrap(),
             "box.example.com"
+        );
+    }
+
+    #[test]
+    fn the_access_hostname_wins_over_the_configured_domain_and_the_host_header() {
+        assert_eq!(
+            pinned_domain(
+                Some("mobux.example.com"),
+                Some("pinned.example.com"),
+                Some("box.tailnet.ts.net:5151")
+            )
+            .unwrap(),
+            "mobux.example.com"
+        );
+    }
+
+    #[test]
+    fn without_an_access_hostname_the_package_follows_the_usual_domain() {
+        assert_eq!(
+            pinned_domain(None, Some(""), Some("box.tailnet.ts.net:5151")).unwrap(),
+            "box.tailnet.ts.net:5151"
+        );
+        assert_eq!(
+            pinned_domain(Some(" "), Some("pinned.example.com"), None).unwrap(),
+            "pinned.example.com"
         );
     }
 

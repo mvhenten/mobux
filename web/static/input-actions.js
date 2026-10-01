@@ -29,6 +29,65 @@ function withNode(path, node) {
   return `${path}${path.includes('?') ? '&' : '?'}node=${encodeURIComponent(node)}`;
 }
 
+// The largest file the listener that served this page takes: 100 MB through
+// the Cloudflare tunnel, more on the tailnet. Read from /api/build-info once;
+// a failed read is not cached and leaves the check to the server's 413.
+let uploadLimit = null;
+
+function uploadLimitBytes() {
+  uploadLimit ??= fetch(u('api/build-info'), {
+    headers: { Accept: 'application/json' },
+    redirect: 'manual',
+  })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((info) => info?.upload_limit_bytes ?? null)
+    .catch(() => null)
+    .then((limit) => {
+      if (limit === null) uploadLimit = null;
+      return limit;
+    });
+  return uploadLimit;
+}
+
+const megabytes = (bytes) => Math.ceil(bytes / 1e6);
+
+export function uploadTooLargeMessage(size, limit) {
+  return `the file is ${megabytes(size)} MB, over the ${megabytes(limit)} MB upload limit on this connection`;
+}
+
+// A redirect on an API call is Cloudflare Access sending a lapsed session to
+// its login page; the SPA listens for this event and shows its signed-out
+// notice with the "Sign in again" control.
+function signedOut(res) {
+  return (
+    res.type === 'opaqueredirect' ||
+    (res.status === 401 &&
+      (res.headers.get('www-authenticate') || '').includes('cloudflare-access'))
+  );
+}
+
+// POST one file to /api/upload. Refuses a file over the limit before sending
+// a byte, and turns a lapsed Access session into the app's signed-out notice.
+async function postUpload(file, filename, node) {
+  const limit = await uploadLimitBytes();
+  if (limit !== null && file.size > limit) {
+    throw new Error(uploadTooLargeMessage(file.size, limit));
+  }
+  const form = new FormData();
+  if (filename) form.append('file', file, filename);
+  else form.append('file', file);
+  const res = await fetch(withNode(u('api/upload'), node), {
+    method: 'POST',
+    body: form,
+    redirect: 'manual',
+  });
+  if (signedOut(res)) {
+    window.dispatchEvent(new Event('mobux:signed-out'));
+    throw new Error('signed out of Cloudflare Access; sign in again');
+  }
+  return res;
+}
+
 // ── Inline attach-error surface ──────────────────────────────────────
 // Standing rule: never a toast/snackbar/auto-dismissing banner anywhere —
 // it vanishes before it can be read or acted on, which is barely better
@@ -247,9 +306,7 @@ export function createAttachAction({ send, node, button, errorContainer } = {}) 
   const errorSurface = createAttachErrorSurface(errorContainer, node);
 
   async function uploadFile(file) {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch(withNode(u('api/upload'), node), { method: 'POST', body: form });
+    const res = await postUpload(file, null, node);
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
     // A prior failure's surface must not linger once an attempt succeeds.
@@ -738,13 +795,11 @@ export function createDictateAction({ send, node, button, onText } = {}) {
     let path;
     try {
       const wav = encodeWav(mic.pendingChunks, mic.pendingRate);
-      const form = new FormData();
-      form.append('file', wav, `dictation-${Date.now()}.wav`);
       telemetry.log('mic.audio.upload.req', {
         bytes: wav.size,
         durationMs: mic.pendingDurationMs,
       });
-      const res = await fetch(withNode(u('api/upload'), node), { method: 'POST', body: form });
+      const res = await postUpload(wav, `dictation-${Date.now()}.wav`, node);
       if (destroyed) return;
       if (!res.ok) {
         const bodyText = await res.text().catch(() => '');

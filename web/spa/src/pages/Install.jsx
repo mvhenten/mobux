@@ -19,6 +19,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { renderSVG } from "uqr";
 import { localFetch, localGet } from "../lib/api.js";
+import { buildInfo, buildInfoError, loadBuildInfo } from "../lib/buildInfo.js";
 
 const POLL_MS = 2000;
 const IDLE_MS = 10000;
@@ -83,7 +84,7 @@ function CopyCommand({ command }) {
   );
 }
 
-function ApkSection({ apkUrl }) {
+function ApkSection({ apkUrl, step }) {
   const [status, setStatus] = useState(null);
   const [requestError, setRequestError] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -164,7 +165,7 @@ function ApkSection({ apkUrl }) {
 
   return (
     <section class="install-card">
-      <h2>2. Install the app</h2>
+      <h2>{step}. Install the app</h2>
 
       {status === null && !requestError && (
         <p class="install-hint">Checking…</p>
@@ -185,6 +186,11 @@ function ApkSection({ apkUrl }) {
             </a>
             <QrCode url={apkUrl} />
           </div>
+          {domain && (
+            <p id="apkBoundHost" class="install-hint">
+              The app opens <code>{domain}</code>.
+            </p>
+          )}
         </>
       )}
 
@@ -277,49 +283,76 @@ function ApkSection({ apkUrl }) {
   );
 }
 
+// Through the Cloudflare tunnel, Cloudflare terminates TLS with a publicly
+// trusted certificate, so there is no CA to install and the app is step one.
 export function InstallPage() {
   const base = origin();
   const apkUrl = base + "/install/mobux.apk";
-  const caUrl = base + "/install/mobux-ca.crt";
+
+  useEffect(() => {
+    loadBuildInfo();
+  }, []);
+
+  const info = buildInfo.value;
+  if (!info && !buildInfoError.value) {
+    return (
+      <main class="install-page">
+        <p class="install-hint">Checking…</p>
+      </main>
+    );
+  }
+
+  if (info?.via_access) {
+    return (
+      <main class="install-page">
+        <ApkSection apkUrl={apkUrl} step={1} />
+      </main>
+    );
+  }
 
   return (
     <main class="install-page">
-      <section class="install-card">
-        <h2>1. Install the CA certificate</h2>
-        <p class="install-lede">
-          Do this <strong>first</strong>. Without the CA, Android won't trust
-          this server, the APK download will be blocked, and the installed app
-          won't connect.
-        </p>
-        <div class="install-grid">
-          <a
-            class="install-btn"
-            href="/install/mobux-ca.crt"
-            download="mobux-ca.crt"
-          >
-            Download CA certificate
-          </a>
-          <QrCode url={caUrl} />
-        </div>
-        <p class="install-hint">
-          After downloading, install it through Android Settings:
-        </p>
-        <ol class="install-steps">
-          <li>Settings → Security &amp; privacy (or just Security)</li>
-          <li>More security settings → Encryption &amp; credentials</li>
-          <li>Install a certificate → CA certificate</li>
-          <li>
-            Acknowledge the warning, pick <code>mobux-ca.crt</code> from your
-            Downloads
-          </li>
-        </ol>
-        <p class="install-hint">
-          Running with ACME / a publicly-trusted cert? Skip this step — there's
-          no local CA to install.
-        </p>
-      </section>
-
-      <ApkSection apkUrl={apkUrl} />
+      <CaSection caUrl={base + "/install/mobux-ca.crt"} />
+      <ApkSection apkUrl={apkUrl} step={2} />
     </main>
+  );
+}
+
+function CaSection({ caUrl }) {
+  return (
+    <section id="installCaStep" class="install-card">
+      <h2>1. Install the CA certificate</h2>
+      <p class="install-lede">
+        Do this <strong>first</strong>. Without the CA, Android won't trust this
+        server, the APK download will be blocked, and the installed app won't
+        connect.
+      </p>
+      <div class="install-grid">
+        <a
+          class="install-btn"
+          href="/install/mobux-ca.crt"
+          download="mobux-ca.crt"
+        >
+          Download CA certificate
+        </a>
+        <QrCode url={caUrl} />
+      </div>
+      <p class="install-hint">
+        After downloading, install it through Android Settings:
+      </p>
+      <ol class="install-steps">
+        <li>Settings → Security &amp; privacy (or just Security)</li>
+        <li>More security settings → Encryption &amp; credentials</li>
+        <li>Install a certificate → CA certificate</li>
+        <li>
+          Acknowledge the warning, pick <code>mobux-ca.crt</code> from your
+          Downloads
+        </li>
+      </ol>
+      <p class="install-hint">
+        Running with ACME / a publicly-trusted cert? Skip this step — there's no
+        local CA to install.
+      </p>
+    </section>
   );
 }

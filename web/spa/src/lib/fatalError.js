@@ -26,6 +26,12 @@ function isApiError(reason) {
   );
 }
 
+// A lapsed Access session has its own persistent notice (accessSession.js);
+// taking the whole app over for it would hide the "Sign in again" control.
+function isSignedOut(reason) {
+  return !!reason && typeof reason === "object" && reason.signedOut === true;
+}
+
 function detailsFromApiError(err) {
   return {
     method: err.method,
@@ -47,7 +53,7 @@ function detailsFromApiError(err) {
 // app.jsx) arms it for every current and future call site.
 if (typeof window !== "undefined") {
   window.addEventListener("unhandledrejection", (event) => {
-    if (isApiError(event.reason)) {
+    if (isApiError(event.reason) && !isSignedOut(event.reason)) {
       reportFatal(detailsFromApiError(event.reason));
     }
   });

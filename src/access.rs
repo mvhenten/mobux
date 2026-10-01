@@ -319,6 +319,13 @@ fn rejection_for(kind: &ErrorKind) -> Rejection {
     }
 }
 
+/// Marks a request that arrived on the Access listener. Set by [`guard`] on
+/// every request it sees, public paths included, so a handler learns which
+/// listener served it from the listener itself and never from a header the
+/// client could send.
+#[derive(Clone, Copy, Debug)]
+pub struct ViaAccess;
+
 /// The Access listener's gate: the token verifier plus the public hostname a
 /// browser on the tunnel sends as its `Origin`.
 pub struct AccessGuard {
@@ -369,6 +376,7 @@ pub async fn guard(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    request.extensions_mut().insert(ViaAccess);
     if crate::is_access_public_path(request.uri().path()) {
         return next.run(request).await;
     }
@@ -907,6 +915,10 @@ mod tests {
             )
         }
 
+        async fn via_access(marker: Option<Extension<ViaAccess>>) -> String {
+            format!("via_access={}", marker.is_some())
+        }
+
         fn router(jwks: &Jwks) -> Router {
             Router::new()
                 .route("/api/sessions", get(seen))
@@ -914,6 +926,7 @@ mod tests {
                 .route("/.well-known/assetlinks.json", get(|| async { "links" }))
                 .route("/api/identify", get(|| async { "mobux" }))
                 .route("/install/mobux-ca.crt", get(|| async { "ca" }))
+                .route("/api/build-info", get(via_access))
                 .layer(axum::middleware::from_fn_with_state(
                     Arc::new(AccessGuard {
                         verifier: jwks.verifier(MIN_REFETCH_INTERVAL),
@@ -980,6 +993,15 @@ mod tests {
                 body(response).await,
                 "Email(\"owner@example.com\") assertion=false cookie=theme=dark; lang=nl"
             );
+        }
+
+        #[tokio::test]
+        async fn marks_an_admitted_request_as_arriving_through_access() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let token = sign(KID, &jwks.claims());
+            let response = call(&jwks, "/api/build-info", &[(ASSERTION_HEADER, &token)]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await, "via_access=true");
         }
 
         #[tokio::test]

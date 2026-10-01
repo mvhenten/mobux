@@ -507,7 +507,9 @@ async fn main() -> Result<()> {
         )
         .route(
             "/api/upload",
-            post(api_upload).layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024)),
+            post(api_upload).layer(axum::extract::DefaultBodyLimit::max(
+                (UPLOAD_LIMIT_BYTES + MULTIPART_ENVELOPE_BYTES) as usize,
+            )),
         )
         // 60 s of 16 kHz mono 16-bit PCM is ~1.9 MB; the default 2 MB body
         // limit is too tight once the multipart envelope is added. Allow 8 MB
@@ -1133,14 +1135,45 @@ async fn api_identify() -> Json<Identify> {
 /// Build-info for the SPA's Build card. Returns the same data the inline
 /// settings page injects as window globals (`MOBUX_BUILD_SERVER`, `MOBUX_VERSION`),
 /// so the SPA can fetch it without needing server-side HTML injection.
-async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn api_build_info(
+    State(state): State<AppState>,
+    via_access: Option<Extension<access::ViaAccess>>,
+) -> Json<serde_json::Value> {
+    let via_access = via_access.is_some();
     Json(json!({
         "version": PKG_VERSION,
         "build_hash": state.build_hash,
         "dev_mode": state.config.app.dev,
         "files": state.config.files.roots.keys().collect::<Vec<_>>(),
         "proxies": state.config.proxy.targets.keys().collect::<Vec<_>>(),
+        "via_access": via_access,
+        "upload_limit_bytes": upload_limit_bytes(via_access),
     }))
+}
+
+/// Largest file `/api/upload` takes on the main listener.
+const UPLOAD_LIMIT_BYTES: u64 = 200 * 1024 * 1024;
+/// Largest file `/api/upload` takes through the Cloudflare tunnel, whose
+/// Free and Pro plans refuse a request body over 100 MB.
+const ACCESS_UPLOAD_LIMIT_BYTES: u64 = 100 * 1000 * 1000;
+/// Room for the multipart boundaries and part headers around the file.
+const MULTIPART_ENVELOPE_BYTES: u64 = 64 * 1024;
+
+fn upload_limit_bytes(via_access: bool) -> u64 {
+    if via_access {
+        return ACCESS_UPLOAD_LIMIT_BYTES;
+    }
+    UPLOAD_LIMIT_BYTES
+}
+
+fn upload_too_large(limit: u64) -> AppError {
+    AppError {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        message: format!(
+            "upload refused: the file is larger than the {} MB limit on this connection",
+            limit.div_ceil(1000 * 1000)
+        ),
+    }
 }
 
 // ── self-update (#130) ─────────────────────────────────────────────────────
@@ -1604,10 +1637,21 @@ fn sanitize_upload_filename(filename: &str) -> String {
 async fn api_upload(
     State(state): State<AppState>,
     Query(q): Query<NodeQuery>,
+    via_access: Option<Extension<access::ViaAccess>>,
+    headers: HeaderMap,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     use std::fs;
     use std::path::PathBuf;
+
+    let limit = upload_limit_bytes(via_access.is_some());
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > limit + MULTIPART_ENVELOPE_BYTES) {
+        return Err(upload_too_large(limit));
+    }
 
     let target = resolve_node_target(&state, q.node.as_deref()).await?;
     let upload_dir = PathBuf::from("/tmp/mobux-uploads");
@@ -1616,7 +1660,7 @@ async fn api_upload(
         fs::create_dir_all(&upload_dir).map_err(|e| AppError::bad_request(e.into()))?;
     }
 
-    if let Some(field) = multipart
+    if let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::bad_request(e.into()))?
@@ -1631,10 +1675,17 @@ async fn api_upload(
             .as_millis();
         let dest_filename = format!("{ts}-{safe_name}");
 
-        let data = field
-            .bytes()
+        let mut data = Vec::new();
+        while let Some(chunk) = field
+            .chunk()
             .await
-            .map_err(|e| AppError::bad_request(e.into()))?;
+            .map_err(|e| AppError::bad_request(e.into()))?
+        {
+            if (data.len() + chunk.len()) as u64 > limit {
+                return Err(upload_too_large(limit));
+            }
+            data.extend_from_slice(&chunk);
+        }
 
         let dest_display = match target.as_deref() {
             None => {
@@ -3587,14 +3638,24 @@ fn install_status_json(phase: &local_stt::Phase) -> serde_json::Value {
 // those, so the button checks for them up front and hands back the one command
 // that installs them rather than dying minutes into a download.
 
+/// The host the APK is signed for: the Cloudflare hostname when Access is
+/// configured, so a package built from either listener opens the tunnel.
+fn apk_domain(config: &config::Config, headers: &HeaderMap) -> Result<String, String> {
+    let access_hostname = config
+        .access
+        .is_configured()
+        .then_some(config.access.hostname.as_str());
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok());
+    twa::pinned_domain(access_hostname, Some(config.app.domain.as_str()), host)
+}
+
 async fn api_install_apk_build(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok());
-    let domain = match twa::resolve_domain(Some(state.config.app.domain.as_str()), host) {
+    let domain = match apk_domain(&state.config, &headers) {
         Ok(d) => d,
         Err(e) => {
             return Ok((
@@ -3689,10 +3750,7 @@ async fn api_install_apk_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok());
-    let domain = twa::resolve_domain(Some(state.config.app.domain.as_str()), host);
+    let domain = apk_domain(&state.config, &headers);
 
     let guard = state.twa_build.lock().await;
     let (phase_str, error) = phase_parts(&guard.phase);
@@ -4432,6 +4490,103 @@ mod tests {
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
         };
         (state, dir)
+    }
+
+    fn listener_app(state: AppState, via_access: bool) -> Router {
+        let app = Router::new()
+            .route("/api/build-info", get(api_build_info))
+            .route("/api/upload", post(api_upload))
+            .with_state(state);
+        if !via_access {
+            return app;
+        }
+        app.layer(middleware::from_fn(
+            |mut request: Request<axum::body::Body>, next: middleware::Next| async move {
+                request.extensions_mut().insert(access::ViaAccess);
+                next.run(request).await
+            },
+        ))
+    }
+
+    async fn build_info(via_access: bool) -> serde_json::Value {
+        use tower::ServiceExt;
+
+        let (state, _dir) = test_state(false);
+        let response = listener_app(state, via_access)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/build-info")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn build_info_reports_the_access_listener_and_its_upload_limit() {
+        let info = build_info(true).await;
+        assert_eq!(info["via_access"], json!(true));
+        assert_eq!(info["upload_limit_bytes"], json!(100_000_000));
+    }
+
+    #[tokio::test]
+    async fn build_info_on_the_main_listener_keeps_the_existing_upload_limit() {
+        let info = build_info(false).await;
+        assert_eq!(info["via_access"], json!(false));
+        assert_eq!(info["upload_limit_bytes"], json!(200 * 1024 * 1024));
+    }
+
+    #[tokio::test]
+    async fn an_upload_over_the_access_limit_is_refused_with_a_one_line_413() {
+        use tower::ServiceExt;
+
+        let (state, _dir) = test_state(false);
+        let response = listener_app(state, true)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/upload")
+                    .header("content-type", "multipart/form-data; boundary=x")
+                    .header("content-length", (150 * 1000 * 1000).to_string())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.to_vec()).unwrap(),
+            "upload refused: the file is larger than the 100 MB limit on this connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_body_on_the_main_listener_is_not_refused_for_size() {
+        use tower::ServiceExt;
+
+        let (state, _dir) = test_state(false);
+        let response = listener_app(state, false)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/upload")
+                    .header("content-type", "multipart/form-data; boundary=x")
+                    .header("content-length", (150 * 1000 * 1000).to_string())
+                    .body(axum::body::Body::from("--x--\r\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -5408,11 +5563,11 @@ mod tests {
     #[tokio::test]
     async fn build_info_reflects_dev_mode() {
         let (state, _dir) = test_state(true);
-        let Json(val) = api_build_info(State(state)).await;
+        let Json(val) = api_build_info(State(state), None).await;
         assert_eq!(val["dev_mode"], true);
 
         let (state, _dir) = test_state(false);
-        let Json(val) = api_build_info(State(state)).await;
+        let Json(val) = api_build_info(State(state), None).await;
         assert_eq!(val["dev_mode"], false);
     }
 
@@ -5420,7 +5575,7 @@ mod tests {
     #[tokio::test]
     async fn build_info_lists_served_page_names() {
         let (state, _dir) = test_state(false);
-        let Json(val) = api_build_info(State(state)).await;
+        let Json(val) = api_build_info(State(state), None).await;
         assert_eq!(val["files"], json!([]));
         assert_eq!(val["proxies"], json!([]));
 
@@ -5435,7 +5590,7 @@ mod tests {
             config: Arc::new(settings),
             ..state
         };
-        let Json(val) = api_build_info(State(state)).await;
+        let Json(val) = api_build_info(State(state), None).await;
         assert_eq!(val["files"], json!(["site"]));
         assert_eq!(val["proxies"], json!(["up"]));
         let body = val.to_string();
