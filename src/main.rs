@@ -51,6 +51,7 @@ mod host_suggestions;
 mod local_stt;
 mod local_tts;
 mod mcp;
+mod mcp_settings;
 mod nodes;
 mod proxy;
 mod push;
@@ -336,6 +337,9 @@ struct AppState {
     /// JSONL under `<data_dir>/history/<session>.jsonl`, fed from the PTY
     /// relay in `handle_ws`, served paginated by `api_session_conversation`.
     session_history: Arc<session_history::SessionHistoryStore>,
+    /// The loopback MCP listener and the `mcp` block of config.json that
+    /// the Settings switch turns it on and off through.
+    mcp: Arc<mcp_settings::McpServer>,
 }
 
 const SESSION_COOKIE_NAME: &str = "mobux_session";
@@ -419,6 +423,17 @@ async fn main() -> Result<()> {
         .and_then(|v| v["hash"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_string());
 
+    let session_name_re = Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$")?);
+    let mcp_server = Arc::new(mcp_settings::McpServer::new(
+        mcp::Context::new(session_name_re.clone(), db.clone(), &settings),
+        settings.clone(),
+        options
+            .config_path
+            .clone()
+            .unwrap_or_else(config::config_file_path),
+        mcp_settings::ManagedBy::detect(&config::EnvSnapshot::from_env(), &options.overrides),
+    ));
+
     let update_state = update::UpdateState::new(settings.update.check_url.clone());
     // Kick off the background crates.io poller (polls now, then every ~6h).
     update::spawn_checker(update_state.clone());
@@ -429,7 +444,7 @@ async fn main() -> Result<()> {
         // a name like "my.app" pass validation while tmux created "my_app",
         // so every later op targeting "my.app" failed with "can't find
         // session". Keep '.' out of the allowed set.
-        session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$")?),
+        session_name_re,
         auth,
         cache_bust: format!(
             "{}",
@@ -447,6 +462,7 @@ async fn main() -> Result<()> {
         build_hash,
         twa_build: BackgroundJobState::idle(),
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
+        mcp: mcp_server,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -468,7 +484,7 @@ async fn main() -> Result<()> {
     } else {
         println!("tmux alert-bell hook installed (internal port {internal_port})");
     }
-    spawn_mcp_server(&state, &settings).await?;
+    state.mcp.start_configured().await;
 
     let state_for_mw = state.clone();
     let app = Router::new()
@@ -528,6 +544,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/settings/notifications",
             get(api_get_notification_prefs).put(api_set_notification_prefs),
+        )
+        .route(
+            "/api/settings/mcp",
+            get(api_get_mcp_settings).put(api_set_mcp_settings),
         )
         .route(
             "/api/settings/preferences",
@@ -698,31 +718,6 @@ async fn main() -> Result<()> {
         .await?;
     }
 
-    Ok(())
-}
-
-/// The MCP server gets its own fixed loopback port rather than a route on the
-/// internal listener, whose port is random and so cannot be registered with a
-/// client.
-async fn spawn_mcp_server(state: &AppState, settings: &config::Config) -> Result<()> {
-    let port = settings.mcp.port;
-    if port == 0 {
-        return Ok(());
-    }
-    let app = mcp::router(mcp::Context::new(
-        state.session_name_re.clone(),
-        state.db.clone(),
-        settings,
-    ));
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-        .await
-        .with_context(|| format!("binding the MCP server to 127.0.0.1:{port}"))?;
-    println!("mcp: http://127.0.0.1:{port}{}", mcp::PATH);
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("mcp listener error: {e:#}");
-        }
-    });
     Ok(())
 }
 
@@ -2048,6 +2043,42 @@ async fn api_set_notification_prefs(
         .set_notification_prefs(req.into())
         .map_err(|e| AppError::internal(anyhow::anyhow!("writing prefs: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_get_mcp_settings(
+    State(state): State<AppState>,
+) -> Result<Json<mcp_settings::Status>, AppError> {
+    state
+        .mcp
+        .status()
+        .await
+        .map(Json)
+        .map_err(|message| AppError {
+            status: StatusCode::CONFLICT,
+            message,
+        })
+}
+
+#[derive(Deserialize)]
+struct McpSettingsPut {
+    port: u16,
+}
+
+/// Writes `mcp.port` (0 is off) to config.json and starts, stops or rebinds
+/// the loopback listener to match.
+async fn api_set_mcp_settings(
+    State(state): State<AppState>,
+    Json(req): Json<McpSettingsPut>,
+) -> Result<Json<mcp_settings::Status>, AppError> {
+    use mcp_settings::SetError;
+    state.mcp.set(req.port).await.map(Json).map_err(|err| {
+        let (status, message) = match err {
+            SetError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+            SetError::Managed(message) | SetError::Bind(message) => (StatusCode::CONFLICT, message),
+            SetError::Io(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        };
+        AppError { status, message }
+    })
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -4482,13 +4513,21 @@ mod tests {
         let mut settings = config::Config::default();
         settings.tls.enabled = false;
         settings.app.dev = dev_mode;
+        let session_name_re = Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
+        let settings = Arc::new(settings);
+        let mcp = Arc::new(mcp_settings::McpServer::new(
+            mcp::Context::new(session_name_re.clone(), db.clone(), &settings),
+            settings.clone(),
+            dir.path().join(config::CONFIG_FILE_NAME),
+            None,
+        ));
         let state = AppState {
-            session_name_re: Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap()),
+            session_name_re,
             auth: None,
             cache_bust: "test".to_string(),
             db,
             internal_token: Arc::new("test-token".to_string()),
-            config: Arc::new(settings),
+            config: settings,
             data_dir: dir.path().to_path_buf(),
             config_dir: dir.path().to_path_buf(),
             update: update::UpdateState::new(String::new()),
@@ -4496,6 +4535,7 @@ mod tests {
 
             twa_build: BackgroundJobState::idle(),
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
+            mcp,
         };
         (state, dir)
     }
@@ -4548,6 +4588,55 @@ mod tests {
         let info = build_info(false).await;
         assert_eq!(info["via_access"], json!(false));
         assert_eq!(info["upload_limit_bytes"], json!(200 * 1024 * 1024));
+    }
+
+    async fn put_mcp(state: AppState, body: &str) -> (StatusCode, String) {
+        use tower::ServiceExt;
+
+        let response = Router::new()
+            .route(
+                "/api/settings/mcp",
+                get(api_get_mcp_settings).put(api_set_mcp_settings),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/mcp")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn an_mcp_port_in_use_answers_409_with_the_reason_and_writes_nothing() {
+        let (state, dir) = test_state(false);
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+
+        let (status, body) = put_mcp(state, &format!("{{\"port\": {port}}}")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.contains(&format!("cannot listen on 127.0.0.1:{port}")),
+            "{body}"
+        );
+        assert!(!dir.path().join(config::CONFIG_FILE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn an_mcp_port_below_1024_answers_400() {
+        let (state, _dir) = test_state(false);
+        let (status, body) = put_mcp(state, r#"{"port": 80}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("from 1024 to 65535"), "{body}");
     }
 
     #[tokio::test]

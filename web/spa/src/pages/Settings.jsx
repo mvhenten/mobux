@@ -11,6 +11,7 @@ import { SttRow, SttCard } from "../components/settings/Stt.jsx";
 import { ListenRow, ListenCard } from "../components/settings/Listen.jsx";
 import { AboutRow, BuildInfoCard } from "../components/settings/BuildInfo.jsx";
 import { PagesRow, PagesCard } from "../components/settings/Pages.jsx";
+import { McpRow, McpCard } from "../components/settings/Mcp.jsx";
 import { Group, NavRow } from "../components/settings/ui.jsx";
 
 export const SUB_PAGES = {
@@ -18,6 +19,7 @@ export const SUB_PAGES = {
   shell: { title: "Shell integration", Page: ShellIntegrationCard },
   nodes: { title: "Nodes", Page: NodesCard },
   pages: { title: "Pages", Page: PagesCard },
+  mcp: { title: "MCP server", Page: McpCard },
   stt: { title: "Speech to text", Page: SttCard },
   listen: { title: "Listen", Page: ListenCard },
   about: { title: "About", Page: BuildInfoCard },
@@ -44,6 +46,7 @@ export function SettingsPage() {
       <Group title="Hosts">
         <NodesRow />
         <PagesRow />
+        <McpRow />
       </Group>
       <Group title="Voice">
         <SttRow />
