@@ -125,6 +125,12 @@ const RENDERER_OPTIONS = {
 //              toggle, so read mode is one tap from either other view. The
 //              engine knows no more about a "read mode" than it does about a
 //              reader. Absent ⇒ no read-mode button is shown.
+//   restore    optional `{ anchor }` from a scrollAnchor() saved before the
+//              tab was discarded; the display scrolls back to it once the
+//              history has loaded.
+//   onSuspend  called as a hidden tab suspends, before its history is
+//              released, so the owner can save what a discard would lose.
+//   onResume   called as a suspended tab comes back.
 //
 // The engine used to be a self-booting module: it read window.MOBUX_* at
 // eval time, so a second (node, session) in the same document silently kept
@@ -141,6 +147,9 @@ export function createTerminal({
   build = "",
   viewToggle = null,
   readToggle = null,
+  restore = null,
+  onSuspend = null,
+  onResume = null,
 } = {}) {
   const $ = (id) => host.querySelector(`#${id}`);
 
@@ -155,16 +164,15 @@ export function createTerminal({
   const cmdCloseBtn = $("cmdCloseBtn");
   const cmdSettingsBtn = $("cmdSettingsBtn");
 
-  // Every teardown is registered here; dispose() drains it. `on`/`later`/
-  // `every` are the tracked variants of addEventListener/setTimeout/
-  // setInterval.
+  // Every teardown is registered here; dispose() drains it. `on`/`later` are
+  // the tracked variants of addEventListener/setTimeout.
   let disposed = false;
   const cleanups = [];
   const on = (target, type, fn, opts) => {
     target.addEventListener(type, fn, opts);
     cleanups.push(() => target.removeEventListener(type, fn, opts));
   };
-  // Both no-op after dispose: a straggler event (an in-flight WS message, a
+  // It no-ops after dispose: a straggler event (an in-flight WS message, a
   // resolving fetch) must not create new timers — `cleanups` has already
   // been drained, so anything registered now would never be torn down.
   const later = (fn, ms) => {
@@ -173,11 +181,6 @@ export function createTerminal({
       if (!disposed) fn();
     }, ms);
     cleanups.push(() => clearTimeout(t));
-  };
-  const every = (fn, ms) => {
-    if (disposed) return;
-    const t = setInterval(fn, ms);
-    cleanups.push(() => clearInterval(t));
   };
 
   {
@@ -736,6 +739,10 @@ export function createTerminal({
     setSyncHold: (ms) => core.view.setSyncHold(ms),
     resize: () => core.resize(),
     reloadHistory: () => core.reloadHistory(),
+    suspended: () => suspended,
+    historyRowCount: () => core.buffer.historyRowCount(),
+    scrollAnchor: () => core.scrollAnchor(),
+    scrollToAnchor: (anchor) => core.scrollToAnchor(anchor),
     onPtyData: (cb) => {
       core.addEventListener("data", cb);
       return () => core.removeEventListener("data", cb);
@@ -791,11 +798,14 @@ export function createTerminal({
   // reconnect() while `core.ws` is still null would open a competing
   // socket that boot then immediately replaces.
   let booted = false;
+  let suspended = false;
   (async () => {
     await core.reloadHistory();
     if (disposed) return;
-    core.connect();
     booted = true;
+    if (restore?.anchor) core.scrollToAnchor(restore.anchor);
+    if (suspended) return;
+    core.connect();
     const w = windowFromUrl(location.href);
     if (w != null) {
       // Brief wait so the WS attach completes before we ask tmux to
@@ -807,7 +817,19 @@ export function createTerminal({
 
   on(window, "resize", () => core.resize());
   later(() => core.resize(), 100);
-  every(() => core.refreshPanes(), 5000);
+
+  let panesPoll = null;
+  const startPanesPoll = () => {
+    if (panesPoll === null && !disposed) {
+      panesPoll = setInterval(() => core.refreshPanes(), 5000);
+    }
+  };
+  const stopPanesPoll = () => {
+    clearInterval(panesPoll);
+    panesPoll = null;
+  };
+  cleanups.push(stopPanesPoll);
+  startPanesPoll();
 
   // ── Auto-reconnect ──────────────────────────────────────────────────
   // Renderer-agnostic. The tmux session persists server-side, so
@@ -823,25 +845,49 @@ export function createTerminal({
   // stays as a manual fallback.
 
   function autoReconnect() {
-    if (!booted || disposed) return;
+    if (!booted || disposed || suspended) return;
     core.reconnect();
   }
 
-  // Primary path: screen/tab is visible again → reconnect now.
+  // ── Page lifecycle ──────────────────────────────────────────────────
+  // A hidden or frozen tab holds no socket, no polls and no history, so the
+  // phone has little reason to discard it. Coming back reconnects and
+  // refetches the history in place; the page never reloads.
+  function suspend() {
+    if (disposed || suspended) return;
+    suspended = true;
+    onSuspend?.();
+    stopPanesPoll();
+    core.suspend();
+  }
+
+  function resume() {
+    if (disposed || document.visibilityState !== "visible") return;
+    startPanesPoll();
+    if (!suspended) {
+      autoReconnect();
+      return;
+    }
+    suspended = false;
+    onResume?.();
+    if (!booted) return;
+    if (core.historyStale) core.reloadHistory();
+    core.reconnect();
+    core.refreshPanes();
+  }
+
   on(document, "visibilitychange", () => {
-    if (document.visibilityState === "visible") autoReconnect();
+    if (document.visibilityState === "visible") resume();
+    else suspend();
   });
+  on(document, "freeze", suspend);
+  on(document, "resume", resume);
   // Network came back.
   on(window, "online", autoReconnect);
   // Android bfcache restore (app swapped back into the foreground).
-  on(window, "pageshow", autoReconnect);
-
-  // A real navigation away / unload is an intentional teardown — mark it
-  // so the socket's onclose doesn't arm a (pointless) backoff retry on a
-  // page that's going away.
-  on(window, "pagehide", () => {
-    core.intentionalClose = true;
-  });
+  on(window, "pageshow", resume);
+  // Navigating away, or into the bfcache: the socket's close is deliberate.
+  on(window, "pagehide", suspend);
 
   // ── Soft keyboard (visualViewport) handler ──────────────────────────
   // Renderer-agnostic. On Android Chrome (the TWA target) the soft

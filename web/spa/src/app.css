@@ -310,3 +310,16 @@ body.term-body #app {
   border-radius: 4px;
   padding: 1px 6px;
 }
+
+.update-bar {
+  position: fixed;
+  top: env(safe-area-inset-top, 0);
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  margin: 0;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}

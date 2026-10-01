@@ -4,7 +4,7 @@
 // reads cells and links from here, never from a renderer, so xterm and sterk
 // select the same text.
 
-import { isBlankCell } from "./terminal-buffer.js";
+import { isBlankCell, logicalLines } from "./terminal-buffer.js";
 import { historyLine, lineCells } from "./terminal-lines.js";
 
 // A row is { cells, wrapped }: one string per column, "" for the second
@@ -136,6 +136,35 @@ export function rowsFromBottom(buffer, count) {
     rows = cutHistoryLine(buffer, i, cols).concat(rows);
   }
   return rows.slice(Math.max(0, rows.length - count));
+}
+
+// The buffer's lines bottom up as { key, depth }: `depth` is the display
+// rows from the line's first row to the bottom. Stops at the first line at
+// least `limit` rows deep, the one holding that row.
+export function lineDepths(buffer, limit = Infinity) {
+  const out = [];
+  const add = (key, depth) => {
+    out.push({ key, depth });
+    return depth >= limit;
+  };
+  const { first } = buffer.paneRows();
+  const lines = buffer.screenLines();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (add(lines[i].key, buffer.rows - first - lines[i].row)) return out;
+  }
+  const start = buffer.historyStart();
+  const count = buffer.historyRowCount();
+  const scrollback = logicalLines(buffer.scrollbackRows());
+  let depth = buffer.rows;
+  for (let j = scrollback.length - 1; j >= 0; j--) {
+    depth += scrollback[j].length;
+    if (add(start + count + j, depth)) return out;
+  }
+  for (let i = count - 1; i >= 0; i--) {
+    depth += cutHistoryLine(buffer, i, buffer.cols).length;
+    if (add(start + i, depth)) return out;
+  }
+  return out;
 }
 
 const URL_RE = /https?:\/\/[^\s)"'>]+/g;

@@ -4,6 +4,7 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
 import { readLoadedBundleHash } from "../lib/bundleHash.js";
 import { createViewController } from "../lib/viewController.js";
+import { clearTabState, saveTabState, takeTabState } from "../lib/tabState.js";
 import { u } from "../lib/base.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
@@ -109,6 +110,8 @@ export function TerminalIsland({ node, session }) {
     let cancelled = false;
     let engine = null;
     let viewCtl = null;
+    // Set only when this tab was discarded while on this route.
+    const saved = takeTabState();
 
     // Resolve the renderer choice from the server-held preference (hydrated at
     // boot by main.jsx), then load the vendor bundles + css (once per
@@ -189,6 +192,13 @@ export function TerminalIsland({ node, session }) {
         build: readLoadedBundleHash() || "",
         viewToggle,
         readToggle,
+        restore: saved,
+        onSuspend: () =>
+          saveTabState({
+            view: viewCtl?.snapshot() ?? null,
+            anchor: engine?.core.scrollAnchor() ?? null,
+          }),
+        onResume: clearTabState,
       });
 
       // The reader and read mode are sibling components mounted next to the
@@ -200,6 +210,7 @@ export function TerminalIsland({ node, session }) {
         terminal: engine,
         createReader,
         createReadMode,
+        restore: saved?.view,
       });
 
       // Assemble the page's test surface from the factory handles. The engine
