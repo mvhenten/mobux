@@ -236,15 +236,17 @@ pub struct UpdateConfig {
 #[serde(deny_unknown_fields)]
 pub struct AccessConfig {
     /// Loopback port the tunnel connects to. Must differ from `server.port`.
-    /// `0` means unset. Env: `MOBUX_ACCESS_PORT`. Flag: `--access-port`.
+    /// `0` turns the listener off. Env: `MOBUX_ACCESS_PORT`. Flag: `--access-port`.
     #[serde(default)]
     #[garde(skip)]
     pub port: u16,
-    /// The Cloudflare Access team domain, a bare hostname such as
-    /// `example.cloudflareaccess.com`. Env: `MOBUX_ACCESS_TEAM_DOMAIN`.
+    /// The Cloudflare Access team domain: a bare hostname such as
+    /// `example.cloudflareaccess.com`, which means https, or an `https://`
+    /// origin. `http://` is accepted only for `127.0.0.1` and `localhost`.
+    /// No path or query. Env: `MOBUX_ACCESS_TEAM_DOMAIN`.
     /// Flag: `--access-team-domain`.
     #[serde(default)]
-    #[garde(custom(bare_host_value))]
+    #[garde(custom(team_domain_value))]
     pub team_domain: String,
     /// The Access application AUD tag tokens must carry.
     /// Env: `MOBUX_ACCESS_AUD`. Flag: `--access-aud`.
@@ -270,7 +272,28 @@ pub struct AccessConfig {
     pub service_tokens: Vec<String>,
 }
 
+const ACCESS_CERTS_PATH: &str = "/cdn-cgi/access/certs";
+
 impl AccessConfig {
+    /// The team domain as an origin, `https://` unless it states a scheme.
+    pub fn team_origin(&self) -> String {
+        let domain = self.team_domain.trim().trim_end_matches('/');
+        if domain.contains("://") {
+            return domain.to_string();
+        }
+        format!("https://{domain}")
+    }
+
+    /// The `iss` claim an Access token for this team carries.
+    pub fn issuer(&self) -> String {
+        self.team_origin()
+    }
+
+    /// Where the team publishes the keys its tokens are signed with.
+    pub fn jwks_url(&self) -> String {
+        format!("{}{ACCESS_CERTS_PATH}", self.team_origin())
+    }
+
     /// Any stated field turns the listener on, so a half-written block fails
     /// the load instead of leaving the listener quietly off.
     pub fn is_configured(&self) -> bool {
@@ -749,14 +772,14 @@ pub const FIELDS: &[FieldSpec] = &[
         env: "MOBUX_ACCESS_PORT",
         flag: Some("--access-port"),
         kind: FieldKind::Number,
-        help: "Loopback port for the Cloudflare Access listener (default off)",
+        help: "Loopback port for the Cloudflare Access listener; 0 turns it off",
     },
     FieldSpec {
         key: "access.team_domain",
         env: "MOBUX_ACCESS_TEAM_DOMAIN",
         flag: Some("--access-team-domain"),
         kind: FieldKind::Text,
-        help: "Cloudflare Access team domain, e.g. example.cloudflareaccess.com",
+        help: "Cloudflare Access team domain or https:// origin, e.g. example.cloudflareaccess.com",
     },
     FieldSpec {
         key: "access.aud",
@@ -1077,13 +1100,22 @@ pub fn check(config: &Config) -> Result<(), String> {
     check_access(config)
 }
 
-/// The rules that keep the Access listener from starting open. Only a stated
-/// block is checked; an absent one leaves the listener off.
+/// The rules that keep the Access listener from starting open, per-field and
+/// cross-field. Only a stated block is checked; an absent one leaves the
+/// listener off. Startup runs this on the final config, so a value from the
+/// environment or a flag meets the same rules as one from the file.
 pub fn check_access(config: &Config) -> Result<(), String> {
     let access = &config.access;
     if !access.is_configured() {
         return Ok(());
     }
+    access.validate().map_err(|report| {
+        report
+            .iter()
+            .map(|(path, error)| format!("access.{path}: {error}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
     if access.port == 0 {
         return Err("access.port: required when the access block is set".to_string());
     }
@@ -1460,6 +1492,46 @@ fn bare_host_value(value: &str, _: &()) -> garde::Result {
         ));
     }
     Ok(())
+}
+
+const TEAM_DOMAIN_RULE: &str = "must be an https:// origin or a bare hostname such as \
+     example.cloudflareaccess.com, without a path or query; http:// is allowed only for \
+     127.0.0.1 and localhost";
+
+/// An origin the verifier can fetch keys from and compare `iss` against: a
+/// bare host meaning https, an https origin, or plain http to a loopback host
+/// so a test can stand in for Cloudflare.
+fn team_domain_value(value: &str, ctx: &()) -> garde::Result {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let rule = || garde::Error::new(TEAM_DOMAIN_RULE);
+    let (scheme, rest) = match value.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
+        None => ("https", value),
+    };
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if authority.contains(['/', '?', '#', '@']) {
+        return Err(rule());
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    bare_host_value(host, ctx).map_err(|_| rule())?;
+    if host.is_empty() {
+        return Err(rule());
+    }
+    if let Some(port) = port {
+        if !port.parse::<u16>().is_ok_and(|p| p > 0) {
+            return Err(rule());
+        }
+    }
+    match scheme {
+        "https" => Ok(()),
+        "http" if matches!(host, "127.0.0.1" | "localhost") => Ok(()),
+        _ => Err(rule()),
+    }
 }
 
 fn required_email_value(value: &str, ctx: &()) -> garde::Result {
@@ -2578,19 +2650,83 @@ mod tests {
         );
     }
 
+    fn with_team_domain(team_domain: &str) -> Result<Config, LoadError> {
+        parse_str(&format!(
+            r#"{{"access": {{"port": 5153, "team_domain": "{team_domain}", "aud": "aud-tag-sample", "allowed_emails": ["user@example.com"]}}}}"#
+        ))
+    }
+
     #[test]
-    fn a_team_domain_with_a_scheme_or_path_is_rejected() {
-        for team_domain in [
-            "https://example.cloudflareaccess.com",
-            "example.cloudflareaccess.com/cdn-cgi",
-            "example.cloudflareaccess.com:443",
+    fn a_bare_team_domain_means_https() {
+        let access = with_team_domain("example.cloudflareaccess.com")
+            .unwrap()
+            .access;
+        assert_eq!(access.issuer(), "https://example.cloudflareaccess.com");
+        assert_eq!(
+            access.jwks_url(),
+            "https://example.cloudflareaccess.com/cdn-cgi/access/certs"
+        );
+    }
+
+    #[test]
+    fn an_https_team_origin_is_accepted() {
+        let access = with_team_domain("https://example.cloudflareaccess.com/")
+            .unwrap()
+            .access;
+        assert_eq!(access.issuer(), "https://example.cloudflareaccess.com");
+        assert_eq!(
+            access.jwks_url(),
+            "https://example.cloudflareaccess.com/cdn-cgi/access/certs"
+        );
+    }
+
+    #[test]
+    fn a_plain_http_team_origin_is_accepted_on_loopback() {
+        for (team_domain, issuer) in [
+            ("http://127.0.0.1:9123", "http://127.0.0.1:9123"),
+            ("http://localhost:9123", "http://localhost:9123"),
         ] {
-            let error = access_message(&format!(
-                r#""port": 5153, "team_domain": "{team_domain}", "aud": "aud-tag-sample", "allowed_emails": ["user@example.com"]"#
-            ));
-            assert!(error.contains("access.team_domain"), "{error}");
-            assert!(error.contains("must be a bare hostname"), "{error}");
+            let access = with_team_domain(team_domain).unwrap().access;
+            assert_eq!(access.issuer(), issuer);
+            assert_eq!(access.jwks_url(), format!("{issuer}/cdn-cgi/access/certs"));
         }
+    }
+
+    #[test]
+    fn a_team_domain_with_a_path_query_or_plain_http_is_rejected() {
+        for team_domain in [
+            "http://example.cloudflareaccess.com",
+            "ftp://example.cloudflareaccess.com",
+            "https://example.cloudflareaccess.com/cdn-cgi",
+            "example.cloudflareaccess.com/cdn-cgi",
+            "https://example.cloudflareaccess.com?team=x",
+            "https://example.cloudflareaccess.com:https",
+            "https://",
+        ] {
+            let error = with_team_domain(team_domain)
+                .expect_err(team_domain)
+                .to_string();
+            assert!(error.contains("access.team_domain"), "{error}");
+            assert!(error.contains("must be an https:// origin"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_bad_access_value_from_the_environment_fails_the_final_config() {
+        let config = resolved(
+            PartialConfig::default(),
+            &env(&[
+                ("MOBUX_ACCESS_PORT", "5153"),
+                ("MOBUX_ACCESS_TEAM_DOMAIN", "https://evil.example/x"),
+                ("MOBUX_ACCESS_AUD", "aud-tag-sample"),
+                ("MOBUX_ACCESS_ALLOWED_EMAILS", "nobody"),
+            ]),
+            PartialConfig::default(),
+        );
+        let error = check_access(&config).expect_err("a bad env value is rejected");
+        assert!(error.contains("access.team_domain"), "{error}");
+        assert!(error.contains("access.allowed_emails[0]"), "{error}");
+        assert!(error.contains("must be an email address"), "{error}");
     }
 
     #[test]

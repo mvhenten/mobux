@@ -24,7 +24,7 @@
         },
         "port": {
           "default": 0,
-          "description": "Loopback port the tunnel connects to. Must differ from `server.port`.\n`0` means unset. Env: `MOBUX_ACCESS_PORT`. Flag: `--access-port`.",
+          "description": "Loopback port the tunnel connects to. Must differ from `server.port`.\n`0` turns the listener off. Env: `MOBUX_ACCESS_PORT`. Flag: `--access-port`.",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
@@ -40,7 +40,7 @@
         },
         "team_domain": {
           "default": "",
-          "description": "The Cloudflare Access team domain, a bare hostname such as\n`example.cloudflareaccess.com`. Env: `MOBUX_ACCESS_TEAM_DOMAIN`.\nFlag: `--access-team-domain`.",
+          "description": "The Cloudflare Access team domain: a bare hostname such as\n`example.cloudflareaccess.com`, which means https, or an `https://`\norigin. `http://` is accepted only for `127.0.0.1` and `localhost`.\nNo path or query. Env: `MOBUX_ACCESS_TEAM_DOMAIN`.\nFlag: `--access-team-domain`.",
           "type": "string"
         }
       },
