@@ -24,7 +24,10 @@ body.term-body #app {
   display: flex;
   flex-direction: column;
 }
+/* Positioned, so the engine's absolute layers (#touchOverlay above all)
+   cover the island and not the update bar above it. */
 .term-body-spa {
+  position: relative;
   flex: 1;
   min-height: 0;
   width: 100%;
