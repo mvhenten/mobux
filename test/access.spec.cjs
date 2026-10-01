@@ -280,12 +280,29 @@ test("access: no token gets the Bearer challenge and never Basic", async () => {
 
 test("access: the public paths answer without a token", async () => {
   for (const publicPath of [
+    "/.well-known/assetlinks.json",
     "/static/manifest.json",
     "/static/icon-192.png",
-    "/api/identify",
+    "/sw.js",
   ]) {
-    const response = await fetch(`${ACCESS}${publicPath}`);
-    expect(response.status, publicPath).toBe(200);
+    const response = await fetch(`${ACCESS}${publicPath}`, {
+      redirect: "manual",
+    });
+    expect(response.status, publicPath).not.toBe(401);
+    expect(response.headers.get("www-authenticate"), publicPath).toBeNull();
+  }
+});
+
+test("access: identify and the install page need a token", async () => {
+  for (const privatePath of [
+    "/api/identify",
+    "/install",
+    "/install/mobux-ca.crt",
+  ]) {
+    const response = await fetch(`${ACCESS}${privatePath}`, {
+      redirect: "manual",
+    });
+    await expectRefused(response, "no Cloudflare Access token");
   }
 });
 
