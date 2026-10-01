@@ -15,31 +15,29 @@ const AUTH =
     : null;
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const SESSION = `bg-resume-${process.pid}`;
 const tmux = createTmuxRunner("mobux-test");
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),
 });
 
-test.beforeAll(() => {
-  try {
-    tmux(`kill-session -t ${SESSION}`);
-  } catch (_) {}
-  tmux(`new-session -d -s ${SESSION} ${SHELL_ENV} "bash --norc --noprofile"`);
-});
+// Each test owns a session it creates and kills, so no test depends on a
+// session (or a tmux server) an earlier test left behind.
+let session = null;
+let sessionCount = 0;
 
 test.beforeEach(() => {
-  terminalPage.resetSession(tmux, SESSION);
+  session = `bg-resume-${process.pid}-${++sessionCount}`;
+  tmux(`new-session -d -s ${session} ${SHELL_ENV} "bash --norc --noprofile"`);
+  terminalPage.resetSession(tmux, session);
 });
 
-test.afterAll(() => {
-  try {
-    tmux(`kill-session -t ${SESSION}`);
-  } catch (_) {}
+test.afterEach(async ({ page }) => {
+  await page.close();
+  tmux(`kill-session -t ${session}`);
 });
 
-const bootTerminal = (page) => terminalPage.bootTerminal(page, BASE, SESSION);
+const bootTerminal = (page) => terminalPage.bootTerminal(page, BASE, session);
 
 function setVisibility(page, state) {
   return page.evaluate((state) => {
@@ -55,12 +53,14 @@ function setVisibility(page, state) {
   }, state);
 }
 
+// The pane's rows; tmux's status line (the last row) carries a clock and
+// the running command, which move on their own.
 const screenRows = (page) =>
   page.evaluate(() => {
     const t = window.__mobuxView.test;
     const top = t.viewportY();
     const rows = [];
-    for (let y = top; y < top + t.rows(); y++) {
+    for (let y = top; y < top + t.rows() - 1; y++) {
       rows.push((t.lineText(y) || "").trimEnd());
     }
     return rows;
@@ -79,7 +79,7 @@ test("a hidden tab drops its socket and polls, and resumes in place", async ({
     if (ws.url().includes("/ws/")) sockets.push(ws);
   });
   await bootTerminal(page);
-  tmux(`send-keys -t ${SESSION} "seq 1 200" Enter`);
+  tmux(`send-keys -t ${session} "seq 1 200" Enter`);
   await expect
     .poll(() => probe(page, "historyRowCount"), { timeout: 8000 })
     .toBeGreaterThan(0);
