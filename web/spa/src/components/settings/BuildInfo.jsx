@@ -1,6 +1,9 @@
 import { useEffect } from "preact/hooks";
-import { signal } from "@preact/signals";
-import { localGet } from "../../lib/api.js";
+import {
+  buildInfo as info,
+  buildInfoError,
+  loadBuildInfo,
+} from "../../lib/buildInfo.js";
 import { readLoadedBundleHash } from "../../lib/bundleHash.js";
 import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
 
@@ -10,28 +13,24 @@ import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
 // filename. They describe two different builds, so they are shown side by
 // side, never compared.
 
-const info = signal(null);
-
-function load() {
-  localGet("/api/build-info")
-    .then((d) => (info.value = d))
-    .catch(() => {});
-}
-
 export function AboutRow() {
-  useEffect(load, []);
+  useEffect(() => {
+    loadBuildInfo();
+  }, []);
   return (
     <NavRow
       row="about"
       to="/settings/about"
       label="About"
-      value={info.value?.version || "…"}
+      value={buildInfoError.value ? "⚠" : info.value?.version || "…"}
     />
   );
 }
 
 export function BuildInfoCard() {
-  useEffect(load, []);
+  useEffect(() => {
+    loadBuildInfo();
+  }, []);
 
   const srv = info.value;
   const feHash = readLoadedBundleHash();

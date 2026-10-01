@@ -1032,6 +1032,8 @@ async fn api_build_info(State(state): State<AppState>) -> Json<serde_json::Value
         "version": PKG_VERSION,
         "build_hash": state.build_hash,
         "dev_mode": state.config.app.dev,
+        "files": state.config.files.roots.keys().collect::<Vec<_>>(),
+        "proxies": state.config.proxy.targets.keys().collect::<Vec<_>>(),
     }))
 }
 
@@ -5267,6 +5269,33 @@ mod tests {
         let (state, _dir) = test_state(false);
         let Json(val) = api_build_info(State(state)).await;
         assert_eq!(val["dev_mode"], false);
+    }
+
+    // Names only: a root's path or a target's port never reaches the browser.
+    #[tokio::test]
+    async fn build_info_lists_served_page_names() {
+        let (state, _dir) = test_state(false);
+        let Json(val) = api_build_info(State(state)).await;
+        assert_eq!(val["files"], json!([]));
+        assert_eq!(val["proxies"], json!([]));
+
+        let (state, _dir) = test_state(false);
+        let mut settings = (*state.config).clone();
+        settings
+            .files
+            .roots
+            .insert("site".to_string(), "/srv/secret-site".to_string());
+        settings.proxy.targets.insert("up".to_string(), 8291);
+        let state = AppState {
+            config: Arc::new(settings),
+            ..state
+        };
+        let Json(val) = api_build_info(State(state)).await;
+        assert_eq!(val["files"], json!(["site"]));
+        assert_eq!(val["proxies"], json!(["up"]));
+        let body = val.to_string();
+        assert!(!body.contains("/srv/secret-site"), "leaked a path: {body}");
+        assert!(!body.contains("8291"), "leaked a port: {body}");
     }
 
     // ── TWA build: the toolchain pre-phase ────────────────────────────────

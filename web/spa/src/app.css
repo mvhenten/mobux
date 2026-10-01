@@ -324,3 +324,12 @@ body.term-body #app {
   border-bottom: 1px solid var(--border);
   color: var(--text);
 }
+
+/* Room under the last Pages row so the fixed "+" button never covers it. */
+.home-pages {
+  padding-bottom: 88px;
+}
+
+.home-pages {
+  padding-bottom: 88px;
+}
