@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use axum::{
     body::Body,
     extract::{Path as RoutePath, State},
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{header, HeaderValue, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -86,16 +86,17 @@ where
         .with_state(roots)
 }
 
-/// `/files/<name>` → `<name>/`. Relative, so the browser keeps whatever
+/// `/files/<name>` → `./<name>/`. Relative, so the browser keeps whatever
 /// prefix a proxy put in front, and relative assets resolve inside the root.
 async fn redirect_to_root(
     State(roots): State<Arc<FileRoots>>,
     RoutePath(name): RoutePath<String>,
+    uri: Uri,
 ) -> Response {
     if !roots.roots.contains_key(&name) {
         return unknown_root(&roots);
     }
-    relative_redirect(&format!("{}/", encode_segment(&name)))
+    relative_redirect(&encode_segment(&name), uri.query())
 }
 
 async fn serve(State(roots): State<Arc<FileRoots>>, req: Request<Body>) -> Response {
@@ -109,12 +110,18 @@ async fn serve(State(roots): State<Arc<FileRoots>>, req: Request<Body>) -> Respo
         return not_found();
     };
 
-    if !target.is_dir() {
+    let Ok(metadata) = std::fs::metadata(&target) else {
+        return not_found();
+    };
+    if metadata.is_file() {
         return serve_file(&target, req).await;
+    }
+    if !metadata.is_dir() {
+        return not_found();
     }
     if !rest.is_empty() && !rest.ends_with('/') {
         let last = rest.rsplit('/').next().unwrap_or_default();
-        return relative_redirect(&format!("{last}/"));
+        return relative_redirect(last, req.uri().query());
     }
     if let Some(index) = resolve_inside(root, &target.join("index.html")) {
         if index.is_file() {
@@ -159,7 +166,7 @@ fn resolve_inside(root: &Path, candidate: &Path) -> Option<PathBuf> {
 
 async fn serve_file(path: &Path, req: Request<Body>) -> Response {
     match ServeFile::new(path).try_call(req).await {
-        Ok(response) => response.map(Body::new),
+        Ok(response) => nosniff(response.map(Body::new)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => not_found(),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -185,11 +192,11 @@ fn listing(root: &Path, dir: &Path) -> Response {
         .filter_map(|entry| {
             let target = resolve_inside(root, &entry.path())?;
             let name = entry.file_name().into_string().ok()?;
-            Some(if target.is_dir() {
-                format!("{name}/")
-            } else {
-                name
-            })
+            let metadata = std::fs::metadata(&target).ok()?;
+            if metadata.is_dir() {
+                return Some(format!("{name}/"));
+            }
+            metadata.is_file().then_some(name)
         })
         .collect();
     names.sort();
@@ -211,7 +218,7 @@ fn listing(root: &Path, dir: &Path) -> Response {
             Some(bare) => (bare, "/"),
             None => (name.as_str(), ""),
         };
-        let href = format!("{}{slash}", encode_segment(bare));
+        let href = format!("./{}{slash}", encode_segment(bare));
         let text = html_escape::encode_text(&name);
         body.push_str(&format!(
             "<li><a href=\"{}\">{text}</a></li>\n",
@@ -219,16 +226,30 @@ fn listing(root: &Path, dir: &Path) -> Response {
         ));
     }
     body.push_str("</ul>\n");
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+    nosniff(([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response())
+}
+
+fn nosniff(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn encode_segment(segment: &str) -> String {
     utf8_percent_encode(segment, SEGMENT).to_string()
 }
 
-fn relative_redirect(location: &str) -> Response {
+/// `./<segment>/`, so a segment like `a:b` never reads as a URL scheme, with
+/// the query carried over.
+fn relative_redirect(segment: &str, query: Option<&str>) -> Response {
+    let location = match query {
+        Some(query) => format!("./{segment}/?{query}"),
+        None => format!("./{segment}/"),
+    };
     let mut response = StatusCode::TEMPORARY_REDIRECT.into_response();
-    if let Ok(value) = HeaderValue::from_str(location) {
+    if let Ok(value) = HeaderValue::from_str(&location) {
         response.headers_mut().insert(header::LOCATION, value);
     }
     response
@@ -422,7 +443,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(header_of(&response, header::CONTENT_TYPE).starts_with("text/html"));
         let body = body_text(response).await;
-        assert!(body.contains("<a href=\"note.txt\">note.txt</a>"), "{body}");
+        assert!(
+            body.contains("<a href=\"./note.txt\">note.txt</a>"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -431,8 +455,8 @@ mod tests {
         std::fs::remove_file(fixture.root.join("index.html")).unwrap();
         let response = get(app(&fixture, true), "/files/site/").await;
         let body = body_text(response).await;
-        assert!(body.contains("<a href=\"css/\">css/</a>"), "{body}");
-        assert!(body.contains("<a href=\"alias.css\">"), "{body}");
+        assert!(body.contains("<a href=\"./css/\">css/</a>"), "{body}");
+        assert!(body.contains("<a href=\"./alias.css\">"), "{body}");
         assert!(!body.contains("leak"), "{body}");
         assert!(!body.contains("href=\"/"), "{body}");
     }
@@ -443,7 +467,7 @@ mod tests {
         let response = get(app(&fixture, false), "/files/site").await;
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         let location = header_of(&response, header::LOCATION);
-        assert_eq!(location, "site/");
+        assert_eq!(location, "./site/");
 
         // A proxy strips its prefix before mobux sees the request; the browser
         // resolves the relative Location against the URL it asked for.
@@ -457,7 +481,7 @@ mod tests {
         let response = get(app(&fixture, true), "/files/site/css").await;
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         let location = header_of(&response, header::LOCATION);
-        assert_eq!(location, "css/");
+        assert_eq!(location, "./css/");
         assert_eq!(
             url_join(
                 "https://host/proxy/workspace/8080/files/site/css",
@@ -465,6 +489,78 @@ mod tests {
             ),
             "https://host/proxy/workspace/8080/files/site/css/"
         );
+    }
+
+    #[tokio::test]
+    async fn a_listing_href_never_reads_as_a_scheme() {
+        let fixture = fixture();
+        std::fs::write(fixture.root.join("bare/javascript:alert(1)"), "x").unwrap();
+        let response = get(app(&fixture, true), "/files/site/bare/").await;
+        let body = body_text(response).await;
+        let hrefs: Vec<&str> = body
+            .split("href=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(hrefs.len(), 2, "{body}");
+        for href in hrefs {
+            assert!(href.starts_with("./"), "{href}");
+        }
+        assert!(body.contains("href=\"./javascript:alert(1)\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_directory_named_like_a_scheme_redirects_below_the_page() {
+        let fixture = fixture();
+        std::fs::create_dir_all(fixture.root.join("a:b")).unwrap();
+        let response = get(app(&fixture, true), "/files/site/a:b").await;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(header_of(&response, header::LOCATION), "./a:b/");
+    }
+
+    #[tokio::test]
+    async fn both_redirects_keep_the_query() {
+        let fixture = fixture();
+        let response = get(app(&fixture, true), "/files/site?v=2&x=y").await;
+        assert_eq!(header_of(&response, header::LOCATION), "./site/?v=2&x=y");
+        let response = get(app(&fixture, true), "/files/site/css?v=2").await;
+        assert_eq!(header_of(&response, header::LOCATION), "./css/?v=2");
+    }
+
+    #[tokio::test]
+    async fn a_named_pipe_is_not_found_rather_than_read() {
+        let fixture = fixture();
+        let fifo = fixture.root.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(status.success());
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            get(app(&fixture, true), "/files/site/pipe"),
+        )
+        .await
+        .expect("a named pipe must not block the request");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_file(fixture.root.join("index.html")).unwrap();
+        let body = body_text(get(app(&fixture, true), "/files/site/").await).await;
+        assert!(!body.contains("pipe"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn files_and_listings_forbid_content_sniffing() {
+        let fixture = fixture();
+        for uri in ["/files/site/app.js", "/files/site/bare/"] {
+            let response = get(app(&fixture, true), uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                header_of(&response, header::X_CONTENT_TYPE_OPTIONS),
+                "nosniff",
+                "{uri}"
+            );
+        }
     }
 
     #[test]
@@ -481,6 +577,6 @@ mod tests {
     /// a relative path with no dot segments, merged onto the base's directory.
     fn url_join(base: &str, relative: &str) -> String {
         let directory = &base[..=base.rfind('/').unwrap()];
-        format!("{directory}{relative}")
+        format!("{directory}{}", relative.trim_start_matches("./"))
     }
 }

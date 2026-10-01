@@ -178,6 +178,10 @@ if one is missing. A path that resolves outside its root, through `..` or a
 symlink, answers 404. A directory serves its `index.html`, or a plain list of
 its entries when `files.listing` is true.
 
+`MOBUX_FILES` replaces the file's `files.roots` rather than adding to them. A
+repeated name keeps its last path, and a path cannot contain a comma; name such
+a directory in the config file instead.
+
 ```json
 { "files": { "roots": { "site": "/home/me/site" }, "listing": false } }
 ```
