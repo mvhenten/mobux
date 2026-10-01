@@ -82,6 +82,9 @@ pub struct Config {
     #[serde(default)]
     #[garde(dive)]
     pub proxy: ProxyConfig,
+    #[serde(default)]
+    #[garde(dive)]
+    pub mcp: McpConfig,
 }
 
 /// Where the server listens.
@@ -338,6 +341,18 @@ pub struct ProxyConfig {
     pub targets: BTreeMap<String, u16>,
 }
 
+/// The MCP server agents on the host reach at `http://127.0.0.1:<port>/mcp`.
+/// It binds loopback only and takes no credentials.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    /// Loopback port the MCP server listens on. `0` turns it off.
+    /// Env: `MOBUX_MCP_PORT`. Flag: `--mcp-port`.
+    #[serde(default)]
+    #[garde(skip)]
+    pub port: u16,
+}
+
 fn default_port() -> u16 {
     DEFAULT_PORT
 }
@@ -449,6 +464,8 @@ pub struct PartialConfig {
     pub files: Option<PartialFilesConfig>,
     #[serde(default)]
     pub proxy: Option<PartialProxyConfig>,
+    #[serde(default)]
+    pub mcp: Option<PartialMcpConfig>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +583,13 @@ pub struct PartialProxyConfig {
     pub targets: Option<BTreeMap<String, u16>>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialMcpConfig {
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
 impl PartialConfig {
     pub fn server_port(&self) -> Option<u16> {
         self.server.as_ref().and_then(|server| server.port)
@@ -635,6 +659,9 @@ impl Config {
         }
         if let Some(proxy) = partial.proxy {
             overlay(&mut self.proxy.targets, proxy.targets);
+        }
+        if let Some(mcp) = partial.mcp {
+            overlay(&mut self.mcp.port, mcp.port);
         }
         self
     }
@@ -872,6 +899,13 @@ pub const FIELDS: &[FieldSpec] = &[
         flag: Some("--access-service-token"),
         kind: FieldKind::List,
         help: "Client id of a service token the Access listener admits",
+    },
+    FieldSpec {
+        key: "mcp.port",
+        env: "MOBUX_MCP_PORT",
+        flag: Some("--mcp-port"),
+        kind: FieldKind::Number,
+        help: "Loopback port for the MCP server at /mcp; 0 turns it off",
     },
 ];
 
@@ -1168,7 +1202,30 @@ pub fn check(config: &Config) -> Result<(), String> {
     if !config.tls.acme_domains.is_empty() && config.tls.acme_email.trim().is_empty() {
         return Err("tls.acme_email: required when tls.acme_domains is set".to_string());
     }
-    check_access(config)
+    check_access(config)?;
+    check_mcp(config)
+}
+
+/// The MCP port shares the loopback interface with the other listeners, so it
+/// must not collide with either of them.
+pub fn check_mcp(config: &Config) -> Result<(), String> {
+    let port = config.mcp.port;
+    if port == 0 {
+        return Ok(());
+    }
+    if port == config.server.port {
+        return Err(format!(
+            "mcp.port: must differ from server.port ({})",
+            config.server.port
+        ));
+    }
+    if port == config.access.port {
+        return Err(format!(
+            "mcp.port: must differ from access.port ({})",
+            config.access.port
+        ));
+    }
+    Ok(())
 }
 
 /// The rules that keep the Access listener from starting open, per-field and
@@ -1359,6 +1416,9 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
         }),
         proxy: Some(PartialProxyConfig {
             targets: env.get(PROXY_ENV).map(split_port_map),
+        }),
+        mcp: Some(PartialMcpConfig {
+            port: env.get("MOBUX_MCP_PORT").and_then(parse_u16),
         }),
     }
 }
@@ -2962,6 +3022,26 @@ mod tests {
         assert!(message(r#"{"proxy": {"targets": {"vite": 0}}}"#).contains("port"));
         assert!(message(r#"{"proxy": {"targets": {"a/b": 80}}}"#).contains("letters"));
         assert!(message(r#"{"proxy": {"targets": {"vite": 70000}}}"#).contains("proxy"));
+    }
+
+    #[test]
+    fn the_mcp_server_is_off_by_default_and_env_turns_it_on() {
+        assert_eq!(Config::default().mcp.port, 0);
+        let config = resolve(
+            Config::default(),
+            PartialConfig::default(),
+            &env(&[("MOBUX_MCP_PORT", "8415")]),
+            PartialConfig::default(),
+        );
+        assert_eq!(config.mcp.port, 8415);
+    }
+
+    #[test]
+    fn an_mcp_port_equal_to_the_main_port_is_rejected() {
+        assert_eq!(
+            message(r#"{"server": {"port": 5151}, "mcp": {"port": 5151}}"#),
+            "config.json: mcp.port: must differ from server.port (5151)"
+        );
     }
 
     #[test]

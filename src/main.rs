@@ -50,6 +50,7 @@ mod files;
 mod host_suggestions;
 mod local_stt;
 mod local_tts;
+mod mcp;
 mod nodes;
 mod proxy;
 mod push;
@@ -151,8 +152,12 @@ fn strip_ansi(line: &str) -> String {
                 }
             }
             Some(']') => {
-                for c in chars.by_ref() {
-                    if c == '\u{7}' || c == '\u{1b}' {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next();
                         break;
                     }
                 }
@@ -463,6 +468,7 @@ async fn main() -> Result<()> {
     } else {
         println!("tmux alert-bell hook installed (internal port {internal_port})");
     }
+    spawn_mcp_server(&state, &settings).await?;
 
     let state_for_mw = state.clone();
     let app = Router::new()
@@ -581,7 +587,8 @@ async fn main() -> Result<()> {
         // answer, since no /app/* deep link exists to preserve.
         .route("/app", get(serve_spa_index))
         .route("/app/{*rest}", get(spa_deep_link_redirect))
-        .route("/static/{*path}", get(serve_static));
+        .route("/static/{*path}", get(serve_static))
+        .merge(mcp::absent());
 
     // Test-only: serve a fixed sparse-index body so the update checker can be
     // exercised hermetically (no live crates.io). Registered only when
@@ -684,6 +691,31 @@ async fn main() -> Result<()> {
         .await?;
     }
 
+    Ok(())
+}
+
+/// The MCP server gets its own fixed loopback port rather than a route on the
+/// internal listener, whose port is random and so cannot be registered with a
+/// client.
+async fn spawn_mcp_server(state: &AppState, settings: &config::Config) -> Result<()> {
+    let port = settings.mcp.port;
+    if port == 0 {
+        return Ok(());
+    }
+    let app = mcp::router(mcp::Context::new(
+        state.session_name_re.clone(),
+        state.db.clone(),
+        settings,
+    ));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .with_context(|| format!("binding the MCP server to 127.0.0.1:{port}"))?;
+    println!("mcp: http://127.0.0.1:{port}{}", mcp::PATH);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("mcp listener error: {e:#}");
+        }
+    });
     Ok(())
 }
 
@@ -5383,6 +5415,10 @@ mod tests {
         assert_eq!(
             strip_ansi("\u{1b}[1;34m[setup-twa]\u{1b}[0m Installing SDKMAN"),
             "[setup-twa] Installing SDKMAN"
+        );
+        assert_eq!(
+            strip_ansi("\u{1b}]8;;https://example.com\u{1b}\\link\u{1b}]8;;\u{1b}\\"),
+            "link"
         );
         assert_eq!(
             strip_ansi("\u{1b}]0;a title\u{7}plain"),

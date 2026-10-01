@@ -97,6 +97,22 @@ pub struct Payload {
     pub url: Option<String>,
 }
 
+/// What a caller that must not fail silently reports when no device would
+/// receive a push.
+pub const NO_SUBSCRIBED_DEVICE: &str =
+    "no subscribed device: open mobux on the phone and turn on notifications in Settings";
+
+/// Queue `payload` for every subscribed device and return how many there are.
+/// Fails when there is none, so a caller can say nothing will arrive.
+pub fn send_to_devices(db: Arc<Db>, contact: String, payload: Payload) -> anyhow::Result<usize> {
+    let devices = db.list_subscriptions()?.len();
+    if devices == 0 {
+        anyhow::bail!(NO_SUBSCRIBED_DEVICE);
+    }
+    tokio::spawn(notify(db, contact, payload));
+    Ok(devices)
+}
+
 /// Send `payload` as a Web Push notification to every subscribed device.
 /// `contact` is the resolved `push.vapid_contact` setting — RFC 8292 requires
 /// a `mailto:` or `https:` URL.

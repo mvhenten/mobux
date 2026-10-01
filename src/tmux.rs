@@ -888,12 +888,25 @@ pub async fn select_pane(session: &str, window_index: &str, target: Option<&str>
     Ok(())
 }
 
-/// Run a tmux command against a session.
-pub async fn run_command(session: &str, command: &str, target: Option<&str>) -> Result<String> {
+/// The commands [`run_command`] accepts.
+pub const COMMANDS: &[&str] = &[
+    "new-window",
+    "kill-window",
+    "split-h",
+    "split-v",
+    "next-window",
+    "prev-window",
+    "next-pane",
+    "prev-pane",
+    "kill-pane",
+    "zoom-pane",
+];
+
+fn command_args(session: &str, command: &str) -> Result<Vec<String>> {
     // Append ':' so tmux treats it as a session target, not a window index
     // (e.g. session "0" would otherwise target window 0)
     let win_target = format!("{}:", session);
-    let args: Vec<String> = match command {
+    Ok(match command {
         "new-window" => vec!["new-window".into(), "-t".into(), win_target],
         "kill-window" => vec!["kill-window".into(), "-t".into(), win_target],
         "split-h" => vec!["split-window".into(), "-h".into(), "-t".into(), win_target],
@@ -905,7 +918,12 @@ pub async fn run_command(session: &str, command: &str, target: Option<&str>) -> 
         "kill-pane" => vec!["kill-pane".into(), "-t".into(), win_target],
         "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), win_target],
         _ => return Err(anyhow!("unknown command: {}", command)),
-    };
+    })
+}
+
+/// Run a tmux command against a session.
+pub async fn run_command(session: &str, command: &str, target: Option<&str>) -> Result<String> {
+    let args = command_args(session, command)?;
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let output = tmux_command(target, &args_ref)
@@ -927,6 +945,40 @@ pub async fn run_command(session: &str, command: &str, target: Option<&str>) -> 
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn send_text_args(session: &str, text: &str, enter: bool) -> Vec<String> {
+    let pane = format!("{session}:");
+    let mut args: Vec<String> = Vec::new();
+    if !text.is_empty() {
+        args.extend(["send-keys", "-l", "-t", &pane, "--", text].map(String::from));
+    }
+    if enter {
+        if !args.is_empty() {
+            args.push(";".into());
+        }
+        args.extend(["send-keys", "-t", &pane, "Enter"].map(String::from));
+    }
+    args
+}
+
+/// Type `text` into the session's active pane as literal keystrokes, then
+/// Enter when `enter` is set.
+pub async fn send_text(session: &str, text: &str, enter: bool, target: Option<&str>) -> Result<()> {
+    let args = send_text_args(session, text, enter);
+    if args.is_empty() {
+        return Err(anyhow!("nothing to send: text is empty and enter is off"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = tmux_command(target, &args)
+        .output()
+        .await
+        .context("failed to execute tmux")?;
+    if !output.status.success() {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!("tmux send-keys failed: {}", msg));
+    }
+    Ok(())
 }
 
 /// Install a tmux server-wide `alert-bell` hook that POSTs to mobux's
@@ -1134,6 +1186,43 @@ fn parse_history_capture(out: &str, lines: u32, delim: &str) -> Option<HistoryCa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_listed_command_has_arguments() {
+        for command in COMMANDS {
+            assert!(command_args("work", command).is_ok(), "{command}");
+        }
+        assert!(command_args("work", "kill-server").is_err());
+    }
+
+    #[test]
+    fn send_text_types_literally_and_presses_enter_separately() {
+        assert_eq!(
+            send_text_args("work", "-n hi", true),
+            [
+                "send-keys",
+                "-l",
+                "-t",
+                "work:",
+                "--",
+                "-n hi",
+                ";",
+                "send-keys",
+                "-t",
+                "work:",
+                "Enter"
+            ]
+        );
+        assert_eq!(
+            send_text_args("work", "ls", false),
+            ["send-keys", "-l", "-t", "work:", "--", "ls"]
+        );
+        assert_eq!(
+            send_text_args("work", "", true),
+            ["send-keys", "-t", "work:", "Enter"]
+        );
+        assert!(send_text_args("work", "", false).is_empty());
+    }
 
     #[test]
     fn capture_history_args_default_scope_includes_the_screen() {
