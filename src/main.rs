@@ -332,7 +332,6 @@ struct AppState {
     session_history: Arc<session_history::SessionHistoryStore>,
 }
 
-/// The cookie that carries a logged-in session.
 const SESSION_COOKIE_NAME: &str = "mobux_session";
 
 #[derive(Clone)]
@@ -672,12 +671,16 @@ async fn main() -> Result<()> {
 
         println!("mobux listening on https://{}", addr);
         axum_server::bind_rustls(addr, rustls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
         println!("mobux listening on http://{}", addr);
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
     }
 
     Ok(())
