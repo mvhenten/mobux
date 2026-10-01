@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{self, ConfigureCommand};
 use crate::config::{self, AccessConfig, Config, FieldKind, FieldSpec, FieldValue, FIELDS};
-use crate::{PublicPath, PUBLIC_PATHS};
+use crate::{PublicPath, ACCESS_PUBLIC_PATHS};
 
 /// Fields whose current value is never echoed back.
 const SECRETS: &[&str] = &["auth.pass", "auth.pin"];
@@ -289,7 +289,7 @@ pub fn check_report(path: &Path, named: bool) -> Result<String, String> {
 /// The paths a Cloudflare Access bypass policy must leave open, as Access
 /// application paths: an exact path as is, a prefix with a trailing `*`.
 pub fn bypass_paths() -> Vec<String> {
-    PUBLIC_PATHS
+    ACCESS_PUBLIC_PATHS
         .iter()
         .map(|public| match public {
             PublicPath::Exact(path) => (*path).to_string(),
@@ -310,7 +310,7 @@ pub fn cloudflared_setup(config: &Config) -> Result<String, String> {
                 .to_string(),
         );
     }
-    config::check_access(config)?;
+    config::check_access(config).map_err(|message| message.replace('\n', "; "))?;
     let hostname = access.hostname.trim();
     if hostname.is_empty() {
         return Err("access.hostname: required to print the tunnel config".to_string());
@@ -373,15 +373,22 @@ pub fn run(command: &ConfigureCommand) -> i32 {
         }
         ConfigureCommand::Check(path) => check(path.as_deref()),
         ConfigureCommand::Interactive { force } => interactive(*force),
-        ConfigureCommand::Cloudflared => cloudflared(),
+        ConfigureCommand::Cloudflared(path) => cloudflared(path.as_deref()),
     }
 }
 
 /// The config the server would run with: the file, then the environment.
-fn cloudflared() -> i32 {
-    let path = config::config_file_path();
+fn cloudflared(named: Option<&str>) -> i32 {
+    let path = named
+        .map(PathBuf::from)
+        .unwrap_or_else(config::config_file_path);
     let file = match config::load_partial_from(&path) {
-        Ok(file) => file.unwrap_or_default(),
+        Ok(Some(file)) => file,
+        Ok(None) if named.is_some() => {
+            eprintln!("mobux: {}: no such file", path.display());
+            return 1;
+        }
+        Ok(None) => config::PartialConfig::default(),
         Err(error) => {
             eprintln!("mobux: {error}");
             return 1;
@@ -785,12 +792,9 @@ ingress:
 #      robot.access
 #
 # 2. Application with a Bypass policy (include Everyone) on these paths:
-#      mobux.example.com/api/identify
-#      mobux.example.com/install
-#      mobux.example.com/install/*
-#      mobux.example.com/.well-known/*
-#      mobux.example.com/static/icon-*
+#      mobux.example.com/.well-known/assetlinks.json
 #      mobux.example.com/static/manifest.json
+#      mobux.example.com/static/icon-*
 #      mobux.example.com/sw.js
 "
         );
@@ -808,40 +812,26 @@ ingress:
     }
 
     #[test]
-    fn the_bypass_paths_are_exactly_the_paths_the_guards_leave_open() {
-        let bypassed = |path: &str| {
-            bypass_paths()
-                .iter()
-                .any(|rule| match rule.strip_suffix('*') {
-                    Some(prefix) => path.starts_with(prefix),
-                    None => path == rule,
-                })
-        };
-        for path in [
-            "/api/identify",
-            "/install",
-            "/install/mobux.apk",
-            "/.well-known/assetlinks.json",
-            "/static/icon-192.png",
-            "/static/manifest.json",
-            "/sw.js",
-            "/",
-            "/app",
-            "/api/sessions",
-            "/api/identify/x",
-            "/installer",
-            "/static/app.js",
-            "/static/manifest.json.bak",
-            "/ws/0",
-        ] {
-            assert_eq!(
-                bypassed(path),
-                crate::is_public_path(path),
-                "the Access bypass and is_public_path disagree on {path}"
-            );
-        }
-        assert!(crate::is_public_path("/api/update/test-index"));
-        assert!(!bypassed("/api/update/test-index"));
+    fn the_access_bypass_is_the_asset_links_manifest_icons_and_service_worker() {
+        assert_eq!(
+            bypass_paths(),
+            [
+                "/.well-known/assetlinks.json",
+                "/static/manifest.json",
+                "/static/icon-*",
+                "/sw.js",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_access_block_is_reported_on_one_line() {
+        let mut config = tunnel_config();
+        config.access.aud = " ".to_string();
+        config.access.team_domain = "http://example.com/path".to_string();
+        let message = cloudflared_setup(&config).expect_err("the block is invalid");
+        assert!(!message.contains('\n'), "{message}");
+        assert!(message.contains("; "), "{message}");
     }
 
     #[test]

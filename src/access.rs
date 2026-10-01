@@ -360,8 +360,8 @@ impl AccessGuard {
     }
 }
 
-/// Guards every request on the Access listener: a public path passes as on the
-/// main listener, anything else needs a same-site `Origin` (or none) and a
+/// Guards every request on the Access listener: a path in
+/// `ACCESS_PUBLIC_PATHS` passes, anything else needs a same-site `Origin` (or none) and a
 /// verified Access token, and carries its [`Verified`] identity on to the
 /// handler. The PIN session is never consulted.
 pub async fn guard(
@@ -369,7 +369,7 @@ pub async fn guard(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if crate::is_public_path(request.uri().path()) {
+    if crate::is_access_public_path(request.uri().path()) {
         return next.run(request).await;
     }
     if !gate.origin_allowed(request.headers()) {
@@ -913,6 +913,7 @@ mod tests {
                 .route("/static/manifest.json", get(|| async { "manifest" }))
                 .route("/.well-known/assetlinks.json", get(|| async { "links" }))
                 .route("/api/identify", get(|| async { "mobux" }))
+                .route("/install/mobux-ca.crt", get(|| async { "ca" }))
                 .layer(axum::middleware::from_fn_with_state(
                     Arc::new(AccessGuard {
                         verifier: jwks.verifier(MIN_REFETCH_INTERVAL),
@@ -1106,13 +1107,21 @@ mod tests {
             for (path, expected) in [
                 ("/static/manifest.json", "manifest"),
                 ("/.well-known/assetlinks.json", "links"),
-                ("/api/identify", "mobux"),
             ] {
                 let response = call(&jwks, path, &[]).await;
                 assert_eq!(response.status(), StatusCode::OK, "{path}");
                 assert_eq!(body(response).await, expected);
             }
             assert_eq!(jwks.fetches(), 0);
+        }
+
+        #[tokio::test]
+        async fn the_install_files_and_identify_need_a_token() {
+            let jwks = Jwks::serve(&[KID]).await;
+            for path in ["/install/mobux-ca.crt", "/api/identify"] {
+                let response = call(&jwks, path, &[]).await;
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            }
         }
     }
 }

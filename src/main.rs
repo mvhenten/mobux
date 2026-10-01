@@ -906,9 +906,6 @@ fn load_auth_config(config_dir: &std::path::Path, settings: &config::Config) -> 
 /// `/api/identify` is intentionally unauthenticated: the self-update health
 /// check polls it on a freshly-restarted binary before any credentials exist.
 /// It leaks nothing beyond "this is mobux, version X".
-///
-/// `PUBLIC_PATHS` is also what `mobux configure --cloudflared` prints as the
-/// Access bypass paths, so the tunnel setup cannot drift from the guards.
 fn is_public_path(path: &str) -> bool {
     // Test-only update-index fixture: the background poller fetches it
     // without credentials, so it must bypass auth. Only ever routed when
@@ -923,7 +920,7 @@ pub enum PublicPath {
 }
 
 impl PublicPath {
-    fn matches(self, path: &str) -> bool {
+    pub fn matches(self, path: &str) -> bool {
         match self {
             PublicPath::Exact(exact) => path == exact,
             PublicPath::Prefix(prefix) => path.starts_with(prefix),
@@ -940,6 +937,23 @@ pub const PUBLIC_PATHS: &[PublicPath] = &[
     PublicPath::Exact("/static/manifest.json"),
     PublicPath::Exact("/sw.js"),
 ];
+
+/// The paths the Access listener leaves open: what Android's asset-links check
+/// and the manifest and icon fetches need without a sign-in. The install page,
+/// the APK, the CA and `/api/identify` stay behind Access. This table is also
+/// what `mobux configure --cloudflared` prints as the Access bypass paths.
+pub const ACCESS_PUBLIC_PATHS: &[PublicPath] = &[
+    PublicPath::Exact("/.well-known/assetlinks.json"),
+    PublicPath::Exact("/static/manifest.json"),
+    PublicPath::Prefix("/static/icon-"),
+    PublicPath::Exact("/sw.js"),
+];
+
+fn is_access_public_path(path: &str) -> bool {
+    ACCESS_PUBLIC_PATHS
+        .iter()
+        .any(|public| public.matches(path))
+}
 
 /// The startup warning for the one combination that leaks credentials: auth is
 /// on, TLS is off, and nothing else terminates it, so the password and the

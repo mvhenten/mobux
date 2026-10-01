@@ -410,9 +410,9 @@ email or service-token allowlist. The PIN plays no part here. A refused request
 gets 401 with a one-line reason and `WWW-Authenticate: Bearer
 realm="cloudflare-access"`. A request whose `Origin` is neither the
 request host nor `https://<access.hostname>` gets 403, since Cloudflare sends
-its cookie on cross-site requests too. The paths the main listener leaves open
-(`/api/identify`, `/install`, `/.well-known/`, `/static/manifest.json`,
-`/static/icon-*`, `/sw.js`) stay open here too.
+its cookie on cross-site requests too. Only `/.well-known/assetlinks.json`,
+`/static/manifest.json`, `/static/icon-*` and `/sw.js` are open without a
+token; the install page, the APK, the CA and `/api/identify` need one.
 
 Terminal WebSockets get a ping every 30 seconds, on both listeners, so
 Cloudflare does not close an idle terminal. A port that cannot be bound stops
@@ -437,25 +437,28 @@ Access in front and mobux checking every Access token itself.
    `port`, `team_domain`, `hostname` and `allowed_emails`. Put any placeholder
    in `aud` for now; step 4 replaces it.
 
-3. Print the tunnel config and write it to `~/.cloudflared/config.yml`:
+3. Print the tunnel config and move it to `~/.cloudflared/config.yml`. Name the
+   config file if the service runs with `--config`:
 
    ```bash
-   mobux configure --cloudflared > ~/.cloudflared/config.yml
+   mobux configure --cloudflared > ~/.cloudflared/config.yml.new
+   mv ~/.cloudflared/config.yml.new ~/.cloudflared/config.yml
    ```
 
    Fill in `<TUNNEL-ID>` and `<user>` from step 1. The ingress points at
    `http://127.0.0.1:<access.port>` and answers 404 for any other hostname.
    WebSockets need no extra setting. Start it with `cloudflared tunnel run mobux`
-   or `cloudflared service install`.
+   or `cloudflared service install`, which on Linux needs root and reads
+   `/etc/cloudflared/config.yml` instead.
 
 4. In Zero Trust, add the two self-hosted applications the output lists:
    - the hostname, with an Allow policy for the printed emails. Set the session
      duration to 24 hours or longer; when it lapses, mobux shows "Sign in
      again". Copy the application's AUD tag into `access.aud` and restart mobux.
-   - the printed bypass paths, with a Bypass policy that includes Everyone. The
-     install page, the asset-links file, the manifest, the icons, the service
-     worker and `/api/identify` must load without a sign-in, or the Android app
-     and the self-update check fail.
+   - the printed bypass paths, with a Bypass policy that includes Everyone.
+     Android's asset-links check and the manifest and icon fetches send no
+     sign-in, so these paths must load without one. The install page, the APK
+     and the CA stay behind Access.
 
 5. For scripts, create a service token under Access > Service Auth, add its
    client ID to `access.service_tokens`, and add a Service Auth policy for it

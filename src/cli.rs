@@ -85,7 +85,7 @@ pub enum ConfigureCommand {
     /// Validate a config file: the named one, or the one in the config dir.
     Check(Option<String>),
     /// Print the cloudflared ingress and the Access application settings.
-    Cloudflared,
+    Cloudflared(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,7 +217,10 @@ fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
             }
             "--interactive" | "-i" => ConfigureCommand::Interactive { force: false },
             "--schema" => ConfigureCommand::Schema,
-            "--cloudflared" => ConfigureCommand::Cloudflared,
+            "--cloudflared" => {
+                let path = args.next_if(|next| !next.starts_with('-'));
+                ConfigureCommand::Cloudflared(path)
+            }
             "--check" => {
                 let path = args.next_if(|next| !next.starts_with('-'));
                 ConfigureCommand::Check(path)
@@ -225,7 +228,7 @@ fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
             _ => {
                 return Parsed::Invalid(format!(
                     "unknown argument {arg:?} — `mobux configure` takes --interactive, --schema, \
-                     --check [PATH], --cloudflared or --force"
+                     --check [PATH], --cloudflared [PATH] or --force"
                 ))
             }
         };
@@ -246,7 +249,7 @@ fn parse_configure<I: Iterator<Item = String>>(args: I) -> Parsed {
             "--force applies to the walkthrough, not to {}",
             match other {
                 ConfigureCommand::Schema => "--schema",
-                ConfigureCommand::Cloudflared => "--cloudflared",
+                ConfigureCommand::Cloudflared(_) => "--cloudflared",
                 _ => "--check",
             }
         )),
@@ -386,7 +389,7 @@ pub fn help_text(version: &str) -> String {
 Usage: mobux [OPTIONS]
        mobux service <install|uninstall|status> [OPTIONS]
        mobux update [--check]
-       mobux configure [--force | --schema | --check [PATH] | --cloudflared]
+       mobux configure [--force | --schema | --check [PATH] | --cloudflared [PATH]]
 
 Commands:
   service install     Install and start a systemd --user service that survives
@@ -407,8 +410,9 @@ Commands:
   configure --schema  Print the JSON schema for config.json
   configure --check   Validate a config file and report what is wrong with it
   configure --cloudflared
-                      Print the cloudflared config.yml for the access block and
-                      the Cloudflare Access application settings
+                      Print the cloudflared config.yml for the access block of
+                      the named or default config file, and the Cloudflare
+                      Access application settings
 
 Options:
 "
@@ -747,7 +751,17 @@ mod tests {
         );
         assert_eq!(
             parse(args(&["configure", "--cloudflared"])),
-            Parsed::Configure(ConfigureCommand::Cloudflared)
+            Parsed::Configure(ConfigureCommand::Cloudflared(None))
+        );
+        assert_eq!(
+            parse(args(&[
+                "configure",
+                "--cloudflared",
+                "/etc/mobux/config.json"
+            ])),
+            Parsed::Configure(ConfigureCommand::Cloudflared(some(
+                "/etc/mobux/config.json"
+            )))
         );
     }
 
