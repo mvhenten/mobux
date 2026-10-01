@@ -13,14 +13,19 @@ import { localGet } from "../lib/api.js";
 // nothing (or finding nothing yet).
 
 const suggestions = signal(null); // null = loading, [] = none found
+const signedOutOfAccess = signal(false);
 
 async function loadSuggestions() {
   suggestions.value = null;
+  signedOutOfAccess.value = false;
   try {
     const data = await localGet("/api/host-suggestions");
     suggestions.value = Array.isArray(data?.hosts) ? data.hosts : [];
-  } catch (_e) {
-    // Best-effort: a failed fetch means "nothing detected", never an error.
+  } catch (e) {
+    // Best-effort: a failed detection means "nothing detected". A lapsed
+    // Access session is not that: the signed-out notice is showing, and the
+    // sheet says why it has nothing.
+    signedOutOfAccess.value = e?.signedOut === true;
     suggestions.value = [];
   }
 }
@@ -82,7 +87,12 @@ export function HostSuggestionSheet({ open, value, onChange, onClose }) {
         </div>
         <div class="picker-body">
           {list == null && <p class="hint picker-hint">Searching…</p>}
-          {list && list.length === 0 && (
+          {signedOutOfAccess.value && (
+            <p class="hint picker-hint">
+              Signed out of Cloudflare Access: sign in again to detect hosts.
+            </p>
+          )}
+          {list && list.length === 0 && !signedOutOfAccess.value && (
             <p class="hint picker-hint">No hosts detected. Type one above.</p>
           )}
           {list &&

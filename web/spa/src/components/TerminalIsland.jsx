@@ -5,6 +5,7 @@ import { getPref } from "../lib/prefs.js";
 import { readLoadedBundleHash } from "../lib/bundleHash.js";
 import { createViewController } from "../lib/viewController.js";
 import { u } from "../lib/base.js";
+import { probeSession } from "../lib/accessSession.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -189,6 +190,16 @@ export function TerminalIsland({ node, session }) {
         build: readLoadedBundleHash() || "",
         viewToggle,
         readToggle,
+      });
+
+      // A socket that closes may be a lapsed Cloudflare Access session, which
+      // a WebSocket cannot tell apart from a network blip. One probe per close
+      // decides (a close the engine asked for needs none); signed out, the reconnect loop stops and the app shows the
+      // signed-out notice instead of a dead terminal.
+      const core = engine.core;
+      core.addEventListener("close", async () => {
+        if (core.intentionalClose) return;
+        if (await probeSession()) core.suspend();
       });
 
       // The reader and read mode are sibling components mounted next to the

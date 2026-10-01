@@ -319,6 +319,13 @@ fn rejection_for(kind: &ErrorKind) -> Rejection {
     }
 }
 
+/// Marks a request that arrived on the Access listener. Set by [`guard`] on
+/// every request it sees, public paths included, so a handler learns which
+/// listener served it from the listener itself and never from a header the
+/// client could send.
+#[derive(Clone, Copy, Debug)]
+pub struct ViaAccess;
+
 /// The Access listener's gate: the token verifier plus the public hostname a
 /// browser on the tunnel sends as its `Origin`.
 pub struct AccessGuard {
@@ -369,6 +376,7 @@ pub async fn guard(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    request.extensions_mut().insert(ViaAccess);
     if crate::is_access_public_path(request.uri().path()) {
         return next.run(request).await;
     }
@@ -393,18 +401,24 @@ pub async fn guard(
         Err(rejection) => {
             match rejection.detail() {
                 Some(detail) => eprintln!(
-                    "[access] 401 {}: {rejection}: {detail}",
+                    "[access] 503 {}: {rejection}: {detail}",
                     request.uri().path()
                 ),
                 None => eprintln!("[access] 401 {}: {rejection}", request.uri().path()),
             }
-            unauthorized(&rejection)
+            refused(&rejection)
         }
     }
 }
 
-fn unauthorized(rejection: &Rejection) -> Response {
+/// A key-fetch outage is mobux failing, not the user signing out: it answers
+/// 503 without the challenge, so the client shows an error and not the
+/// signed-out notice.
+fn refused(rejection: &Rejection) -> Response {
     let body = format!("{rejection}\n");
+    if matches!(rejection, Rejection::KeysUnavailable(_)) {
+        return (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+    }
     let mut response = (StatusCode::UNAUTHORIZED, body).into_response();
     response.headers_mut().insert(
         header::WWW_AUTHENTICATE,
@@ -907,6 +921,10 @@ mod tests {
             )
         }
 
+        async fn via_access(marker: Option<Extension<ViaAccess>>) -> String {
+            format!("via_access={}", marker.is_some())
+        }
+
         fn router(jwks: &Jwks) -> Router {
             Router::new()
                 .route("/api/sessions", get(seen))
@@ -914,6 +932,7 @@ mod tests {
                 .route("/.well-known/assetlinks.json", get(|| async { "links" }))
                 .route("/api/identify", get(|| async { "mobux" }))
                 .route("/install/mobux-ca.crt", get(|| async { "ca" }))
+                .route("/api/build-info", get(via_access))
                 .layer(axum::middleware::from_fn_with_state(
                     Arc::new(AccessGuard {
                         verifier: jwks.verifier(MIN_REFETCH_INTERVAL),
@@ -980,6 +999,15 @@ mod tests {
                 body(response).await,
                 "Email(\"owner@example.com\") assertion=false cookie=theme=dark; lang=nl"
             );
+        }
+
+        #[tokio::test]
+        async fn marks_an_admitted_request_as_arriving_through_access() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let token = sign(KID, &jwks.claims());
+            let response = call(&jwks, "/api/build-info", &[(ASSERTION_HEADER, &token)]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await, "via_access=true");
         }
 
         #[tokio::test]
@@ -1090,12 +1118,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn keeps_the_key_fetch_error_out_of_the_response() {
+        async fn answers_a_key_fetch_outage_with_a_503_and_no_challenge() {
             let jwks = Jwks::serve(&[KID]).await;
             jwks.failing.store(true, Ordering::SeqCst);
             let token = sign(KID, &jwks.claims());
             let response = call(&jwks, "/api/sessions", &[(ASSERTION_HEADER, &token)]).await;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
             let body = body(response).await;
             assert_eq!(body, "the team's signing keys could not be fetched\n");
             assert!(!body.contains(&jwks.origin), "{body}");

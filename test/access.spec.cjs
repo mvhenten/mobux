@@ -354,3 +354,290 @@ test("access: the Access listener is reachable on loopback only", async () => {
   expect(await connects("127.0.0.1", ACCESS_PORT)).toBe(true);
   expect(await connects(lan, ACCESS_PORT)).toBe(false);
 });
+
+const UI_SESSION = `access-ui-${process.pid}`;
+const ACCESS_UPLOAD_LIMIT = 100 * 1024 * 1024;
+const OVERSIZED_UPLOAD = path.join(DATA_DIR, "access-oversized-upload.bin");
+
+function signInUrl(url) {
+  const target = new URL(url);
+  target.searchParams.set("mobux_route", target.hash);
+  return target.href;
+}
+
+async function buildInfo(base, headers) {
+  const response = await fetch(`${base}/api/build-info`, { headers });
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
+test("access: build-info reports the Access listener and its upload limit", async () => {
+  const viaAccess = await buildInfo(ACCESS, { [ASSERTION]: sign() });
+  expect(viaAccess.via_access).toBe(true);
+  expect(viaAccess.upload_limit_bytes).toBe(ACCESS_UPLOAD_LIMIT);
+
+  const main = await buildInfo(BASE, BASIC ? { Authorization: BASIC } : {});
+  expect(main.via_access).toBe(false);
+  expect(main.upload_limit_bytes).toBeGreaterThan(ACCESS_UPLOAD_LIMIT);
+});
+
+test("access: a client header never claims the Access listener", async () => {
+  const main = await buildInfo(BASE, {
+    ...(BASIC ? { Authorization: BASIC } : {}),
+    [ASSERTION]: sign(),
+    "X-Via-Access": "true",
+  });
+  expect(main.via_access).toBe(false);
+});
+
+async function accessPage(browser, options = {}) {
+  const context = await browser.newContext({
+    ...options,
+    extraHTTPHeaders: { [ASSERTION]: sign() },
+  });
+  return { context, page: await context.newPage() };
+}
+
+test("access: the install page skips the CA step on the tunnel", async ({
+  browser,
+  page,
+}) => {
+  const tunnel = await accessPage(browser);
+  await tunnel.page.goto(`${ACCESS}/app#/install`);
+  await expect(
+    tunnel.page.getByRole("heading", { name: "1. Install the app" }),
+  ).toBeVisible();
+  await expect(tunnel.page.locator("#installCaStep")).toHaveCount(0);
+  await tunnel.context.close();
+
+  await page.goto(`${BASE}/app#/install`);
+  await expect(page.locator("#installCaStep")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "2. Install the app" }),
+  ).toBeVisible();
+});
+
+const CLOUDFLARE_LOGIN =
+  "https://smoke.cloudflareaccess.com/cdn-cgi/access/login/mobux.example.com";
+
+function answerLikeAnExpiredSession(route) {
+  return route.fulfill({
+    status: 302,
+    headers: { location: CLOUDFLARE_LOGIN },
+    body: "",
+  });
+}
+
+test("access: a lapsed session shows the signed-out notice, never an empty list", async ({
+  browser,
+}) => {
+  const { context, page } = await accessPage(browser);
+  await page.route(/\/api\/sessions(\?.*)?$/, answerLikeAnExpiredSession, {
+    times: 1,
+  });
+  await page.goto(`${ACCESS}/app#/`);
+
+  const notice = page.locator("#signedOutNotice");
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("Cloudflare Access session has ended");
+  await expect(page.getByText("No tmux sessions")).toHaveCount(0);
+
+  const signIn = page.locator("#signInAgain");
+  await expect(signIn).toHaveAttribute("href", signInUrl(page.url()));
+  await signIn.click();
+  await expect(page).toHaveURL(`${ACCESS}/app#/`);
+  await expect(page.locator(".app-wordmark")).toBeVisible();
+  await expect(page.locator("#signedOutNotice")).toHaveCount(0);
+  await context.close();
+});
+
+test("access: signing in again restores the route a login dropped", async ({
+  browser,
+}) => {
+  const { context, page } = await accessPage(browser);
+  await page.goto(
+    `${ACCESS}/app?mobux_route=${encodeURIComponent("#/install")}`,
+  );
+  await expect(page).toHaveURL(`${ACCESS}/app#/install`);
+  await expect(
+    page.getByRole("heading", { name: "1. Install the app" }),
+  ).toBeVisible();
+  await context.close();
+});
+
+async function openAccessTerminal(page) {
+  const listed = await fetch(`${ACCESS}/api/sessions`, {
+    headers: { [ASSERTION]: sign() },
+  });
+  const sessions = (await listed.json()).map((s) => s.name ?? s);
+  if (!sessions.includes(UI_SESSION)) {
+    const created = await fetch(`${ACCESS}/api/sessions`, {
+      method: "POST",
+      headers: { [ASSERTION]: sign(), "content-type": "application/json" },
+      body: JSON.stringify({ name: UI_SESSION }),
+    });
+    expect(created.status).toBe(200);
+  }
+  await page.goto(`${ACCESS}/app#/s/${UI_SESSION}`);
+  await page.waitForFunction(() => !!window.__mobuxView);
+}
+
+test("access: a terminal that drops while signed out shows the notice", async ({
+  browser,
+}) => {
+  const { context, page } = await accessPage(browser);
+  let socket = null;
+  await page.routeWebSocket(/\/ws\//, (ws) => {
+    ws.connectToServer();
+    socket = ws;
+  });
+  await openAccessTerminal(page);
+  await expect.poll(() => socket !== null).toBe(true);
+  await expect(page.locator("#signedOutNotice")).toHaveCount(0);
+
+  await page.route(/\/api\/build-info$/, answerLikeAnExpiredSession);
+  await socket.close();
+
+  await expect(page.locator("#signedOutNotice")).toBeVisible();
+  await expect(page.locator("#signInAgain")).toHaveAttribute(
+    "href",
+    signInUrl(page.url()),
+  );
+  await context.close();
+});
+
+// Sparse, so it costs no disk. Exactly the limit: the multipart envelope
+// around it would take the body over Cloudflare's cap.
+function oversizedFile() {
+  fs.writeFileSync(OVERSIZED_UPLOAD, "");
+  fs.truncateSync(OVERSIZED_UPLOAD, ACCESS_UPLOAD_LIMIT);
+  return OVERSIZED_UPLOAD;
+}
+
+test("access: an upload over the tunnel's limit is refused before it is sent", async ({
+  browser,
+}) => {
+  const { context, page } = await accessPage(browser, {
+    viewport: { width: 1280, height: 800 },
+    hasTouch: false,
+    isMobile: false,
+  });
+  const uploads = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/upload")) uploads.push(request.url());
+  });
+  await openAccessTerminal(page);
+
+  await expect(page.locator("#mobux-top-bar")).toHaveCount(1);
+  const file = oversizedFile();
+  for (const input of await page.locator('input[type="file"]').all()) {
+    await input.setInputFiles(file);
+  }
+
+  const surface = page.locator("#mobux-top-bar .mobux-attach-error");
+  await expect(surface).toBeVisible();
+  await expect(surface).toContainText(
+    "Attach failed: upload refused: over the 100 MB limit on this connection",
+  );
+  expect(uploads).toEqual([]);
+  await context.close();
+});
+
+function postDeclaredUpload(length) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(`${ACCESS}/api/upload`, {
+      method: "POST",
+      headers: {
+        [ASSERTION]: sign(),
+        "content-type": "multipart/form-data; boundary=x",
+        "content-length": String(length),
+      },
+    });
+    request.once("response", (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        request.destroy();
+        resolve({ status: response.statusCode, body });
+      });
+    });
+    request.once("error", reject);
+    request.flushHeaders();
+  });
+}
+
+test("access: the server refuses an over-limit upload with a one-line 413", async () => {
+  const { status, body } = await postDeclaredUpload(150_000_000);
+  expect(status).toBe(413);
+  expect(body).toBe(
+    "upload refused: the file is larger than the 100 MB limit on this connection",
+  );
+});
+
+function postChunkedUpload(bytes) {
+  return new Promise((resolve, reject) => {
+    let answered = false;
+    const request = http.request(`${ACCESS}/api/upload`, {
+      method: "POST",
+      headers: {
+        [ASSERTION]: sign(),
+        "content-type": "multipart/form-data; boundary=x",
+        "transfer-encoding": "chunked",
+      },
+    });
+    request.once("response", (response) => {
+      answered = true;
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        request.destroy();
+        resolve({ status: response.statusCode, body });
+      });
+    });
+    request.on("error", (error) => {
+      if (!answered) reject(error);
+    });
+    const chunk = Buffer.alloc(1024 * 1024, "a");
+    let sent = 0;
+    const pump = () => {
+      if (sent === 0) {
+        request.write(
+          '--x\r\ncontent-disposition: form-data; name="file"; filename="big.bin"\r\n\r\n',
+        );
+      }
+      while (!answered && sent < bytes) {
+        sent += chunk.length;
+        if (!request.write(chunk)) {
+          request.once("drain", pump);
+          return;
+        }
+      }
+      if (!answered) request.end("\r\n--x--\r\n");
+    };
+    pump();
+  });
+}
+
+test("access: the server refuses a chunked upload over the limit with a 413", async () => {
+  const { status, body } = await postChunkedUpload(
+    ACCESS_UPLOAD_LIMIT + 2 * 1024 * 1024,
+  );
+  expect(status).toBe(413);
+  expect(body).toBe(
+    "upload refused: the file is larger than the 100 MB limit on this connection",
+  );
+});
+
+test.afterAll(async () => {
+  fs.rmSync(OVERSIZED_UPLOAD, { force: true });
+  await fetch(`${ACCESS}/api/sessions/${UI_SESSION}/kill`, {
+    method: "POST",
+    headers: { [ASSERTION]: sign() },
+  }).catch(() => {});
+});

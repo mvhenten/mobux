@@ -28,13 +28,13 @@ const AUTH =
     : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-critical";
 
-const { createTmuxRunner } = require("./lib/tmux.cjs");
+const { createTmuxRunner, SMOKE_TMUX_SOCKET } = require("./lib/tmux.cjs");
 const terminalPage = require("./lib/terminal-page.cjs");
 const { touch } = terminalPage;
 
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),

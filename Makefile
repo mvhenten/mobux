@@ -8,6 +8,10 @@ MOBUX_PORT       ?= 5151
 MOBUX_DEV_PORT   ?= 5152
 MOBUX_SMOKE_PORT ?= 8281
 MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
+# tmux server (-L) the smoke instance and the specs drive (exported to both);
+# set it per checkout to run smoke instances side by side.
+MOBUX_SMOKE_TMUX ?= mobux-test
+export MOBUX_SMOKE_TMUX
 # Loopback port the smoke instance proxies as `up`; test/proxy.spec.cjs
 # starts its fixture server there.
 MOBUX_PROXY_FIXTURE_PORT ?= $(shell expr $(MOBUX_SMOKE_PORT) + 10)
@@ -194,10 +198,10 @@ smoke-start: build
 	@# The tests create and kill sessions on this server; with exit-empty on,
 	@# killing the last one would take the server down under the next test.
 	@env -u TMUX -u TMUX_PANE HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
-		tmux -L mobux-test start-server \; set-option -s exit-empty off
+		tmux -L $(MOBUX_SMOKE_TMUX) start-server \; set-option -s exit-empty off
 	@nohup env MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) MOBUX_TLS=0 \
 		HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
-		MOBUX_TMUX_SOCKET=mobux-test \
+		MOBUX_TMUX_SOCKET=$(MOBUX_SMOKE_TMUX) \
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
@@ -216,7 +220,7 @@ smoke-start: build
 
 smoke-stop:
 	@if [ -n "$(SMOKE_PID)" ]; then kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"; else echo "smoke not running"; fi
-	@env -u TMUX -u TMUX_PANE tmux -L mobux-test kill-server 2>/dev/null || true
+	@env -u TMUX -u TMUX_PANE tmux -L $(MOBUX_SMOKE_TMUX) kill-server 2>/dev/null || true
 
 smoke-logs:
 	@tail -f $(MOBUX_SMOKE_DATA)/mobux.log

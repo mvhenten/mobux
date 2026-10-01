@@ -13,6 +13,7 @@
 // callbacks so behavior stays identical per surface.
 
 import { u } from './base.js';
+import { accessFetch, signedOutResponse } from './access-session.js';
 import telemetry from './telemetry.js';
 import { createMicOverlay, faultMessage } from './mic-overlay.js';
 import { openExternal } from './external-link.js';
@@ -27,6 +28,62 @@ import { openExternal } from './external-link.js';
 function withNode(path, node) {
   if (!node) return path;
   return `${path}${path.includes('?') ? '&' : '?'}node=${encodeURIComponent(node)}`;
+}
+
+// The largest file the listener that served this page takes: 100 MB through
+// the Cloudflare tunnel, more on the tailnet. Read from /api/build-info once;
+// a failed read is not cached and leaves the check to the server's 413.
+let uploadLimit = null;
+
+function uploadLimitBytes() {
+  uploadLimit ??= fetch(u('api/build-info'), {
+    headers: { Accept: 'application/json' },
+    redirect: 'manual',
+  })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((info) => info?.upload_limit_bytes ?? null)
+    .catch(() => null)
+    .then((limit) => {
+      if (limit === null) uploadLimit = null;
+      return limit;
+    });
+  return uploadLimit;
+}
+
+// Cloudflare limits the whole request body, so the multipart boundaries and
+// part headers around the file count against the limit too.
+const MULTIPART_ALLOWANCE_BYTES = 64 * 1024;
+
+const megabytes = (bytes) => Math.floor(bytes / (1024 * 1024));
+
+export function uploadTooLargeMessage(limit) {
+  return `upload refused: over the ${megabytes(limit)} MB limit on this connection`;
+}
+
+// POST one file to /api/upload. Refuses a file over the limit before sending
+// a byte, turns a lapsed Access session into the app's signed-out notice, and
+// names the limit when Cloudflare's own HTML 413 page answers instead of
+// mobux.
+async function postUpload(file, filename, node) {
+  const limit = await uploadLimitBytes();
+  if (limit !== null && file.size > limit - MULTIPART_ALLOWANCE_BYTES) {
+    throw new Error(uploadTooLargeMessage(limit));
+  }
+  const form = new FormData();
+  if (filename) form.append('file', file, filename);
+  else form.append('file', file);
+  const res = await accessFetch(withNode(u('api/upload'), node), {
+    method: 'POST',
+    body: form,
+  });
+  if (signedOutResponse(res)) {
+    throw new Error('signed out of Cloudflare Access; sign in again');
+  }
+  if (res.status === 413 && (res.headers.get('content-type') || '').includes('html')) {
+    res.body?.cancel().catch(() => {});
+    throw new Error(limit !== null ? uploadTooLargeMessage(limit) : 'upload refused: the file is over the upload limit');
+  }
+  return res;
 }
 
 // ── Inline attach-error surface ──────────────────────────────────────
@@ -247,9 +304,7 @@ export function createAttachAction({ send, node, button, errorContainer } = {}) 
   const errorSurface = createAttachErrorSurface(errorContainer, node);
 
   async function uploadFile(file) {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch(withNode(u('api/upload'), node), { method: 'POST', body: form });
+    const res = await postUpload(file, null, node);
     if (!res.ok) throw new Error(await res.text());
     const { path } = await res.json();
     // A prior failure's surface must not linger once an attempt succeeds.
@@ -738,13 +793,11 @@ export function createDictateAction({ send, node, button, onText } = {}) {
     let path;
     try {
       const wav = encodeWav(mic.pendingChunks, mic.pendingRate);
-      const form = new FormData();
-      form.append('file', wav, `dictation-${Date.now()}.wav`);
       telemetry.log('mic.audio.upload.req', {
         bytes: wav.size,
         durationMs: mic.pendingDurationMs,
       });
-      const res = await fetch(withNode(u('api/upload'), node), { method: 'POST', body: form });
+      const res = await postUpload(wav, `dictation-${Date.now()}.wav`, node);
       if (destroyed) return;
       if (!res.ok) {
         const bodyText = await res.text().catch(() => '');

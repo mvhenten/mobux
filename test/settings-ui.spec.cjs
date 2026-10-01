@@ -4,7 +4,7 @@
 // Runs on the smoke instance with the rest of `make test-spa`.
 
 const { test, expect } = require("./fixtures.cjs");
-const { createTmuxRunner } = require("./lib/tmux.cjs");
+const { createTmuxRunner, SMOKE_TMUX_SOCKET } = require("./lib/tmux.cjs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
 const APP = `${BASE}/app`;
@@ -16,7 +16,7 @@ const AUTH =
     : null;
 
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 const SESSION = `settings-ui-${process.pid}`;
 
 test.use({

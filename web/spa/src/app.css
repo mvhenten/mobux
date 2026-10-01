@@ -333,3 +333,32 @@ body.term-body #app {
 .home-pages {
   padding-bottom: 88px;
 }
+
+.signed-out-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 2px solid var(--danger);
+  color: var(--text);
+  position: relative;
+  z-index: 50;
+}
+
+.signed-out-text {
+  flex: 1 1 200px;
+}
+
+.signed-out-action {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--on-accent);
+  text-decoration: none;
+  font-weight: 600;
+}

@@ -10,16 +10,20 @@ const AUTH =
     : null;
 const SESSION = process.env.MOBUX_TEST_SESSION || "mobux-smoke";
 
-const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
+const {
+  createTmuxRunner,
+  SMOKE_TMUX_SOCKET,
+  waitForClientAttached,
+} = require("./lib/tmux.cjs");
 
-// Runs against a dedicated tmux server (`tmux -L mobux-test`) so tests
+// Runs against a dedicated tmux server (`tmux -L $MOBUX_SMOKE_TMUX`, default mobux-test) so tests
 // never touch the host's default tmux server — see test/lib/tmux.cjs for
 // the isolation guarantees. Override with `MOBUX_TEST_TMUX` to target a
 // containerized mobux's tmux server, e.g.
 // `MOBUX_TEST_TMUX="podman exec mobux-podman tmux"` for `make podman-test`.
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 
 test.use({
   ...(AUTH ? { extraHTTPHeaders: { Authorization: AUTH } } : {}),

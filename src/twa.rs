@@ -34,6 +34,27 @@ pub fn apk_path(data_dir: &Path) -> PathBuf {
     data_dir.join("install").join("mobux.apk")
 }
 
+/// What a finished build records next to the package: the host it was
+/// signed for, so the install page names what the installed app opens rather
+/// than what a new build would use.
+pub fn build_record_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("install").join("mobux.apk.json")
+}
+
+pub fn record_build(data_dir: &Path, domain: &str) -> Result<()> {
+    let path = build_record_path(data_dir);
+    let record = serde_json::json!({ "domain": domain });
+    std::fs::write(&path, record.to_string()).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The host the package on disk was built for. `None` for a package with no
+/// record, such as one a checkout's `make twa` produced.
+pub fn built_domain(data_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(build_record_path(data_dir)).ok()?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    record["domain"].as_str().map(str::to_owned)
+}
+
 pub fn assetlinks_path(data_dir: &Path) -> PathBuf {
     data_dir.join(".well-known").join("assetlinks.json")
 }
@@ -225,6 +246,19 @@ pub fn resolve_domain(
     validate_domain(domain).map(|_| domain.to_string())
 }
 
+/// [`resolve_domain`] with the Cloudflare Access hostname ahead of both: a
+/// package bound to the tunnel opens one origin, whichever address built it.
+pub fn pinned_domain(
+    access_hostname: Option<&str>,
+    configured: Option<&str>,
+    host_header: Option<&str>,
+) -> Result<String, String> {
+    match access_hostname.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(hostname) => resolve_domain(Some(hostname), None),
+        None => resolve_domain(configured, host_header),
+    }
+}
+
 fn validate_domain(domain: &str) -> Result<(), String> {
     if domain.is_empty() {
         return Err("empty domain".to_string());
@@ -277,6 +311,31 @@ mod tests {
     }
 
     #[test]
+    fn the_access_hostname_wins_over_the_configured_domain_and_the_host_header() {
+        assert_eq!(
+            pinned_domain(
+                Some("mobux.example.com"),
+                Some("pinned.example.com"),
+                Some("box.tailnet.ts.net:5151")
+            )
+            .unwrap(),
+            "mobux.example.com"
+        );
+    }
+
+    #[test]
+    fn without_an_access_hostname_the_package_follows_the_usual_domain() {
+        assert_eq!(
+            pinned_domain(None, Some(""), Some("box.tailnet.ts.net:5151")).unwrap(),
+            "box.tailnet.ts.net:5151"
+        );
+        assert_eq!(
+            pinned_domain(Some(" "), Some("pinned.example.com"), None).unwrap(),
+            "pinned.example.com"
+        );
+    }
+
+    #[test]
     fn default_tls_port_is_dropped() {
         assert_eq!(
             resolve_domain(None, Some("box.example.com:443")).unwrap(),
@@ -302,6 +361,18 @@ mod tests {
                 "should reject {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_finished_build_records_the_host_it_was_signed_for() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(built_domain(dir.path()), None);
+        std::fs::create_dir_all(dir.path().join("install")).unwrap();
+        record_build(dir.path(), "mobux.example.com").unwrap();
+        assert_eq!(
+            built_domain(dir.path()).as_deref(),
+            Some("mobux.example.com")
+        );
     }
 
     #[test]

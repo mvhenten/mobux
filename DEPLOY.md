@@ -163,6 +163,16 @@ least one entry. As with `tls.acme_domains`, the file is validated on its own
 before the environment and flags apply, so a block split between the file and
 the environment must already pass these rules in the file.
 
+On the Access listener the app behaves as a client of the public hostname.
+The install page drops the CA step, since Cloudflare terminates TLS with a
+publicly trusted certificate. With `access.hostname` set, the Android package
+is signed for that hostname whichever address builds it, and the install page
+names the host it opens. Uploads through the tunnel stop at 100 MB, the body
+limit on Cloudflare's Free and Pro plans: the app refuses a larger file before
+sending it, and the listener answers 413. When the Access session lapses, the
+app shows a notice with a "Sign in again" control that loads the page again through
+Cloudflare's login and returns to the same screen.
+
 Toggles take `--flag` to turn on and `--no-flag` to turn off. `--flag=` also
 takes `1`, `true`, `yes`, `on`, `0`, `false`, `no` and `off`. `MOBUX_TLS` reads
 any value other than `0` and `false` as on; every other toggle variable wants

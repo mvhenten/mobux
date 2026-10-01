@@ -23,7 +23,11 @@
 const fs = require("fs");
 const path = require("path");
 const { test, expect } = require("./fixtures.cjs");
-const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
+const {
+  createTmuxRunner,
+  SMOKE_TMUX_SOCKET,
+  waitForClientAttached,
+} = require("./lib/tmux.cjs");
 const { resolveZshBin } = require("./lib/zsh.cjs");
 
 const BASE = process.env.MOBUX_URL || "https://localhost:5151";
@@ -41,7 +45,7 @@ test.use({
 
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 
 const ERROR_TEXT = "can't reach the server — retrying";
 const isConversationUrl = (url) => url.pathname.endsWith("/conversation");

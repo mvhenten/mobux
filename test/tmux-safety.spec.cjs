@@ -10,6 +10,7 @@
 const { test, expect } = require("@playwright/test");
 const {
   createTmuxRunner,
+  SMOKE_TMUX_SOCKET,
   sanitizedEnv,
   assertIsolated,
 } = require("./lib/tmux.cjs");
@@ -40,7 +41,7 @@ test("assertIsolated refuses a command with no explicit test socket", () => {
 
 test("assertIsolated allows an explicit -L socket or a delegated podman runner", () => {
   expect(() =>
-    assertIsolated("tmux -L mobux-test", "kill-session -t foo"),
+    assertIsolated(`tmux -L ${SMOKE_TMUX_SOCKET}`, "kill-session -t foo"),
   ).not.toThrow();
   expect(() =>
     assertIsolated("podman exec mobux-podman tmux", "kill-server"),

@@ -30,7 +30,11 @@ const AUTH =
     ? "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64")
     : null;
 
-const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
+const {
+  createTmuxRunner,
+  SMOKE_TMUX_SOCKET,
+  waitForClientAttached,
+} = require("./lib/tmux.cjs");
 
 // Dedicated tmux server/session, identical convention to smoke.spec.cjs, so
 // SPA session ops drive the smoke instance's tmux without colliding with the
@@ -38,7 +42,7 @@ const { createTmuxRunner, waitForClientAttached } = require("./lib/tmux.cjs");
 const SANDBOX_HOME = process.env.MOBUX_TEST_HOME || "/tmp/mobux-smoke/home";
 const SHELL_ENV = `-e HISTFILE=/dev/null -e HOME=${SANDBOX_HOME}`;
 const OSC_CWD = `${SANDBOX_HOME}/osc133-cwd`;
-const tmux = createTmuxRunner("mobux-test");
+const tmux = createTmuxRunner(SMOKE_TMUX_SOCKET);
 
 // Unique session names per run so the create/rename/kill lifecycle never
 // collides with a leftover from a previous run or the smoke seed session.

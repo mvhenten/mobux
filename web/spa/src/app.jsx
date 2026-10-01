@@ -12,6 +12,7 @@ import { InstallPage } from "./pages/Install.jsx";
 import { ErrorPage } from "./components/ErrorPage.jsx";
 import { fatalError } from "./lib/fatalError.js";
 import { dismissUpdate, updateAvailable } from "./lib/reload.js";
+import { SignedOutNotice } from "./components/SignedOutNotice.jsx";
 
 // App shell. Wouter owns client-side routing for the SPA's own routes. The
 // terminal page renders no chrome (full-screen island); the others get a slim
@@ -22,7 +23,12 @@ export function App() {
   // full-screen error page, checked before routing so it wins on every
   // route — including the terminal island.
   if (fatalError.value) {
-    return <ErrorPage error={fatalError.value} />;
+    return (
+      <>
+        <SignedOutNotice />
+        <ErrorPage error={fatalError.value} />
+      </>
+    );
   }
 
   // Hash routing. The SPA is mounted under a sub-path (/static/spa/) parallel
@@ -30,6 +36,7 @@ export function App() {
   // server-side history fallback and work identically in dev and prod.
   return (
     <>
+      <SignedOutNotice />
       <UpdateBar />
       <Routes />
     </>
