@@ -855,7 +855,7 @@ pub async fn list_panes(session: &str, target: Option<&str>) -> Result<Vec<Pane>
         &[
             "list-windows",
             "-t",
-            session,
+            &format!("={session}"),
             "-F",
             // Printable separator, free-text window name LAST — see the
             // separator note above list_sessions. `splitn` keeps any `:`
@@ -888,24 +888,15 @@ pub async fn select_pane(session: &str, window_index: &str, target: Option<&str>
     Ok(())
 }
 
-/// The commands [`run_command`] accepts.
-pub const COMMANDS: &[&str] = &[
-    "new-window",
-    "kill-window",
-    "split-h",
-    "split-v",
-    "next-window",
-    "prev-window",
-    "next-pane",
-    "prev-pane",
-    "kill-pane",
-    "zoom-pane",
-];
+/// The session named exactly `session`, as a target. A bare name also
+/// matches a session it is a prefix of (`work` finds `work-long`), and
+/// without the trailing ':' tmux reads a name like "0" as a window index.
+fn exact_target(session: &str) -> String {
+    format!("={session}:")
+}
 
 fn command_args(session: &str, command: &str) -> Result<Vec<String>> {
-    // Append ':' so tmux treats it as a session target, not a window index
-    // (e.g. session "0" would otherwise target window 0)
-    let win_target = format!("{}:", session);
+    let win_target = exact_target(session);
     Ok(match command {
         "new-window" => vec!["new-window".into(), "-t".into(), win_target],
         "kill-window" => vec!["kill-window".into(), "-t".into(), win_target],
@@ -913,8 +904,8 @@ fn command_args(session: &str, command: &str) -> Result<Vec<String>> {
         "split-v" => vec!["split-window".into(), "-v".into(), "-t".into(), win_target],
         "next-window" => vec!["next-window".into(), "-t".into(), win_target],
         "prev-window" => vec!["previous-window".into(), "-t".into(), win_target],
-        "next-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:+", session)],
-        "prev-pane" => vec!["select-pane".into(), "-t".into(), format!("{}:-", session)],
+        "next-pane" => vec!["select-pane".into(), "-t".into(), format!("={session}:+")],
+        "prev-pane" => vec!["select-pane".into(), "-t".into(), format!("={session}:-")],
         "kill-pane" => vec!["kill-pane".into(), "-t".into(), win_target],
         "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), win_target],
         _ => return Err(anyhow!("unknown command: {}", command)),
@@ -947,11 +938,21 @@ pub async fn run_command(session: &str, command: &str, target: Option<&str>) -> 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// tmux reads an argument ending in `;` as a command separator, even after
+/// `-l`; a `\;` ending is the escaped, literal form.
+fn literal_argument(text: &str) -> String {
+    match text.strip_suffix(';') {
+        Some(rest) => format!(r"{rest}\;"),
+        None => text.to_string(),
+    }
+}
+
 fn send_text_args(session: &str, text: &str, enter: bool) -> Vec<String> {
-    let pane = format!("{session}:");
+    let pane = exact_target(session);
     let mut args: Vec<String> = Vec::new();
     if !text.is_empty() {
-        args.extend(["send-keys", "-l", "-t", &pane, "--", text].map(String::from));
+        let text = literal_argument(text);
+        args.extend(["send-keys", "-l", "-t", &pane, "--", &text].map(String::from));
     }
     if enter {
         if !args.is_empty() {
@@ -1054,7 +1055,7 @@ fn capture_history_args(session: &str, lines: u32, scope: HistoryScope) -> Vec<S
         args.push("-1".into()); // end on the last history line
     }
     args.push("-t".into());
-    args.push(session.into());
+    args.push(exact_target(session));
     args
 }
 
@@ -1082,7 +1083,7 @@ fn straddle_args(session: &str) -> Vec<String> {
         "-E",
         "0",
         "-t",
-        session,
+        &exact_target(session),
     ]
     .iter()
     .map(|a| a.to_string())
@@ -1149,7 +1150,7 @@ fn history_capture_args(session: &str, lines: u32, delim: &str) -> Vec<String> {
         "display-message",
         "-p",
         "-t",
-        session,
+        &exact_target(session),
         "#{history_size}",
         ";",
     ]
@@ -1189,8 +1190,20 @@ mod tests {
 
     #[test]
     fn every_listed_command_has_arguments() {
-        for command in COMMANDS {
-            assert!(command_args("work", command).is_ok(), "{command}");
+        for command in [
+            "new-window",
+            "kill-window",
+            "split-h",
+            "split-v",
+            "next-window",
+            "prev-window",
+            "next-pane",
+            "prev-pane",
+            "kill-pane",
+            "zoom-pane",
+        ] {
+            let args = command_args("work", command).unwrap();
+            assert!(args.last().unwrap().starts_with("=work:"), "{command}");
         }
         assert!(command_args("work", "kill-server").is_err());
     }
@@ -1203,32 +1216,47 @@ mod tests {
                 "send-keys",
                 "-l",
                 "-t",
-                "work:",
+                "=work:",
                 "--",
                 "-n hi",
                 ";",
                 "send-keys",
                 "-t",
-                "work:",
+                "=work:",
                 "Enter"
             ]
         );
         assert_eq!(
             send_text_args("work", "ls", false),
-            ["send-keys", "-l", "-t", "work:", "--", "ls"]
+            ["send-keys", "-l", "-t", "=work:", "--", "ls"]
         );
         assert_eq!(
             send_text_args("work", "", true),
-            ["send-keys", "-t", "work:", "Enter"]
+            ["send-keys", "-t", "=work:", "Enter"]
         );
         assert!(send_text_args("work", "", false).is_empty());
+        assert_eq!(
+            send_text_args("work", r"find . -exec rm {} \;", false),
+            [
+                "send-keys",
+                "-l",
+                "-t",
+                "=work:",
+                "--",
+                r"find . -exec rm {} \\;"
+            ]
+        );
+        assert_eq!(
+            send_text_args("work", "ls;", false),
+            ["send-keys", "-l", "-t", "=work:", "--", r"ls\;"]
+        );
     }
 
     #[test]
     fn capture_history_args_default_scope_includes_the_screen() {
         assert_eq!(
             capture_history_args("main", 10000, HistoryScope::All),
-            vec!["capture-pane", "-p", "-e", "-S", "-10000", "-t", "main"]
+            vec!["capture-pane", "-p", "-e", "-S", "-10000", "-t", "=main:"]
         );
     }
 
@@ -1246,7 +1274,7 @@ mod tests {
                 "-E",
                 "-1",
                 "-t",
-                "main"
+                "=main:"
             ]
         );
     }
@@ -1264,7 +1292,7 @@ mod tests {
                 "-E",
                 "0",
                 "-t",
-                "main"
+                "=main:"
             ]
         );
         assert!(joins_into_screen("a wrapped line and its rest\n"));
@@ -1280,7 +1308,7 @@ mod tests {
                 "display-message",
                 "-p",
                 "-t",
-                "main",
+                "=main:",
                 "#{history_size}",
                 ";",
                 "capture-pane",
@@ -1292,7 +1320,7 @@ mod tests {
                 "-E",
                 "-1",
                 "-t",
-                "main",
+                "=main:",
                 ";",
                 "display-message",
                 "-p",
@@ -1306,7 +1334,7 @@ mod tests {
                 "-E",
                 "0",
                 "-t",
-                "main"
+                "=main:"
             ]
         );
     }

@@ -14,11 +14,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const require = createRequire(import.meta.url);
 const { createTmuxRunner } = require("./lib/tmux.cjs");
 
-const MCP_URL = process.env.MOBUX_MCP_URL || "http://127.0.0.1:8292/mcp";
+const MCP_URL = process.env.MOBUX_MCP_URL || "http://127.0.0.1:8294/mcp";
 const BASE = process.env.MOBUX_URL || "http://127.0.0.1:8281";
 const USER = process.env.MOBUX_USER || "";
 const PASS = process.env.MOBUX_PASS || "";
-const tmux = createTmuxRunner(process.env.MOBUX_SMOKE_TMUX || "mobux-test");
+const tmux = createTmuxRunner("mobux-test");
 const SESSION = `mcp-e2e-${process.pid}`;
 
 const TOOLS = [
@@ -133,6 +133,30 @@ test("send_keys types into the pane", async () => {
     const pane = capturePane();
     return { ok: pane.includes("typed-2-by-mcp"), value: pane };
   }, "the typed command never ran in the pane");
+});
+
+test("send_keys keeps a trailing semicolon", async () => {
+  for (const typed of ["echo semi-end;", "find . -exec true {} \\;"]) {
+    const result = await call("send_keys", { session: SESSION, text: typed });
+    assert.ok(!result.isError, text(result));
+    await eventually(async () => {
+      const pane = capturePane();
+      return { ok: pane.includes(typed), value: pane };
+    }, `the pane never showed ${typed}`);
+    tmux(`send-keys -t ${SESSION}: C-u`);
+  }
+});
+
+test("send_keys to a name that only prefixes a session is a tool error", async () => {
+  const short = `mcpx${process.pid}`;
+  tmux(`new-session -d -s ${short}-long "bash --norc --noprofile"`);
+  try {
+    const result = await call("send_keys", { session: short, text: "echo x" });
+    assert.equal(result.isError, true, text(result));
+    assert.match(text(result), /can't find/);
+  } finally {
+    tmux(`kill-session -t =${short}-long`);
+  }
 });
 
 test("run_tmux_command new-window adds a window", async () => {

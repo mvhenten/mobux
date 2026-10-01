@@ -2963,8 +2963,12 @@ async fn start_history_feed(
     }
 }
 
+fn is_valid_session_name(session_name_re: &Regex, name: &str) -> bool {
+    !name.is_empty() && session_name_re.is_match(name)
+}
+
 fn validate_session_name(state: &AppState, name: &str) -> Result<(), AppError> {
-    if name.is_empty() || !state.session_name_re.is_match(name) {
+    if !is_valid_session_name(&state.session_name_re, name) {
         return Err(AppError::bad_request(anyhow::anyhow!(
             "invalid session name"
         )));

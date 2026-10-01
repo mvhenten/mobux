@@ -43,10 +43,6 @@ pub struct Context {
     pub session_name: Arc<Regex>,
     pub db: Arc<Db>,
     pub vapid_contact: String,
-    /// Where a relative `show_on_phone` URL resolves, from the configured
-    /// public hostname. `None` leaves it relative, and the phone's service
-    /// worker resolves it against the origin it was installed from.
-    pub public_origin: Option<String>,
 }
 
 impl Context {
@@ -55,7 +51,6 @@ impl Context {
             session_name,
             db,
             vapid_contact: config.push.vapid_contact.clone(),
-            public_origin: public_origin(config),
         }
     }
 }
@@ -83,31 +78,11 @@ pub fn absent<S: Clone + Send + Sync + 'static>() -> Router<S> {
     )
 }
 
-/// The origin the phone reaches this instance on, with the base path and a
-/// trailing slash. The Access hostname is always https; `app.domain` is https
-/// when mobux or the proxy in front of it terminates TLS.
-pub fn public_origin(config: &config::Config) -> Option<String> {
-    let base = config.server.base_path.trim_end_matches('/');
-    let access_host = config.access.hostname.trim();
-    if !access_host.is_empty() {
-        return Some(format!("https://{access_host}{base}/"));
-    }
-    let domain = config.app.domain.trim();
-    if domain.is_empty() {
-        return None;
-    }
-    let scheme = if config.tls.enabled || config.server.behind_tls_proxy {
-        "https"
-    } else {
-        "http"
-    };
-    Some(format!("{scheme}://{domain}{base}/"))
-}
-
-/// The URL a notification opens. An http(s) URL stays as it is; a path is
-/// taken from the instance root, so `/files/site/` and `files/site/` are the
-/// same page.
-pub fn link_target(url: &str, public_origin: Option<&str>) -> Result<String, String> {
+/// The URL a notification opens. An http(s) URL stays as it is. A path is
+/// sent relative, from the instance root, so `/files/site/` and `files/site/`
+/// are the same page: the phone's service worker resolves it against its own
+/// scope, which keeps the phone on the address it subscribed from.
+pub fn link_target(url: &str) -> Result<String, String> {
     let url = url.trim();
     if url.is_empty() {
         return Err("url is required".to_string());
@@ -119,11 +94,10 @@ pub fn link_target(url: &str, public_origin: Option<&str>) -> Result<String, Str
     if has_scheme(url) {
         return Err(format!("{url}: only http and https URLs open on the phone"));
     }
-    let path = url.trim_start_matches('/');
-    Ok(match public_origin {
-        Some(origin) => format!("{origin}{path}"),
-        None => path.to_string(),
-    })
+    if url.contains('\\') {
+        return Err(format!("{url}: a path cannot contain a backslash"));
+    }
+    Ok(url.trim_start_matches('/').to_string())
 }
 
 fn has_scheme(url: &str) -> bool {
@@ -157,7 +131,8 @@ pub struct RunCommandArgs {
 pub struct SendKeysArgs {
     /// The tmux session name.
     pub session: String,
-    /// Text typed into the active pane as literal keystrokes.
+    /// Text typed into the active pane as literal keystrokes. A newline in
+    /// it runs the line, even with enter off.
     pub text: String,
     /// Press Enter after the text.
     pub enter: Option<bool>,
@@ -195,19 +170,24 @@ impl Mobux {
     }
 
     fn session(&self, name: &str) -> Result<(), String> {
-        if name.is_empty() || !self.context.session_name.is_match(name) {
+        if !crate::is_valid_session_name(&self.context.session_name, name) {
             return Err(format!("invalid session name: {name:?}"));
         }
         Ok(())
     }
 
-    fn push(&self, payload: push::Payload) -> Result<usize, String> {
-        push::send_to_devices(
+    async fn push(&self, payload: push::Payload) -> Result<String, String> {
+        let delivery = push::send_to_devices(
             self.context.db.clone(),
             self.context.vapid_contact.clone(),
             payload,
         )
-        .map_err(|e| format!("{e:#}"))
+        .await
+        .map_err(one_line)?;
+        Ok(format!(
+            "sent={} failed={} pruned={}",
+            delivery.sent, delivery.failed, delivery.pruned
+        ))
     }
 }
 
@@ -269,13 +249,6 @@ impl Mobux {
         Parameters(args): Parameters<RunCommandArgs>,
     ) -> Result<String, String> {
         self.session(&args.session)?;
-        if !tmux::COMMANDS.contains(&args.command.as_str()) {
-            return Err(format!(
-                "unknown command {:?}; use one of {}",
-                args.command,
-                tmux::COMMANDS.join(", ")
-            ));
-        }
         tmux::list_panes(&args.session, None)
             .await
             .map_err(one_line)?;
@@ -290,7 +263,7 @@ impl Mobux {
     }
 
     #[tool(
-        description = "Type text into the active pane of a session as literal keystrokes, optionally followed by Enter."
+        description = "Type text into the active pane of a session as literal keystrokes, optionally followed by Enter. A newline in the text runs the line, even with enter off."
     )]
     async fn send_keys(
         &self,
@@ -313,13 +286,15 @@ impl Mobux {
         if args.body.trim().is_empty() {
             return Err("body is required".to_string());
         }
-        let devices = self.push(push::Payload {
-            title: args.title,
-            body: args.body,
-            tag: None,
-            url: None,
-        })?;
-        Ok(format!("notification sent to {devices} device(s)"))
+        let outcome = self
+            .push(push::Payload {
+                title: args.title,
+                body: args.body,
+                tag: None,
+                url: None,
+            })
+            .await?;
+        Ok(format!("notification delivered: {outcome}"))
     }
 
     #[tool(
@@ -329,14 +304,16 @@ impl Mobux {
         &self,
         Parameters(args): Parameters<ShowOnPhoneArgs>,
     ) -> Result<String, String> {
-        let target = link_target(&args.url, self.context.public_origin.as_deref())?;
-        let devices = self.push(push::Payload {
-            title: args.title,
-            body: target.clone(),
-            tag: None,
-            url: Some(target.clone()),
-        })?;
-        Ok(format!("sent {target} to {devices} device(s)"))
+        let target = link_target(&args.url)?;
+        let outcome = self
+            .push(push::Payload {
+                title: args.title,
+                body: target.clone(),
+                tag: None,
+                url: Some(target.clone()),
+            })
+            .await?;
+        Ok(format!("{target} delivered: {outcome}"))
     }
 }
 
@@ -443,45 +420,26 @@ mod tests {
     }
 
     #[test]
-    fn a_path_resolves_against_the_public_origin() {
-        let origin = Some("https://phone.example/mobux/");
-        assert_eq!(
-            link_target("/files/site/", origin).unwrap(),
-            "https://phone.example/mobux/files/site/"
-        );
-        assert_eq!(
-            link_target("proxy/vite/", origin).unwrap(),
-            "https://phone.example/mobux/proxy/vite/"
-        );
-        assert_eq!(link_target("/files/site/", None).unwrap(), "files/site/");
+    fn a_path_is_sent_relative_to_the_instance_root() {
+        assert_eq!(link_target("/files/site/").unwrap(), "files/site/");
+        assert_eq!(link_target("proxy/vite/").unwrap(), "proxy/vite/");
+        assert_eq!(link_target("//evil.com/x").unwrap(), "evil.com/x");
+    }
+
+    #[test]
+    fn a_backslash_in_a_path_is_refused() {
+        assert!(link_target(r"\\evil.com/x").is_err());
+        assert!(link_target(r"\/evil.com").is_err());
+        assert!(link_target(r"/files/a\b").is_err());
     }
 
     #[test]
     fn an_http_url_is_kept_and_other_schemes_are_refused() {
         assert_eq!(
-            link_target("https://example.com/a", None).unwrap(),
+            link_target("https://example.com/a").unwrap(),
             "https://example.com/a"
         );
-        assert!(link_target("javascript:alert(1)", None).is_err());
-        assert!(link_target("  ", None).is_err());
-    }
-
-    #[test]
-    fn the_public_origin_comes_from_the_configured_hostname() {
-        let mut config = config::Config::default();
-        assert_eq!(public_origin(&config), None);
-        config.app.domain = "box:5151".to_string();
-        assert_eq!(public_origin(&config).as_deref(), Some("http://box:5151/"));
-        config.tls.enabled = true;
-        config.server.base_path = "/mobux".to_string();
-        assert_eq!(
-            public_origin(&config).as_deref(),
-            Some("https://box:5151/mobux/")
-        );
-        config.access.hostname = "mobux.example.com".to_string();
-        assert_eq!(
-            public_origin(&config).as_deref(),
-            Some("https://mobux.example.com/mobux/")
-        );
+        assert!(link_target("javascript:alert(1)").is_err());
+        assert!(link_target("  ").is_err());
     }
 }
