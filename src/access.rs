@@ -2,14 +2,16 @@
 //! Checks the JWT Cloudflare puts on every request it lets through against
 //! the team's published keys, the application AUD and the identity allowlist.
 
-// Wired into the Access listener in the next stage of #333.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::http::{header, HeaderMap};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -20,6 +22,8 @@ use crate::config::AccessConfig;
 
 pub const ASSERTION_HEADER: &str = "cf-access-jwt-assertion";
 pub const AUTHORIZATION_COOKIE: &str = "CF_Authorization";
+
+pub const CHALLENGE: &str = "Bearer realm=\"cloudflare-access\"";
 
 const CLOCK_LEEWAY_SECS: u64 = 30;
 const MIN_REFETCH_INTERVAL: Duration = Duration::from_secs(60);
@@ -65,10 +69,9 @@ impl fmt::Display for Rejection {
                 f,
                 "the Cloudflare Access token is signed with a key the team does not publish"
             ),
-            Rejection::KeysUnavailable(reason) => write!(
-                f,
-                "could not fetch the Cloudflare Access signing keys: {reason}"
-            ),
+            Rejection::KeysUnavailable(_) => {
+                write!(f, "the team's signing keys could not be fetched")
+            }
             Rejection::Expired => write!(
                 f,
                 "the Cloudflare Access session has expired: sign in again"
@@ -91,6 +94,16 @@ impl fmt::Display for Rejection {
 }
 
 impl std::error::Error for Rejection {}
+
+impl Rejection {
+    /// What the operator log needs beyond the one-line reason a client gets.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Rejection::KeysUnavailable(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
 
 /// The candidate Access JWTs a request carries: the `Cf-Access-Jwt-Assertion`
 /// header alone when present, otherwise every `CF_Authorization` cookie in
@@ -304,6 +317,107 @@ fn rejection_for(kind: &ErrorKind) -> Rejection {
         ErrorKind::InvalidIssuer => Rejection::WrongIssuer,
         _ => Rejection::Malformed,
     }
+}
+
+/// The Access listener's gate: the token verifier plus the public hostname a
+/// browser on the tunnel sends as its `Origin`.
+pub struct AccessGuard {
+    verifier: Verifier,
+    hostname: String,
+}
+
+impl AccessGuard {
+    pub fn new(config: &AccessConfig, client: reqwest::Client) -> Self {
+        AccessGuard {
+            verifier: Verifier::new(config, client),
+            hostname: config.hostname.trim().to_lowercase(),
+        }
+    }
+
+    /// Cloudflare sets `CF_Authorization` with `SameSite=None`, so a page on
+    /// another site can make the browser send it, a WebSocket upgrade or a form
+    /// post included. A request whose `Origin` is neither this host nor the
+    /// configured public hostname is refused before the token is looked at.
+    fn origin_allowed(&self, headers: &HeaderMap) -> bool {
+        let Some(origin) = headers.get(header::ORIGIN) else {
+            return true;
+        };
+        let Some((scheme, authority)) = origin.to_str().ok().and_then(|o| o.split_once("://"))
+        else {
+            return false;
+        };
+        let authority = authority.to_lowercase();
+        if !self.hostname.is_empty()
+            && scheme.eq_ignore_ascii_case("https")
+            && authority == self.hostname
+        {
+            return true;
+        }
+        headers
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok())
+            .is_some_and(|host| host.trim().to_lowercase() == authority)
+    }
+}
+
+/// Guards every request on the Access listener: a public path passes as on the
+/// main listener, anything else needs a same-site `Origin` (or none) and a
+/// verified Access token, and carries its [`Verified`] identity on to the
+/// handler. The PIN session is never consulted.
+pub async fn guard(
+    State(gate): State<Arc<AccessGuard>>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    if crate::is_public_path(request.uri().path()) {
+        return next.run(request).await;
+    }
+    if !gate.origin_allowed(request.headers()) {
+        eprintln!(
+            "[access] 403 {}: cross-site Origin {:?}",
+            request.uri().path(),
+            request.headers().get(header::ORIGIN)
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-site request refused: the Origin does not match this host\n",
+        )
+            .into_response();
+    }
+    match gate.verifier.verify_headers(request.headers()).await {
+        Ok(verified) => {
+            strip_tokens(request.headers_mut());
+            request.extensions_mut().insert(verified);
+            next.run(request).await
+        }
+        Err(rejection) => {
+            match rejection.detail() {
+                Some(detail) => eprintln!(
+                    "[access] 401 {}: {rejection}: {detail}",
+                    request.uri().path()
+                ),
+                None => eprintln!("[access] 401 {}: {rejection}", request.uri().path()),
+            }
+            unauthorized(&rejection)
+        }
+    }
+}
+
+fn unauthorized(rejection: &Rejection) -> Response {
+    let body = format!("{rejection}\n");
+    let mut response = (StatusCode::UNAUTHORIZED, body).into_response();
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static(CHALLENGE),
+    );
+    response
+}
+
+/// Drops the Access token from a verified request so nothing downstream, a
+/// proxied local app in particular, receives a credential for the whole site.
+fn strip_tokens(headers: &mut HeaderMap) {
+    headers.remove(ASSERTION_HEADER);
+    crate::proxy::strip_cookie(headers, AUTHORIZATION_COOKIE);
 }
 
 #[cfg(test)]
@@ -773,5 +887,232 @@ mod tests {
             tokens_from_headers(&HeaderMap::new()),
             Err(Rejection::MissingToken)
         );
+    }
+
+    mod listener {
+        use super::*;
+        use axum::routing::get;
+        use axum::{Extension, Router};
+        use tower::ServiceExt;
+
+        async fn seen(Extension(verified): Extension<Verified>, headers: HeaderMap) -> String {
+            let cookie = headers
+                .get(header::COOKIE)
+                .map(|value| value.to_str().unwrap().to_string())
+                .unwrap_or_default();
+            format!(
+                "{:?} assertion={} cookie={cookie}",
+                verified.identity,
+                headers.contains_key(ASSERTION_HEADER)
+            )
+        }
+
+        fn router(jwks: &Jwks) -> Router {
+            Router::new()
+                .route("/api/sessions", get(seen))
+                .route("/static/manifest.json", get(|| async { "manifest" }))
+                .route("/.well-known/assetlinks.json", get(|| async { "links" }))
+                .route("/api/identify", get(|| async { "mobux" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    Arc::new(AccessGuard {
+                        verifier: jwks.verifier(MIN_REFETCH_INTERVAL),
+                        hostname: "mobux.example.com".to_string(),
+                    }),
+                    guard,
+                ))
+        }
+
+        async fn call(jwks: &Jwks, path: &str, pairs: &[(&'static str, &str)]) -> Response {
+            let mut request = Request::builder()
+                .uri(path)
+                .header("host", "127.0.0.1:5153");
+            for (name, value) in pairs {
+                request = request.header(*name, *value);
+            }
+            router(jwks)
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        }
+
+        async fn body(response: Response) -> String {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        async fn assert_refused(response: Response, rejection: Rejection) {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let challenges: Vec<_> = response
+                .headers()
+                .get_all(header::WWW_AUTHENTICATE)
+                .iter()
+                .map(|value| value.to_str().unwrap().to_string())
+                .collect();
+            assert_eq!(challenges, vec![CHALLENGE.to_string()]);
+            assert_eq!(body(response).await, format!("{rejection}\n"));
+        }
+
+        #[tokio::test]
+        async fn admits_a_header_token_and_hands_on_the_identity() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let token = sign(KID, &jwks.claims());
+            let response = call(&jwks, "/api/sessions", &[(ASSERTION_HEADER, &token)]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                body(response).await,
+                "Email(\"owner@example.com\") assertion=false cookie="
+            );
+        }
+
+        #[tokio::test]
+        async fn admits_a_cookie_token_and_keeps_the_other_cookies() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let cookie = format!(
+                "theme=dark; CF_Authorization={}; lang=nl",
+                sign(KID, &jwks.claims())
+            );
+            let response = call(&jwks, "/api/sessions", &[("cookie", &cookie)]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                body(response).await,
+                "Email(\"owner@example.com\") assertion=false cookie=theme=dark; lang=nl"
+            );
+        }
+
+        #[tokio::test]
+        async fn refuses_a_request_without_a_token_with_the_bearer_challenge() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let response = call(&jwks, "/api/sessions", &[]).await;
+            assert_refused(response, Rejection::MissingToken).await;
+        }
+
+        #[tokio::test]
+        async fn ignores_the_pin_credentials() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let response = call(
+                &jwks,
+                "/api/sessions",
+                &[
+                    ("authorization", "Basic c21va2U6MDAwMDA="),
+                    ("cookie", "mobux_session=anything"),
+                ],
+            )
+            .await;
+            assert_refused(response, Rejection::MissingToken).await;
+        }
+
+        #[tokio::test]
+        async fn refuses_an_expired_token_naming_the_reason() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let token = sign(KID, &with(jwks.claims(), "exp", json!(now() - 120)));
+            let response = call(&jwks, "/api/sessions", &[(ASSERTION_HEADER, &token)]).await;
+            assert_refused(response, Rejection::Expired).await;
+        }
+
+        #[tokio::test]
+        async fn refuses_a_token_for_another_audience() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let token = sign(KID, &with(jwks.claims(), "aud", json!(["other-app"])));
+            let response = call(&jwks, "/api/sessions", &[(ASSERTION_HEADER, &token)]).await;
+            assert_refused(response, Rejection::WrongAudience).await;
+        }
+
+        async fn status(jwks: &Jwks, origin: &str) -> StatusCode {
+            let token = sign(KID, &jwks.claims());
+            call(
+                jwks,
+                "/api/sessions",
+                &[(ASSERTION_HEADER, &token), ("origin", origin)],
+            )
+            .await
+            .status()
+        }
+
+        #[tokio::test]
+        async fn refuses_a_cross_site_origin_even_with_a_valid_token() {
+            let jwks = Jwks::serve(&[KID]).await;
+            let token = sign(KID, &jwks.claims());
+            let response = call(
+                &jwks,
+                "/api/sessions",
+                &[
+                    (ASSERTION_HEADER, &token),
+                    ("origin", "http://evil.example"),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
+            assert_eq!(
+                body(response).await,
+                "cross-site request refused: the Origin does not match this host\n"
+            );
+        }
+
+        #[tokio::test]
+        async fn admits_an_origin_matching_the_host_in_either_scheme() {
+            let jwks = Jwks::serve(&[KID]).await;
+            assert_eq!(status(&jwks, "http://127.0.0.1:5153").await, StatusCode::OK);
+            assert_eq!(
+                status(&jwks, "https://127.0.0.1:5153").await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status(&jwks, "http://127.0.0.1:5154").await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn admits_the_configured_hostname_over_https_only() {
+            let jwks = Jwks::serve(&[KID]).await;
+            assert_eq!(
+                status(&jwks, "https://Mobux.Example.com").await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status(&jwks, "http://mobux.example.com").await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                status(&jwks, "https://mobux.example.com.evil.example").await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn refuses_an_opaque_origin() {
+            let jwks = Jwks::serve(&[KID]).await;
+            assert_eq!(status(&jwks, "null").await, StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn keeps_the_key_fetch_error_out_of_the_response() {
+            let jwks = Jwks::serve(&[KID]).await;
+            jwks.failing.store(true, Ordering::SeqCst);
+            let token = sign(KID, &jwks.claims());
+            let response = call(&jwks, "/api/sessions", &[(ASSERTION_HEADER, &token)]).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = body(response).await;
+            assert_eq!(body, "the team's signing keys could not be fetched\n");
+            assert!(!body.contains(&jwks.origin), "{body}");
+        }
+
+        #[tokio::test]
+        async fn serves_the_public_paths_without_a_token() {
+            let jwks = Jwks::serve(&[KID]).await;
+            for (path, expected) in [
+                ("/static/manifest.json", "manifest"),
+                ("/.well-known/assetlinks.json", "links"),
+                ("/api/identify", "mobux"),
+            ] {
+                let response = call(&jwks, path, &[]).await;
+                assert_eq!(response.status(), StatusCode::OK, "{path}");
+                assert_eq!(body(response).await, expected);
+            }
+            assert_eq!(jwks.fetches(), 0);
+        }
     }
 }

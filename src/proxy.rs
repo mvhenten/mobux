@@ -388,16 +388,16 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
     }
 }
 
-/// Remove the mobux session cookie and keep every other cookie byte for byte,
-/// whether or not it is valid UTF-8.
-fn strip_cookie(headers: &mut HeaderMap, session_cookie: &str) {
+/// Remove every cookie called `name` and keep every other cookie byte for
+/// byte, whether or not it is valid UTF-8.
+pub(crate) fn strip_cookie(headers: &mut HeaderMap, name: &str) {
     let kept: Vec<&[u8]> = headers
         .get_all(header::COOKIE)
         .iter()
         .flat_map(|value| value.as_bytes().split(|byte| *byte == b';'))
         .map(<[u8]>::trim_ascii)
         .filter(|pair| !pair.is_empty())
-        .filter(|pair| cookie_name(pair) != session_cookie.as_bytes())
+        .filter(|pair| cookie_name(pair) != name.as_bytes())
         .collect();
     let joined = kept.join(&b"; "[..]);
     headers.remove(header::COOKIE);
