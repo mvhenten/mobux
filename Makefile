@@ -11,6 +11,7 @@ MOBUX_SMOKE_DATA ?= /tmp/mobux-smoke
 # Loopback port the smoke instance proxies as `up`; test/proxy.spec.cjs
 # starts its fixture server there.
 MOBUX_PROXY_FIXTURE_PORT ?= 8291
+MOBUX_SMOKE_TMUX ?= mobux-test
 MOBUX_USER       ?= $(USER)
 MOBUX_PIN        ?= 30879
 CARGO            := $(HOME)/.cargo/bin/cargo
@@ -185,10 +186,10 @@ smoke-start: build
 	@# The tests create and kill sessions on this server; with exit-empty on,
 	@# killing the last one would take the server down under the next test.
 	@env -u TMUX -u TMUX_PANE HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
-		tmux -L mobux-test start-server \; set-option -s exit-empty off
+		tmux -L $(MOBUX_SMOKE_TMUX) start-server \; set-option -s exit-empty off
 	@nohup env MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) MOBUX_TLS=0 \
 		HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
-		MOBUX_TMUX_SOCKET=mobux-test \
+		MOBUX_TMUX_SOCKET=$(MOBUX_SMOKE_TMUX) \
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
@@ -202,7 +203,7 @@ smoke-start: build
 
 smoke-stop:
 	@if [ -n "$(SMOKE_PID)" ]; then kill $(SMOKE_PID) && echo "smoke stopped (pid $(SMOKE_PID))"; else echo "smoke not running"; fi
-	@env -u TMUX -u TMUX_PANE tmux -L mobux-test kill-server 2>/dev/null || true
+	@env -u TMUX -u TMUX_PANE tmux -L $(MOBUX_SMOKE_TMUX) kill-server 2>/dev/null || true
 
 smoke-logs:
 	@tail -f $(MOBUX_SMOKE_DATA)/mobux.log
@@ -336,7 +337,7 @@ test-spa:
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) \
 		MOBUX_USER=smoke MOBUX_PASS=00000 \
-		npx playwright test test/spa.spec.cjs test/settings-ui.spec.cjs test/spa-base.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs test/read-mode-scrollback.spec.cjs test/background-resume.spec.cjs
+		npx playwright test test/spa.spec.cjs test/settings-ui.spec.cjs test/spa-base.spec.cjs test/pages-listing.spec.cjs test/reader-font.spec.cjs test/reader-command-grouping.spec.cjs test/session-history.spec.cjs test/read-mode-render.spec.cjs test/read-mode.spec.cjs test/read-mode-scrollback.spec.cjs test/background-resume.spec.cjs
 
 # URL base helper (web/spa/src/lib/base.js): pure Node, no browser and no
 # server, so it runs on its own. Rides `make test-spa` in CI.

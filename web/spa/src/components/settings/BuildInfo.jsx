@@ -1,6 +1,8 @@
 import { useEffect } from "preact/hooks";
-import { signal } from "@preact/signals";
-import { localGet } from "../../lib/api.js";
+import {
+  buildInfo as info,
+  loadBuildInfo as load,
+} from "../../lib/buildInfo.js";
 import { readLoadedBundleHash } from "../../lib/bundleHash.js";
 import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
 
@@ -9,14 +11,6 @@ import { Group, Lede, NavRow, ValueRow } from "./ui.jsx";
 // The SPA hash is the content hash Vite baked into the loaded script's
 // filename. They describe two different builds, so they are shown side by
 // side, never compared.
-
-const info = signal(null);
-
-function load() {
-  localGet("/api/build-info")
-    .then((d) => (info.value = d))
-    .catch(() => {});
-}
 
 export function AboutRow() {
   useEffect(load, []);

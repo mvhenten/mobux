@@ -3,6 +3,9 @@ import { useLocation } from "wouter-preact";
 import { signal } from "@preact/signals";
 import { apiGet, apiSend } from "../lib/api.js";
 import { u } from "../lib/base.js";
+import { buildInfo, loadBuildInfo } from "../lib/buildInfo.js";
+import { PageRows, hasPages } from "../components/PagesList.jsx";
+import { Group } from "../components/settings/ui.jsx";
 import { getSelectedNode, setSelectedNode, withNode } from "../lib/nodes.js";
 
 // Home / session list. Ports the behaviour of the Rust-rendered `/` page
@@ -90,6 +93,7 @@ export function HomePage() {
     // session list is fetched with it.
     selectedNode.value = getSelectedNode();
     loadNodes().then(refresh);
+    loadBuildInfo();
   }, []);
 
   const pickNode = (name) => {
@@ -300,6 +304,12 @@ export function HomePage() {
           );
         })}
       </div>
+
+      {hasPages(buildInfo.value) && (
+        <Group id="pagesCard" title="Pages">
+          <PageRows info={buildInfo.value} />
+        </Group>
+      )}
 
       <button
         id="fabNew"

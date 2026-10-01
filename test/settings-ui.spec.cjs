@@ -51,12 +51,13 @@ const SUB_PAGES = [
   ["update", "Software update", "#update"],
   ["shell", "Shell integration", "#shell-integration"],
   ["nodes", "Nodes", "#nodes-settings"],
+  ["pages", "Pages", "#pages-settings"],
   ["stt", "Speech to text", "#stt-provider"],
   ["listen", "Listen", "#listen-settings"],
   ["about", "About", "#build-info"],
 ];
 
-test("settings top level lists the ten rows and no search or reload", async ({
+test("settings top level lists the eleven rows and no search or reload", async ({
   page,
 }) => {
   await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
@@ -69,6 +70,7 @@ test("settings top level lists the ten rows and no search or reload", async ({
     "theme",
     "shell",
     "nodes",
+    "pages",
     "stt",
     "listen",
     "about",

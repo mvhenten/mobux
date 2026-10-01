@@ -10,12 +10,14 @@ import { NodesRow, NodesCard } from "../components/settings/Nodes.jsx";
 import { SttRow, SttCard } from "../components/settings/Stt.jsx";
 import { ListenRow, ListenCard } from "../components/settings/Listen.jsx";
 import { AboutRow, BuildInfoCard } from "../components/settings/BuildInfo.jsx";
+import { PagesRow, PagesCard } from "../components/settings/Pages.jsx";
 import { Group, NavRow } from "../components/settings/ui.jsx";
 
 export const SUB_PAGES = {
   update: { title: "Software update", Page: UpdateCard },
   shell: { title: "Shell integration", Page: ShellIntegrationCard },
   nodes: { title: "Nodes", Page: NodesCard },
+  pages: { title: "Pages", Page: PagesCard },
   stt: { title: "Speech to text", Page: SttCard },
   listen: { title: "Listen", Page: ListenCard },
   about: { title: "About", Page: BuildInfoCard },
@@ -41,6 +43,7 @@ export function SettingsPage() {
       </Group>
       <Group title="Hosts">
         <NodesRow />
+        <PagesRow />
       </Group>
       <Group title="Voice">
         <SttRow />
