@@ -14,7 +14,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::cli::{self, ConfigureCommand};
-use crate::config::{self, Config, FieldKind, FieldSpec, FieldValue, FIELDS};
+use crate::config::{self, AccessConfig, Config, FieldKind, FieldSpec, FieldValue, FIELDS};
+use crate::{PublicPath, ACCESS_PUBLIC_PATHS};
 
 /// Fields whose current value is never echoed back.
 const SECRETS: &[&str] = &["auth.pass", "auth.pin"];
@@ -282,6 +283,85 @@ pub fn check_report(path: &Path, named: bool) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
+// The tunnel
+// ---------------------------------------------------------------------------
+
+/// The paths a Cloudflare Access bypass policy must leave open, as Access
+/// application paths: an exact path as is, a prefix with a trailing `*`.
+pub fn bypass_paths() -> Vec<String> {
+    ACCESS_PUBLIC_PATHS
+        .iter()
+        .map(|public| match public {
+            PublicPath::Exact(path) => (*path).to_string(),
+            PublicPath::Prefix(prefix) => format!("{prefix}*"),
+        })
+        .collect()
+}
+
+/// The cloudflared `config.yml` for the access block, with the Access
+/// application settings after it as YAML comments, so the whole output can be
+/// written straight to the file.
+pub fn cloudflared_setup(config: &Config) -> Result<String, String> {
+    let access = &config.access;
+    if !access.is_configured() {
+        return Err(
+            "the access block is not set — set access.port, access.team_domain, access.aud, \
+             access.hostname and access.allowed_emails in config.json"
+                .to_string(),
+        );
+    }
+    config::check_access(config).map_err(|message| message.replace('\n', "; "))?;
+    let hostname = access.hostname.trim();
+    if hostname.is_empty() {
+        return Err("access.hostname: required to print the tunnel config".to_string());
+    }
+    Ok(render_cloudflared(access, hostname))
+}
+
+fn render_cloudflared(access: &AccessConfig, hostname: &str) -> String {
+    let listed = |entries: &[String]| -> String {
+        if entries.is_empty() {
+            return "#      (none)\n".to_string();
+        }
+        entries
+            .iter()
+            .map(|entry| format!("#      {entry}\n"))
+            .collect()
+    };
+    let bypass: Vec<String> = bypass_paths()
+        .iter()
+        .map(|path| format!("{hostname}{path}"))
+        .collect();
+
+    format!(
+        "# tunnel and credentials-file come from `cloudflared tunnel create mobux`
+tunnel: <TUNNEL-ID>
+credentials-file: /home/<user>/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: {hostname}
+    service: http://127.0.0.1:{port}
+  - service: http_status:404
+
+# Cloudflare Access: Zero Trust > Access > Applications > Add > Self-hosted
+#
+# 1. Application on {hostname}
+#    Session duration: 24 hours or longer
+#    AUD tag: copy it from the application into access.aud (now {aud})
+#    Allow policy, include these emails:
+{emails}#    Service Auth policy, include these service tokens (client id):
+{tokens}#
+# 2. Application with a Bypass policy (include Everyone) on these paths:
+{bypass}",
+        port = access.port,
+        aud = access.aud.trim(),
+        emails = listed(&access.allowed_emails),
+        tokens = listed(&access.service_tokens),
+        bypass = listed(&bypass),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // The command
 // ---------------------------------------------------------------------------
 
@@ -293,6 +373,42 @@ pub fn run(command: &ConfigureCommand) -> i32 {
         }
         ConfigureCommand::Check(path) => check(path.as_deref()),
         ConfigureCommand::Interactive { force } => interactive(*force),
+        ConfigureCommand::Cloudflared(path) => cloudflared(path.as_deref()),
+    }
+}
+
+/// The config the server would run with: the file, then the environment.
+fn cloudflared(named: Option<&str>) -> i32 {
+    let path = named
+        .map(PathBuf::from)
+        .unwrap_or_else(config::config_file_path);
+    let file = match config::load_partial_from(&path) {
+        Ok(Some(file)) => file,
+        Ok(None) if named.is_some() => {
+            eprintln!("mobux: {}: no such file", path.display());
+            return 1;
+        }
+        Ok(None) => config::PartialConfig::default(),
+        Err(error) => {
+            eprintln!("mobux: {error}");
+            return 1;
+        }
+    };
+    let settings = config::resolve(
+        Config::default(),
+        file,
+        &config::EnvSnapshot::from_env(),
+        config::PartialConfig::default(),
+    );
+    match cloudflared_setup(&settings) {
+        Ok(text) => {
+            print!("{text}");
+            0
+        }
+        Err(message) => {
+            eprintln!("mobux: {message}");
+            1
+        }
     }
 }
 
@@ -635,5 +751,101 @@ mod tests {
         let embedded: serde_json::Value =
             serde_json::from_str(config::SCHEMA_JSON).expect("the embedded schema is JSON");
         assert_eq!(embedded, config::schema());
+    }
+
+    fn tunnel_config() -> Config {
+        Config {
+            access: AccessConfig {
+                port: 5153,
+                team_domain: "example.cloudflareaccess.com".to_string(),
+                aud: "a1b2c3".to_string(),
+                hostname: "mobux.example.com".to_string(),
+                allowed_emails: vec!["me@example.com".to_string()],
+                service_tokens: vec!["robot.access".to_string()],
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn cloudflared_prints_the_ingress_and_the_access_settings() {
+        let printed = cloudflared_setup(&tunnel_config()).expect("access is configured");
+        assert_eq!(
+            printed,
+            "# tunnel and credentials-file come from `cloudflared tunnel create mobux`
+tunnel: <TUNNEL-ID>
+credentials-file: /home/<user>/.cloudflared/<TUNNEL-ID>.json
+
+ingress:
+  - hostname: mobux.example.com
+    service: http://127.0.0.1:5153
+  - service: http_status:404
+
+# Cloudflare Access: Zero Trust > Access > Applications > Add > Self-hosted
+#
+# 1. Application on mobux.example.com
+#    Session duration: 24 hours or longer
+#    AUD tag: copy it from the application into access.aud (now a1b2c3)
+#    Allow policy, include these emails:
+#      me@example.com
+#    Service Auth policy, include these service tokens (client id):
+#      robot.access
+#
+# 2. Application with a Bypass policy (include Everyone) on these paths:
+#      mobux.example.com/.well-known/assetlinks.json
+#      mobux.example.com/static/manifest.json
+#      mobux.example.com/static/icon-*
+#      mobux.example.com/sw.js
+"
+        );
+    }
+
+    #[test]
+    fn an_empty_allowlist_is_printed_as_none() {
+        let mut config = tunnel_config();
+        config.access.service_tokens.clear();
+        let printed = cloudflared_setup(&config).expect("access is configured");
+        assert!(
+            printed.contains("(client id):\n#      (none)\n"),
+            "{printed}"
+        );
+    }
+
+    #[test]
+    fn the_access_bypass_is_the_asset_links_manifest_icons_and_service_worker() {
+        assert_eq!(
+            bypass_paths(),
+            [
+                "/.well-known/assetlinks.json",
+                "/static/manifest.json",
+                "/static/icon-*",
+                "/sw.js",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_access_block_is_reported_on_one_line() {
+        let mut config = tunnel_config();
+        config.access.aud = " ".to_string();
+        config.access.team_domain = "http://example.com/path".to_string();
+        let message = cloudflared_setup(&config).expect_err("the block is invalid");
+        assert!(!message.contains('\n'), "{message}");
+        assert!(message.contains("; "), "{message}");
+    }
+
+    #[test]
+    fn cloudflared_names_the_block_to_set_when_access_is_off() {
+        let message = cloudflared_setup(&Config::default()).expect_err("access is off");
+        assert!(message.contains("access block is not set"), "{message}");
+        assert!(!message.contains('\n'), "{message}");
+    }
+
+    #[test]
+    fn cloudflared_needs_the_public_hostname() {
+        let mut config = tunnel_config();
+        config.access.hostname.clear();
+        let message = cloudflared_setup(&config).expect_err("no hostname");
+        assert!(message.starts_with("access.hostname"), "{message}");
     }
 }

@@ -907,17 +907,52 @@ fn load_auth_config(config_dir: &std::path::Path, settings: &config::Config) -> 
 /// check polls it on a freshly-restarted binary before any credentials exist.
 /// It leaks nothing beyond "this is mobux, version X".
 fn is_public_path(path: &str) -> bool {
-    path == "/api/identify"
-        // Test-only update-index fixture: the background poller fetches it
-        // without credentials, so it must bypass auth. Only ever routed when
-        // MOBUX_UPDATE_TEST_INDEX is set (see router construction).
-        || path == "/api/update/test-index"
-        || path == "/install"
-        || path.starts_with("/install/")
-        || path.starts_with("/.well-known/")
-        || path.starts_with("/static/icon-")
-        || path == "/static/manifest.json"
-        || path == "/sw.js"
+    // Test-only update-index fixture: the background poller fetches it
+    // without credentials, so it must bypass auth. Only ever routed when
+    // MOBUX_UPDATE_TEST_INDEX is set (see router construction).
+    path == "/api/update/test-index" || PUBLIC_PATHS.iter().any(|public| public.matches(path))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicPath {
+    Exact(&'static str),
+    Prefix(&'static str),
+}
+
+impl PublicPath {
+    pub fn matches(self, path: &str) -> bool {
+        match self {
+            PublicPath::Exact(exact) => path == exact,
+            PublicPath::Prefix(prefix) => path.starts_with(prefix),
+        }
+    }
+}
+
+pub const PUBLIC_PATHS: &[PublicPath] = &[
+    PublicPath::Exact("/api/identify"),
+    PublicPath::Exact("/install"),
+    PublicPath::Prefix("/install/"),
+    PublicPath::Prefix("/.well-known/"),
+    PublicPath::Prefix("/static/icon-"),
+    PublicPath::Exact("/static/manifest.json"),
+    PublicPath::Exact("/sw.js"),
+];
+
+/// The paths the Access listener leaves open: what Android's asset-links check
+/// and the manifest and icon fetches need without a sign-in. The install page,
+/// the APK, the CA and `/api/identify` stay behind Access. This table is also
+/// what `mobux configure --cloudflared` prints as the Access bypass paths.
+pub const ACCESS_PUBLIC_PATHS: &[PublicPath] = &[
+    PublicPath::Exact("/.well-known/assetlinks.json"),
+    PublicPath::Exact("/static/manifest.json"),
+    PublicPath::Prefix("/static/icon-"),
+    PublicPath::Exact("/sw.js"),
+];
+
+fn is_access_public_path(path: &str) -> bool {
+    ACCESS_PUBLIC_PATHS
+        .iter()
+        .any(|public| public.matches(path))
 }
 
 /// The startup warning for the one combination that leaks credentials: auth is

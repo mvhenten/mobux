@@ -47,6 +47,14 @@ mobux is meant to live on your private network, not the open internet.
 - **HTTPS on request.** mobux serves plain HTTP by default, which is what you want behind a reverse proxy or a tunnel that already terminates TLS. Pass `--tls` (or set `MOBUX_TLS=1`) and it generates and manages its own CA so phones can trust it — the `/install` page walks you through adding the cert — or obtains a real Let's Encrypt certificate via ACME if you give it a public domain. Turn it on when nothing else terminates TLS: on a bare tailnet the credentials would otherwise cross the wire in clear text, and mobux says so loudly at startup.
 - **PIN / Basic auth.** Access is gated by HTTP Basic auth with a user and PIN you set in the config file, in an environment variable, or on the command line.
 
+## Cloudflare Tunnel and Access
+
+To reach mobux without the tailnet, serve it through a Cloudflare Tunnel with
+Cloudflare Access in front. Set the `access` block, run
+`mobux configure --cloudflared` for the cloudflared config and the Access
+settings, and follow [Cloudflare Tunnel and Access](DEPLOY.md#cloudflare-tunnel-and-access).
+The tailnet and the PIN keep working alongside.
+
 ## Quick start
 
 Install the prebuilt binary (Linux x86_64 or aarch64, needs `tmux`):

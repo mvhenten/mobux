@@ -410,14 +410,68 @@ email or service-token allowlist. The PIN plays no part here. A refused request
 gets 401 with a one-line reason and `WWW-Authenticate: Bearer
 realm="cloudflare-access"`. A request whose `Origin` is neither the
 request host nor `https://<access.hostname>` gets 403, since Cloudflare sends
-its cookie on cross-site requests too. The paths the main listener leaves open
-(`/api/identify`, `/install`, `/.well-known/`, `/static/manifest.json`,
-`/static/icon-*`, `/sw.js`) stay open here too.
+its cookie on cross-site requests too. Only `/.well-known/assetlinks.json`,
+`/static/manifest.json`, `/static/icon-*` and `/sw.js` are open without a
+token; the install page, the APK, the CA and `/api/identify` need one.
 
 Terminal WebSockets get a ping every 30 seconds, on both listeners, so
 Cloudflare does not close an idle terminal. A port that cannot be bound stops
 startup, so a self-update that breaks the listener rolls back. The main listener
 and its PIN are unchanged.
+
+## Cloudflare Tunnel and Access
+
+Serves mobux on a public hostname through a Cloudflare Tunnel, with Cloudflare
+Access in front and mobux checking every Access token itself.
+
+1. Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+   and create a named tunnel:
+
+   ```bash
+   cloudflared tunnel login
+   cloudflared tunnel create mobux
+   cloudflared tunnel route dns mobux mobux.example.com
+   ```
+
+2. Set the `access` block in `config.json` ([config reference](#config-reference)):
+   `port`, `team_domain`, `hostname` and `allowed_emails`. Put any placeholder
+   in `aud` for now; step 4 replaces it.
+
+3. Print the tunnel config and move it to `~/.cloudflared/config.yml`. Name the
+   config file if the service runs with `--config`:
+
+   ```bash
+   mobux configure --cloudflared > ~/.cloudflared/config.yml.new
+   mv ~/.cloudflared/config.yml.new ~/.cloudflared/config.yml
+   ```
+
+   Fill in `<TUNNEL-ID>` and `<user>` from step 1. The ingress points at
+   `http://127.0.0.1:<access.port>` and answers 404 for any other hostname.
+   WebSockets need no extra setting. Start it with `cloudflared tunnel run mobux`
+   or `cloudflared service install`, which on Linux needs root and reads
+   `/etc/cloudflared/config.yml` instead.
+
+4. In Zero Trust, add the two self-hosted applications the output lists:
+   - the hostname, with an Allow policy for the printed emails. Set the session
+     duration to 24 hours or longer; when it lapses, mobux shows "Sign in
+     again". Copy the application's AUD tag into `access.aud` and restart mobux.
+   - the printed bypass paths, with a Bypass policy that includes Everyone.
+     Android's asset-links check and the manifest and icon fetches send no
+     sign-in, so these paths must load without one. The install page, the APK
+     and the CA stay behind Access.
+
+5. For scripts, create a service token under Access > Service Auth, add its
+   client ID to `access.service_tokens`, and add a Service Auth policy for it
+   to the first application. A script sends the `CF-Access-Client-Id` and
+   `CF-Access-Client-Secret` headers; Cloudflare swaps them for a token whose
+   `common_name` is the client ID, which mobux matches against
+   `access.service_tokens`.
+
+Cloudflare caps a request body at 100 MB on the Free and Pro plans, so an
+upload over 100 MB fails through the tunnel. Send large files over the tailnet,
+where the limit is 200 MB.
+
+The tailnet listener, its CA and the PIN keep working alongside the tunnel.
 
 ## Upgrade notes
 
