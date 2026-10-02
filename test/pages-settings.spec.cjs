@@ -99,7 +99,7 @@ test("adding a file root and a proxy target sends the full section list", async 
     "href",
     /\/files\/docs\/$/,
   );
-  await expect(page.locator("#pagesStatus")).toHaveText("Saved ✓");
+  await expect(page.locator("#pages-files-status")).toHaveText("Saved ✓");
   await expect(files.locator(".page-add-name")).toHaveValue("");
 
   const proxies = page.locator('.page-add[data-section="proxies"]');
@@ -158,7 +158,7 @@ test("removing takes a second tap", async ({ page }) => {
   ]);
 });
 
-test("a refused change shows the server's reason and keeps the list", async ({
+test("a refused change shows the server's reason under its own form and keeps the list", async ({
   page,
 }) => {
   const reason =
@@ -174,9 +174,17 @@ test("a refused change shows the server's reason and keeps the list", async ({
   await files.locator(".page-add-name").fill("docs");
   await files.locator(".page-add-value").fill("/srv/missing");
   await files.locator(".page-add-btn").click();
-  await expect(page.locator("#pagesStatus .settings-status-line")).toHaveText(
-    reason,
-  );
+  const error = page.locator("#pages-files-status");
+  await expect(error.locator(".settings-status-line")).toHaveText(reason);
+  await expect(page.locator("#pages-proxies-status")).toHaveCount(0);
+  const below = (a, b) =>
+    Promise.all([a.boundingBox(), b.boundingBox()]).then(
+      ([upper, lower]) => upper.y + upper.height <= lower.y,
+    );
+  expect(await below(files, error)).toBe(true);
+  expect(
+    await below(error, page.locator('.page-add[data-section="proxies"]')),
+  ).toBe(true);
   await expect(row(page, "files", "docs")).toHaveCount(0);
   await expect(files.locator(".page-add-name")).toHaveValue("docs");
 });
@@ -191,14 +199,14 @@ test("a bad name, path or port is refused before anything is sent", async ({
   await files.locator(".page-add-name").fill("a/b");
   await files.locator(".page-add-value").fill("/srv/x");
   await files.locator(".page-add-btn").click();
-  await expect(page.locator("#pagesStatus")).toHaveText(
+  await expect(page.locator("#pages-files-status")).toHaveText(
     "Name must be letters, digits, - or _.",
   );
 
   await files.locator(".page-add-name").fill("docs");
   await files.locator(".page-add-value").fill("srv/x");
   await files.locator(".page-add-btn").click();
-  await expect(page.locator("#pagesStatus")).toHaveText(
+  await expect(page.locator("#pages-files-status")).toHaveText(
     "Path must be absolute.",
   );
 
@@ -206,7 +214,7 @@ test("a bad name, path or port is refused before anything is sent", async ({
   await proxies.locator(".page-add-name").fill("vite");
   await proxies.locator(".page-add-value").fill("70000");
   await proxies.locator(".page-add-btn").click();
-  await expect(page.locator("#pagesStatus")).toHaveText(
+  await expect(page.locator("#pages-proxies-status")).toHaveText(
     "Port must be a whole number from 1 to 65535.",
   );
   expect(puts).toEqual([]);

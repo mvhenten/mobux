@@ -4,15 +4,15 @@
 //! routes, so a removed page answers 404 and an added one serves at once.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::config;
+use crate::config_file::{ConfigFile, EditError};
 use crate::files::{self, FileRoots};
-use crate::mcp_settings::{read_optional, with_keys, write_atomic, ManagedBy};
+use crate::mcp_settings::ManagedBy;
 use crate::proxy::ProxyTargets;
 
 const FILES_NOTE: &str = "MOBUX_FILES sets the file roots; unset it to edit them here.";
@@ -92,7 +92,7 @@ pub enum SetError {
 pub struct PagesSettings {
     files: Arc<FileRoots>,
     proxies: Arc<ProxyTargets>,
-    path: PathBuf,
+    file: Arc<ConfigFile>,
     managed: Managed,
     write: Mutex<()>,
 }
@@ -101,13 +101,13 @@ impl PagesSettings {
     pub fn new(
         files: Arc<FileRoots>,
         proxies: Arc<ProxyTargets>,
-        path: PathBuf,
+        file: Arc<ConfigFile>,
         managed: Managed,
     ) -> Self {
         PagesSettings {
             files,
             proxies,
-            path,
+            file,
             managed,
             write: Mutex::new(()),
         }
@@ -179,10 +179,10 @@ impl PagesSettings {
             return Ok(self.status());
         }
 
-        let previous = read_optional(&self.path).map_err(SetError::Io)?;
-        let next = with_keys(previous.as_deref(), &keys).map_err(SetError::Invalid)?;
-        config::parse(&self.path, &next).map_err(|e| SetError::Invalid(e.to_string()))?;
-        write_atomic(&self.path, &next).map_err(|e| SetError::Io(e.to_string()))?;
+        self.file.edit(&keys).await.map_err(|err| match err {
+            EditError::Invalid(message) => SetError::Invalid(message),
+            EditError::Io(message) => SetError::Io(message),
+        })?;
 
         if let Some(resolved) = resolved {
             self.files.replace(resolved);
@@ -228,9 +228,11 @@ fn twice(section: &str, name: &str) -> SetError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_file::read_optional;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::Router;
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     struct Fixture {
@@ -270,7 +272,7 @@ mod tests {
         let settings = config::load_from(&path).unwrap();
         let files = Arc::new(FileRoots::from_config(&settings.files).unwrap());
         let proxies = Arc::new(ProxyTargets::from_config(&settings, "mobux_session").unwrap());
-        let pages = PagesSettings::new(files, proxies, path, managed);
+        let pages = PagesSettings::new(files, proxies, Arc::new(ConfigFile::new(path)), managed);
         Fixture { dir, pages }
     }
 

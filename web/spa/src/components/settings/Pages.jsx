@@ -1,14 +1,13 @@
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { apiSend, localGet } from "../../lib/api.js";
-import { u } from "../../lib/base.js";
 import {
   buildInfo,
   buildInfoError,
   loadBuildInfo,
   reloadBuildInfo,
 } from "../../lib/buildInfo.js";
-import { PagesError, hasPages, pageCount } from "../PagesList.jsx";
+import { PageLink, PagesError, hasPages, pageCount } from "../PagesList.jsx";
 import {
   Actions,
   Button,
@@ -27,7 +26,7 @@ import {
 
 const pages = signal(null); // null = loading or failed — never editable
 const loadError = signal(null);
-const status = signal(null);
+const status = { files: signal(null), proxies: signal(null) };
 const busy = signal(false);
 const draft = {
   files: { name: signal(""), value: signal("") },
@@ -63,7 +62,8 @@ export function PagesRow() {
 async function load() {
   pages.value = null;
   loadError.value = null;
-  status.value = null;
+  status.files.value = null;
+  status.proxies.value = null;
   try {
     pages.value = await localGet("/api/settings/pages");
   } catch (e) {
@@ -78,11 +78,11 @@ async function save(section, list) {
       method: "PUT",
       body: JSON.stringify({ [section]: list }),
     });
-    status.value = { msg: "Saved ✓", kind: "ok" };
+    status[section].value = { msg: "Saved ✓", kind: "ok" };
     reloadBuildInfo();
     return true;
   } catch (e) {
-    status.value = { msg: errorText(e), kind: "error" };
+    status[section].value = { msg: errorText(e), kind: "error" };
     return false;
   } finally {
     busy.value = false;
@@ -94,7 +94,6 @@ const SECTIONS = {
     title: "File roots",
     addTitle: "Add a file root",
     kind: "files",
-    mount: "/files/",
     field: "path",
     fieldLabel: "Path",
     placeholder: "/home/me/site",
@@ -110,7 +109,6 @@ const SECTIONS = {
     title: "Proxy targets",
     addTitle: "Add a proxy target",
     kind: "proxy",
-    mount: "/proxy/",
     field: "port",
     fieldLabel: "Port",
     placeholder: "5173",
@@ -136,19 +134,13 @@ function PageRow({ section, entry, editable }) {
     );
   return (
     <div class="settings-row page-row">
-      <a
+      <PageLink
         class="page-link"
-        data-page-kind={s.kind}
-        data-page-name={entry.name}
-        href={u(`${s.mount}${encodeURIComponent(entry.name)}/`)}
-        target="_blank"
-        rel="noopener"
-      >
-        <span class="settings-label">
-          <span class="settings-title">{entry.name}</span>
-          <small class="page-detail">{s.detail(entry)}</small>
-        </span>
-      </a>
+        kind={s.kind}
+        name={entry.name}
+        detail={s.detail(entry)}
+        detailClass="page-detail"
+      />
       {editable && (
         <ConfirmButton
           class="btn--inline page-remove"
@@ -172,19 +164,22 @@ function AddForm({ section }) {
     e.preventDefault();
     const n = name.value.trim();
     if (!NAME_RULE.test(n)) {
-      status.value = {
+      status[section].value = {
         msg: "Name must be letters, digits, - or _.",
         kind: "error",
       };
       return;
     }
     if (pages.value[section].some((x) => x.name === n)) {
-      status.value = { msg: `'${n}' is already listed.`, kind: "error" };
+      status[section].value = {
+        msg: `'${n}' is already listed.`,
+        kind: "error",
+      };
       return;
     }
     const parsed = s.parse(value.value);
     if (parsed.error) {
-      status.value = { msg: parsed.error, kind: "error" };
+      status[section].value = { msg: parsed.error, kind: "error" };
       return;
     }
     const entry = { name: n, [s.field]: parsed.value };
@@ -260,6 +255,7 @@ function Section({ section, data }) {
         )}
       </Group>
       {!note && <AddForm section={section} />}
+      <Status id={`pages-${section}-status`} status={status[section].value} />
     </>
   );
 }
@@ -294,7 +290,6 @@ export function PagesCard() {
       )}
       {data && <Section section="files" data={data} />}
       {data && <Section section="proxies" data={data} />}
-      <Status id="pagesStatus" status={status.value} />
     </div>
   );
 }
