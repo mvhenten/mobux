@@ -195,7 +195,6 @@ smoke-start: build
 	@if [ -n "$(SMOKE_PID)" ]; then echo "smoke already running (pid $(SMOKE_PID)) on $(MOBUX_SMOKE_PORT)"; exit 1; fi
 	@if [ "$(MOBUX_SMOKE_PORT)" = "$(MOBUX_PORT)" ]; then echo "MOBUX_SMOKE_PORT must differ from MOBUX_PORT"; exit 1; fi
 	@mkdir -p $(MOBUX_SMOKE_DATA)/home
-	@node test/lib/smoke-config.cjs $(MOBUX_SMOKE_DATA)/home/.config/mobux
 	@# The tests create and kill sessions on this server; with exit-empty on,
 	@# killing the last one would take the server down under the next test.
 	@env -u TMUX -u TMUX_PANE HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
@@ -207,7 +206,7 @@ smoke-start: build
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
-		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site \
+		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site MOBUX_FILES_LISTING=1 \
 		MOBUX_PROXY=up=$(MOBUX_PROXY_FIXTURE_PORT) \
 		MOBUX_MCP_PORT=$(MOBUX_SMOKE_MCP_PORT) \
 		MOBUX_ACCESS_PORT=$(MOBUX_ACCESS_SMOKE_PORT) \

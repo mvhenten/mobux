@@ -96,7 +96,7 @@
       "properties": {
         "listing": {
           "default": false,
-          "description": "List a directory that has no `index.html`. Off answers 404 instead.",
+          "description": "List a directory that has no `index.html`. Off answers 404 instead.\nEnv: `MOBUX_FILES_LISTING`.",
           "type": "boolean"
         },
         "roots": {

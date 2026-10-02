@@ -87,7 +87,7 @@ test("files: under a path prefix the page and its assets keep the prefix", async
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });
 
-// The smoke instance turns files.listing on (test/lib/smoke-config.cjs), and
+// The smoke instance turns files.listing on (MOBUX_FILES_LISTING), and
 // downloads/ has no index.html, so it renders the listing.
 const LISTED = "rapport-ñ.txt";
 

@@ -148,7 +148,7 @@ long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
 | `access.allowed_emails` | `MOBUX_ACCESS_ALLOWED_EMAILS` | `--access-allowed-email` | empty | Email addresses the Access listener admits |
 | `access.service_tokens` | `MOBUX_ACCESS_SERVICE_TOKENS` | `--access-service-token` | empty | Client ids of the service tokens the Access listener admits |
 | `files.roots` | `MOBUX_FILES` | none | empty | Host directories served under `/files/<name>/` |
-| `files.listing` | none | none | `false` | List a served directory that has no `index.html` |
+| `files.listing` | `MOBUX_FILES_LISTING` | `--files-listing` | `false` | List a served directory that has no `index.html` |
 | `proxy.targets` | `MOBUX_PROXY` | none | empty | Loopback ports proxied under `/proxy/<name>/` |
 | `mcp.port` | `MOBUX_MCP_PORT` | `--mcp-port` | `0` (off) | Loopback port for the MCP server at `/mcp`. Must differ from `server.port` and `access.port` |
 

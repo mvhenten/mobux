@@ -36,6 +36,7 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'<')
     .add(b'>')
     .add(b'?')
+    .add(b'\\')
     .add(b'`')
     .add(b'{')
     .add(b'}');
@@ -189,8 +190,11 @@ async fn serve(State(roots): State<Arc<FileRoots>>, req: Request<Body>) -> Respo
     };
     if metadata.is_file() {
         let download = wants_download(req.uri().query()).then(|| {
-            let name = rest.rsplit('/').next().unwrap_or_default();
-            percent_decode_str(name).decode_utf8_lossy().into_owned()
+            let decoded = percent_decode_str(rest).decode_utf8_lossy();
+            Path::new(decoded.as_ref())
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
         });
         let response = serve_file(&target, req).await;
         return match download {
@@ -273,11 +277,11 @@ fn attachment(mut response: Response, name: &str) -> Response {
     if !response.status().is_success() {
         return response;
     }
-    if let Ok(value) = HeaderValue::from_str(&content_disposition(name)) {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_DISPOSITION, value);
-    }
+    let value = HeaderValue::from_str(&content_disposition(name))
+        .expect("content_disposition only emits visible ASCII");
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, value);
     response
 }
 
@@ -285,7 +289,7 @@ fn content_disposition(name: &str) -> String {
     let plain: String = name
         .chars()
         .filter(|c| !c.is_control())
-        .map(|c| if c.is_ascii() { c } else { '_' })
+        .map(|c| if c.is_ascii() && c != '%' { c } else { '_' })
         .fold(String::new(), |mut plain, c| {
             if c == '"' || c == '\\' {
                 plain.push('\\');
@@ -737,6 +741,11 @@ mod tests {
                 "attachment; filename=\"rapport-_.pdf\"; filename*=UTF-8''rapport-%C3%B1.pdf",
             ),
             (
+                "100% done.txt",
+                "/files/site/bare/100%25%20done.txt?download",
+                "attachment; filename=\"100_ done.txt\"; filename*=UTF-8''100%25%20done.txt",
+            ),
+            (
                 "tab\there.txt",
                 "/files/site/bare/tab%09here.txt?download",
                 "attachment; filename=\"tabhere.txt\"; filename*=UTF-8''tab%09here.txt",
@@ -755,6 +764,52 @@ mod tests {
                 "nosniff"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_download_is_named_after_the_decoded_file_not_the_url_segment() {
+        let fixture = fixture();
+        let response = get(app(&fixture, false), "/files/site/bare%2Fnote.txt?download").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&response, header::CONTENT_DISPOSITION),
+            "attachment; filename=\"note.txt\"; filename*=UTF-8''note.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_head_download_carries_the_attachment_header() {
+        let fixture = fixture();
+        let req = Request::builder()
+            .method("HEAD")
+            .uri("/files/site/bare/note.txt?download")
+            .body(Body::empty())
+            .unwrap();
+        let response = app(&fixture, false).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&response, header::CONTENT_DISPOSITION),
+            "attachment; filename=\"note.txt\"; filename*=UTF-8''note.txt"
+        );
+        assert_eq!(body_text(response).await, "");
+    }
+
+    #[tokio::test]
+    async fn a_backslash_in_a_listed_name_stays_inside_the_segment() {
+        let fixture = fixture();
+        std::fs::write(fixture.root.join("bare/a\\b"), "x").unwrap();
+        std::fs::write(fixture.root.join("bare/..\\..\\..\\api\\x"), "x").unwrap();
+        let body = body_text(get(app(&fixture, true), "/files/site/bare/").await).await;
+        assert!(body.contains("href=\"./a%5Cb\" "), "{body}");
+        assert!(
+            body.contains("href=\"./a%5Cb?download\" download"),
+            "{body}"
+        );
+        assert!(
+            body.contains("href=\"./..%5C..%5C..%5Capi%5Cx?download\" download"),
+            "{body}"
+        );
+        assert!(!body.contains("href=\"./a\\b"), "{body}");
     }
 
     #[tokio::test]
