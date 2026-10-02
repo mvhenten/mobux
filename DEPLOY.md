@@ -148,7 +148,7 @@ long-running instance keeps its PIN in the config file or in `MOBUX_PIN`.
 | `access.allowed_emails` | `MOBUX_ACCESS_ALLOWED_EMAILS` | `--access-allowed-email` | empty | Email addresses the Access listener admits |
 | `access.service_tokens` | `MOBUX_ACCESS_SERVICE_TOKENS` | `--access-service-token` | empty | Client ids of the service tokens the Access listener admits |
 | `files.roots` | `MOBUX_FILES` | none | empty | Host directories served under `/files/<name>/` |
-| `files.listing` | none | none | `false` | List a served directory that has no `index.html` |
+| `files.listing` | `MOBUX_FILES_LISTING` | `--files-listing` | `false` | List a served directory that has no `index.html` |
 | `proxy.targets` | `MOBUX_PROXY` | none | empty | Loopback ports proxied under `/proxy/<name>/` |
 | `mcp.port` | `MOBUX_MCP_PORT` | `--mcp-port` | `0` (off) | Loopback port for the MCP server at `/mcp`. Must differ from `server.port` and `access.port` |
 
@@ -188,7 +188,8 @@ pairs: `MOBUX_FILES=site=/srv/site,docs=/srv/docs`.
 behind the same login as the UI. mobux resolves each root at startup and stops
 if one is missing. A path that resolves outside its root, through `..` or a
 symlink, answers 404. A directory serves its `index.html`, or a plain list of
-its entries when `files.listing` is true.
+its entries when `files.listing` is true, each file with an Open and a Download
+link. Adding `?download` to any file URL saves the file instead of showing it.
 
 `MOBUX_FILES` replaces the file's `files.roots` rather than adding to them. A
 repeated name keeps its last path, and a path cannot contain a comma; name such

@@ -17,7 +17,9 @@ use axum::{
     routing::get,
     Router,
 };
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{
+    percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS, NON_ALPHANUMERIC,
+};
 use tower_http::services::ServeFile;
 
 use crate::config::{self, FilesConfig};
@@ -34,9 +36,39 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'<')
     .add(b'>')
     .add(b'?')
+    .add(b'\\')
     .add(b'`')
     .add(b'{')
     .add(b'}');
+
+/// RFC 5987 `attr-char`: everything else in `filename*` is percent-encoded.
+const ATTR_CHAR: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'!')
+    .remove(b'#')
+    .remove(b'$')
+    .remove(b'&')
+    .remove(b'+')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'^')
+    .remove(b'_')
+    .remove(b'`')
+    .remove(b'|')
+    .remove(b'~');
+
+const LISTING_STYLE: &str = "\
+:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--line:#ddd;--link:#0b57d0}
+@media (prefers-color-scheme:dark){:root{--fg:#e8e8e8;--bg:#121212;--line:#333;--link:#8ab4f8}}
+body{margin:0;padding:0 16px;font:16px/1.4 system-ui,sans-serif;color:var(--fg);background:var(--bg)}
+ul{list-style:none;margin:0;padding:0}
+li{display:flex;align-items:center;gap:8px;min-height:48px;padding:4px 0;border-bottom:1px solid var(--line)}
+a{color:var(--link)}
+.name{flex:1;min-width:0;overflow-wrap:anywhere}
+a.name{display:flex;align-items:center;min-height:48px}
+.actions{display:flex;flex:none;gap:8px;margin-left:auto}
+.actions a{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;\
+min-width:48px;min-height:48px;padding:0 12px;border:1px solid var(--line);border-radius:8px;text-decoration:none}
+";
 
 /// One served directory: the path as configured, and where it resolves.
 #[derive(Debug, Clone)]
@@ -157,7 +189,18 @@ async fn serve(State(roots): State<Arc<FileRoots>>, req: Request<Body>) -> Respo
         return not_found();
     };
     if metadata.is_file() {
-        return serve_file(&target, req).await;
+        let download = wants_download(req.uri().query()).then(|| {
+            let decoded = percent_decode_str(rest).decode_utf8_lossy();
+            Path::new(decoded.as_ref())
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        let response = serve_file(&target, req).await;
+        return match download {
+            Some(name) => attachment(response, &name),
+            None => response,
+        };
     }
     if !metadata.is_dir() {
         return not_found();
@@ -219,6 +262,45 @@ async fn serve_file(path: &Path, req: Request<Body>) -> Response {
     }
 }
 
+/// `?download`, with or without a value, anywhere in the query.
+fn wants_download(query: Option<&str>) -> bool {
+    query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair.split('=').next() == Some("download"))
+    })
+}
+
+/// Save rather than show: RFC 6266 `attachment` with an ASCII `filename`
+/// for old clients and the exact UTF-8 name in `filename*` (RFC 5987).
+fn attachment(mut response: Response, name: &str) -> Response {
+    if !response.status().is_success() {
+        return response;
+    }
+    let value = HeaderValue::from_str(&content_disposition(name))
+        .expect("content_disposition only emits visible ASCII");
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, value);
+    response
+}
+
+fn content_disposition(name: &str) -> String {
+    let plain: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| if c.is_ascii() && c != '%' { c } else { '_' })
+        .fold(String::new(), |mut plain, c| {
+            if c == '"' || c == '\\' {
+                plain.push('\\');
+            }
+            plain.push(c);
+            plain
+        });
+    let exact = utf8_percent_encode(name, ATTR_CHAR);
+    format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{exact}")
+}
+
 fn listing(root: &Path, dir: &Path) -> Response {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -254,7 +336,7 @@ fn listing(root: &Path, dir: &Path) -> Response {
     let mut body = format!(
         "<!doctype html>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>/{title}</title>\n<ul>\n"
+         <title>/{title}</title>\n<style>\n{LISTING_STYLE}</style>\n<ul>\n"
     );
     for name in names {
         let (bare, slash) = match name.strip_suffix('/') {
@@ -263,9 +345,22 @@ fn listing(root: &Path, dir: &Path) -> Response {
         };
         let href = format!("./{}{slash}", encode_segment(bare));
         let text = html_escape::encode_text(&name);
+        if !slash.is_empty() {
+            body.push_str(&format!(
+                "<li><a class=\"name\" href=\"{}\">{text}</a></li>\n",
+                html_escape::encode_double_quoted_attribute(&href)
+            ));
+            continue;
+        }
+        let label = html_escape::encode_double_quoted_attribute(&name);
+        let download = format!("{href}?download");
         body.push_str(&format!(
-            "<li><a href=\"{}\">{text}</a></li>\n",
-            html_escape::encode_double_quoted_attribute(&href)
+            "<li><span class=\"name\">{text}</span><span class=\"actions\">\
+             <a href=\"{}\" aria-label=\"Open {label}\">Open</a>\
+             <a href=\"{}\" download aria-label=\"Download {label}\">Download</a>\
+             </span></li>\n",
+            html_escape::encode_double_quoted_attribute(&href),
+            html_escape::encode_double_quoted_attribute(&download),
         ));
     }
     body.push_str("</ul>\n");
@@ -487,9 +582,10 @@ mod tests {
         assert!(header_of(&response, header::CONTENT_TYPE).starts_with("text/html"));
         let body = body_text(response).await;
         assert!(
-            body.contains("<a href=\"./note.txt\">note.txt</a>"),
+            body.contains("<span class=\"name\">note.txt</span>"),
             "{body}"
         );
+        assert!(body.contains("<a href=\"./note.txt\" "), "{body}");
     }
 
     #[tokio::test]
@@ -498,8 +594,11 @@ mod tests {
         std::fs::remove_file(fixture.root.join("index.html")).unwrap();
         let response = get(app(&fixture, true), "/files/site/").await;
         let body = body_text(response).await;
-        assert!(body.contains("<a href=\"./css/\">css/</a>"), "{body}");
-        assert!(body.contains("<a href=\"./alias.css\">"), "{body}");
+        assert!(
+            body.contains("<a class=\"name\" href=\"./css/\">css/</a>"),
+            "{body}"
+        );
+        assert!(body.contains("<a href=\"./alias.css\" "), "{body}");
         assert!(!body.contains("leak"), "{body}");
         assert!(!body.contains("href=\"/"), "{body}");
     }
@@ -545,11 +644,15 @@ mod tests {
             .skip(1)
             .map(|rest| rest.split('"').next().unwrap())
             .collect();
-        assert_eq!(hrefs.len(), 2, "{body}");
+        assert_eq!(hrefs.len(), 4, "{body}");
         for href in hrefs {
             assert!(href.starts_with("./"), "{href}");
         }
         assert!(body.contains("href=\"./javascript:alert(1)\""), "{body}");
+        assert!(
+            body.contains("href=\"./javascript:alert(1)?download\" download"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -604,6 +707,199 @@ mod tests {
                 "{uri}"
             );
         }
+    }
+
+    fn hrefs_of(body: &str) -> Vec<String> {
+        body.split("href=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn download_saves_the_file_under_its_encoded_name() {
+        let fixture = fixture();
+        for (name, uri, expected) in [
+            (
+                "note.txt",
+                "/files/site/bare/note.txt?download",
+                "attachment; filename=\"note.txt\"; filename*=UTF-8''note.txt",
+            ),
+            (
+                "field notes.txt",
+                "/files/site/bare/field%20notes.txt?download=1",
+                "attachment; filename=\"field notes.txt\"; filename*=UTF-8''field%20notes.txt",
+            ),
+            (
+                "say \"hi\".txt",
+                "/files/site/bare/say%20%22hi%22.txt?v=2&download",
+                "attachment; filename=\"say \\\"hi\\\".txt\"; filename*=UTF-8''say%20%22hi%22.txt",
+            ),
+            (
+                "rapport-ñ.pdf",
+                "/files/site/bare/rapport-%C3%B1.pdf?download",
+                "attachment; filename=\"rapport-_.pdf\"; filename*=UTF-8''rapport-%C3%B1.pdf",
+            ),
+            (
+                "100% done.txt",
+                "/files/site/bare/100%25%20done.txt?download",
+                "attachment; filename=\"100_ done.txt\"; filename*=UTF-8''100%25%20done.txt",
+            ),
+            (
+                "tab\there.txt",
+                "/files/site/bare/tab%09here.txt?download",
+                "attachment; filename=\"tabhere.txt\"; filename*=UTF-8''tab%09here.txt",
+            ),
+        ] {
+            std::fs::write(fixture.root.join("bare").join(name), "x").unwrap();
+            let response = get(app(&fixture, false), uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                header_of(&response, header::CONTENT_DISPOSITION),
+                expected,
+                "{uri}"
+            );
+            assert_eq!(
+                header_of(&response, header::X_CONTENT_TYPE_OPTIONS),
+                "nosniff"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_download_is_named_after_the_decoded_file_not_the_url_segment() {
+        let fixture = fixture();
+        let response = get(app(&fixture, false), "/files/site/bare%2Fnote.txt?download").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&response, header::CONTENT_DISPOSITION),
+            "attachment; filename=\"note.txt\"; filename*=UTF-8''note.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_head_download_carries_the_attachment_header() {
+        let fixture = fixture();
+        let req = Request::builder()
+            .method("HEAD")
+            .uri("/files/site/bare/note.txt?download")
+            .body(Body::empty())
+            .unwrap();
+        let response = app(&fixture, false).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&response, header::CONTENT_DISPOSITION),
+            "attachment; filename=\"note.txt\"; filename*=UTF-8''note.txt"
+        );
+        assert_eq!(body_text(response).await, "");
+    }
+
+    #[tokio::test]
+    async fn a_backslash_in_a_listed_name_stays_inside_the_segment() {
+        let fixture = fixture();
+        std::fs::write(fixture.root.join("bare/a\\b"), "x").unwrap();
+        std::fs::write(fixture.root.join("bare/..\\..\\..\\api\\x"), "x").unwrap();
+        let body = body_text(get(app(&fixture, true), "/files/site/bare/").await).await;
+        assert!(body.contains("href=\"./a%5Cb\" "), "{body}");
+        assert!(
+            body.contains("href=\"./a%5Cb?download\" download"),
+            "{body}"
+        );
+        assert!(
+            body.contains("href=\"./..%5C..%5C..%5Capi%5Cx?download\" download"),
+            "{body}"
+        );
+        assert!(!body.contains("href=\"./a\\b"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_file_opens_inline_without_the_download_query() {
+        let fixture = fixture();
+        for uri in [
+            "/files/site/logo.png",
+            "/files/site/logo.png?v=2",
+            "/files/site/logo.png?downloaded",
+        ] {
+            let response = get(app(&fixture, false), uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert!(response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .is_none());
+            assert!(header_of(&response, header::CONTENT_TYPE).contains("image/png"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_download_keeps_ranges_and_the_mime_type() {
+        let fixture = fixture();
+        let response = get_with(
+            app(&fixture, false),
+            "/files/site/logo.png?download",
+            Some("bytes=1-3"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            header_of(&response, header::CONTENT_RANGE),
+            format!("bytes 1-3/{}", PNG.len())
+        );
+        assert!(header_of(&response, header::CONTENT_TYPE).contains("image/png"));
+        assert!(header_of(&response, header::CONTENT_DISPOSITION).starts_with("attachment;"));
+        assert_eq!(body_text(response).await, "PNG");
+    }
+
+    #[tokio::test]
+    async fn a_directory_ignores_the_download_query() {
+        let fixture = fixture();
+        for (uri, listing) in [
+            ("/files/site/?download", false),
+            ("/files/site/bare/?download", true),
+        ] {
+            let response = get(app(&fixture, listing), uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert!(header_of(&response, header::CONTENT_TYPE).starts_with("text/html"));
+            assert!(response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .is_none());
+        }
+        let response = get(app(&fixture, true), "/files/site/css?download").await;
+        assert_eq!(header_of(&response, header::LOCATION), "./css/?download");
+    }
+
+    #[tokio::test]
+    async fn a_listing_offers_open_and_download_for_each_file() {
+        let fixture = fixture();
+        std::fs::write(fixture.root.join("bare/a <b>&\"c\".txt"), "x").unwrap();
+        std::fs::create_dir_all(fixture.root.join("bare/sub")).unwrap();
+        let body = body_text(get(app(&fixture, true), "/files/site/bare/").await).await;
+        assert!(body.contains("<style>"), "{body}");
+        assert!(body.contains("prefers-color-scheme:dark"), "{body}");
+        assert!(!body.contains("<script"), "{body}");
+        assert!(
+            body.contains(
+                "<a href=\"./note.txt\" aria-label=\"Open note.txt\">Open</a>\
+                 <a href=\"./note.txt?download\" download aria-label=\"Download note.txt\">Download</a>"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("<span class=\"name\">a &lt;b&gt;&amp;\"c\".txt</span>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("href=\"./a%20%3Cb%3E&amp;%22c%22.txt?download\" download"),
+            "{body}"
+        );
+        assert!(
+            body.contains("<li><a class=\"name\" href=\"./sub/\">sub/</a></li>"),
+            "{body}"
+        );
+        assert!(!body.contains("./sub/?download"), "{body}");
+        let hrefs = hrefs_of(&body);
+        assert_eq!(hrefs.len(), 5, "{body}");
+        assert!(hrefs.iter().all(|href| href.starts_with("./")), "{body}");
     }
 
     #[test]

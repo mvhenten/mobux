@@ -322,6 +322,7 @@ pub struct FilesConfig {
     #[garde(custom(file_roots_value))]
     pub roots: BTreeMap<String, String>,
     /// List a directory that has no `index.html`. Off answers 404 instead.
+    /// Env: `MOBUX_FILES_LISTING`.
     #[serde(default)]
     #[garde(skip)]
     pub listing: bool,
@@ -901,6 +902,13 @@ pub const FIELDS: &[FieldSpec] = &[
         help: "Client id of a service token the Access listener admits",
     },
     FieldSpec {
+        key: "files.listing",
+        env: "MOBUX_FILES_LISTING",
+        flag: Some("--files-listing"),
+        kind: FieldKind::Toggle,
+        help: "List a served directory that has no index.html (default off)",
+    },
+    FieldSpec {
         key: "mcp.port",
         env: "MOBUX_MCP_PORT",
         flag: Some("--mcp-port"),
@@ -1420,7 +1428,7 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
         }),
         files: Some(PartialFilesConfig {
             roots: env.get(FILES_ENV).map(split_map),
-            listing: None,
+            listing: env.get("MOBUX_FILES_LISTING").map(truthy_toggle),
         }),
         proxy: Some(PartialProxyConfig {
             targets: env.get(PROXY_ENV).map(split_port_map),
@@ -3000,6 +3008,25 @@ mod tests {
         );
         assert_eq!(config.files.roots.len(), 2);
         assert_eq!(config.files.roots["docs"], "/srv/docs");
+        assert!(!config.files.listing);
+    }
+
+    #[test]
+    fn files_listing_reads_from_the_environment_over_the_file() {
+        let layer = file(r#"{"files": {"listing": false}}"#);
+        let config = resolved(
+            layer,
+            &env(&[("MOBUX_FILES_LISTING", "1")]),
+            PartialConfig::default(),
+        );
+        assert!(config.files.listing);
+
+        let layer = file(r#"{"files": {"listing": true}}"#);
+        let config = resolved(
+            layer,
+            &env(&[("MOBUX_FILES_LISTING", "0")]),
+            PartialConfig::default(),
+        );
         assert!(!config.files.listing);
     }
 

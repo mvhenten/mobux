@@ -87,6 +87,33 @@ test("files: under a path prefix the page and its assets keep the prefix", async
   await page.unrouteAll({ behavior: "ignoreErrors" });
 });
 
+// The smoke instance turns files.listing on (MOBUX_FILES_LISTING), and
+// downloads/ has no index.html, so it renders the listing.
+const LISTED = "rapport-ñ.txt";
+
+test("files: Download in the listing saves the file under its name", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/files/site/downloads/`);
+  const link = page.getByRole("link", { name: `Download ${LISTED}` });
+  await expect(link).toHaveAttribute("download", "");
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    link.tap(),
+  ]);
+  expect(download.suggestedFilename()).toBe(LISTED);
+  expect(new URL(download.url()).search).toBe("?download");
+});
+
+test("files: Open in the listing shows the file inline", async ({ page }) => {
+  await page.goto(`${BASE}/files/site/downloads/`);
+  await page.getByRole("link", { name: `Open ${LISTED}` }).tap();
+  await expect(page).toHaveURL(
+    `${BASE}/files/site/downloads/${encodeURIComponent(LISTED)}`,
+  );
+  await expect(page.locator("body")).toHaveText("rapport inline");
+});
+
 test("files: a request without credentials gets 401", async () => {
   test.skip(!AUTH, "the instance under test has no auth");
   const response = await fetch(`${BASE}/files/site/`, { redirect: "manual" });

@@ -200,12 +200,13 @@ smoke-start: build
 	@env -u TMUX -u TMUX_PANE HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
 		tmux -L $(MOBUX_SMOKE_TMUX) start-server \; set-option -s exit-empty off
 	@nohup env MOBUX_DATA_DIR=$(MOBUX_SMOKE_DATA) MOBUX_TLS=0 \
+		MOBUX_CONFIG_DIR=$(MOBUX_SMOKE_DATA)/home/.config/mobux \
 		HOME=$(MOBUX_SMOKE_DATA)/home HISTFILE=/dev/null \
 		MOBUX_TMUX_SOCKET=$(MOBUX_SMOKE_TMUX) \
 		MOBUX_UPDATE_TEST_INDEX='{"name":"mobux","vers":"999.0.0","yanked":false}' \
 		MOBUX_UPDATE_CHECK_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT)/api/update/test-index \
 		MOBUX_UPDATE_DISABLE_RUN=1 \
-		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site \
+		MOBUX_FILES=site=$(CURDIR)/test/assets/files-site MOBUX_FILES_LISTING=1 \
 		MOBUX_PROXY=up=$(MOBUX_PROXY_FIXTURE_PORT) \
 		MOBUX_MCP_PORT=$(MOBUX_SMOKE_MCP_PORT) \
 		MOBUX_ACCESS_PORT=$(MOBUX_ACCESS_SMOKE_PORT) \
