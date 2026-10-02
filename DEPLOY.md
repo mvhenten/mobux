@@ -188,7 +188,8 @@ pairs: `MOBUX_FILES=site=/srv/site,docs=/srv/docs`.
 behind the same login as the UI. mobux resolves each root at startup and stops
 if one is missing. A path that resolves outside its root, through `..` or a
 symlink, answers 404. A directory serves its `index.html`, or a plain list of
-its entries when `files.listing` is true.
+its entries when `files.listing` is true, each file with an Open and a Download
+link. Adding `?download` to any file URL saves the file instead of showing it.
 
 `MOBUX_FILES` replaces the file's `files.roots` rather than adding to them. A
 repeated name keeps its last path, and a path cannot contain a comma; name such
