@@ -126,6 +126,8 @@ The UI is being modernized toward a component-based single-page app. That migrat
 
 A short product overview for the curious is in **[OVERVIEW.md](OVERVIEW.md)**.
 
+An agent on the host reads **[docs/for-agents.md](docs/for-agents.md)** for the MCP tools, the file server and the proxy.
+
 ## API
 
 | Endpoint | Method | Description |
