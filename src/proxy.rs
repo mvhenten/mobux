@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -55,9 +55,11 @@ const HOP_BY_HOP: [HeaderName; 9] = [
 
 /// The configured targets plus what every forwarded request needs to say
 /// about the outside: the mount prefix, the scheme, and the cookie to keep.
-#[derive(Debug, Clone)]
+/// Settings → Pages swaps the targets while mobux runs, so a request reads
+/// them per call.
+#[derive(Debug)]
 pub struct ProxyTargets {
-    targets: BTreeMap<String, u16>,
+    targets: RwLock<BTreeMap<String, u16>>,
     base_path: String,
     proto: &'static str,
     session_cookie: String,
@@ -77,7 +79,7 @@ impl ProxyTargets {
         connector.set_nodelay(true);
         connector.set_connect_timeout(Some(FIRST_BYTE_TIMEOUT));
         Ok(ProxyTargets {
-            targets: settings.proxy.targets.clone(),
+            targets: RwLock::new(settings.proxy.targets.clone()),
             base_path: settings
                 .server
                 .base_path
@@ -93,11 +95,34 @@ impl ProxyTargets {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.targets.is_empty()
+        self.len() == 0
     }
 
     pub fn len(&self) -> usize {
-        self.targets.len()
+        self.entries().len()
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.entries().into_keys().collect()
+    }
+
+    pub fn entries(&self) -> BTreeMap<String, u16> {
+        self.targets
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn replace(&self, targets: BTreeMap<String, u16>) {
+        *self.targets.write().unwrap_or_else(PoisonError::into_inner) = targets;
+    }
+
+    fn port(&self, name: &str) -> Option<u16> {
+        self.targets
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .copied()
     }
 
     /// `X-Forwarded-Prefix` for one target: where the browser sees its root.
@@ -123,7 +148,7 @@ async fn redirect_to_root(
     RoutePath(name): RoutePath<String>,
     uri: Uri,
 ) -> Response {
-    if !targets.targets.contains_key(&name) {
+    if targets.port(&name).is_none() {
         return unknown_target(&targets);
     }
     let location = match uri.query() {
@@ -141,7 +166,7 @@ async fn forward(State(targets): State<Arc<ProxyTargets>>, mut req: Request<Body
     let Some((name, rest)) = split_request_path(req.uri().path()) else {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     };
-    let Some(&port) = targets.targets.get(&name) else {
+    let Some(port) = targets.port(&name) else {
         return unknown_target(&targets);
     };
     let rest = rest.to_string();

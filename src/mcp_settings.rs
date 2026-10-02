@@ -242,9 +242,16 @@ pub fn registration_command(port: u16) -> String {
     )
 }
 
-/// Set `mcp.port` and leave every other key where it was; serde_json keeps
-/// insertion order (`preserve_order`).
 fn with_mcp_port(raw: Option<&str>, port: u16) -> Result<String, String> {
+    with_keys(raw, &[("mcp", "port", port.into())])
+}
+
+/// Set each `block.key` and leave every other key where it was; serde_json
+/// keeps insertion order (`preserve_order`).
+pub(crate) fn with_keys(
+    raw: Option<&str>,
+    keys: &[(&str, &str, serde_json::Value)],
+) -> Result<String, String> {
     let mut document: serde_json::Value = match raw {
         Some(raw) => serde_json::from_str(raw).map_err(|e| format!("config.json: {e}"))?,
         None => serde_json::json!({}),
@@ -252,19 +259,23 @@ fn with_mcp_port(raw: Option<&str>, port: u16) -> Result<String, String> {
     let root = document
         .as_object_mut()
         .ok_or("config.json: the top level must be an object")?;
-    let block = root.entry("mcp").or_insert_with(|| serde_json::json!({}));
-    if !block.is_object() {
-        *block = serde_json::json!({});
+    for (block, key, value) in keys {
+        let block = root
+            .entry(block.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !block.is_object() {
+            *block = serde_json::json!({});
+        }
+        block
+            .as_object_mut()
+            .expect("just made an object")
+            .insert(key.to_string(), value.clone());
     }
-    block
-        .as_object_mut()
-        .expect("just made an object")
-        .insert("port".to_string(), port.into());
     let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
     Ok(format!("{text}\n"))
 }
 
-fn read_optional(path: &Path) -> Result<Option<String>, String> {
+pub(crate) fn read_optional(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(raw) => Ok(Some(raw)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -274,7 +285,7 @@ fn read_optional(path: &Path) -> Result<Option<String>, String> {
 
 /// Replace the file in one rename, through a symlink to the file it names,
 /// at mode 600 because it can hold the PIN.
-fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let parent = target
         .parent()

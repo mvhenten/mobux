@@ -20,3 +20,10 @@ export function loadBuildInfo() {
   );
   return request;
 }
+
+// After Settings changes what is served: the next screen that reads build
+// info sees the new names.
+export function reloadBuildInfo() {
+  request = null;
+  return loadBuildInfo();
+}

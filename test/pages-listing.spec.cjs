@@ -171,21 +171,28 @@ test("with nothing configured the home card is gone and settings says none", asy
   await expect(page.locator("#sessionList")).toBeVisible();
   await expect(page.locator("#pagesCard")).toHaveCount(0);
 
+  await page.route(/\/api\/settings\/pages$/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({
+      response,
+      json: { ...body, files: [], proxies: [] },
+    });
+  });
   await page.goto(`${BASE}/app#/settings`, { waitUntil: "networkidle" });
   await expect(page.locator('[data-row="pages"] .settings-value')).toHaveText(
     "none",
   );
   await page.locator('[data-row="pages"]').click();
-  await expect(page.locator("#pages-settings")).toContainText(
-    "Nothing configured",
+  await expect(page.locator("#pages-files")).toContainText("No file roots.");
+  await expect(page.locator("#pages-proxies")).toContainText(
+    "No proxy targets.",
   );
   await expect(page.locator("#pages-settings [data-page-kind]")).toHaveCount(0);
 });
 
-test("a failed build-info fetch says so on home and in settings", async ({
-  page,
-}) => {
-  await page.route(/\/api\/build-info$/, (route) =>
+test("a failed fetch says so on home and in settings", async ({ page }) => {
+  await page.route(/\/api\/(build-info|settings\/pages)$/, (route) =>
     route.fulfill({ status: 500, body: "boom" }),
   );
   await page.goto(`${BASE}/app#/`, { waitUntil: "networkidle" });

@@ -53,6 +53,7 @@ mod local_tts;
 mod mcp;
 mod mcp_settings;
 mod nodes;
+mod pages_settings;
 mod proxy;
 mod push;
 mod release_asset;
@@ -340,6 +341,9 @@ struct AppState {
     /// The loopback MCP listener and the `mcp` block of config.json that
     /// the Settings switch turns it on and off through.
     mcp: Arc<mcp_settings::McpServer>,
+    /// The live `/files/` and `/proxy/` maps and the `files.roots` and
+    /// `proxy.targets` blocks of config.json that Settings → Pages edits.
+    pages: Arc<pages_settings::PagesSettings>,
 }
 
 const SESSION_COOKIE_NAME: &str = "mobux_session";
@@ -424,14 +428,22 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
 
     let session_name_re = Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$")?);
+    let config_path = options
+        .config_path
+        .clone()
+        .unwrap_or_else(config::config_file_path);
+    let env = config::EnvSnapshot::from_env();
     let mcp_server = Arc::new(mcp_settings::McpServer::new(
         mcp::Context::new(session_name_re.clone(), db.clone(), &settings),
         settings.clone(),
-        options
-            .config_path
-            .clone()
-            .unwrap_or_else(config::config_file_path),
-        mcp_settings::ManagedBy::detect(&config::EnvSnapshot::from_env(), &options.overrides),
+        config_path.clone(),
+        mcp_settings::ManagedBy::detect(&env, &options.overrides),
+    ));
+    let pages = Arc::new(pages_settings::PagesSettings::new(
+        file_roots.clone(),
+        proxy_targets.clone(),
+        config_path,
+        pages_settings::Managed::detect(&env),
     ));
 
     let update_state = update::UpdateState::new(settings.update.check_url.clone());
@@ -463,6 +475,7 @@ async fn main() -> Result<()> {
         twa_build: BackgroundJobState::idle(),
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
         mcp: mcp_server,
+        pages,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -550,6 +563,10 @@ async fn main() -> Result<()> {
             get(api_get_mcp_settings).put(api_set_mcp_settings),
         )
         .route(
+            "/api/settings/pages",
+            get(api_get_pages_settings).put(api_set_pages_settings),
+        )
+        .route(
             "/api/settings/preferences",
             get(api_get_ui_preferences).put(api_set_ui_preferences),
         )
@@ -621,22 +638,20 @@ async fn main() -> Result<()> {
         app
     };
 
-    let app = if file_roots.is_empty() {
-        app
-    } else {
+    // Mounted even when empty: Settings → Pages adds and removes entries
+    // while mobux runs, and each request reads the current map.
+    if !file_roots.is_empty() {
         println!("files: serving {} root(s) under /files/", file_roots.len());
-        app.merge(files::router(file_roots))
-    };
-
-    let app = if proxy_targets.is_empty() {
-        app
-    } else {
+    }
+    if !proxy_targets.is_empty() {
         println!(
             "proxy: forwarding {} target(s) under /proxy/",
             proxy_targets.len()
         );
-        app.merge(proxy::router(proxy_targets))
-    };
+    }
+    let app = app
+        .merge(files::router(file_roots))
+        .merge(proxy::router(proxy_targets));
 
     let routes = app
         // An unmatched path serves the SPA shell, which routes it client-side.
@@ -1139,8 +1154,8 @@ async fn api_build_info(
         "version": PKG_VERSION,
         "build_hash": state.build_hash,
         "dev_mode": state.config.app.dev,
-        "files": state.config.files.roots.keys().collect::<Vec<_>>(),
-        "proxies": state.config.proxy.targets.keys().collect::<Vec<_>>(),
+        "files": state.pages.files().names(),
+        "proxies": state.pages.proxies().names(),
         "via_access": via_access,
         "upload_limit_bytes": upload_limit_bytes(via_access),
     }))
@@ -2075,6 +2090,27 @@ async fn api_set_mcp_settings(
         let (status, message) = match err {
             SetError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
             SetError::Managed(message) | SetError::Bind(message) => (StatusCode::CONFLICT, message),
+            SetError::Io(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        };
+        AppError { status, message }
+    })
+}
+
+async fn api_get_pages_settings(State(state): State<AppState>) -> Json<pages_settings::Status> {
+    Json(state.pages.status())
+}
+
+/// Writes `files.roots` and `proxy.targets` to config.json and swaps them
+/// into the live `/files/` and `/proxy/` routes.
+async fn api_set_pages_settings(
+    State(state): State<AppState>,
+    Json(req): Json<pages_settings::Change>,
+) -> Result<Json<pages_settings::Status>, AppError> {
+    use pages_settings::SetError;
+    state.pages.set(req).await.map(Json).map_err(|err| {
+        let (status, message) = match err {
+            SetError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+            SetError::Managed(message) => (StatusCode::CONFLICT, message),
             SetError::Io(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
         AppError { status, message }
@@ -4521,6 +4557,12 @@ mod tests {
             dir.path().join(config::CONFIG_FILE_NAME),
             None,
         ));
+        let pages = Arc::new(pages_settings::PagesSettings::new(
+            Arc::new(files::FileRoots::default()),
+            Arc::new(proxy::ProxyTargets::from_config(&settings, SESSION_COOKIE_NAME).unwrap()),
+            dir.path().join(config::CONFIG_FILE_NAME),
+            pages_settings::Managed::default(),
+        ));
         let state = AppState {
             session_name_re,
             auth: None,
@@ -4536,6 +4578,7 @@ mod tests {
             twa_build: BackgroundJobState::idle(),
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
             mcp,
+            pages,
         };
         (state, dir)
     }
@@ -4614,6 +4657,73 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn put_pages(state: AppState, body: &str) -> (StatusCode, String) {
+        use tower::ServiceExt;
+
+        let response = Router::new()
+            .route(
+                "/api/settings/pages",
+                get(api_get_pages_settings).put(api_set_pages_settings),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/pages")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_bad_page_answers_400_with_the_rule_and_writes_nothing() {
+        let (state, dir) = test_state(false);
+        for (body, rule) in [
+            (
+                r#"{"files": [{"name": "site", "path": "relative"}]}"#,
+                "must be an absolute path",
+            ),
+            (
+                r#"{"proxies": [{"name": "up", "port": 70000}]}"#,
+                "port from 1 to 65535",
+            ),
+        ] {
+            let (status, text) = put_pages(state.clone(), body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {text}");
+            assert!(text.contains(rule), "{body}: {text}");
+        }
+        assert!(!dir.path().join(config::CONFIG_FILE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn a_page_section_the_environment_sets_answers_409() {
+        let (state, dir) = test_state(false);
+        let state = AppState {
+            pages: Arc::new(pages_settings::PagesSettings::new(
+                state.pages.files().clone(),
+                state.pages.proxies().clone(),
+                dir.path().join(config::CONFIG_FILE_NAME),
+                pages_settings::Managed {
+                    files: None,
+                    proxies: Some(mcp_settings::ManagedBy::Env),
+                },
+            )),
+            ..state
+        };
+        let (status, text) =
+            put_pages(state, r#"{"proxies": [{"name": "up", "port": 8000}]}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(text.contains("MOBUX_PROXY"), "{text}");
     }
 
     #[tokio::test]
@@ -5676,22 +5786,24 @@ mod tests {
         assert_eq!(val["files"], json!([]));
         assert_eq!(val["proxies"], json!([]));
 
-        let (state, _dir) = test_state(false);
-        let mut settings = (*state.config).clone();
-        settings
-            .files
-            .roots
-            .insert("site".to_string(), "/srv/secret-site".to_string());
-        settings.proxy.targets.insert("up".to_string(), 8291);
-        let state = AppState {
-            config: Arc::new(settings),
-            ..state
-        };
+        let (state, dir) = test_state(false);
+        let root = dir.path().join("secret-site");
+        std::fs::create_dir_all(&root).unwrap();
+        let (status, body) = put_pages(
+            state.clone(),
+            &json!({
+                "files": [{"name": "site", "path": root}],
+                "proxies": [{"name": "up", "port": 8291}],
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
         let Json(val) = api_build_info(State(state), None).await;
         assert_eq!(val["files"], json!(["site"]));
         assert_eq!(val["proxies"], json!(["up"]));
         let body = val.to_string();
-        assert!(!body.contains("/srv/secret-site"), "leaked a path: {body}");
+        assert!(!body.contains("secret-site"), "leaked a path: {body}");
         assert!(!body.contains("8291"), "leaked a port: {body}");
     }
 
