@@ -3,10 +3,7 @@
 //! stops or rebinds the loopback listener to match. A bind that fails puts
 //! the file back, so the file and the running listener never disagree.
 
-use std::io::Write;
 use std::net::Ipv4Addr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +12,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::config_file::{ConfigFile, EditError};
 use crate::{config, mcp};
 
 /// The port the switch offers when the file names none.
@@ -109,7 +107,7 @@ struct Listener {
 pub struct McpServer {
     context: mcp::Context,
     config: Arc<config::Config>,
-    path: PathBuf,
+    file: Arc<ConfigFile>,
     managed_by: Option<ManagedBy>,
     listener: Mutex<Listener>,
 }
@@ -118,13 +116,13 @@ impl McpServer {
     pub fn new(
         context: mcp::Context,
         config: Arc<config::Config>,
-        path: PathBuf,
+        file: Arc<ConfigFile>,
         managed_by: Option<ManagedBy>,
     ) -> Self {
         McpServer {
             context,
             config,
-            path,
+            file,
             managed_by,
             listener: Mutex::new(Listener::default()),
         }
@@ -155,16 +153,14 @@ impl McpServer {
 
     /// Bind the new port, write `port` (0 is off) to the file, then swap the
     /// listener. The file only ever names a port that was just bound, so a
-    /// crash part way never leaves one mobux cannot start with.
+    /// crash part way never leaves one mobux cannot start with. The file is
+    /// read and written under the shared config lock, after the bind.
     pub async fn set(&self, port: u16) -> Result<Status, SetError> {
         let mut listener = self.listener.lock().await;
         if let Some(managed) = self.managed_by {
             return Err(SetError::Managed(managed.reason().to_string()));
         }
 
-        let previous = read_optional(&self.path).map_err(SetError::Io)?;
-        let next = with_mcp_port(previous.as_deref(), port).map_err(SetError::Invalid)?;
-        config::parse(&self.path, &next).map_err(|e| SetError::Invalid(e.to_string()))?;
         let mut effective = (*self.config).clone();
         effective.mcp.port = port;
         config::check_mcp(&effective).map_err(SetError::Invalid)?;
@@ -175,7 +171,13 @@ impl McpServer {
             port if current == Some(port) => None,
             port => Some(bind(port).await.map_err(SetError::Bind)?),
         };
-        write_atomic(&self.path, &next).map_err(|e| SetError::Io(e.to_string()))?;
+        self.file
+            .edit(&[("mcp", "port", port.into())])
+            .await
+            .map_err(|err| match err {
+                EditError::Invalid(message) => SetError::Invalid(message),
+                EditError::Io(message) => SetError::Io(message),
+            })?;
 
         listener.error = None;
         let replaced = match bound {
@@ -190,7 +192,7 @@ impl McpServer {
     }
 
     fn status_of(&self, listener: &Listener) -> Result<Status, String> {
-        let port = config::load_partial_from(&self.path)
+        let port = config::load_partial_from(self.file.path())
             .map_err(|e| e.to_string())?
             .and_then(|partial| partial.mcp)
             .and_then(|mcp| mcp.port)
@@ -242,67 +244,13 @@ pub fn registration_command(port: u16) -> String {
     )
 }
 
-/// Set `mcp.port` and leave every other key where it was; serde_json keeps
-/// insertion order (`preserve_order`).
-fn with_mcp_port(raw: Option<&str>, port: u16) -> Result<String, String> {
-    let mut document: serde_json::Value = match raw {
-        Some(raw) => serde_json::from_str(raw).map_err(|e| format!("config.json: {e}"))?,
-        None => serde_json::json!({}),
-    };
-    let root = document
-        .as_object_mut()
-        .ok_or("config.json: the top level must be an object")?;
-    let block = root.entry("mcp").or_insert_with(|| serde_json::json!({}));
-    if !block.is_object() {
-        *block = serde_json::json!({});
-    }
-    block
-        .as_object_mut()
-        .expect("just made an object")
-        .insert("port".to_string(), port.into());
-    let text = serde_json::to_string_pretty(&document).map_err(|e| e.to_string())?;
-    Ok(format!("{text}\n"))
-}
-
-fn read_optional(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(Some(raw)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
-}
-
-/// Replace the file in one rename, through a symlink to the file it names,
-/// at mode 600 because it can hold the PIN.
-fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let parent = target
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
-    std::fs::create_dir_all(&parent)?;
-    let mut staging = target.clone().into_os_string();
-    staging.push(".tmp");
-    let staging = PathBuf::from(staging);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&staging)?;
-    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&staging, &target)?;
-    std::fs::File::open(&parent)?.sync_all()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_file::read_optional;
     use crate::db::Db;
     use regex::Regex;
+    use std::path::PathBuf;
 
     const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#;
     const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
@@ -336,7 +284,7 @@ mod tests {
             db,
             &config,
         );
-        let server = McpServer::new(context, config, path, managed_by);
+        let server = McpServer::new(context, config, Arc::new(ConfigFile::new(path)), managed_by);
         Fixture { dir, server }
     }
 

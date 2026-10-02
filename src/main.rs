@@ -44,6 +44,7 @@ struct StaticAssets;
 mod access;
 mod cli;
 mod config;
+mod config_file;
 mod configure;
 mod db;
 mod files;
@@ -53,6 +54,7 @@ mod local_tts;
 mod mcp;
 mod mcp_settings;
 mod nodes;
+mod pages_settings;
 mod proxy;
 mod push;
 mod release_asset;
@@ -340,6 +342,9 @@ struct AppState {
     /// The loopback MCP listener and the `mcp` block of config.json that
     /// the Settings switch turns it on and off through.
     mcp: Arc<mcp_settings::McpServer>,
+    /// The live `/files/` and `/proxy/` maps and the `files.roots` and
+    /// `proxy.targets` blocks of config.json that Settings → Pages edits.
+    pages: Arc<pages_settings::PagesSettings>,
 }
 
 const SESSION_COOKIE_NAME: &str = "mobux_session";
@@ -424,14 +429,24 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
 
     let session_name_re = Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$")?);
-    let mcp_server = Arc::new(mcp_settings::McpServer::new(
-        mcp::Context::new(session_name_re.clone(), db.clone(), &settings),
-        settings.clone(),
+    let config_file = Arc::new(config_file::ConfigFile::new(
         options
             .config_path
             .clone()
             .unwrap_or_else(config::config_file_path),
-        mcp_settings::ManagedBy::detect(&config::EnvSnapshot::from_env(), &options.overrides),
+    ));
+    let env = config::EnvSnapshot::from_env();
+    let mcp_server = Arc::new(mcp_settings::McpServer::new(
+        mcp::Context::new(session_name_re.clone(), db.clone(), &settings),
+        settings.clone(),
+        config_file.clone(),
+        mcp_settings::ManagedBy::detect(&env, &options.overrides),
+    ));
+    let pages = Arc::new(pages_settings::PagesSettings::new(
+        file_roots.clone(),
+        proxy_targets.clone(),
+        config_file,
+        pages_settings::Managed::detect(&env),
     ));
 
     let update_state = update::UpdateState::new(settings.update.check_url.clone());
@@ -463,6 +478,7 @@ async fn main() -> Result<()> {
         twa_build: BackgroundJobState::idle(),
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
         mcp: mcp_server,
+        pages,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -487,165 +503,16 @@ async fn main() -> Result<()> {
     state.mcp.start_configured().await;
 
     let state_for_mw = state.clone();
-    let app = Router::new()
-        .route("/", get(root_redirect))
-        .route("/api/identify", get(api_identify))
-        .route("/api/build-info", get(api_build_info))
-        .route("/api/sessions", get(api_sessions).post(api_create_session))
-        .route("/api/sessions/{name}/kill", post(api_kill_session))
-        .route("/api/sessions/{name}/rename", post(api_rename_session))
-        .route("/api/sessions/{name}/panes", get(api_list_panes))
-        .route(
-            "/api/sessions/{name}/panes/{pane}/select",
-            post(api_select_pane),
-        )
-        .route("/api/sessions/{name}/history", get(api_session_history))
-        // Distinct path from the tmux-scrollback `history` route above: this
-        // is the OSC 133-segmented conversation record (issue #220), a
-        // different shape (paginated JSON entries, not a scrollback blob)
-        // decoupled from terminal scrollback entirely. `history` was
-        // already taken by that pre-existing route (terminal-engine.js's
-        // initial-repaint fetch), so it can't be reused/extended here.
-        .route(
-            "/api/sessions/{name}/conversation",
-            get(api_session_conversation),
-        )
-        .route("/api/sessions/{name}/command", post(api_tmux_command))
-        .route(
-            "/api/settings/nodes",
-            get(api_get_settings_nodes).put(api_set_settings_nodes),
-        )
-        .route("/api/nodes", get(api_nodes_status))
-        .route("/api/host-suggestions", get(api_host_suggestions))
-        .route(
-            "/api/telemetry",
-            post(api_telemetry).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route(
-            "/api/upload",
-            post(api_upload).layer(axum::extract::DefaultBodyLimit::max(
-                (UPLOAD_LIMIT_BYTES + MULTIPART_ENVELOPE_BYTES) as usize,
-            )),
-        )
-        // 60 s of 16 kHz mono 16-bit PCM is ~1.9 MB; the default 2 MB body
-        // limit is too tight once the multipart envelope is added. Allow 8 MB
-        // for this route only (the 70 s sample cap is enforced after decode).
-        .route(
-            "/transcribe",
-            post(api_transcribe).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
-        )
-        .route("/api/push/vapid-public-key", get(api_push_vapid_public_key))
-        .route(
-            "/api/push/subscribe",
-            post(api_push_subscribe).delete(api_push_unsubscribe),
-        )
-        .route("/api/push/devices", get(api_push_devices))
-        .route("/api/push/notify", post(api_push_notify))
-        .route(
-            "/api/settings/notifications",
-            get(api_get_notification_prefs).put(api_set_notification_prefs),
-        )
-        .route(
-            "/api/settings/mcp",
-            get(api_get_mcp_settings).put(api_set_mcp_settings),
-        )
-        .route(
-            "/api/settings/preferences",
-            get(api_get_ui_preferences).put(api_set_ui_preferences),
-        )
-        .route(
-            "/api/settings/stt",
-            get(api_get_stt_config).put(api_set_stt_config),
-        )
-        .route("/api/stt/status", get(api_stt_status))
-        .route("/api/stt/models", get(api_stt_models))
-        .route(
-            "/api/stt/install",
-            post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
-        )
-        .route("/api/stt/install/status", get(api_stt_install_status))
-        .route("/api/install/apk/build", post(api_install_apk_build))
-        .route("/api/install/apk/status", get(api_install_apk_status))
-        .route("/api/tts/status", get(api_tts_status))
-        .route("/api/tts/prepare", post(api_tts_prepare))
-        .route(
-            "/api/tts/speak",
-            post(api_tts_speak).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route(
-            "/api/shell-integration/status",
-            get(api_shell_integration_status),
-        )
-        .route(
-            "/api/shell-integration/install",
-            post(api_shell_integration_install),
-        )
-        .route(
-            "/api/shell-integration/uninstall",
-            post(api_shell_integration_uninstall),
-        )
-        // Self-update (#130).
-        .route("/api/update/status", get(api_update_status))
-        .route("/api/update/check", post(api_update_check))
-        .route("/api/update/run", post(api_update_run))
-        .route("/settings", get(settings_page))
-        .route("/s/{name}", get(terminal_page))
-        .route("/ws/{name}", get(terminal_ws))
-        .route("/sw.js", get(serve_sw))
-        .route("/install", get(install_page))
-        .route("/install/mobux.apk", get(serve_install_apk))
-        .route("/install/mobux-ca.crt", get(serve_install_ca))
-        .route("/.well-known/assetlinks.json", get(serve_assetlinks))
-        // New client SPA (web/spa, built to web/static/spa/). Its one document
-        // is /app; assets live under /static/spa/ and are handled by
-        // serve_static. The old Rust-rendered pages (/, /s/:name, /settings,
-        // /install) are untouched — both UIs coexist.
-        //
-        // /app/* used to serve the shell too (a history fallback for a router
-        // that never arrived — the SPA routes on the hash). The shell's asset
-        // URLs are relative, so they only resolve from /app's own directory;
-        // served a level deeper they would point at /app/static/spa/… and 404.
-        // Sending the browser back to /app is both the fix and the honest
-        // answer, since no /app/* deep link exists to preserve.
-        .route("/app", get(serve_spa_index))
-        .route("/app/{*rest}", get(spa_deep_link_redirect))
-        .route("/static/{*path}", get(serve_static))
-        .merge(mcp::absent());
-
-    // Test-only: serve a fixed sparse-index body so the update checker can be
-    // exercised hermetically (no live crates.io). Registered only when
-    // MOBUX_UPDATE_TEST_INDEX is set; never present in a normal/prod run.
-    let app = if std::env::var_os("MOBUX_UPDATE_TEST_INDEX").is_some() {
-        app.route("/api/update/test-index", get(api_update_test_index))
-    } else {
-        app
-    };
-
-    let app = if file_roots.is_empty() {
-        app
-    } else {
+    if !file_roots.is_empty() {
         println!("files: serving {} root(s) under /files/", file_roots.len());
-        app.merge(files::router(file_roots))
-    };
-
-    let app = if proxy_targets.is_empty() {
-        app
-    } else {
+    }
+    if !proxy_targets.is_empty() {
         println!(
             "proxy: forwarding {} target(s) under /proxy/",
             proxy_targets.len()
         );
-        app.merge(proxy::router(proxy_targets))
-    };
-
-    let routes = app
-        // An unmatched path serves the SPA shell, which routes it client-side.
-        // It used to redirect to `/`, which a path-prefixing proxy sends
-        // outside the mount entirely — and root-absolute is the one thing a
-        // prefixed deployment cannot express. Serving the shell needs no URL
-        // at all.
-        .fallback(get(serve_spa_index))
-        .with_state(state.clone());
+    }
+    let routes = app_routes(state.clone());
 
     if settings.access.is_configured() {
         serve_access_listener(&settings.access, routes.clone()).await?;
@@ -1139,8 +1006,8 @@ async fn api_build_info(
         "version": PKG_VERSION,
         "build_hash": state.build_hash,
         "dev_mode": state.config.app.dev,
-        "files": state.config.files.roots.keys().collect::<Vec<_>>(),
-        "proxies": state.config.proxy.targets.keys().collect::<Vec<_>>(),
+        "files": state.pages.files().names(),
+        "proxies": state.pages.proxies().names(),
         "via_access": via_access,
         "upload_limit_bytes": upload_limit_bytes(via_access),
     }))
@@ -2081,6 +1948,27 @@ async fn api_set_mcp_settings(
     })
 }
 
+async fn api_get_pages_settings(State(state): State<AppState>) -> Json<pages_settings::Status> {
+    Json(state.pages.status())
+}
+
+/// Writes `files.roots` and `proxy.targets` to config.json and swaps them
+/// into the live `/files/` and `/proxy/` routes.
+async fn api_set_pages_settings(
+    State(state): State<AppState>,
+    Json(req): Json<pages_settings::Change>,
+) -> Result<Json<pages_settings::Status>, AppError> {
+    use pages_settings::SetError;
+    state.pages.set(req).await.map(Json).map_err(|err| {
+        let (status, message) = match err {
+            SetError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+            SetError::Managed(message) => (StatusCode::CONFLICT, message),
+            SetError::Io(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        };
+        AppError { status, message }
+    })
+}
+
 #[derive(serde::Serialize, Deserialize)]
 struct UiPrefsJson {
     renderer: String,
@@ -2431,6 +2319,159 @@ async fn serve_static(Path(path): Path<String>) -> Response {
 /// `spa/index.html` is emitted by `web/spa`'s Vite build into `web/static/spa/`
 /// and embedded by RustEmbed. If the SPA wasn't built (asset missing), return a
 /// clear 404 hint rather than a blank page.
+/// Every route of the main listener, before the auth layer. `/files/` and
+/// `/proxy/` are mounted even when empty: Settings → Pages adds and removes
+/// entries while mobux runs, and each request reads the current map.
+fn app_routes(state: AppState) -> Router {
+    let app = Router::new()
+        .route("/", get(root_redirect))
+        .route("/api/identify", get(api_identify))
+        .route("/api/build-info", get(api_build_info))
+        .route("/api/sessions", get(api_sessions).post(api_create_session))
+        .route("/api/sessions/{name}/kill", post(api_kill_session))
+        .route("/api/sessions/{name}/rename", post(api_rename_session))
+        .route("/api/sessions/{name}/panes", get(api_list_panes))
+        .route(
+            "/api/sessions/{name}/panes/{pane}/select",
+            post(api_select_pane),
+        )
+        .route("/api/sessions/{name}/history", get(api_session_history))
+        // Distinct path from the tmux-scrollback `history` route above: this
+        // is the OSC 133-segmented conversation record (issue #220), a
+        // different shape (paginated JSON entries, not a scrollback blob)
+        // decoupled from terminal scrollback entirely. `history` was
+        // already taken by that pre-existing route (terminal-engine.js's
+        // initial-repaint fetch), so it can't be reused/extended here.
+        .route(
+            "/api/sessions/{name}/conversation",
+            get(api_session_conversation),
+        )
+        .route("/api/sessions/{name}/command", post(api_tmux_command))
+        .route(
+            "/api/settings/nodes",
+            get(api_get_settings_nodes).put(api_set_settings_nodes),
+        )
+        .route("/api/nodes", get(api_nodes_status))
+        .route("/api/host-suggestions", get(api_host_suggestions))
+        .route(
+            "/api/telemetry",
+            post(api_telemetry).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/api/upload",
+            post(api_upload).layer(axum::extract::DefaultBodyLimit::max(
+                (UPLOAD_LIMIT_BYTES + MULTIPART_ENVELOPE_BYTES) as usize,
+            )),
+        )
+        // 60 s of 16 kHz mono 16-bit PCM is ~1.9 MB; the default 2 MB body
+        // limit is too tight once the multipart envelope is added. Allow 8 MB
+        // for this route only (the 70 s sample cap is enforced after decode).
+        .route(
+            "/transcribe",
+            post(api_transcribe).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route("/api/push/vapid-public-key", get(api_push_vapid_public_key))
+        .route(
+            "/api/push/subscribe",
+            post(api_push_subscribe).delete(api_push_unsubscribe),
+        )
+        .route("/api/push/devices", get(api_push_devices))
+        .route("/api/push/notify", post(api_push_notify))
+        .route(
+            "/api/settings/notifications",
+            get(api_get_notification_prefs).put(api_set_notification_prefs),
+        )
+        .route(
+            "/api/settings/mcp",
+            get(api_get_mcp_settings).put(api_set_mcp_settings),
+        )
+        .route(
+            "/api/settings/pages",
+            get(api_get_pages_settings).put(api_set_pages_settings),
+        )
+        .route(
+            "/api/settings/preferences",
+            get(api_get_ui_preferences).put(api_set_ui_preferences),
+        )
+        .route(
+            "/api/settings/stt",
+            get(api_get_stt_config).put(api_set_stt_config),
+        )
+        .route("/api/stt/status", get(api_stt_status))
+        .route("/api/stt/models", get(api_stt_models))
+        .route(
+            "/api/stt/install",
+            post(api_stt_install).layer(axum::extract::DefaultBodyLimit::max(1024)),
+        )
+        .route("/api/stt/install/status", get(api_stt_install_status))
+        .route("/api/install/apk/build", post(api_install_apk_build))
+        .route("/api/install/apk/status", get(api_install_apk_status))
+        .route("/api/tts/status", get(api_tts_status))
+        .route("/api/tts/prepare", post(api_tts_prepare))
+        .route(
+            "/api/tts/speak",
+            post(api_tts_speak).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/api/shell-integration/status",
+            get(api_shell_integration_status),
+        )
+        .route(
+            "/api/shell-integration/install",
+            post(api_shell_integration_install),
+        )
+        .route(
+            "/api/shell-integration/uninstall",
+            post(api_shell_integration_uninstall),
+        )
+        // Self-update (#130).
+        .route("/api/update/status", get(api_update_status))
+        .route("/api/update/check", post(api_update_check))
+        .route("/api/update/run", post(api_update_run))
+        .route("/settings", get(settings_page))
+        .route("/s/{name}", get(terminal_page))
+        .route("/ws/{name}", get(terminal_ws))
+        .route("/sw.js", get(serve_sw))
+        .route("/install", get(install_page))
+        .route("/install/mobux.apk", get(serve_install_apk))
+        .route("/install/mobux-ca.crt", get(serve_install_ca))
+        .route("/.well-known/assetlinks.json", get(serve_assetlinks))
+        // New client SPA (web/spa, built to web/static/spa/). Its one document
+        // is /app; assets live under /static/spa/ and are handled by
+        // serve_static. The old Rust-rendered pages (/, /s/:name, /settings,
+        // /install) are untouched — both UIs coexist.
+        //
+        // /app/* used to serve the shell too (a history fallback for a router
+        // that never arrived — the SPA routes on the hash). The shell's asset
+        // URLs are relative, so they only resolve from /app's own directory;
+        // served a level deeper they would point at /app/static/spa/… and 404.
+        // Sending the browser back to /app is both the fix and the honest
+        // answer, since no /app/* deep link exists to preserve.
+        .route("/app", get(serve_spa_index))
+        .route("/app/{*rest}", get(spa_deep_link_redirect))
+        .route("/static/{*path}", get(serve_static))
+        .merge(mcp::absent());
+
+    // Test-only: serve a fixed sparse-index body so the update checker can be
+    // exercised hermetically (no live crates.io). Registered only when
+    // MOBUX_UPDATE_TEST_INDEX is set; never present in a normal/prod run.
+    let app = if std::env::var_os("MOBUX_UPDATE_TEST_INDEX").is_some() {
+        app.route("/api/update/test-index", get(api_update_test_index))
+    } else {
+        app
+    };
+
+    app.merge(files::router(state.pages.files().clone()))
+        .merge(proxy::router(state.pages.proxies().clone()))
+        // An unmatched path serves the SPA shell, which routes it client-side.
+        // It used to redirect to `/`, which a path-prefixing proxy sends
+        // outside the mount entirely — and root-absolute is the one thing a
+        // prefixed deployment cannot express. Serving the shell needs no URL
+        // at all.
+        .fallback(get(serve_spa_index))
+        .with_state(state)
+}
+
 async fn serve_spa_index() -> Response {
     use axum::http::header;
     match StaticAssets::get("spa/index.html") {
@@ -4515,11 +4556,20 @@ mod tests {
         settings.app.dev = dev_mode;
         let session_name_re = Arc::new(Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
         let settings = Arc::new(settings);
+        let config_file = Arc::new(config_file::ConfigFile::new(
+            dir.path().join(config::CONFIG_FILE_NAME),
+        ));
         let mcp = Arc::new(mcp_settings::McpServer::new(
             mcp::Context::new(session_name_re.clone(), db.clone(), &settings),
             settings.clone(),
-            dir.path().join(config::CONFIG_FILE_NAME),
+            config_file.clone(),
             None,
+        ));
+        let pages = Arc::new(pages_settings::PagesSettings::new(
+            Arc::new(files::FileRoots::default()),
+            Arc::new(proxy::ProxyTargets::from_config(&settings, SESSION_COOKIE_NAME).unwrap()),
+            config_file,
+            pages_settings::Managed::default(),
         ));
         let state = AppState {
             session_name_re,
@@ -4536,6 +4586,7 @@ mod tests {
             twa_build: BackgroundJobState::idle(),
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
             mcp,
+            pages,
         };
         (state, dir)
     }
@@ -4614,6 +4665,160 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn put_pages(state: AppState, body: &str) -> (StatusCode, String) {
+        use tower::ServiceExt;
+
+        let response = Router::new()
+            .route(
+                "/api/settings/pages",
+                get(api_get_pages_settings).put(api_set_pages_settings),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/pages")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn concurrent_pages_and_mcp_saves_both_land_in_the_file() {
+        let (state, dir) = test_state(false);
+        let path = dir.path().join(config::CONFIG_FILE_NAME);
+        for n in 0..8 {
+            let root = dir.path().join(format!("site{n}"));
+            std::fs::create_dir_all(&root).unwrap();
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let pages = json!({"files": [{"name": format!("site{n}"), "path": root}]}).to_string();
+            let mcp = json!({"port": port}).to_string();
+            let ((mcp_status, mcp_body), (pages_status, pages_body)) = tokio::join!(
+                put_mcp(state.clone(), &mcp),
+                put_pages(state.clone(), &pages),
+            );
+            assert_eq!(mcp_status, StatusCode::OK, "{mcp_body}");
+            assert_eq!(pages_status, StatusCode::OK, "{pages_body}");
+            let written = config::load_from(&path).unwrap();
+            assert_eq!(written.mcp.port, port, "round {n}");
+            assert!(
+                written.files.roots.contains_key(&format!("site{n}")),
+                "round {n}"
+            );
+        }
+        put_mcp(state, r#"{"port": 0}"#).await;
+    }
+
+    // With nothing configured, /files/ and /proxy/ are still mounted, so an
+    // unknown name is a plain 404 rather than the SPA shell from the fallback.
+    #[tokio::test]
+    async fn an_unconfigured_page_is_404_and_the_spa_still_serves() {
+        use tower::ServiceExt;
+
+        let (mut state, _dir) = test_state(false);
+        state.auth = Some(AuthConfig {
+            user: "me".to_string(),
+            pass: "12345".to_string(),
+            session_cookie_name: SESSION_COOKIE_NAME.to_string(),
+            session_cookie_value: "cookie".to_string(),
+        });
+        let app =
+            app_routes(state.clone()).layer(middleware::from_fn_with_state(state, auth_middleware));
+        let get = |uri: &str| {
+            let request = Request::builder()
+                .uri(uri)
+                .header(axum::http::header::COOKIE, "mobux_session=cookie")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (status, bytes.to_vec())
+            }
+        };
+
+        for (uri, body) in [
+            ("/files/x/", "no file root by that name; 0 configured\n"),
+            ("/files/x", "no file root by that name; 0 configured\n"),
+            ("/proxy/x/", "no proxy target by that name; 0 configured\n"),
+        ] {
+            let (status, bytes) = get(uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(String::from_utf8_lossy(&bytes), body, "{uri}");
+        }
+
+        let shell = serve_spa_index().await;
+        let shell_status = shell.status();
+        let shell_body = axum::body::to_bytes(shell.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        for uri in ["/app", "/somewhere/else"] {
+            let (status, bytes) = get(uri).await;
+            assert_eq!(status, shell_status, "{uri}");
+            assert_eq!(bytes, shell_body, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bad_page_answers_400_with_the_rule_and_writes_nothing() {
+        let (state, dir) = test_state(false);
+        for (body, rule) in [
+            (
+                r#"{"files": [{"name": "site", "path": "relative"}]}"#,
+                "must be an absolute path",
+            ),
+            (
+                r#"{"proxies": [{"name": "up", "port": 70000}]}"#,
+                "port from 1 to 65535",
+            ),
+        ] {
+            let (status, text) = put_pages(state.clone(), body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {text}");
+            assert!(text.contains(rule), "{body}: {text}");
+        }
+        assert!(!dir.path().join(config::CONFIG_FILE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn a_page_section_the_environment_sets_answers_409() {
+        let (state, dir) = test_state(false);
+        let state = AppState {
+            pages: Arc::new(pages_settings::PagesSettings::new(
+                state.pages.files().clone(),
+                state.pages.proxies().clone(),
+                Arc::new(config_file::ConfigFile::new(
+                    dir.path().join(config::CONFIG_FILE_NAME),
+                )),
+                pages_settings::Managed {
+                    files: None,
+                    proxies: Some(mcp_settings::ManagedBy::Env),
+                },
+            )),
+            ..state
+        };
+        let (status, text) =
+            put_pages(state, r#"{"proxies": [{"name": "up", "port": 8000}]}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(text.contains("MOBUX_PROXY"), "{text}");
     }
 
     #[tokio::test]
@@ -5676,22 +5881,24 @@ mod tests {
         assert_eq!(val["files"], json!([]));
         assert_eq!(val["proxies"], json!([]));
 
-        let (state, _dir) = test_state(false);
-        let mut settings = (*state.config).clone();
-        settings
-            .files
-            .roots
-            .insert("site".to_string(), "/srv/secret-site".to_string());
-        settings.proxy.targets.insert("up".to_string(), 8291);
-        let state = AppState {
-            config: Arc::new(settings),
-            ..state
-        };
+        let (state, dir) = test_state(false);
+        let root = dir.path().join("secret-site");
+        std::fs::create_dir_all(&root).unwrap();
+        let (status, body) = put_pages(
+            state.clone(),
+            &json!({
+                "files": [{"name": "site", "path": root}],
+                "proxies": [{"name": "up", "port": 8291}],
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
         let Json(val) = api_build_info(State(state), None).await;
         assert_eq!(val["files"], json!(["site"]));
         assert_eq!(val["proxies"], json!(["up"]));
         let body = val.to_string();
-        assert!(!body.contains("/srv/secret-site"), "leaked a path: {body}");
+        assert!(!body.contains("secret-site"), "leaked a path: {body}");
         assert!(!body.contains("8291"), "leaked a port: {body}");
     }
 

@@ -208,6 +208,11 @@ upstream never sees the mobux session cookie or `Authorization`, and gets
 targets, as `MOBUX_FILES` does. A dev server that emits root-absolute URLs
 needs its base set to the mount, e.g. `vite --base /proxy/vite/`.
 
+Settings → Pages adds and removes file roots and proxy targets from the phone:
+it writes `files.roots` and `proxy.targets` to the config file and serves the
+change at once, without a restart. A section that `MOBUX_FILES` or
+`MOBUX_PROXY` sets is read-only there.
+
 ```json
 { "proxy": { "targets": { "vite": 5173 } } }
 ```

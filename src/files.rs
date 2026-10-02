@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -38,10 +38,18 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'}');
 
-/// The configured roots, each already canonicalized.
-#[derive(Debug, Clone, Default)]
+/// One served directory: the path as configured, and where it resolves.
+#[derive(Debug, Clone)]
+pub struct Root {
+    pub path: String,
+    canonical: PathBuf,
+}
+
+/// The served roots. Settings → Pages swaps the map while mobux runs, so a
+/// request reads it per call instead of capturing it at startup.
+#[derive(Debug, Default)]
 pub struct FileRoots {
-    roots: BTreeMap<String, PathBuf>,
+    roots: RwLock<BTreeMap<String, Root>>,
     listing: bool,
 }
 
@@ -49,30 +57,64 @@ impl FileRoots {
     /// Resolve every root once at startup. A root that is missing, not a
     /// directory, or badly named stops the server with the reason.
     pub fn from_config(files: &FilesConfig) -> Result<FileRoots> {
-        config::file_roots_value(&files.roots, &())
-            .map_err(|err| anyhow::anyhow!("files.roots: {err}"))?;
-        let mut roots = BTreeMap::new();
-        for (name, path) in &files.roots {
-            let canonical = std::fs::canonicalize(path)
-                .with_context(|| format!("files.roots.{name}: {path}"))?;
-            if !canonical.is_dir() {
-                bail!("files.roots.{name}: {path} is not a directory");
-            }
-            roots.insert(name.clone(), canonical);
-        }
         Ok(FileRoots {
-            roots,
+            roots: RwLock::new(resolve_roots(&files.roots)?),
             listing: files.listing,
         })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.roots.is_empty()
+        self.len() == 0
     }
 
     pub fn len(&self) -> usize {
-        self.roots.len()
+        self.read().len()
     }
+
+    pub fn names(&self) -> Vec<String> {
+        self.read().keys().cloned().collect()
+    }
+
+    pub fn entries(&self) -> Vec<(String, String)> {
+        self.read()
+            .iter()
+            .map(|(name, root)| (name.clone(), root.path.clone()))
+            .collect()
+    }
+
+    pub fn replace(&self, roots: BTreeMap<String, Root>) {
+        *self.roots.write().unwrap_or_else(PoisonError::into_inner) = roots;
+    }
+
+    fn canonical(&self, name: &str) -> Option<PathBuf> {
+        self.read().get(name).map(|root| root.canonical.clone())
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, BTreeMap<String, Root>> {
+        self.roots.read().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Check the names and paths, then canonicalize each root. A root that is
+/// missing or not a directory fails with its name and path.
+pub fn resolve_roots(roots: &BTreeMap<String, String>) -> Result<BTreeMap<String, Root>> {
+    config::file_roots_value(roots, &()).map_err(|err| anyhow::anyhow!("files.roots: {err}"))?;
+    let mut resolved = BTreeMap::new();
+    for (name, path) in roots {
+        let canonical =
+            std::fs::canonicalize(path).with_context(|| format!("files.roots.{name}: {path}"))?;
+        if !canonical.is_dir() {
+            bail!("files.roots.{name}: {path} is not a directory");
+        }
+        resolved.insert(
+            name.clone(),
+            Root {
+                path: path.clone(),
+                canonical,
+            },
+        );
+    }
+    Ok(resolved)
 }
 
 pub fn router<S>(roots: Arc<FileRoots>) -> Router<S>
@@ -93,7 +135,7 @@ async fn redirect_to_root(
     RoutePath(name): RoutePath<String>,
     uri: Uri,
 ) -> Response {
-    if !roots.roots.contains_key(&name) {
+    if roots.canonical(&name).is_none() {
         return unknown_root(&roots);
     }
     relative_redirect(&encode_segment(&name), uri.query())
@@ -103,9 +145,10 @@ async fn serve(State(roots): State<Arc<FileRoots>>, req: Request<Body>) -> Respo
     let Some((name, rest)) = split_request_path(req.uri().path()) else {
         return not_found();
     };
-    let Some(root) = roots.roots.get(&name) else {
+    let Some(root) = roots.canonical(&name) else {
         return unknown_root(&roots);
     };
+    let root = root.as_path();
     let Some(target) = resolve(root, rest) else {
         return not_found();
     };
