@@ -1,5 +1,5 @@
-// The voices Listen can speak through, and what each one needs. Mirrors
-// TTS_KINDS and tts_default in src/speech_settings.rs.
+// The voices Listen can speak through, and the fields each one takes. The
+// defaults come filled from GET /api/settings/tts.
 
 export const TTS_KINDS = [
   { value: "local", label: "On this machine" },
@@ -14,31 +14,6 @@ export const TTS_KIND_SHORT = {
   network: "Network",
   kyutai: "Kyutai",
 };
-
-export function ttsDefaults(kind) {
-  if (kind === "mistral")
-    return {
-      host: "https://api.mistral.ai",
-      port: "443",
-      model: "voxtral-mini-tts-2603",
-      voice: "en_paul_neutral",
-    };
-  if (kind === "network")
-    return {
-      host: "",
-      port: "",
-      model: "mistralai/Voxtral-4B-TTS-2603",
-      voice: "casual_female",
-    };
-  if (kind === "kyutai")
-    return {
-      host: "http://localhost",
-      port: "8000",
-      model: "pocket-tts",
-      voice: "alba",
-    };
-  return { host: "", port: "", model: "", voice: "" };
-}
 
 // Which fields a kind takes.
 export function ttsFields(kind) {

@@ -35,22 +35,13 @@ impl ConfigFile {
         &self.path
     }
 
-    /// Set each `block.key` in the file as it is now, check the result with
-    /// the loader's rules, and write it. A refused edit leaves the file alone.
-    pub async fn edit(&self, keys: &[(&str, &str, serde_json::Value)]) -> Result<(), EditError> {
-        let _held = self.lock.lock().await;
-        let previous = read_optional(&self.path).map_err(EditError::Io)?;
-        let next = with_keys(previous.as_deref(), keys).map_err(EditError::Invalid)?;
-        config::parse(&self.path, &next).map_err(|e| EditError::Invalid(e.to_string()))?;
-        write_atomic(&self.path, &next).map_err(|e| EditError::Io(e.to_string()))
-    }
-
-    /// Like [`ConfigFile::edit`], with the keys worked out from the file as it
-    /// is under the lock, so a change that rewrites a whole map never drops an
-    /// entry another save wrote a moment earlier.
-    pub async fn edit_with<F>(&self, change: F) -> Result<(), EditError>
+    /// Set each `block.key` the change returns, check the result with the
+    /// loader's rules, and write it. The change sees the file as it is under
+    /// the lock, so one that rewrites a whole map never drops an entry another
+    /// save wrote a moment earlier. A refused edit leaves the file alone.
+    pub async fn edit_with<'a, F>(&self, change: F) -> Result<(), EditError>
     where
-        F: FnOnce(&config::Config) -> Vec<(&'static str, &'static str, serde_json::Value)>,
+        F: FnOnce(&config::Config) -> Vec<(&'a str, &'a str, serde_json::Value)>,
     {
         let _held = self.lock.lock().await;
         let previous = read_optional(&self.path).map_err(EditError::Io)?;
@@ -66,12 +57,6 @@ impl ConfigFile {
     /// every call, so a hand edit applies without a restart.
     pub fn read(&self) -> Result<config::Config, config::LoadError> {
         config::load_from(&self.path)
-    }
-
-    /// The file's own statement, without the defaults. `None` when there is no
-    /// file.
-    pub fn read_partial(&self) -> Result<Option<config::PartialConfig>, config::LoadError> {
-        config::load_partial_from(&self.path)
     }
 }
 
@@ -168,7 +153,7 @@ mod tests {
                         0 => ("mcp", "port", serde_json::json!(9000 + n)),
                         _ => ("files", "listing", serde_json::json!(true)),
                     };
-                    file.edit(&[edit]).await.unwrap();
+                    file.edit_with(|_| vec![edit]).await.unwrap();
                 })
             })
             .collect();

@@ -292,7 +292,7 @@ file.
 
 An install from before this block kept its speech-to-text settings in the
 database. On the first start with a `config.json` that has no `stt` block,
-mobux copies them into the file once; the database rows are not read again.
+mobux copies them into the file once and clears the rows.
 
 ### The schema
 

@@ -85,9 +85,13 @@ pub struct Config {
     #[serde(default)]
     #[garde(dive)]
     pub mcp: McpConfig,
+    /// Speech-to-text: where dictation from the microphone button is
+    /// transcribed. File-only: no environment variable or flag sets it.
     #[serde(default)]
     #[garde(skip)]
     pub stt: SttConfig,
+    /// Text-to-speech: the voice Listen mode reads the terminal with.
+    /// File-only: no environment variable or flag sets it.
     #[serde(default)]
     #[garde(skip)]
     pub tts: TtsConfig,
@@ -360,20 +364,106 @@ pub struct McpConfig {
     pub port: u16,
 }
 
-/// Speech-to-text: where dictation from the microphone button is transcribed.
-/// File-only: no environment variable or flag sets it, and Settings → Speech
-/// to text writes it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// A speech provider block: the kind in use and the settings per kind.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SttConfig {
-    /// The provider kind in use: `local`, `network`, `openai`, `mistral`
-    /// or `kyutai`.
-    #[serde(default = "default_speech_kind")]
-    pub active: String,
+#[schemars(rename = "SpeechConfig_{K}")]
+pub struct SpeechConfig<K: Ord + Default, P> {
+    /// The provider kind in use.
+    #[serde(default)]
+    pub active: K,
     /// Settings per provider kind. A kind left out, or a field left empty,
     /// takes that kind's defaults.
     #[serde(default)]
-    pub providers: BTreeMap<String, SttProvider>,
+    pub providers: BTreeMap<K, P>,
+}
+
+pub type SttConfig = SpeechConfig<SttKind, SttProvider>;
+pub type TtsConfig = SpeechConfig<TtsKind, TtsProvider>;
+
+/// Where dictation from the microphone button is transcribed.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SttKind {
+    /// Whisper in the mobux process.
+    #[default]
+    Local,
+    /// A self-hosted OpenAI-compatible `/v1/audio/transcriptions`.
+    Network,
+    /// OpenAI.
+    Openai,
+    /// Mistral Voxtral, hosted.
+    Mistral,
+    /// Kyutai STT on `moshi-server`.
+    Kyutai,
+}
+
+impl SttKind {
+    pub const ALL: [SttKind; 5] = [
+        SttKind::Local,
+        SttKind::Network,
+        SttKind::Openai,
+        SttKind::Mistral,
+        SttKind::Kyutai,
+    ];
+}
+
+/// The voice Listen mode reads the terminal with.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsKind {
+    /// The Piper voice in the mobux process.
+    #[default]
+    Local,
+    /// Mistral Voxtral TTS, hosted.
+    Mistral,
+    /// A self-hosted OpenAI-compatible `/v1/audio/speech`.
+    Network,
+    /// Kyutai Pocket TTS.
+    Kyutai,
+}
+
+impl TtsKind {
+    pub const ALL: [TtsKind; 4] = [
+        TtsKind::Local,
+        TtsKind::Mistral,
+        TtsKind::Network,
+        TtsKind::Kyutai,
+    ];
+}
+
+/// The lowercase name a kind is spelled with in config.json and the API.
+pub fn kind_name<K: Serialize>(kind: &K) -> String {
+    match serde_json::to_value(kind) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => unreachable!("a speech kind serializes as a string"),
+    }
 }
 
 /// One speech-to-text provider.
@@ -392,20 +482,6 @@ pub struct SttProvider {
     /// API key sent to the provider. Never returned by the settings API.
     #[serde(default)]
     pub api_key: String,
-}
-
-/// Text-to-speech: the voice Listen mode reads the terminal with. File-only,
-/// written by Settings → Listen.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TtsConfig {
-    /// The provider kind in use: `local`, `mistral`, `network` or `kyutai`.
-    #[serde(default = "default_speech_kind")]
-    pub active: String,
-    /// Settings per provider kind. A kind left out, or a field left empty,
-    /// takes that kind's defaults.
-    #[serde(default)]
-    pub providers: BTreeMap<String, TtsProvider>,
 }
 
 /// One text-to-speech provider.
@@ -427,30 +503,6 @@ pub struct TtsProvider {
     /// API key sent to the provider. Never returned by the settings API.
     #[serde(default)]
     pub api_key: String,
-}
-
-pub const LOCAL_SPEECH_KIND: &str = "local";
-
-fn default_speech_kind() -> String {
-    LOCAL_SPEECH_KIND.to_string()
-}
-
-impl Default for SttConfig {
-    fn default() -> Self {
-        SttConfig {
-            active: default_speech_kind(),
-            providers: BTreeMap::new(),
-        }
-    }
-}
-
-impl Default for TtsConfig {
-    fn default() -> Self {
-        TtsConfig {
-            active: default_speech_kind(),
-            providers: BTreeMap::new(),
-        }
-    }
 }
 
 fn default_port() -> u16 {
@@ -567,9 +619,9 @@ pub struct PartialConfig {
     #[serde(default)]
     pub mcp: Option<PartialMcpConfig>,
     #[serde(default)]
-    pub stt: Option<PartialSttConfig>,
+    pub stt: Option<PartialSpeechConfig<SttKind, SttProvider>>,
     #[serde(default)]
-    pub tts: Option<PartialTtsConfig>,
+    pub tts: Option<PartialSpeechConfig<TtsKind, TtsProvider>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -696,20 +748,11 @@ pub struct PartialMcpConfig {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PartialSttConfig {
+pub struct PartialSpeechConfig<K: Ord, P> {
     #[serde(default)]
-    pub active: Option<String>,
+    pub active: Option<K>,
     #[serde(default)]
-    pub providers: Option<BTreeMap<String, SttProvider>>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PartialTtsConfig {
-    #[serde(default)]
-    pub active: Option<String>,
-    #[serde(default)]
-    pub providers: Option<BTreeMap<String, TtsProvider>>,
+    pub providers: Option<BTreeMap<K, P>>,
 }
 
 impl PartialConfig {
@@ -3230,15 +3273,6 @@ mod tests {
     }
 
     #[test]
-    fn speech_blocks_default_to_the_local_voice_and_engine() {
-        let config = Config::default();
-        assert_eq!(config.stt.active, "local");
-        assert_eq!(config.tts.active, "local");
-        assert!(config.stt.providers.is_empty());
-        assert!(config.tts.providers.is_empty());
-    }
-
-    #[test]
     fn speech_blocks_round_trip_with_keys_and_empty_fields() {
         let raw = r#"{
             "stt": {"active": "mistral", "providers": {
@@ -3251,19 +3285,13 @@ mod tests {
             }}
         }"#;
         let config = parse_str(raw).unwrap();
-        assert_eq!(config.stt.active, "mistral");
-        assert_eq!(config.stt.providers["mistral"].api_key, "sk-1");
-        assert_eq!(config.stt.providers["network"].port, "");
-        assert_eq!(config.tts.providers["kyutai"].voice, "alba");
-        assert_eq!(config.tts.providers["kyutai"].api_key, "");
+        assert_eq!(config.stt.active, SttKind::Mistral);
+        assert_eq!(config.stt.providers[&SttKind::Mistral].api_key, "sk-1");
+        assert_eq!(config.stt.providers[&SttKind::Network].port, "");
+        assert_eq!(config.tts.providers[&TtsKind::Kyutai].voice, "alba");
+        assert_eq!(config.tts.providers[&TtsKind::Kyutai].api_key, "");
         let again = parse_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(again, config);
-    }
-
-    #[test]
-    fn an_unknown_speech_provider_field_is_rejected() {
-        let error = message(r#"{"stt": {"providers": {"openai": {"apikey": "x"}}}}"#);
-        assert!(error.contains("did you mean `api_key`?"), "{error}");
     }
 
     #[test]

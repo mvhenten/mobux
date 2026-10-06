@@ -4,14 +4,14 @@
 //! process (`crate::local_stt`); the "kyutai" kind streams the clip to a
 //! moshi-server websocket (`crate::kyutai_stt`); every other kind, Mistral
 //! Voxtral included, forwards the clip to an OpenAI-compatible
-//! `/v1/audio/transcriptions` endpoint the user configured. The active
-//! provider is read from config.json on each request, so a change needs no
-//! restart.
+//! `/v1/audio/transcriptions` endpoint the user configured.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::multipart;
+
+use crate::config::SttKind;
 
 /// Endpoint configuration for a remote provider.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,12 +20,6 @@ pub struct ProviderConfig {
     pub model: String,
     pub api_key: Option<String>,
 }
-
-/// The provider kind that runs in-process instead of over HTTP.
-pub const LOCAL_KIND: &str = "local";
-
-/// The provider kind that streams to Kyutai's moshi-server.
-pub const KYUTAI_KIND: &str = "kyutai";
 
 /// Where a transcription runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,13 +32,10 @@ pub enum Provider {
     Kyutai(ProviderConfig),
 }
 
-/// Pick the provider for a configured kind.
-///
-/// Only the local kind runs in-process; every other kind — including one this
-/// build has never heard of — is a user-configured endpoint, so an unknown
-/// kind keeps forwarding rather than silently switching to local inference.
-pub fn select_provider(kind: &str, url: &str, model: &str, api_key: Option<&str>) -> Provider {
-    if kind == LOCAL_KIND {
+/// Pick the provider for a configured kind. Only the local kind runs
+/// in-process; every other kind is a user-configured endpoint.
+pub fn select_provider(kind: SttKind, url: &str, model: &str, api_key: Option<&str>) -> Provider {
+    if kind == SttKind::Local {
         return Provider::InProcess {
             model: crate::local_stt::resolve_model(model).to_string(),
         };
@@ -54,7 +45,7 @@ pub fn select_provider(kind: &str, url: &str, model: &str, api_key: Option<&str>
         model: model.to_string(),
         api_key: api_key.filter(|k| !k.is_empty()).map(str::to_string),
     };
-    if kind == KYUTAI_KIND {
+    if kind == SttKind::Kyutai {
         return Provider::Kyutai(config);
     }
     Provider::Remote(config)
@@ -233,7 +224,7 @@ mod tests {
     #[test]
     fn the_local_kind_runs_in_process() {
         assert_eq!(
-            select_provider("local", "http://127.0.0.1:5200", "tiny.en", None),
+            select_provider(SttKind::Local, "http://127.0.0.1:5200", "tiny.en", None),
             Provider::InProcess {
                 model: "tiny.en".to_string()
             }
@@ -245,7 +236,7 @@ mod tests {
     #[test]
     fn a_stale_local_model_resolves_to_one_the_engine_can_run() {
         let Provider::InProcess { model } = select_provider(
-            "local",
+            SttKind::Local,
             "http://127.0.0.1:5200/v1/audio/transcriptions",
             "Systran/faster-whisper-small",
             None,
@@ -258,7 +249,7 @@ mod tests {
     #[test]
     fn a_configured_endpoint_is_forwarded_to_unchanged() {
         let provider = select_provider(
-            "openai",
+            SttKind::Openai,
             "https://api.openai.com:443/v1/audio/transcriptions",
             "whisper-1",
             Some("sk-test"),
@@ -276,7 +267,7 @@ mod tests {
     #[test]
     fn a_self_hosted_endpoint_keeps_its_own_model_id() {
         let provider = select_provider(
-            "network",
+            SttKind::Network,
             "http://lab:8081/v1/audio/transcriptions",
             "Systran/faster-whisper-medium.en",
             Some(""),
@@ -291,26 +282,11 @@ mod tests {
         );
     }
 
-    // A kind this build does not know is still a configured endpoint, never a
-    // silent switch to in-process inference.
-    #[test]
-    fn an_unknown_kind_stays_a_remote_endpoint() {
-        assert!(matches!(
-            select_provider(
-                "groq",
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                "whisper-large-v3",
-                None
-            ),
-            Provider::Remote(_)
-        ));
-    }
-
     #[test]
     fn the_kyutai_kind_streams_to_moshi_server() {
         assert!(matches!(
             select_provider(
-                "kyutai",
+                SttKind::Kyutai,
                 "ws://gpu:8080/api/asr-streaming",
                 "stt-1b-en_fr",
                 None
@@ -355,17 +331,21 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let defaults = crate::speech_settings::stt_default("mistral");
+        use crate::speech_settings::SpeechProvider;
+        let defaults = crate::config::SttProvider::default_for(SttKind::Mistral);
         let provider = crate::config::SttProvider {
             host: format!("http://{addr}"),
             port: String::new(),
             api_key: "mistral-key".to_string(),
             ..defaults
         };
-        let url = crate::speech_settings::stt_url("mistral", &provider);
-        let Provider::Remote(cfg) =
-            select_provider("mistral", &url, &provider.model, Some(&provider.api_key))
-        else {
+        let url = crate::speech_settings::stt_url(SttKind::Mistral, &provider);
+        let Provider::Remote(cfg) = select_provider(
+            SttKind::Mistral,
+            &url,
+            &provider.model,
+            Some(&provider.api_key),
+        ) else {
             panic!("mistral is a remote endpoint");
         };
         let text = transcribe_with_provider(&cfg, vec![1u8; 64], "speech.wav")

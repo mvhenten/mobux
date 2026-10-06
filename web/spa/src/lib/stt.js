@@ -27,14 +27,6 @@ export function kindDefaults(kind) {
     return { host: "", port: "", model: FALLBACK_MODELS.local[0] };
   if (kind === "openai")
     return { host: "https://api.openai.com", port: "443", model: "whisper-1" };
-  if (kind === "mistral")
-    return {
-      host: "https://api.mistral.ai",
-      port: "443",
-      model: "voxtral-mini-latest",
-    };
-  if (kind === "kyutai")
-    return { host: "ws://localhost", port: "8080", model: "stt-1b-en_fr" };
   return { host: "", port: "", model: FALLBACK_MODELS.network[0] };
 }
 

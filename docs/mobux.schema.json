@@ -204,25 +204,71 @@
       },
       "type": "object"
     },
-    "SttConfig": {
+    "SpeechConfig_SttKind": {
       "additionalProperties": false,
-      "description": "Speech-to-text: where dictation from the microphone button is transcribed.\nFile-only: no environment variable or flag sets it, and Settings → Speech\nto text writes it.",
+      "description": "A speech provider block: the kind in use and the settings per kind.",
       "properties": {
         "active": {
-          "default": "local",
-          "description": "The provider kind in use: `local`, `network`, `openai`, `mistral`\nor `kyutai`.",
-          "type": "string"
+          "$ref": "#/$defs/SttKind",
+          "description": "The provider kind in use."
         },
         "providers": {
           "additionalProperties": {
             "$ref": "#/$defs/SttProvider"
           },
-          "default": {},
           "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
           "type": "object"
         }
       },
       "type": "object"
+    },
+    "SpeechConfig_TtsKind": {
+      "additionalProperties": false,
+      "description": "A speech provider block: the kind in use and the settings per kind.",
+      "properties": {
+        "active": {
+          "$ref": "#/$defs/TtsKind",
+          "description": "The provider kind in use."
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TtsProvider"
+          },
+          "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SttKind": {
+      "description": "Where dictation from the microphone button is transcribed.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "Whisper in the mobux process.",
+          "type": "string"
+        },
+        {
+          "const": "network",
+          "description": "A self-hosted OpenAI-compatible `/v1/audio/transcriptions`.",
+          "type": "string"
+        },
+        {
+          "const": "openai",
+          "description": "OpenAI.",
+          "type": "string"
+        },
+        {
+          "const": "mistral",
+          "description": "Mistral Voxtral, hosted.",
+          "type": "string"
+        },
+        {
+          "const": "kyutai",
+          "description": "Kyutai STT on `moshi-server`.",
+          "type": "string"
+        }
+      ]
     },
     "SttProvider": {
       "additionalProperties": false,
@@ -307,25 +353,30 @@
       },
       "type": "object"
     },
-    "TtsConfig": {
-      "additionalProperties": false,
-      "description": "Text-to-speech: the voice Listen mode reads the terminal with. File-only,\nwritten by Settings → Listen.",
-      "properties": {
-        "active": {
-          "default": "local",
-          "description": "The provider kind in use: `local`, `mistral`, `network` or `kyutai`.",
+    "TtsKind": {
+      "description": "The voice Listen mode reads the terminal with.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "The Piper voice in the mobux process.",
           "type": "string"
         },
-        "providers": {
-          "additionalProperties": {
-            "$ref": "#/$defs/TtsProvider"
-          },
-          "default": {},
-          "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
-          "type": "object"
+        {
+          "const": "mistral",
+          "description": "Mistral Voxtral TTS, hosted.",
+          "type": "string"
+        },
+        {
+          "const": "network",
+          "description": "A self-hosted OpenAI-compatible `/v1/audio/speech`.",
+          "type": "string"
+        },
+        {
+          "const": "kyutai",
+          "description": "Kyutai Pocket TTS.",
+          "type": "string"
         }
-      },
-      "type": "object"
+      ]
     },
     "TtsProvider": {
       "additionalProperties": false,
@@ -449,11 +500,12 @@
       }
     },
     "stt": {
-      "$ref": "#/$defs/SttConfig",
+      "$ref": "#/$defs/SpeechConfig_SttKind",
       "default": {
         "active": "local",
         "providers": {}
-      }
+      },
+      "description": "Speech-to-text: where dictation from the microphone button is\ntranscribed. File-only: no environment variable or flag sets it."
     },
     "tls": {
       "$ref": "#/$defs/TlsConfig",
@@ -469,11 +521,12 @@
       }
     },
     "tts": {
-      "$ref": "#/$defs/TtsConfig",
+      "$ref": "#/$defs/SpeechConfig_TtsKind",
       "default": {
         "active": "local",
         "providers": {}
-      }
+      },
+      "description": "Text-to-speech: the voice Listen mode reads the terminal with.\nFile-only: no environment variable or flag sets it."
     },
     "update": {
       "$ref": "#/$defs/UpdateConfig",

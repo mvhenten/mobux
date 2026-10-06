@@ -3,12 +3,7 @@ import { signal } from "@preact/signals";
 import { u } from "../../lib/base.js";
 import { getPref, setPref } from "../../lib/prefs.js";
 import { apiGet, apiPutJSON } from "../../lib/api.js";
-import {
-  TTS_KINDS,
-  TTS_KIND_SHORT,
-  ttsDefaults,
-  ttsFields,
-} from "../../lib/tts.js";
+import { TTS_KINDS, TTS_KIND_SHORT, ttsFields } from "../../lib/tts.js";
 import {
   Actions,
   Button,
@@ -78,12 +73,11 @@ const ttsHasKey = signal(false);
 const ttsSaved = signal(null);
 
 function showProvider(kind) {
-  const def = ttsDefaults(kind);
   const p = providers.value[kind] || {};
-  ttsHost.value = p.host || def.host;
-  ttsPort.value = p.port || def.port;
-  ttsModel.value = p.model || def.model;
-  ttsVoice.value = p.voice || def.voice;
+  ttsHost.value = p.host || "";
+  ttsPort.value = p.port || "";
+  ttsModel.value = p.model || "";
+  ttsVoice.value = p.voice || "";
   ttsKey.value = "";
   ttsHasKey.value = !!p.has_key;
 }

@@ -28,6 +28,7 @@ use rand::{distr::Alphanumeric, Rng};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
+use speech_settings::SpeechProvider;
 
 /// Frontend assets compiled into the binary so `cargo install mobux` yields a
 /// self-contained executable that serves the UI from memory — no `web/` dir
@@ -349,7 +350,7 @@ struct AppState {
     /// The live `/files/` and `/proxy/` maps and the `files.roots` and
     /// `proxy.targets` blocks of config.json that Settings → Pages edits.
     pages: Arc<pages_settings::PagesSettings>,
-    /// The `stt` and `tts` blocks of config.json, read on every request.
+    /// The `stt` and `tts` blocks of config.json.
     speech: Arc<speech_settings::SpeechSettings>,
 }
 
@@ -1599,7 +1600,6 @@ async fn api_upload(
 // Accepts audio as multipart/form-data (field name `audio`) and runs it
 // through the active provider — whisper in this process, or the
 // OpenAI-compatible endpoint the user configured. Returns `{ "text": "..." }`.
-// Provider config is read from config.json on each request — no restart needed after change.
 async fn api_transcribe(
     State(state): State<AppState>,
     mut multipart: axum::extract::Multipart,
@@ -1633,8 +1633,6 @@ async fn api_transcribe(
     let audio = audio_bytes
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("missing 'audio' field")))?;
 
-    // Read config per-request — no restart needed after config change.
-    // Use the active kind's per-kind settings.
     let (provider, debug_ctx) = tokio::task::spawn_blocking({
         let speech = state.speech.clone();
         move || active_provider(&speech)
@@ -1835,7 +1833,7 @@ struct InternalTriggerQuery {
 
 #[derive(serde::Deserialize)]
 struct SttModelsQuery {
-    kind: Option<String>,
+    kind: Option<config::SttKind>,
     host: Option<String>,
     port: Option<String>,
 }
@@ -3371,45 +3369,39 @@ async fn api_host_suggestions() -> Json<HostSuggestionsJson> {
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
 
-/// Shape returned by GET /api/settings/stt.
+/// What GET /api/settings/{stt,tts} answers. The key never leaves the
+/// server; `has_key` says whether one is stored.
 #[derive(serde::Serialize)]
-struct SttConfigGetJson {
+struct SpeechSettingsJson<K> {
     #[serde(rename = "activeKind")]
-    active_kind: String,
-    providers: std::collections::BTreeMap<String, speech_settings::SttProviderView>,
+    active_kind: K,
+    providers: std::collections::BTreeMap<K, serde_json::Value>,
     /// Whether this build carries the in-process engine, so the card can say
     /// so instead of offering a local provider that cannot run.
     #[serde(rename = "localEngine")]
     local_engine: bool,
 }
 
-/// Shape accepted by PUT /api/settings/stt.
-/// Saves settings for the given kind and makes it the active kind.
-/// api_key is optional; if absent or empty the existing stored key is preserved.
-#[derive(serde::Deserialize)]
-struct SttConfigPutJson {
-    kind: String,
-    host: String,
-    port: String,
-    model: String,
-    #[serde(default)]
-    api_key: Option<String>,
-}
-
-async fn read_stt(state: &AppState) -> Result<config::SttConfig, AppError> {
+async fn read_speech<P: SpeechProvider>(
+    state: &AppState,
+) -> Result<config::SpeechConfig<P::Kind, P>, AppError> {
     let speech = state.speech.clone();
-    tokio::task::spawn_blocking(move || speech.stt())
+    tokio::task::spawn_blocking(move || speech.read::<P>())
         .await
         .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
         .map_err(|e| AppError::internal(anyhow::anyhow!(e)))
 }
 
-async fn read_tts(state: &AppState) -> Result<config::TtsConfig, AppError> {
-    let speech = state.speech.clone();
-    tokio::task::spawn_blocking(move || speech.tts())
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-        .map_err(|e| AppError::internal(anyhow::anyhow!(e)))
+async fn speech_settings_json<P: SpeechProvider>(
+    state: &AppState,
+    local_engine: bool,
+) -> Result<Json<SpeechSettingsJson<P::Kind>>, AppError> {
+    let block = read_speech::<P>(state).await?;
+    Ok(Json(SpeechSettingsJson {
+        providers: speech_settings::views(&block),
+        active_kind: block.active,
+        local_engine,
+    }))
 }
 
 fn edit_error(err: config_file::EditError) -> AppError {
@@ -3427,71 +3419,36 @@ fn edit_error(err: config_file::EditError) -> AppError {
 
 async fn api_get_stt_config(
     State(state): State<AppState>,
-) -> Result<Json<SttConfigGetJson>, AppError> {
-    let stt = read_stt(&state).await?;
-    Ok(Json(SttConfigGetJson {
-        providers: speech_settings::stt_views(&stt),
-        active_kind: stt.active,
-        local_engine: local_stt::ENABLED,
-    }))
+) -> Result<Json<SpeechSettingsJson<config::SttKind>>, AppError> {
+    speech_settings_json::<config::SttProvider>(&state, local_stt::ENABLED).await
 }
 
 async fn api_set_stt_config(
     State(state): State<AppState>,
-    Json(req): Json<SttConfigPutJson>,
+    Json(mut req): Json<speech_settings::Change<config::SttKind, config::SttProvider>>,
 ) -> Result<StatusCode, AppError> {
     // The local kind runs a fixed catalog, so a model it cannot run is stored
     // as the one it will actually load. Otherwise the picker keeps offering a
     // value nothing honours — which is how faster-whisper ids outlived the
     // container-backed provider.
-    let model = if req.kind == transcribe::LOCAL_KIND {
-        local_stt::resolve_model(&req.model).to_string()
-    } else {
-        req.model
-    };
-    state
-        .speech
-        .set_stt(speech_settings::SttChange {
-            kind: req.kind,
-            host: req.host,
-            port: req.port,
-            model,
-            // Empty means "keep the stored key".
-            api_key: req.api_key,
-        })
-        .await
-        .map_err(edit_error)?;
+    if req.kind == config::SttKind::Local {
+        req.provider.model = local_stt::resolve_model(&req.provider.model).to_string();
+    }
+    state.speech.set(req).await.map_err(edit_error)?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Shape returned by GET /api/settings/tts. The key itself never leaves the
-/// server; `has_key` says whether one is stored.
-#[derive(serde::Serialize)]
-struct TtsConfigGetJson {
-    #[serde(rename = "activeKind")]
-    active_kind: String,
-    providers: std::collections::BTreeMap<String, speech_settings::TtsProviderView>,
-    #[serde(rename = "localEngine")]
-    local_engine: bool,
 }
 
 async fn api_get_tts_config(
     State(state): State<AppState>,
-) -> Result<Json<TtsConfigGetJson>, AppError> {
-    let tts = read_tts(&state).await?;
-    Ok(Json(TtsConfigGetJson {
-        providers: speech_settings::tts_views(&tts),
-        active_kind: tts.active,
-        local_engine: local_tts::ENABLED,
-    }))
+) -> Result<Json<SpeechSettingsJson<config::TtsKind>>, AppError> {
+    speech_settings_json::<config::TtsProvider>(&state, local_tts::ENABLED).await
 }
 
-/// Save one kind and make it active. An empty `api_key` keeps the stored one.
 async fn api_set_tts_config(
     State(state): State<AppState>,
-    Json(req): Json<speech_settings::TtsChange>,
+    Json(req): Json<speech_settings::Change<config::TtsKind, config::TtsProvider>>,
 ) -> Result<StatusCode, AppError> {
-    state.speech.set_tts(req).await.map_err(edit_error)?;
+    state.speech.set(req).await.map_err(edit_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3587,17 +3544,19 @@ impl SttStatus {
 fn active_provider(
     speech: &speech_settings::SpeechSettings,
 ) -> anyhow::Result<(transcribe::Provider, stt_debug::ProviderContext)> {
-    let stt = speech.stt().map_err(anyhow::Error::msg)?;
-    let kind = stt.active.clone();
-    let row = speech_settings::stt_provider(&stt, &kind);
-    let url = speech_settings::stt_url(&kind, &row);
-    let provider = transcribe::select_provider(&kind, &url, &row.model, Some(&row.api_key));
+    let stt = speech
+        .read::<config::SttProvider>()
+        .map_err(anyhow::Error::msg)?;
+    let kind = stt.active;
+    let row = speech_settings::provider(&stt, kind);
+    let url = speech_settings::stt_url(kind, &row);
+    let provider = transcribe::select_provider(kind, &url, &row.model, Some(&row.api_key));
     let model = match &provider {
         transcribe::Provider::InProcess { model } => model.clone(),
         transcribe::Provider::Remote(cfg) | transcribe::Provider::Kyutai(cfg) => cfg.model.clone(),
     };
     let debug_ctx = stt_debug::ProviderContext {
-        kind,
+        kind: config::kind_name(&kind),
         model,
         host: row.host,
         port: row.port,
@@ -3915,8 +3874,9 @@ struct SpeakRequest {
 /// What `/api/tts/status` says about a remote voice: always ready, since
 /// there is nothing to download; a failing endpoint shows up as the browser
 /// fallback's reason when it is asked to speak.
-fn remote_voice_status(kind: &str, provider: &config::TtsProvider) -> serde_json::Value {
+fn remote_voice_status(kind: config::TtsKind, provider: &config::TtsProvider) -> serde_json::Value {
     let url = speech_settings::base_url(&provider.host, &provider.port);
+    let kind = config::kind_name(&kind);
     json!({
         "enabled": true,
         "kind": kind,
@@ -3930,16 +3890,16 @@ fn remote_voice_status(kind: &str, provider: &config::TtsProvider) -> serde_json
 async fn api_tts_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tts = read_tts(&state).await?;
-    if tts.active != config::LOCAL_SPEECH_KIND {
-        let provider = speech_settings::tts_provider(&tts, &tts.active);
-        return Ok(Json(remote_voice_status(&tts.active, &provider)));
+    let tts = read_speech::<config::TtsProvider>(&state).await?;
+    if tts.active != config::TtsKind::Local {
+        let provider = speech_settings::provider(&tts, tts.active);
+        return Ok(Json(remote_voice_status(tts.active, &provider)));
     }
     let voice = local_tts::voice();
     let phase = local_tts::phase(&state.data_dir);
     Ok(Json(json!({
         "enabled": local_tts::ENABLED,
-        "kind": config::LOCAL_SPEECH_KIND,
+        "kind": config::TtsKind::Local,
         "model": "",
         "voice": voice,
         "state": phase.state(),
@@ -3953,10 +3913,10 @@ async fn api_tts_status(
 async fn api_tts_prepare(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tts = read_tts(&state).await?;
-    if tts.active != config::LOCAL_SPEECH_KIND {
-        let provider = speech_settings::tts_provider(&tts, &tts.active);
-        return Ok(Json(remote_voice_status(&tts.active, &provider)));
+    let tts = read_speech::<config::TtsProvider>(&state).await?;
+    if tts.active != config::TtsKind::Local {
+        let provider = speech_settings::provider(&tts, tts.active);
+        return Ok(Json(remote_voice_status(tts.active, &provider)));
     }
     let voice = local_tts::voice();
     local_tts::ensure_ready(state.data_dir.clone())
@@ -3991,13 +3951,10 @@ async fn api_tts_speak(
 
     check_speakable(&speech)?;
 
-    let tts = match read_tts(&state).await {
-        Ok(tts) => tts,
-        Err(err) => return Ok(browser_speech(&speech, &err.message)),
-    };
-    if tts.active != config::LOCAL_SPEECH_KIND {
-        let provider = speech_settings::tts_provider(&tts, &tts.active);
-        return match tts_provider::speak(&tts.active, &provider, &speech.text).await {
+    let tts = read_speech::<config::TtsProvider>(&state).await?;
+    if tts.active != config::TtsKind::Local {
+        let provider = speech_settings::provider(&tts, tts.active);
+        return match tts_provider::speak(tts.active, &provider, &speech.text).await {
             Ok(clip) => {
                 Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], clip).into_response())
             }
@@ -4056,20 +4013,22 @@ async fn api_stt_models(
 ) -> Result<Json<serde_json::Value>, AppError> {
     use std::time::Duration;
 
-    let fallback_for_kind = |kind: &str| -> Vec<String> {
+    let fallback_for_kind = |kind: config::SttKind| -> Vec<String> {
         match kind {
-            transcribe::LOCAL_KIND => local_stt::model_ids(),
-            "openai" => vec![
+            config::SttKind::Local => local_stt::model_ids(),
+            config::SttKind::Openai => vec![
                 "whisper-1".to_string(),
                 "gpt-4o-transcribe".to_string(),
                 "gpt-4o-mini-transcribe".to_string(),
             ],
-            "mistral" => vec![
+            config::SttKind::Mistral => vec![
                 "voxtral-mini-latest".to_string(),
                 "voxtral-mini-2507".to_string(),
             ],
-            transcribe::KYUTAI_KIND => vec!["stt-1b-en_fr".to_string(), "stt-2.6b-en".to_string()],
-            _ => vec![
+            config::SttKind::Kyutai => {
+                vec!["stt-1b-en_fr".to_string(), "stt-2.6b-en".to_string()]
+            }
+            config::SttKind::Network => vec![
                 "Systran/faster-whisper-base.en".to_string(),
                 "Systran/faster-whisper-small.en".to_string(),
                 "Systran/faster-whisper-medium.en".to_string(),
@@ -4080,32 +4039,35 @@ async fn api_stt_models(
     // Answer for the kind that was asked about, falling back to the active one
     // only when the caller named none: the settings card asks about the kind
     // the user just picked, which it has not saved yet, and answering about
-    // the active kind handed it another provider's catalog. The key always
-    // comes from config.json, so the card never round-trips it.
-    let stt = read_stt(&state).await?;
-    let kind = q
-        .kind
-        .clone()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| stt.active.clone());
-    let stored = speech_settings::stt_provider(&stt, &kind);
-    let base_url = match q.host.as_deref().filter(|h| !h.is_empty()) {
-        Some(host) => speech_settings::base_url(host, q.port.as_deref().unwrap_or("")),
-        None => speech_settings::base_url(&stored.host, &stored.port),
+    // the active kind handed it another provider's catalog.
+    let stt = read_speech::<config::SttProvider>(&state).await?;
+    let kind = q.kind.unwrap_or(stt.active);
+    let stored = speech_settings::provider(&stt, kind);
+    // The stored key goes only to the stored host: a host named in the query
+    // could be anywhere, and must not be handed the key.
+    let (base_url, api_key) = match q.host.as_deref().filter(|h| !h.is_empty()) {
+        Some(host) => (
+            speech_settings::base_url(host, q.port.as_deref().unwrap_or("")),
+            None,
+        ),
+        None => (
+            speech_settings::base_url(&stored.host, &stored.port),
+            Some(stored.api_key).filter(|k| !k.is_empty()),
+        ),
     };
-    let api_key = Some(stored.api_key).filter(|k| !k.is_empty());
 
     // The local kind has no endpoint to enumerate — its catalog is whatever
-    // the in-process engine can run.
-    // Mistral's model list is every model it hosts, chat included, and
-    // moshi-server has no list at all; both answer with their own catalog.
+    // the in-process engine can run. Mistral's model list is every model it
+    // hosts, chat included, and moshi-server has no list at all; both answer
+    // with their own catalog.
     if base_url.is_empty()
-        || kind == transcribe::LOCAL_KIND
-        || kind == "mistral"
-        || kind == transcribe::KYUTAI_KIND
+        || matches!(
+            kind,
+            config::SttKind::Local | config::SttKind::Mistral | config::SttKind::Kyutai
+        )
     {
         return Ok(Json(serde_json::json!({
-            "models": fallback_for_kind(&kind)
+            "models": fallback_for_kind(kind)
         })));
     }
 
@@ -4117,7 +4079,7 @@ async fn api_stt_models(
         Ok(c) => c,
         Err(_) => {
             return Ok(Json(
-                serde_json::json!({ "models": fallback_for_kind(&kind) }),
+                serde_json::json!({ "models": fallback_for_kind(kind) }),
             ));
         }
     };
@@ -4140,8 +4102,8 @@ async fn api_stt_models(
                     .collect()
             })
             .filter(|v: &Vec<String>| !v.is_empty())
-            .unwrap_or_else(|| fallback_for_kind(&kind)),
-        _ => fallback_for_kind(&kind),
+            .unwrap_or_else(|| fallback_for_kind(kind)),
+        _ => fallback_for_kind(kind),
     };
 
     Ok(Json(serde_json::json!({ "models": ids })))
@@ -4647,14 +4609,30 @@ mod tests {
         .expect("writing config.json");
     }
 
-    fn set_active_stt(state: &AppState, kind: &str) {
+    fn set_active_stt(state: &AppState, kind: config::SttKind) {
         write_config(state, json!({"stt": {"active": kind}}));
     }
 
-    fn stored_stt_model(state: &AppState, kind: &str) -> String {
-        state.speech.stt().expect("config.json reads").providers[kind]
+    fn stored_stt_model(state: &AppState, kind: config::SttKind) -> String {
+        state
+            .speech
+            .read::<config::SttProvider>()
+            .expect("config.json reads")
+            .providers[&kind]
             .model
             .clone()
+    }
+
+    fn local_model_change(
+        model: &str,
+    ) -> speech_settings::Change<config::SttKind, config::SttProvider> {
+        speech_settings::Change {
+            kind: config::SttKind::Local,
+            provider: config::SttProvider {
+                model: model.to_string(),
+                ..Default::default()
+            },
+        }
     }
 
     fn listener_app(state: AppState, via_access: bool) -> Router {
@@ -5312,7 +5290,7 @@ mod tests {
     #[tokio::test]
     async fn stt_install_refuses_a_remote_provider() {
         let (state, _dir) = test_state(false);
-        set_active_stt(&state, "openai");
+        set_active_stt(&state, config::SttKind::Openai);
         let resp = api_stt_install(State(state)).await.unwrap().into_response();
         assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
     }
@@ -5408,7 +5386,7 @@ mod tests {
 
     fn local_status(phase: local_stt::Phase) -> SttStatus {
         SttStatus {
-            kind: transcribe::LOCAL_KIND.to_string(),
+            kind: config::kind_name(&config::SttKind::Local),
             url: String::new(),
             model: local_stt::DEFAULT_MODEL.to_string(),
             local: Some(phase),
@@ -5539,7 +5517,7 @@ mod tests {
     async fn stt_status_on_a_fresh_install_reports_the_local_engine() {
         let (state, _dir) = test_state(false);
         let resp = api_stt_status(State(state)).await.unwrap();
-        assert_eq!(resp.0["kind"], transcribe::LOCAL_KIND);
+        assert_eq!(resp.0["kind"], "local");
         assert_eq!(resp.0["model"], local_stt::DEFAULT_MODEL);
         assert_eq!(resp.0["url"], "");
         assert_eq!(resp.0["engine_available"], local_stt::ENABLED);
@@ -5607,6 +5585,66 @@ mod tests {
         assert!(safe.contains("PWNED"));
     }
 
+    // The model list may be asked about any host. The stored key belongs to
+    // the stored host only; a host named in the query never receives it.
+    #[tokio::test]
+    async fn stt_models_sends_the_stored_key_only_to_the_stored_host() {
+        use std::sync::Mutex;
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let mock = Router::new().route(
+            "/v1/models",
+            get({
+                let seen = seen.clone();
+                move |headers: HeaderMap| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    seen.lock().unwrap().push(auth);
+                    Json(json!({"data": [{"id": "whisper-1"}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let (state, _dir) = test_state(false);
+        write_config(
+            &state,
+            json!({"stt": {"active": "network", "providers": {"network": {
+                "host": "http://127.0.0.1", "port": port, "api_key": "sk-stored"
+            }}}}),
+        );
+
+        let Json(listed) = api_stt_models(
+            State(state.clone()),
+            Query(SttModelsQuery {
+                kind: Some(config::SttKind::Network),
+                host: Some("http://127.0.0.1".to_string()),
+                port: Some(port.clone()),
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        assert_eq!(listed["models"], json!(["whisper-1"]));
+        let Json(listed) = api_stt_models(
+            State(state),
+            Query(SttModelsQuery {
+                kind: Some(config::SttKind::Network),
+                host: None,
+                port: None,
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        assert_eq!(listed["models"], json!(["whisper-1"]));
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![String::new(), "Bearer sk-stored".to_string()]);
+    }
+
     #[tokio::test]
     async fn stt_models_returns_fallback_when_no_config() {
         let (state, _dir) = test_state(false);
@@ -5629,12 +5667,12 @@ mod tests {
     #[tokio::test]
     async fn stt_models_answers_for_the_kind_that_was_asked_about() {
         let (state, _dir) = test_state(false);
-        set_active_stt(&state, "network");
+        set_active_stt(&state, config::SttKind::Network);
 
         let Json(val) = api_stt_models(
             State(state.clone()),
             Query(SttModelsQuery {
-                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                kind: Some(config::SttKind::Local),
                 host: None,
                 port: None,
             }),
@@ -5650,11 +5688,11 @@ mod tests {
         assert_eq!(models, local_stt::model_ids());
 
         // And the reverse, so the fix is not "always answer local".
-        set_active_stt(&state, transcribe::LOCAL_KIND);
+        set_active_stt(&state, config::SttKind::Local);
         let Json(val) = api_stt_models(
             State(state),
             Query(SttModelsQuery {
-                kind: Some("network".to_string()),
+                kind: Some(config::SttKind::Network),
                 host: None,
                 port: None,
             }),
@@ -5675,19 +5713,13 @@ mod tests {
         let (state, _dir) = test_state(false);
         api_set_stt_config(
             State(state.clone()),
-            Json(SttConfigPutJson {
-                kind: transcribe::LOCAL_KIND.to_string(),
-                host: String::new(),
-                port: String::new(),
-                model: "Systran/faster-whisper-small".to_string(),
-                api_key: None,
-            }),
+            Json(local_model_change("Systran/faster-whisper-small")),
         )
         .await
         .expect("saving must not error");
 
         assert_eq!(
-            stored_stt_model(&state, transcribe::LOCAL_KIND),
+            stored_stt_model(&state, config::SttKind::Local),
             local_stt::DEFAULT_MODEL
         );
     }
@@ -5696,20 +5728,11 @@ mod tests {
     #[tokio::test]
     async fn saving_a_local_model_from_the_catalog_keeps_it() {
         let (state, _dir) = test_state(false);
-        api_set_stt_config(
-            State(state.clone()),
-            Json(SttConfigPutJson {
-                kind: transcribe::LOCAL_KIND.to_string(),
-                host: String::new(),
-                port: String::new(),
-                model: "small.en".to_string(),
-                api_key: None,
-            }),
-        )
-        .await
-        .expect("saving must not error");
+        api_set_stt_config(State(state.clone()), Json(local_model_change("small.en")))
+            .await
+            .expect("saving must not error");
 
-        assert_eq!(stored_stt_model(&state, transcribe::LOCAL_KIND), "small.en");
+        assert_eq!(stored_stt_model(&state, config::SttKind::Local), "small.en");
     }
 
     // The in-process engine runs the checkpoints in model.lock.json and
@@ -5731,7 +5754,7 @@ mod tests {
         let Json(val) = api_stt_models(
             State(state),
             Query(SttModelsQuery {
-                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                kind: Some(config::SttKind::Local),
                 host: Some("http://127.0.0.1".to_string()),
                 port: Some("5200".to_string()),
             }),
@@ -5757,7 +5780,7 @@ mod tests {
     async fn stt_models_returns_openai_fallback_for_openai_kind() {
         let (state, _dir) = test_state(false);
         let q = SttModelsQuery {
-            kind: Some("openai".to_string()),
+            kind: Some(config::SttKind::Openai),
             host: Some("https://api.openai.com".to_string()),
             port: Some("443".to_string()),
         };

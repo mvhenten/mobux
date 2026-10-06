@@ -5,53 +5,26 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, SttConfig, SttProvider, TtsConfig, TtsProvider};
+use crate::config::{self, SpeechConfig, SttKind, SttProvider, TtsKind, TtsProvider};
 use crate::config_file::{ConfigFile, EditError};
 use crate::db;
 
-/// The speech-to-text kinds Settings offers, in the order it lists them.
-pub const STT_KINDS: &[&str] = &["local", "network", "openai", "mistral", "kyutai"];
-
-/// The text-to-speech kinds Settings offers, in the order it lists them.
-pub const TTS_KINDS: &[&str] = &["local", "mistral", "network", "kyutai"];
-
-pub fn stt_default(kind: &str) -> SttProvider {
-    let provider = |host: &str, port: &str, model: &str| SttProvider {
-        host: host.to_string(),
-        port: port.to_string(),
-        model: model.to_string(),
-        api_key: String::new(),
-    };
-    match kind {
-        config::LOCAL_SPEECH_KIND => provider("", "", crate::local_stt::DEFAULT_MODEL),
-        "openai" => provider("https://api.openai.com", "443", "whisper-1"),
-        "mistral" => provider("https://api.mistral.ai", "443", "voxtral-mini-latest"),
-        "kyutai" => provider("ws://localhost", "8080", "stt-1b-en_fr"),
-        _ => provider("", "", "Systran/faster-whisper-base.en"),
-    }
-}
-
-pub fn tts_default(kind: &str) -> TtsProvider {
-    let provider = |host: &str, port: &str, model: &str, voice: &str| TtsProvider {
-        host: host.to_string(),
-        port: port.to_string(),
-        model: model.to_string(),
-        voice: voice.to_string(),
-        api_key: String::new(),
-    };
-    match kind {
-        "mistral" => provider(
-            "https://api.mistral.ai",
-            "443",
-            "voxtral-mini-tts-2603",
-            "en_paul_neutral",
-        ),
-        "network" => provider("", "", "mistralai/Voxtral-4B-TTS-2603", "casual_female"),
-        "kyutai" => provider("http://localhost", "8000", "pocket-tts", "alba"),
-        _ => provider("", "", "", ""),
-    }
+/// What the `stt` and `tts` blocks share, so each operation has one copy.
+pub trait SpeechProvider:
+    Clone + Default + Serialize + DeserializeOwned + Send + Sync + 'static
+{
+    type Kind: Copy + Ord + Default + Serialize + DeserializeOwned + Send + Sync + 'static;
+    const BLOCK: &'static str;
+    const KINDS: &'static [Self::Kind];
+    fn block(config: &config::Config) -> &SpeechConfig<Self::Kind, Self>;
+    fn default_for(kind: Self::Kind) -> Self;
+    /// Every empty field taken from `default`; the key is kept as stated.
+    fn filled(&self, default: Self) -> Self;
+    fn api_key(&self) -> &str;
+    fn set_api_key(&mut self, key: String);
 }
 
 fn or_default(value: &str, default: String) -> String {
@@ -61,33 +34,134 @@ fn or_default(value: &str, default: String) -> String {
     value.to_string()
 }
 
-/// A kind's settings as stated in the file, every empty field filled from that
-/// kind's defaults.
-pub fn stt_provider(stt: &SttConfig, kind: &str) -> SttProvider {
-    let default = stt_default(kind);
-    let Some(stated) = stt.providers.get(kind) else {
-        return default;
-    };
-    SttProvider {
-        host: or_default(&stated.host, default.host),
-        port: or_default(&stated.port, default.port),
-        model: or_default(&stated.model, default.model),
-        api_key: stated.api_key.clone(),
+impl SpeechProvider for SttProvider {
+    type Kind = SttKind;
+    const BLOCK: &'static str = "stt";
+    const KINDS: &'static [SttKind] = &SttKind::ALL;
+
+    fn block(config: &config::Config) -> &SpeechConfig<SttKind, Self> {
+        &config.stt
+    }
+
+    fn default_for(kind: SttKind) -> Self {
+        let provider = |host: &str, port: &str, model: &str| SttProvider {
+            host: host.to_string(),
+            port: port.to_string(),
+            model: model.to_string(),
+            api_key: String::new(),
+        };
+        match kind {
+            SttKind::Local => provider("", "", crate::local_stt::DEFAULT_MODEL),
+            SttKind::Network => provider("", "", "Systran/faster-whisper-base.en"),
+            SttKind::Openai => provider("https://api.openai.com", "443", "whisper-1"),
+            SttKind::Mistral => provider("https://api.mistral.ai", "443", "voxtral-mini-latest"),
+            SttKind::Kyutai => provider("ws://localhost", "8080", "stt-1b-en_fr"),
+        }
+    }
+
+    fn filled(&self, default: Self) -> Self {
+        SttProvider {
+            host: or_default(&self.host, default.host),
+            port: or_default(&self.port, default.port),
+            model: or_default(&self.model, default.model),
+            api_key: self.api_key.clone(),
+        }
+    }
+
+    fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    fn set_api_key(&mut self, key: String) {
+        self.api_key = key;
     }
 }
 
-pub fn tts_provider(tts: &TtsConfig, kind: &str) -> TtsProvider {
-    let default = tts_default(kind);
-    let Some(stated) = tts.providers.get(kind) else {
-        return default;
-    };
-    TtsProvider {
-        host: or_default(&stated.host, default.host),
-        port: or_default(&stated.port, default.port),
-        model: or_default(&stated.model, default.model),
-        voice: or_default(&stated.voice, default.voice),
-        api_key: stated.api_key.clone(),
+impl SpeechProvider for TtsProvider {
+    type Kind = TtsKind;
+    const BLOCK: &'static str = "tts";
+    const KINDS: &'static [TtsKind] = &TtsKind::ALL;
+
+    fn block(config: &config::Config) -> &SpeechConfig<TtsKind, Self> {
+        &config.tts
     }
+
+    fn default_for(kind: TtsKind) -> Self {
+        let provider = |host: &str, port: &str, model: &str, voice: &str| TtsProvider {
+            host: host.to_string(),
+            port: port.to_string(),
+            model: model.to_string(),
+            voice: voice.to_string(),
+            api_key: String::new(),
+        };
+        match kind {
+            TtsKind::Local => provider("", "", "", ""),
+            TtsKind::Mistral => provider(
+                "https://api.mistral.ai",
+                "443",
+                "voxtral-mini-tts-2603",
+                "en_paul_neutral",
+            ),
+            TtsKind::Network => provider("", "", "mistralai/Voxtral-4B-TTS-2603", "casual_female"),
+            TtsKind::Kyutai => provider("http://localhost", "8000", "pocket-tts", "alba"),
+        }
+    }
+
+    fn filled(&self, default: Self) -> Self {
+        TtsProvider {
+            host: or_default(&self.host, default.host),
+            port: or_default(&self.port, default.port),
+            model: or_default(&self.model, default.model),
+            voice: or_default(&self.voice, default.voice),
+            api_key: self.api_key.clone(),
+        }
+    }
+
+    fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    fn set_api_key(&mut self, key: String) {
+        self.api_key = key;
+    }
+}
+
+/// A kind's settings as stated in the file, every empty field filled from that
+/// kind's defaults.
+pub fn provider<P: SpeechProvider>(block: &SpeechConfig<P::Kind, P>, kind: P::Kind) -> P {
+    let default = P::default_for(kind);
+    match block.providers.get(&kind) {
+        Some(stated) => stated.filled(default),
+        None => default,
+    }
+}
+
+/// Every kind as `GET /api/settings/*` shows it: the filled settings with
+/// `has_key` in place of the key.
+pub fn views<P: SpeechProvider>(
+    block: &SpeechConfig<P::Kind, P>,
+) -> BTreeMap<P::Kind, serde_json::Value> {
+    P::KINDS
+        .iter()
+        .map(|&kind| {
+            let filled = provider(block, kind);
+            let has_key = !filled.api_key().is_empty();
+            let mut view = serde_json::to_value(filled).expect("a provider serializes");
+            let fields = view.as_object_mut().expect("a provider is an object");
+            fields.remove("api_key");
+            fields.insert("has_key".to_string(), has_key.into());
+            (kind, view)
+        })
+        .collect()
+}
+
+/// `PUT /api/settings/{stt,tts}`: one kind's settings, made active. An absent
+/// or empty `api_key` keeps the stored one.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Change<K, P> {
+    pub kind: K,
+    #[serde(flatten)]
+    pub provider: P,
 }
 
 /// `scheme://host:port`, `http://` when the host names no scheme. Empty when
@@ -111,118 +185,15 @@ pub fn base_url(host: &str, port: &str) -> String {
 
 /// Where a speech-to-text kind is reached: the websocket for Kyutai, the
 /// OpenAI-shaped transcription route for every other remote kind.
-pub fn stt_url(kind: &str, provider: &SttProvider) -> String {
+pub fn stt_url(kind: SttKind, provider: &SttProvider) -> String {
     let base = base_url(&provider.host, &provider.port);
     if base.is_empty() {
         return base;
     }
-    if kind == "kyutai" {
+    if kind == SttKind::Kyutai {
         return format!("{base}{}", crate::kyutai_stt::PATH);
     }
     format!("{base}/v1/audio/transcriptions")
-}
-
-/// One kind as `GET /api/settings/*` shows it: everything but the key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SttProviderView {
-    pub host: String,
-    pub port: String,
-    pub model: String,
-    pub has_key: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TtsProviderView {
-    pub host: String,
-    pub port: String,
-    pub model: String,
-    pub voice: String,
-    pub has_key: bool,
-}
-
-pub fn stt_views(stt: &SttConfig) -> BTreeMap<String, SttProviderView> {
-    let mut kinds: Vec<String> = STT_KINDS.iter().map(|k| k.to_string()).collect();
-    kinds.extend(stt.providers.keys().cloned());
-    kinds
-        .into_iter()
-        .map(|kind| {
-            let p = stt_provider(stt, &kind);
-            let view = SttProviderView {
-                host: p.host,
-                port: p.port,
-                model: p.model,
-                has_key: !p.api_key.is_empty(),
-            };
-            (kind, view)
-        })
-        .collect()
-}
-
-pub fn tts_views(tts: &TtsConfig) -> BTreeMap<String, TtsProviderView> {
-    let mut kinds: Vec<String> = TTS_KINDS.iter().map(|k| k.to_string()).collect();
-    kinds.extend(tts.providers.keys().cloned());
-    kinds
-        .into_iter()
-        .map(|kind| {
-            let p = tts_provider(tts, &kind);
-            let view = TtsProviderView {
-                host: p.host,
-                port: p.port,
-                model: p.model,
-                voice: p.voice,
-                has_key: !p.api_key.is_empty(),
-            };
-            (kind, view)
-        })
-        .collect()
-}
-
-/// `PUT /api/settings/stt`: one kind's settings, made active. An absent or
-/// empty `api_key` keeps the stored one.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SttChange {
-    pub kind: String,
-    pub host: String,
-    pub port: String,
-    pub model: String,
-    #[serde(default)]
-    pub api_key: Option<String>,
-}
-
-/// `PUT /api/settings/tts`, the same rules as [`SttChange`].
-#[derive(Debug, Clone, Deserialize)]
-pub struct TtsChange {
-    pub kind: String,
-    #[serde(default)]
-    pub host: String,
-    #[serde(default)]
-    pub port: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub voice: String,
-    #[serde(default)]
-    pub api_key: Option<String>,
-}
-
-fn kept_key(new: Option<String>, stored: Option<&String>) -> String {
-    match new.filter(|key| !key.is_empty()) {
-        Some(key) => key,
-        None => stored.cloned().unwrap_or_default(),
-    }
-}
-
-fn check_kind(kind: &str) -> Result<(), EditError> {
-    let valid = !kind.is_empty()
-        && kind
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if valid {
-        return Ok(());
-    }
-    Err(EditError::Invalid(format!(
-        "kind: `{kind}` must be letters, digits, `-` and `_`"
-    )))
 }
 
 pub struct SpeechSettings {
@@ -234,80 +205,41 @@ impl SpeechSettings {
         SpeechSettings { file }
     }
 
-    pub fn stt(&self) -> Result<SttConfig, String> {
+    pub fn read<P: SpeechProvider>(&self) -> Result<SpeechConfig<P::Kind, P>, String> {
         self.file
             .read()
-            .map(|config| config.stt)
+            .map(|config| P::block(&config).clone())
             .map_err(|e| e.to_string())
     }
 
-    pub fn tts(&self) -> Result<TtsConfig, String> {
-        self.file
-            .read()
-            .map(|config| config.tts)
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn set_stt(&self, change: SttChange) -> Result<(), EditError> {
-        check_kind(&change.kind)?;
+    pub async fn set<P: SpeechProvider>(
+        &self,
+        change: Change<P::Kind, P>,
+    ) -> Result<(), EditError> {
         self.file
             .edit_with(|current| {
-                let mut providers = current.stt.providers.clone();
-                let api_key = kept_key(
-                    change.api_key,
-                    providers.get(&change.kind).map(|p| &p.api_key),
-                );
-                providers.insert(
-                    change.kind.clone(),
-                    SttProvider {
-                        host: change.host,
-                        port: change.port,
-                        model: change.model,
-                        api_key,
-                    },
-                );
+                let mut providers = P::block(current).providers.clone();
+                let mut provider = change.provider;
+                if provider.api_key().is_empty() {
+                    let stored = providers
+                        .get(&change.kind)
+                        .map(|p| p.api_key().to_string())
+                        .unwrap_or_default();
+                    provider.set_api_key(stored);
+                }
+                providers.insert(change.kind, provider);
                 vec![
-                    ("stt", "active", serde_json::json!(change.kind)),
-                    ("stt", "providers", serde_json::json!(providers)),
-                ]
-            })
-            .await
-    }
-
-    pub async fn set_tts(&self, change: TtsChange) -> Result<(), EditError> {
-        check_kind(&change.kind)?;
-        self.file
-            .edit_with(|current| {
-                let mut providers = current.tts.providers.clone();
-                let api_key = kept_key(
-                    change.api_key,
-                    providers.get(&change.kind).map(|p| &p.api_key),
-                );
-                providers.insert(
-                    change.kind.clone(),
-                    TtsProvider {
-                        host: change.host,
-                        port: change.port,
-                        model: change.model,
-                        voice: change.voice,
-                        api_key,
-                    },
-                );
-                vec![
-                    ("tts", "active", serde_json::json!(change.kind)),
-                    ("tts", "providers", serde_json::json!(providers)),
+                    (P::BLOCK, "active", serde_json::json!(change.kind)),
+                    (P::BLOCK, "providers", serde_json::json!(providers)),
                 ]
             })
             .await
     }
 
     /// Copy the speech-to-text settings sqlite used to hold into a file that
-    /// states no `stt` block. Runs at startup; once the block is written the
-    /// rows are never read again.
+    /// states no `stt` block, then clear the rows. Runs at startup.
     pub async fn adopt_stored_stt(&self, db: &db::Db) -> Result<bool, String> {
-        let stated = self
-            .file
-            .read_partial()
+        let stated = config::load_partial_from(self.file.path())
             .map_err(|e| e.to_string())?
             .and_then(|partial| partial.stt)
             .is_some();
@@ -318,39 +250,45 @@ impl SpeechSettings {
             return Ok(false);
         };
         self.file
-            .edit(&[
-                ("stt", "active", serde_json::json!(stored.active)),
-                ("stt", "providers", serde_json::json!(stored.providers)),
-            ])
+            .edit_with(|_| {
+                vec![
+                    ("stt", "active", serde_json::json!(stored.active)),
+                    ("stt", "providers", serde_json::json!(stored.providers)),
+                ]
+            })
             .await
             .map_err(|e| match e {
                 EditError::Invalid(message) | EditError::Io(message) => message,
             })?;
+        db.clear_stt_saved().map_err(|e| format!("{e:#}"))?;
         Ok(true)
     }
 }
 
+fn stt_kind(name: String) -> anyhow::Result<SttKind> {
+    serde_json::from_value(serde_json::Value::String(name.clone()))
+        .map_err(|_| anyhow::anyhow!("stored stt kind `{name}` is not one this build knows"))
+}
+
 /// What sqlite holds, as the `stt` block. `None` when nothing was ever saved.
-fn stored_stt(db: &db::Db) -> anyhow::Result<Option<SttConfig>> {
+fn stored_stt(db: &db::Db) -> anyhow::Result<Option<config::SttConfig>> {
     let active = db.stt_saved_active_kind()?;
     let rows = db.stt_saved_providers()?;
     if active.is_none() && rows.is_empty() {
         return Ok(None);
     }
-    let providers = rows
-        .into_iter()
-        .map(|row| {
-            let provider = SttProvider {
-                host: row.host,
-                port: row.port,
-                model: row.model,
-                api_key: row.api_key.unwrap_or_default(),
-            };
-            (row.kind, provider)
-        })
-        .collect();
-    Ok(Some(SttConfig {
-        active: active.unwrap_or_else(|| config::LOCAL_SPEECH_KIND.to_string()),
+    let mut providers = BTreeMap::new();
+    for row in rows {
+        let provider = SttProvider {
+            host: row.host,
+            port: row.port,
+            model: row.model,
+            api_key: row.api_key.unwrap_or_default(),
+        };
+        providers.insert(stt_kind(row.kind)?, provider);
+    }
+    Ok(Some(config::SttConfig {
+        active: active.map(stt_kind).transpose()?.unwrap_or_default(),
         providers,
     }))
 }
@@ -382,15 +320,21 @@ mod tests {
                 .expect("the file exists");
             serde_json::from_str(&raw).unwrap()
         }
+
+        fn stt(&self) -> config::SttConfig {
+            self.speech.read::<SttProvider>().unwrap()
+        }
     }
 
-    fn change(kind: &str, key: Option<&str>) -> SttChange {
-        SttChange {
-            kind: kind.to_string(),
-            host: "https://api.mistral.ai".to_string(),
-            port: "443".to_string(),
-            model: "voxtral-mini-latest".to_string(),
-            api_key: key.map(str::to_string),
+    fn change(kind: SttKind, key: &str) -> Change<SttKind, SttProvider> {
+        Change {
+            kind,
+            provider: SttProvider {
+                host: "https://api.mistral.ai".to_string(),
+                port: "443".to_string(),
+                model: "voxtral-mini-latest".to_string(),
+                api_key: key.to_string(),
+            },
         }
     }
 
@@ -398,7 +342,7 @@ mod tests {
     async fn a_saved_kind_lands_in_the_file_and_becomes_active() {
         let f = fixture(Some(r#"{"server": {"port": 5151}}"#));
         f.speech
-            .set_stt(change("mistral", Some("sk-1")))
+            .set(change(SttKind::Mistral, "sk-1"))
             .await
             .unwrap();
         let doc = f.document();
@@ -411,99 +355,102 @@ mod tests {
     async fn an_empty_key_keeps_the_stored_one() {
         let f = fixture(None);
         f.speech
-            .set_stt(change("mistral", Some("sk-1")))
+            .set(change(SttKind::Mistral, "sk-1"))
             .await
             .unwrap();
-        f.speech.set_stt(change("mistral", Some(""))).await.unwrap();
-        f.speech.set_stt(change("mistral", None)).await.unwrap();
-        let stt = f.speech.stt().unwrap();
-        assert_eq!(stt.providers["mistral"].api_key, "sk-1");
+        f.speech.set(change(SttKind::Mistral, "")).await.unwrap();
+        assert_eq!(f.stt().providers[&SttKind::Mistral].api_key, "sk-1");
     }
 
     #[tokio::test]
     async fn saving_one_kind_keeps_the_others() {
         let f = fixture(None);
         f.speech
-            .set_stt(change("mistral", Some("sk-1")))
+            .set(change(SttKind::Mistral, "sk-1"))
             .await
             .unwrap();
-        f.speech.set_stt(change("network", None)).await.unwrap();
-        let stt = f.speech.stt().unwrap();
-        assert_eq!(stt.active, "network");
-        assert_eq!(stt.providers["mistral"].api_key, "sk-1");
+        f.speech.set(change(SttKind::Network, "")).await.unwrap();
+        let stt = f.stt();
+        assert_eq!(stt.active, SttKind::Network);
+        assert_eq!(stt.providers[&SttKind::Mistral].api_key, "sk-1");
     }
 
-    #[tokio::test]
-    async fn a_kind_that_is_not_a_name_is_refused() {
-        let f = fixture(None);
-        let refused = f.speech.set_stt(change("../x", None)).await;
-        assert!(matches!(refused, Err(EditError::Invalid(_))));
+    #[test]
+    fn a_put_body_names_the_kind_beside_the_fields() {
+        let change: Change<TtsKind, TtsProvider> = serde_json::from_str(
+            r#"{"kind": "kyutai", "host": "http://pocket", "port": "8000", "voice": "alba"}"#,
+        )
+        .unwrap();
+        assert_eq!(change.kind, TtsKind::Kyutai);
+        assert_eq!(change.provider.voice, "alba");
+        assert_eq!(change.provider.api_key, "");
+        assert!(
+            serde_json::from_str::<Change<SttKind, SttProvider>>(r#"{"kind": "groq"}"#).is_err()
+        );
     }
 
     #[test]
     fn a_hand_edit_is_read_on_the_next_call() {
         let f = fixture(Some(r#"{"stt": {"active": "openai"}}"#));
-        assert_eq!(f.speech.stt().unwrap().active, "openai");
+        assert_eq!(f.stt().active, SttKind::Openai);
         std::fs::write(
             f.dir.path().join(config::CONFIG_FILE_NAME),
             r#"{"stt": {"active": "kyutai"}}"#,
         )
         .unwrap();
-        assert_eq!(f.speech.stt().unwrap().active, "kyutai");
+        assert_eq!(f.stt().active, SttKind::Kyutai);
     }
 
     #[test]
     fn empty_fields_take_the_kind_defaults_and_the_view_hides_the_key() {
-        let stt: SttConfig = serde_json::from_str(
+        let stt: config::SttConfig = serde_json::from_str(
             r#"{"active": "mistral", "providers": {"mistral": {"api_key": "sk-1"}}}"#,
         )
         .unwrap();
-        let views = stt_views(&stt);
-        assert_eq!(views["mistral"].host, "https://api.mistral.ai");
-        assert_eq!(views["mistral"].model, "voxtral-mini-latest");
-        assert!(views["mistral"].has_key);
-        assert!(!views["openai"].has_key);
-        for kind in STT_KINDS {
-            assert!(views.contains_key(*kind), "{kind}");
-        }
+        let views = views(&stt);
+        assert_eq!(views[&SttKind::Mistral]["host"], "https://api.mistral.ai");
+        assert_eq!(views[&SttKind::Mistral]["model"], "voxtral-mini-latest");
+        assert_eq!(views[&SttKind::Mistral]["has_key"], true);
+        assert_eq!(views[&SttKind::Openai]["has_key"], false);
+        assert_eq!(views.len(), SttKind::ALL.len());
         let json = serde_json::to_string(&views).unwrap();
         assert!(!json.contains("sk-1"), "{json}");
+        assert!(!json.contains("api_key"), "{json}");
     }
 
     #[tokio::test]
     async fn tts_saves_follow_the_same_rules() {
         let f = fixture(None);
-        let tts = |key: Option<&str>| TtsChange {
-            kind: "kyutai".to_string(),
-            host: "http://pocket".to_string(),
-            port: "8000".to_string(),
-            model: String::new(),
-            voice: "alba".to_string(),
-            api_key: key.map(str::to_string),
+        let tts = |key: &str| Change {
+            kind: TtsKind::Kyutai,
+            provider: TtsProvider {
+                host: "http://pocket".to_string(),
+                port: "8000".to_string(),
+                voice: "alba".to_string(),
+                api_key: key.to_string(),
+                ..TtsProvider::default()
+            },
         };
-        f.speech.set_tts(tts(Some("k"))).await.unwrap();
-        f.speech.set_tts(tts(None)).await.unwrap();
-        let stored = f.speech.tts().unwrap();
-        assert_eq!(stored.active, "kyutai");
-        assert_eq!(stored.providers["kyutai"].api_key, "k");
-        assert_eq!(tts_provider(&stored, "kyutai").model, "pocket-tts");
-        assert!(!serde_json::to_string(&tts_views(&stored))
-            .unwrap()
-            .contains("\"k\""));
+        f.speech.set(tts("k")).await.unwrap();
+        f.speech.set(tts("")).await.unwrap();
+        let stored = f.speech.read::<TtsProvider>().unwrap();
+        assert_eq!(stored.active, TtsKind::Kyutai);
+        assert_eq!(stored.providers[&TtsKind::Kyutai].api_key, "k");
+        assert_eq!(provider(&stored, TtsKind::Kyutai).model, "pocket-tts");
     }
 
     fn db_with_rows() -> (tempfile::TempDir, db::Db) {
         let dir = tempfile::tempdir().unwrap();
-        let db = db::Db::open(&dir.path().join("mobux.db")).unwrap();
-        db.set_stt_provider(db::SttProviderRow {
-            kind: "openai".to_string(),
-            host: "https://api.openai.com".to_string(),
-            port: "443".to_string(),
-            model: "whisper-1".to_string(),
-            api_key: Some("sk-old".to_string()),
-        })
-        .unwrap();
-        db.set_stt_active_kind("openai").unwrap();
+        let path = dir.path().join("mobux.db");
+        let db = db::Db::open(&path).unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO stt_providers (kind, host, port, url, model, api_key)
+                 VALUES ('openai', 'https://api.openai.com', '443', '', 'whisper-1', 'sk-old');
+                 INSERT INTO stt_active_kind (id, kind) VALUES (1, 'openai');",
+            )
+            .unwrap();
         (dir, db)
     }
 
@@ -517,9 +464,16 @@ mod tests {
         assert_eq!(doc["stt"]["active"], "openai");
         assert_eq!(doc["stt"]["providers"]["openai"]["api_key"], "sk-old");
 
-        db.set_stt_active_kind("network").unwrap();
+        assert!(db.stt_saved_providers().unwrap().is_empty());
+        assert_eq!(db.stt_saved_active_kind().unwrap(), None);
+
+        std::fs::write(
+            f.dir.path().join(config::CONFIG_FILE_NAME),
+            r#"{"mcp": {"port": 8415}}"#,
+        )
+        .unwrap();
         assert!(!f.speech.adopt_stored_stt(&db).await.unwrap());
-        assert_eq!(f.speech.stt().unwrap().active, "openai");
+        assert_eq!(f.stt().active, SttKind::Local);
     }
 
     #[tokio::test]
@@ -527,7 +481,7 @@ mod tests {
         let (_db_dir, db) = db_with_rows();
         let f = fixture(Some(r#"{"stt": {"active": "mistral"}}"#));
         assert!(!f.speech.adopt_stored_stt(&db).await.unwrap());
-        assert_eq!(f.speech.stt().unwrap().active, "mistral");
+        assert_eq!(f.stt().active, SttKind::Mistral);
     }
 
     #[tokio::test]
@@ -543,17 +497,18 @@ mod tests {
 
     #[test]
     fn urls_carry_the_route_each_kind_speaks() {
-        let kyutai = stt_default("kyutai");
+        let kyutai = SttProvider::default_for(SttKind::Kyutai);
         assert_eq!(
-            stt_url("kyutai", &kyutai),
+            stt_url(SttKind::Kyutai, &kyutai),
             "ws://localhost:8080/api/asr-streaming"
         );
-        let mistral = stt_default("mistral");
+        let mistral = SttProvider::default_for(SttKind::Mistral);
         assert_eq!(
-            stt_url("mistral", &mistral),
+            stt_url(SttKind::Mistral, &mistral),
             "https://api.mistral.ai:443/v1/audio/transcriptions"
         );
         assert_eq!(base_url("lab", ""), "http://lab");
-        assert_eq!(stt_url("network", &stt_default("network")), "");
+        let network = SttProvider::default_for(SttKind::Network);
+        assert_eq!(stt_url(SttKind::Network, &network), "");
     }
 }
