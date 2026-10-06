@@ -93,7 +93,7 @@ async function settings(request, block) {
 async function openListen(page) {
   await page.context().setHTTPCredentials({ username: USER, password: PASS });
   await page.goto(`${BASE}/app#/settings/listen`);
-  await expect(page.locator("#ttsKind")).toBeVisible();
+  await expect(page.locator("#ttsKind")).toBeEnabled();
 }
 
 test("a file edit applies without a restart and the key never comes back", async ({

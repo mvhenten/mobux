@@ -71,6 +71,9 @@ const ttsVoice = signal("");
 const ttsKey = signal("");
 const ttsHasKey = signal(false);
 const ttsSaved = signal(null);
+// The picker stays disabled until the stored settings arrive; a choice made
+// before then was overwritten by the late GET.
+const ttsLoaded = signal(false);
 
 function showProvider(kind) {
   const p = providers.value[kind] || {};
@@ -83,6 +86,7 @@ function showProvider(kind) {
 }
 
 async function loadProviders() {
+  ttsLoaded.value = false;
   try {
     const cfg = await apiGet("/api/settings/tts");
     providers.value = cfg.providers || {};
@@ -94,6 +98,7 @@ async function loadProviders() {
     };
   }
   showProvider(ttsKind.value);
+  ttsLoaded.value = true;
 }
 
 async function saveProvider() {
@@ -318,6 +323,7 @@ export function ListenCard() {
           value={ttsKind.value}
           options={TTS_KINDS}
           onChange={onKindChange}
+          disabled={!ttsLoaded.value}
         />
         {fields.endpoint && (
           <FieldRow rowId="ttsHostRow" label="Host">
