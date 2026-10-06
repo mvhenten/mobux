@@ -85,6 +85,16 @@ pub struct Config {
     #[serde(default)]
     #[garde(dive)]
     pub mcp: McpConfig,
+    /// Speech-to-text: where dictation from the microphone button is
+    /// transcribed. File-only: no environment variable or flag sets it.
+    #[serde(default)]
+    #[garde(skip)]
+    pub stt: SttConfig,
+    /// Text-to-speech: the voice Listen mode reads the terminal with.
+    /// File-only: no environment variable or flag sets it.
+    #[serde(default)]
+    #[garde(skip)]
+    pub tts: TtsConfig,
 }
 
 /// Where the server listens.
@@ -354,6 +364,147 @@ pub struct McpConfig {
     pub port: u16,
 }
 
+/// A speech provider block: the kind in use and the settings per kind.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "SpeechConfig_{K}")]
+pub struct SpeechConfig<K: Ord + Default, P> {
+    /// The provider kind in use.
+    #[serde(default)]
+    pub active: K,
+    /// Settings per provider kind. A kind left out, or a field left empty,
+    /// takes that kind's defaults.
+    #[serde(default)]
+    pub providers: BTreeMap<K, P>,
+}
+
+pub type SttConfig = SpeechConfig<SttKind, SttProvider>;
+pub type TtsConfig = SpeechConfig<TtsKind, TtsProvider>;
+
+/// Where dictation from the microphone button is transcribed.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SttKind {
+    /// Whisper in the mobux process.
+    #[default]
+    Local,
+    /// A self-hosted OpenAI-compatible `/v1/audio/transcriptions`.
+    Network,
+    /// OpenAI.
+    Openai,
+    /// Mistral Voxtral, hosted.
+    Mistral,
+    /// Kyutai STT on `moshi-server`.
+    Kyutai,
+}
+
+impl SttKind {
+    pub const ALL: [SttKind; 5] = [
+        SttKind::Local,
+        SttKind::Network,
+        SttKind::Openai,
+        SttKind::Mistral,
+        SttKind::Kyutai,
+    ];
+}
+
+/// The voice Listen mode reads the terminal with.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsKind {
+    /// The Piper voice in the mobux process.
+    #[default]
+    Local,
+    /// Mistral Voxtral TTS, hosted.
+    Mistral,
+    /// A self-hosted OpenAI-compatible `/v1/audio/speech`.
+    Network,
+    /// Kyutai Pocket TTS.
+    Kyutai,
+}
+
+impl TtsKind {
+    pub const ALL: [TtsKind; 4] = [
+        TtsKind::Local,
+        TtsKind::Mistral,
+        TtsKind::Network,
+        TtsKind::Kyutai,
+    ];
+}
+
+/// The lowercase name a kind is spelled with in config.json and the API.
+pub fn kind_name<K: Serialize>(kind: &K) -> String {
+    match serde_json::to_value(kind) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => unreachable!("a speech kind serializes as a string"),
+    }
+}
+
+/// One speech-to-text provider.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SttProvider {
+    /// Scheme and host, e.g. `https://api.mistral.ai` or `ws://gpu-box`.
+    #[serde(default)]
+    pub host: String,
+    /// Port, as text; empty means the scheme's default.
+    #[serde(default)]
+    pub port: String,
+    /// Model id sent to the provider.
+    #[serde(default)]
+    pub model: String,
+    /// API key sent to the provider. Never returned by the settings API.
+    #[serde(default)]
+    pub api_key: String,
+}
+
+/// One text-to-speech provider.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TtsProvider {
+    /// Scheme and host, e.g. `https://api.mistral.ai`.
+    #[serde(default)]
+    pub host: String,
+    /// Port, as text; empty means the scheme's default.
+    #[serde(default)]
+    pub port: String,
+    /// Model id sent to the provider.
+    #[serde(default)]
+    pub model: String,
+    /// Voice id or preset name sent to the provider.
+    #[serde(default)]
+    pub voice: String,
+    /// API key sent to the provider. Never returned by the settings API.
+    #[serde(default)]
+    pub api_key: String,
+}
+
 fn default_port() -> u16 {
     DEFAULT_PORT
 }
@@ -467,6 +618,10 @@ pub struct PartialConfig {
     pub proxy: Option<PartialProxyConfig>,
     #[serde(default)]
     pub mcp: Option<PartialMcpConfig>,
+    #[serde(default)]
+    pub stt: Option<PartialSpeechConfig<SttKind, SttProvider>>,
+    #[serde(default)]
+    pub tts: Option<PartialSpeechConfig<TtsKind, TtsProvider>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +746,15 @@ pub struct PartialMcpConfig {
     pub port: Option<u16>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialSpeechConfig<K: Ord, P> {
+    #[serde(default)]
+    pub active: Option<K>,
+    #[serde(default)]
+    pub providers: Option<BTreeMap<K, P>>,
+}
+
 impl PartialConfig {
     pub fn server_port(&self) -> Option<u16> {
         self.server.as_ref().and_then(|server| server.port)
@@ -663,6 +827,14 @@ impl Config {
         }
         if let Some(mcp) = partial.mcp {
             overlay(&mut self.mcp.port, mcp.port);
+        }
+        if let Some(stt) = partial.stt {
+            overlay(&mut self.stt.active, stt.active);
+            overlay(&mut self.stt.providers, stt.providers);
+        }
+        if let Some(tts) = partial.tts {
+            overlay(&mut self.tts.active, tts.active);
+            overlay(&mut self.tts.providers, tts.providers);
         }
         self
     }
@@ -1436,6 +1608,8 @@ pub fn env_partial(env: &EnvSnapshot) -> PartialConfig {
         mcp: Some(PartialMcpConfig {
             port: env.get("MOBUX_MCP_PORT").and_then(parse_u16),
         }),
+        stt: None,
+        tts: None,
     }
 }
 
@@ -3096,5 +3270,36 @@ mod tests {
                 field.env
             );
         }
+    }
+
+    #[test]
+    fn speech_blocks_round_trip_with_keys_and_empty_fields() {
+        let raw = r#"{
+            "stt": {"active": "mistral", "providers": {
+                "mistral": {"host": "https://api.mistral.ai", "port": "443",
+                            "model": "voxtral-mini-latest", "api_key": "sk-1"},
+                "network": {"host": "http://lab"}
+            }},
+            "tts": {"active": "kyutai", "providers": {
+                "kyutai": {"host": "http://pocket", "port": "8000", "voice": "alba"}
+            }}
+        }"#;
+        let config = parse_str(raw).unwrap();
+        assert_eq!(config.stt.active, SttKind::Mistral);
+        assert_eq!(config.stt.providers[&SttKind::Mistral].api_key, "sk-1");
+        assert_eq!(config.stt.providers[&SttKind::Network].port, "");
+        assert_eq!(config.tts.providers[&TtsKind::Kyutai].voice, "alba");
+        assert_eq!(config.tts.providers[&TtsKind::Kyutai].api_key, "");
+        let again = parse_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(again, config);
+    }
+
+    #[test]
+    fn speech_blocks_are_file_only() {
+        assert!(FIELDS
+            .iter()
+            .all(|field| !field.key.starts_with("stt.") && !field.key.starts_with("tts.")));
+        let partial = env_partial(&env(&[("MOBUX_STT_ACTIVE", "openai")]));
+        assert!(partial.stt.is_none() && partial.tts.is_none());
     }
 }

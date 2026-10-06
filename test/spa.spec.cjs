@@ -2437,6 +2437,7 @@ test("settings: every ported card renders and consumes its endpoint", async ({
     "GET /api/settings/notifications",
     "GET /api/shell-integration/status",
     "GET /api/settings/stt",
+    "GET /api/settings/tts",
     "GET /api/settings/nodes",
     "GET /api/build-info",
   ]) {

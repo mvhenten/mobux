@@ -172,7 +172,7 @@ impl McpServer {
             port => Some(bind(port).await.map_err(SetError::Bind)?),
         };
         self.file
-            .edit(&[("mcp", "port", port.into())])
+            .edit_with(|_| vec![("mcp", "port", port.into())])
             .await
             .map_err(|err| match err {
                 EditError::Invalid(message) => SetError::Invalid(message),

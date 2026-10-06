@@ -204,6 +204,99 @@
       },
       "type": "object"
     },
+    "SpeechConfig_SttKind": {
+      "additionalProperties": false,
+      "description": "A speech provider block: the kind in use and the settings per kind.",
+      "properties": {
+        "active": {
+          "$ref": "#/$defs/SttKind",
+          "description": "The provider kind in use."
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SttProvider"
+          },
+          "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SpeechConfig_TtsKind": {
+      "additionalProperties": false,
+      "description": "A speech provider block: the kind in use and the settings per kind.",
+      "properties": {
+        "active": {
+          "$ref": "#/$defs/TtsKind",
+          "description": "The provider kind in use."
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TtsProvider"
+          },
+          "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SttKind": {
+      "description": "Where dictation from the microphone button is transcribed.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "Whisper in the mobux process.",
+          "type": "string"
+        },
+        {
+          "const": "network",
+          "description": "A self-hosted OpenAI-compatible `/v1/audio/transcriptions`.",
+          "type": "string"
+        },
+        {
+          "const": "openai",
+          "description": "OpenAI.",
+          "type": "string"
+        },
+        {
+          "const": "mistral",
+          "description": "Mistral Voxtral, hosted.",
+          "type": "string"
+        },
+        {
+          "const": "kyutai",
+          "description": "Kyutai STT on `moshi-server`.",
+          "type": "string"
+        }
+      ]
+    },
+    "SttProvider": {
+      "additionalProperties": false,
+      "description": "One speech-to-text provider.",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "description": "API key sent to the provider. Never returned by the settings API.",
+          "type": "string"
+        },
+        "host": {
+          "default": "",
+          "description": "Scheme and host, e.g. `https://api.mistral.ai` or `ws://gpu-box`.",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "description": "Model id sent to the provider.",
+          "type": "string"
+        },
+        "port": {
+          "default": "",
+          "description": "Port, as text; empty means the scheme's default.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "TlsConfig": {
       "additionalProperties": false,
       "description": "HTTPS: the built-in CA, a supplied key pair, or ACME.",
@@ -255,6 +348,63 @@
         "key_file": {
           "default": "",
           "description": "Path to the private key PEM matching `cert_file`. Env: `MOBUX_KEY_FILE`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TtsKind": {
+      "description": "The voice Listen mode reads the terminal with.",
+      "oneOf": [
+        {
+          "const": "local",
+          "description": "The Piper voice in the mobux process.",
+          "type": "string"
+        },
+        {
+          "const": "mistral",
+          "description": "Mistral Voxtral TTS, hosted.",
+          "type": "string"
+        },
+        {
+          "const": "network",
+          "description": "A self-hosted OpenAI-compatible `/v1/audio/speech`.",
+          "type": "string"
+        },
+        {
+          "const": "kyutai",
+          "description": "Kyutai Pocket TTS.",
+          "type": "string"
+        }
+      ]
+    },
+    "TtsProvider": {
+      "additionalProperties": false,
+      "description": "One text-to-speech provider.",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "description": "API key sent to the provider. Never returned by the settings API.",
+          "type": "string"
+        },
+        "host": {
+          "default": "",
+          "description": "Scheme and host, e.g. `https://api.mistral.ai`.",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "description": "Model id sent to the provider.",
+          "type": "string"
+        },
+        "port": {
+          "default": "",
+          "description": "Port, as text; empty means the scheme's default.",
+          "type": "string"
+        },
+        "voice": {
+          "default": "",
+          "description": "Voice id or preset name sent to the provider.",
           "type": "string"
         }
       },
@@ -349,6 +499,14 @@
         "shell": ""
       }
     },
+    "stt": {
+      "$ref": "#/$defs/SpeechConfig_SttKind",
+      "default": {
+        "active": "local",
+        "providers": {}
+      },
+      "description": "Speech-to-text: where dictation from the microphone button is\ntranscribed. File-only: no environment variable or flag sets it."
+    },
     "tls": {
       "$ref": "#/$defs/TlsConfig",
       "default": {
@@ -361,6 +519,14 @@
         "hosts": [],
         "key_file": ""
       }
+    },
+    "tts": {
+      "$ref": "#/$defs/SpeechConfig_TtsKind",
+      "default": {
+        "active": "local",
+        "providers": {}
+      },
+      "description": "Text-to-speech: the voice Listen mode reads the terminal with.\nFile-only: no environment variable or flag sets it."
     },
     "update": {
       "$ref": "#/$defs/UpdateConfig",

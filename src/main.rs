@@ -28,6 +28,7 @@ use rand::{distr::Alphanumeric, Rng};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
+use speech_settings::SpeechProvider;
 
 /// Frontend assets compiled into the binary so `cargo install mobux` yields a
 /// self-contained executable that serves the UI from memory — no `web/` dir
@@ -49,6 +50,7 @@ mod configure;
 mod db;
 mod files;
 mod host_suggestions;
+mod kyutai_stt;
 mod local_stt;
 mod local_tts;
 mod mcp;
@@ -62,16 +64,19 @@ mod screen_model;
 mod service;
 mod session_history;
 mod shell_integration;
+mod speech_settings;
 mod speech_text;
 mod ssl;
 mod stt_debug;
 mod terminal_cursor;
 mod tmux;
 mod transcribe;
+mod tts_provider;
 mod twa;
 mod update;
 mod update_cli;
 mod utf8_stream;
+mod wav;
 
 #[derive(Clone, Debug, PartialEq)]
 enum InstallPhase {
@@ -345,6 +350,8 @@ struct AppState {
     /// The live `/files/` and `/proxy/` maps and the `files.roots` and
     /// `proxy.targets` blocks of config.json that Settings → Pages edits.
     pages: Arc<pages_settings::PagesSettings>,
+    /// The `stt` and `tts` blocks of config.json.
+    speech: Arc<speech_settings::SpeechSettings>,
 }
 
 const SESSION_COOKIE_NAME: &str = "mobux_session";
@@ -445,9 +452,17 @@ async fn main() -> Result<()> {
     let pages = Arc::new(pages_settings::PagesSettings::new(
         file_roots.clone(),
         proxy_targets.clone(),
-        config_file,
+        config_file.clone(),
         pages_settings::Managed::detect(&env),
     ));
+    let speech = Arc::new(speech_settings::SpeechSettings::new(config_file));
+    match speech.adopt_stored_stt(&db).await {
+        Ok(true) => println!("stt: copied the stored providers into config.json"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("warning: stt: the stored providers were not copied into config.json: {e}")
+        }
+    }
 
     let update_state = update::UpdateState::new(settings.update.check_url.clone());
     // Kick off the background crates.io poller (polls now, then every ~6h).
@@ -479,6 +494,7 @@ async fn main() -> Result<()> {
         session_history: Arc::new(session_history::SessionHistoryStore::new(&data_dir)),
         mcp: mcp_server,
         pages,
+        speech,
     };
 
     // Stand up the internal hook-callback listener on a 127.0.0.1 port
@@ -1584,7 +1600,6 @@ async fn api_upload(
 // Accepts audio as multipart/form-data (field name `audio`) and runs it
 // through the active provider — whisper in this process, or the
 // OpenAI-compatible endpoint the user configured. Returns `{ "text": "..." }`.
-// Provider config is read from db on each request — no restart needed after change.
 async fn api_transcribe(
     State(state): State<AppState>,
     mut multipart: axum::extract::Multipart,
@@ -1618,11 +1633,9 @@ async fn api_transcribe(
     let audio = audio_bytes
         .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("missing 'audio' field")))?;
 
-    // Read config per-request — no restart needed after config change.
-    // Use the active kind's per-kind settings.
     let (provider, debug_ctx) = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || active_provider(&db)
+        let speech = state.speech.clone();
+        move || active_provider(&speech)
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -1641,6 +1654,7 @@ async fn api_transcribe(
         transcribe::Provider::Remote(cfg) => {
             transcribe::transcribe_with_provider(cfg, audio, &filename).await
         }
+        transcribe::Provider::Kyutai(cfg) => kyutai_stt::transcribe(cfg, &audio).await,
     };
     let elapsed = started.elapsed();
 
@@ -1819,7 +1833,7 @@ struct InternalTriggerQuery {
 
 #[derive(serde::Deserialize)]
 struct SttModelsQuery {
-    kind: Option<String>,
+    kind: Option<config::SttKind>,
     host: Option<String>,
     port: Option<String>,
 }
@@ -2396,6 +2410,10 @@ fn app_routes(state: AppState) -> Router {
         .route(
             "/api/settings/stt",
             get(api_get_stt_config).put(api_set_stt_config),
+        )
+        .route(
+            "/api/settings/tts",
+            get(api_get_tts_config).put(api_set_tts_config),
         )
         .route("/api/stt/status", get(api_stt_status))
         .route("/api/stt/models", get(api_stt_models))
@@ -3351,109 +3369,86 @@ async fn api_host_suggestions() -> Json<HostSuggestionsJson> {
 
 // ── STT provider settings + lifecycle endpoints ───────────────────────
 
-/// Per-kind provider info returned by GET /api/settings/stt.
-/// api_key is NEVER returned; has_key is a boolean indicator.
+/// What GET /api/settings/{stt,tts} answers. The key never leaves the
+/// server; `has_key` says whether one is stored.
 #[derive(serde::Serialize)]
-struct SttProviderJson {
-    host: String,
-    port: String,
-    model: String,
-    has_key: bool,
-}
-
-/// Shape returned by GET /api/settings/stt.
-#[derive(serde::Serialize)]
-struct SttConfigGetJson {
+struct SpeechSettingsJson<K> {
     #[serde(rename = "activeKind")]
-    active_kind: String,
-    providers: std::collections::HashMap<String, SttProviderJson>,
+    active_kind: K,
+    providers: std::collections::BTreeMap<K, serde_json::Value>,
     /// Whether this build carries the in-process engine, so the card can say
     /// so instead of offering a local provider that cannot run.
     #[serde(rename = "localEngine")]
     local_engine: bool,
 }
 
-/// Shape accepted by PUT /api/settings/stt.
-/// Saves settings for the given kind and makes it the active kind.
-/// api_key is optional; if absent or empty the existing stored key is preserved.
-#[derive(serde::Deserialize)]
-struct SttConfigPutJson {
-    kind: String,
-    host: String,
-    port: String,
-    model: String,
-    #[serde(default)]
-    api_key: Option<String>,
+async fn read_speech<P: SpeechProvider>(
+    state: &AppState,
+) -> Result<config::SpeechConfig<P::Kind, P>, AppError> {
+    let speech = state.speech.clone();
+    tokio::task::spawn_blocking(move || speech.read::<P>())
+        .await
+        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
+        .map_err(|e| AppError::internal(anyhow::anyhow!(e)))
+}
+
+async fn speech_settings_json<P: SpeechProvider>(
+    state: &AppState,
+    local_engine: bool,
+) -> Result<Json<SpeechSettingsJson<P::Kind>>, AppError> {
+    let block = read_speech::<P>(state).await?;
+    Ok(Json(SpeechSettingsJson {
+        providers: speech_settings::views(&block),
+        active_kind: block.active,
+        local_engine,
+    }))
+}
+
+fn edit_error(err: config_file::EditError) -> AppError {
+    match err {
+        config_file::EditError::Invalid(message) => AppError {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        },
+        config_file::EditError::Io(message) => AppError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        },
+    }
 }
 
 async fn api_get_stt_config(
     State(state): State<AppState>,
-) -> Result<Json<SttConfigGetJson>, AppError> {
-    let (active_kind, providers) = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || -> anyhow::Result<_> {
-            let active_kind = db.stt_active_kind()?;
-            let rows = db.stt_all_providers()?;
-            Ok((active_kind, rows))
-        }
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
-
-    let mut map = std::collections::HashMap::new();
-    for row in &providers {
-        map.insert(
-            row.kind.clone(),
-            SttProviderJson {
-                host: row.host.clone(),
-                port: row.port.clone(),
-                model: row.model.clone(),
-                has_key: row.api_key.as_deref().is_some_and(|k| !k.is_empty()),
-            },
-        );
-    }
-
-    Ok(Json(SttConfigGetJson {
-        active_kind,
-        providers: map,
-        local_engine: local_stt::ENABLED,
-    }))
+) -> Result<Json<SpeechSettingsJson<config::SttKind>>, AppError> {
+    speech_settings_json::<config::SttProvider>(&state, local_stt::ENABLED).await
 }
 
 async fn api_set_stt_config(
     State(state): State<AppState>,
-    Json(req): Json<SttConfigPutJson>,
+    Json(mut req): Json<speech_settings::Change<config::SttKind, config::SttProvider>>,
 ) -> Result<StatusCode, AppError> {
     // The local kind runs a fixed catalog, so a model it cannot run is stored
     // as the one it will actually load. Otherwise the picker keeps offering a
     // value nothing honours — which is how faster-whisper ids outlived the
     // container-backed provider.
-    let model = if req.kind == transcribe::LOCAL_KIND {
-        local_stt::resolve_model(&req.model).to_string()
-    } else {
-        req.model
-    };
-    let row = db::SttProviderRow {
-        kind: req.kind.clone(),
-        host: req.host,
-        port: req.port,
-        model,
-        // Empty string means "keep existing" — set_stt_provider handles this.
-        api_key: req.api_key,
-    };
-    tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        let kind = req.kind.clone();
-        move || -> anyhow::Result<()> {
-            db.set_stt_provider(row)?;
-            db.set_stt_active_kind(&kind)?;
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-    .map_err(AppError::internal)?;
+    if req.kind == config::SttKind::Local {
+        req.provider.model = local_stt::resolve_model(&req.provider.model).to_string();
+    }
+    state.speech.set(req).await.map_err(edit_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_get_tts_config(
+    State(state): State<AppState>,
+) -> Result<Json<SpeechSettingsJson<config::TtsKind>>, AppError> {
+    speech_settings_json::<config::TtsProvider>(&state, local_tts::ENABLED).await
+}
+
+async fn api_set_tts_config(
+    State(state): State<AppState>,
+    Json(req): Json<speech_settings::Change<config::TtsKind, config::TtsProvider>>,
+) -> Result<StatusCode, AppError> {
+    state.speech.set(req).await.map_err(edit_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3547,20 +3542,21 @@ impl SttStatus {
 /// Resolve the active provider and the context the debug clip store records
 /// alongside it.
 fn active_provider(
-    db: &db::Db,
+    speech: &speech_settings::SpeechSettings,
 ) -> anyhow::Result<(transcribe::Provider, stt_debug::ProviderContext)> {
-    let kind = db.stt_active_kind()?;
-    let row = db
-        .stt_provider(&kind)?
-        .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-    let url = row.transcription_url();
-    let provider = transcribe::select_provider(&kind, &url, &row.model, row.api_key.as_deref());
+    let stt = speech
+        .read::<config::SttProvider>()
+        .map_err(anyhow::Error::msg)?;
+    let kind = stt.active;
+    let row = speech_settings::provider(&stt, kind);
+    let url = speech_settings::stt_url(kind, &row);
+    let provider = transcribe::select_provider(kind, &url, &row.model, Some(&row.api_key));
     let model = match &provider {
         transcribe::Provider::InProcess { model } => model.clone(),
-        transcribe::Provider::Remote(cfg) => cfg.model.clone(),
+        transcribe::Provider::Remote(cfg) | transcribe::Provider::Kyutai(cfg) => cfg.model.clone(),
     };
     let debug_ctx = stt_debug::ProviderContext {
-        kind,
+        kind: config::kind_name(&kind),
         model,
         host: row.host,
         port: row.port,
@@ -3573,8 +3569,8 @@ async fn api_stt_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let (provider, ctx) = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || active_provider(&db)
+        let speech = state.speech.clone();
+        move || active_provider(&speech)
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -3616,6 +3612,13 @@ async fn api_stt_status(
                 remote_reachable: reachable,
             }
         }
+        transcribe::Provider::Kyutai(cfg) => SttStatus {
+            kind: ctx.kind,
+            url: cfg.url.clone(),
+            model: cfg.model.clone(),
+            local: None,
+            remote_reachable: kyutai_stt::probe(cfg).await,
+        },
     };
 
     Ok(Json(status.into_json()))
@@ -3625,8 +3628,8 @@ async fn api_stt_status(
 /// Answers immediately; `/api/stt/install/status` carries the progress.
 async fn api_stt_install(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let (provider, _) = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || active_provider(&db)
+        let speech = state.speech.clone();
+        move || active_provider(&speech)
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -3663,8 +3666,8 @@ async fn api_stt_install_status(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let (provider, _) = tokio::task::spawn_blocking({
-        let db = state.db.clone();
-        move || active_provider(&db)
+        let speech = state.speech.clone();
+        move || active_provider(&speech)
     })
     .await
     .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
@@ -3672,7 +3675,9 @@ async fn api_stt_install_status(
 
     let phase = match &provider {
         transcribe::Provider::InProcess { model } => local_stt::phase(&state.data_dir, model),
-        transcribe::Provider::Remote(_) => local_stt::Phase::Disabled,
+        transcribe::Provider::Remote(_) | transcribe::Provider::Kyutai(_) => {
+            local_stt::Phase::Disabled
+        }
     };
     Ok(Json(install_status_json(&phase)))
 }
@@ -3866,15 +3871,40 @@ struct SpeakRequest {
     language: String,
 }
 
-async fn api_tts_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+/// What `/api/tts/status` says about a remote voice: always ready, since
+/// there is nothing to download; a failing endpoint shows up as the browser
+/// fallback's reason when it is asked to speak.
+fn remote_voice_status(kind: config::TtsKind, provider: &config::TtsProvider) -> serde_json::Value {
+    let url = speech_settings::base_url(&provider.host, &provider.port);
+    let kind = config::kind_name(&kind);
+    json!({
+        "enabled": true,
+        "kind": kind,
+        "model": provider.model,
+        "voice": provider.voice,
+        "state": "ready",
+        "message": format!("Speaking through the {kind} voice at {url}."),
+    })
+}
+
+async fn api_tts_status(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let tts = read_speech::<config::TtsProvider>(&state).await?;
+    if tts.active != config::TtsKind::Local {
+        let provider = speech_settings::provider(&tts, tts.active);
+        return Ok(Json(remote_voice_status(tts.active, &provider)));
+    }
     let voice = local_tts::voice();
     let phase = local_tts::phase(&state.data_dir);
-    Json(json!({
+    Ok(Json(json!({
         "enabled": local_tts::ENABLED,
+        "kind": config::TtsKind::Local,
+        "model": "",
         "voice": voice,
         "state": phase.state(),
         "message": phase.message(),
-    }))
+    })))
 }
 
 /// Fetch and load the voice. Separate from speaking because the first run
@@ -3883,6 +3913,11 @@ async fn api_tts_status(State(state): State<AppState>) -> Json<serde_json::Value
 async fn api_tts_prepare(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let tts = read_speech::<config::TtsProvider>(&state).await?;
+    if tts.active != config::TtsKind::Local {
+        let provider = speech_settings::provider(&tts, tts.active);
+        return Ok(Json(remote_voice_status(tts.active, &provider)));
+    }
     let voice = local_tts::voice();
     local_tts::ensure_ready(state.data_dir.clone())
         .await
@@ -3915,6 +3950,17 @@ async fn api_tts_speak(
     );
 
     check_speakable(&speech)?;
+
+    let tts = read_speech::<config::TtsProvider>(&state).await?;
+    if tts.active != config::TtsKind::Local {
+        let provider = speech_settings::provider(&tts, tts.active);
+        return match tts_provider::speak(tts.active, &provider, &speech.text).await {
+            Ok(clip) => {
+                Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], clip).into_response())
+            }
+            Err(reason) => Ok(browser_speech(&speech, &reason)),
+        };
+    }
 
     if !local_tts::ENABLED {
         return Ok(browser_speech(
@@ -3967,15 +4013,22 @@ async fn api_stt_models(
 ) -> Result<Json<serde_json::Value>, AppError> {
     use std::time::Duration;
 
-    let fallback_for_kind = |kind: &str| -> Vec<String> {
+    let fallback_for_kind = |kind: config::SttKind| -> Vec<String> {
         match kind {
-            transcribe::LOCAL_KIND => local_stt::model_ids(),
-            "openai" => vec![
+            config::SttKind::Local => local_stt::model_ids(),
+            config::SttKind::Openai => vec![
                 "whisper-1".to_string(),
                 "gpt-4o-transcribe".to_string(),
                 "gpt-4o-mini-transcribe".to_string(),
             ],
-            _ => vec![
+            config::SttKind::Mistral => vec![
+                "voxtral-mini-latest".to_string(),
+                "voxtral-mini-2507".to_string(),
+            ],
+            config::SttKind::Kyutai => {
+                vec!["stt-1b-en_fr".to_string(), "stt-2.6b-en".to_string()]
+            }
+            config::SttKind::Network => vec![
                 "Systran/faster-whisper-base.en".to_string(),
                 "Systran/faster-whisper-small.en".to_string(),
                 "Systran/faster-whisper-medium.en".to_string(),
@@ -3983,83 +4036,38 @@ async fn api_stt_models(
         }
     };
 
-    let (base_url, api_key, kind) = if q.host.as_deref().map(|h| !h.is_empty()).unwrap_or(false) {
-        // Front-end supplied explicit host+port — use them.  The api_key comes
-        // from the per-kind stored row so the frontend doesn't need to round-trip it.
-        let raw_host = q.host.as_deref().unwrap_or("").trim_end_matches('/');
-        // Normalize: add http:// if no scheme so reqwest gets a valid URL.
-        let host = if raw_host.contains("://") {
-            raw_host.to_string()
-        } else {
-            format!("http://{}", raw_host)
-        };
-        let port = q.port.as_deref().unwrap_or("");
-        let base = if port.is_empty() {
-            host
-        } else {
-            format!("{}:{}", host, port)
-        };
-        let k = q.kind.clone().unwrap_or_default();
-        let api_key = if k == "openai" {
-            let kc = k.clone();
-            tokio::task::spawn_blocking({
-                let db = state.db.clone();
-                move || db.stt_provider(&kc)
-            })
-            .await
-            .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-            .map_err(AppError::internal)?
-            .and_then(|r| r.api_key)
-            .filter(|k| !k.is_empty())
-        } else {
-            None
-        };
-        (base, api_key, k)
-    } else {
-        // No explicit host. Answer for the kind that was asked about, falling
-        // back to the active one only when the caller named none: the settings
-        // card asks about the kind the user just picked, which it has not
-        // saved yet, and answering about the active kind handed it another
-        // provider's catalog.
-        let requested = q.kind.clone().filter(|k| !k.is_empty());
-        tokio::task::spawn_blocking({
-            let db = state.db.clone();
-            move || -> anyhow::Result<_> {
-                let kind = match requested {
-                    Some(kind) => kind,
-                    None => db.stt_active_kind()?,
-                };
-                let row = db
-                    .stt_provider(&kind)?
-                    .unwrap_or_else(|| db::SttProviderRow::default_for(&kind));
-                let base = {
-                    let raw = row.host.trim_end_matches('/');
-                    // Normalize: add http:// if no scheme so reqwest gets a valid URL.
-                    let h = if raw.contains("://") {
-                        raw.to_string()
-                    } else {
-                        format!("http://{}", raw)
-                    };
-                    if row.port.is_empty() {
-                        h
-                    } else {
-                        format!("{}:{}", h, row.port)
-                    }
-                };
-                let key = row.api_key.filter(|k| !k.is_empty());
-                Ok((base, key, kind))
-            }
-        })
-        .await
-        .map_err(|e| AppError::internal(anyhow::anyhow!("spawn_blocking: {e}")))?
-        .map_err(AppError::internal)?
+    // Answer for the kind that was asked about, falling back to the active one
+    // only when the caller named none: the settings card asks about the kind
+    // the user just picked, which it has not saved yet, and answering about
+    // the active kind handed it another provider's catalog.
+    let stt = read_speech::<config::SttProvider>(&state).await?;
+    let kind = q.kind.unwrap_or(stt.active);
+    let stored = speech_settings::provider(&stt, kind);
+    // The stored key goes only to the stored host: a host named in the query
+    // could be anywhere, and must not be handed the key.
+    let (base_url, api_key) = match q.host.as_deref().filter(|h| !h.is_empty()) {
+        Some(host) => (
+            speech_settings::base_url(host, q.port.as_deref().unwrap_or("")),
+            None,
+        ),
+        None => (
+            speech_settings::base_url(&stored.host, &stored.port),
+            Some(stored.api_key).filter(|k| !k.is_empty()),
+        ),
     };
 
     // The local kind has no endpoint to enumerate — its catalog is whatever
-    // the in-process engine can run.
-    if base_url.is_empty() || kind == transcribe::LOCAL_KIND {
+    // the in-process engine can run. Mistral's model list is every model it
+    // hosts, chat included, and moshi-server has no list at all; both answer
+    // with their own catalog.
+    if base_url.is_empty()
+        || matches!(
+            kind,
+            config::SttKind::Local | config::SttKind::Mistral | config::SttKind::Kyutai
+        )
+    {
         return Ok(Json(serde_json::json!({
-            "models": fallback_for_kind(&kind)
+            "models": fallback_for_kind(kind)
         })));
     }
 
@@ -4071,7 +4079,7 @@ async fn api_stt_models(
         Ok(c) => c,
         Err(_) => {
             return Ok(Json(
-                serde_json::json!({ "models": fallback_for_kind(&kind) }),
+                serde_json::json!({ "models": fallback_for_kind(kind) }),
             ));
         }
     };
@@ -4094,8 +4102,8 @@ async fn api_stt_models(
                     .collect()
             })
             .filter(|v: &Vec<String>| !v.is_empty())
-            .unwrap_or_else(|| fallback_for_kind(&kind)),
-        _ => fallback_for_kind(&kind),
+            .unwrap_or_else(|| fallback_for_kind(kind)),
+        _ => fallback_for_kind(kind),
     };
 
     Ok(Json(serde_json::json!({ "models": ids })))
@@ -4568,9 +4576,10 @@ mod tests {
         let pages = Arc::new(pages_settings::PagesSettings::new(
             Arc::new(files::FileRoots::default()),
             Arc::new(proxy::ProxyTargets::from_config(&settings, SESSION_COOKIE_NAME).unwrap()),
-            config_file,
+            config_file.clone(),
             pages_settings::Managed::default(),
         ));
+        let speech = Arc::new(speech_settings::SpeechSettings::new(config_file));
         let state = AppState {
             session_name_re,
             auth: None,
@@ -4587,8 +4596,43 @@ mod tests {
             session_history: Arc::new(session_history::SessionHistoryStore::new(dir.path())),
             mcp,
             pages,
+            speech,
         };
         (state, dir)
+    }
+
+    fn write_config(state: &AppState, document: serde_json::Value) {
+        std::fs::write(
+            state.config_dir.join(config::CONFIG_FILE_NAME),
+            document.to_string(),
+        )
+        .expect("writing config.json");
+    }
+
+    fn set_active_stt(state: &AppState, kind: config::SttKind) {
+        write_config(state, json!({"stt": {"active": kind}}));
+    }
+
+    fn stored_stt_model(state: &AppState, kind: config::SttKind) -> String {
+        state
+            .speech
+            .read::<config::SttProvider>()
+            .expect("config.json reads")
+            .providers[&kind]
+            .model
+            .clone()
+    }
+
+    fn local_model_change(
+        model: &str,
+    ) -> speech_settings::Change<config::SttKind, config::SttProvider> {
+        speech_settings::Change {
+            kind: config::SttKind::Local,
+            provider: config::SttProvider {
+                model: model.to_string(),
+                ..Default::default()
+            },
+        }
     }
 
     fn listener_app(state: AppState, via_access: bool) -> Router {
@@ -5246,10 +5290,7 @@ mod tests {
     #[tokio::test]
     async fn stt_install_refuses_a_remote_provider() {
         let (state, _dir) = test_state(false);
-        state
-            .db
-            .set_stt_active_kind("openai")
-            .expect("switch to a configured endpoint");
+        set_active_stt(&state, config::SttKind::Openai);
         let resp = api_stt_install(State(state)).await.unwrap().into_response();
         assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
     }
@@ -5345,7 +5386,7 @@ mod tests {
 
     fn local_status(phase: local_stt::Phase) -> SttStatus {
         SttStatus {
-            kind: transcribe::LOCAL_KIND.to_string(),
+            kind: config::kind_name(&config::SttKind::Local),
             url: String::new(),
             model: local_stt::DEFAULT_MODEL.to_string(),
             local: Some(phase),
@@ -5476,7 +5517,7 @@ mod tests {
     async fn stt_status_on_a_fresh_install_reports_the_local_engine() {
         let (state, _dir) = test_state(false);
         let resp = api_stt_status(State(state)).await.unwrap();
-        assert_eq!(resp.0["kind"], transcribe::LOCAL_KIND);
+        assert_eq!(resp.0["kind"], "local");
         assert_eq!(resp.0["model"], local_stt::DEFAULT_MODEL);
         assert_eq!(resp.0["url"], "");
         assert_eq!(resp.0["engine_available"], local_stt::ENABLED);
@@ -5544,6 +5585,66 @@ mod tests {
         assert!(safe.contains("PWNED"));
     }
 
+    // The model list may be asked about any host. The stored key belongs to
+    // the stored host only; a host named in the query never receives it.
+    #[tokio::test]
+    async fn stt_models_sends_the_stored_key_only_to_the_stored_host() {
+        use std::sync::Mutex;
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let mock = Router::new().route(
+            "/v1/models",
+            get({
+                let seen = seen.clone();
+                move |headers: HeaderMap| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    seen.lock().unwrap().push(auth);
+                    Json(json!({"data": [{"id": "whisper-1"}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let (state, _dir) = test_state(false);
+        write_config(
+            &state,
+            json!({"stt": {"active": "network", "providers": {"network": {
+                "host": "http://127.0.0.1", "port": port, "api_key": "sk-stored"
+            }}}}),
+        );
+
+        let Json(listed) = api_stt_models(
+            State(state.clone()),
+            Query(SttModelsQuery {
+                kind: Some(config::SttKind::Network),
+                host: Some("http://127.0.0.1".to_string()),
+                port: Some(port.clone()),
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        assert_eq!(listed["models"], json!(["whisper-1"]));
+        let Json(listed) = api_stt_models(
+            State(state),
+            Query(SttModelsQuery {
+                kind: Some(config::SttKind::Network),
+                host: None,
+                port: None,
+            }),
+        )
+        .await
+        .expect("handler should not error");
+        assert_eq!(listed["models"], json!(["whisper-1"]));
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![String::new(), "Bearer sk-stored".to_string()]);
+    }
+
     #[tokio::test]
     async fn stt_models_returns_fallback_when_no_config() {
         let (state, _dir) = test_state(false);
@@ -5566,15 +5667,12 @@ mod tests {
     #[tokio::test]
     async fn stt_models_answers_for_the_kind_that_was_asked_about() {
         let (state, _dir) = test_state(false);
-        state
-            .db
-            .set_stt_active_kind("network")
-            .expect("a self-hosted endpoint is active");
+        set_active_stt(&state, config::SttKind::Network);
 
         let Json(val) = api_stt_models(
             State(state.clone()),
             Query(SttModelsQuery {
-                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                kind: Some(config::SttKind::Local),
                 host: None,
                 port: None,
             }),
@@ -5590,14 +5688,11 @@ mod tests {
         assert_eq!(models, local_stt::model_ids());
 
         // And the reverse, so the fix is not "always answer local".
-        state
-            .db
-            .set_stt_active_kind(transcribe::LOCAL_KIND)
-            .expect("switch the active kind");
+        set_active_stt(&state, config::SttKind::Local);
         let Json(val) = api_stt_models(
             State(state),
             Query(SttModelsQuery {
-                kind: Some("network".to_string()),
+                kind: Some(config::SttKind::Network),
                 host: None,
                 port: None,
             }),
@@ -5618,24 +5713,13 @@ mod tests {
         let (state, _dir) = test_state(false);
         api_set_stt_config(
             State(state.clone()),
-            Json(SttConfigPutJson {
-                kind: transcribe::LOCAL_KIND.to_string(),
-                host: String::new(),
-                port: String::new(),
-                model: "Systran/faster-whisper-small".to_string(),
-                api_key: None,
-            }),
+            Json(local_model_change("Systran/faster-whisper-small")),
         )
         .await
         .expect("saving must not error");
 
         assert_eq!(
-            state
-                .db
-                .stt_provider(transcribe::LOCAL_KIND)
-                .expect("read local")
-                .expect("local row")
-                .model,
+            stored_stt_model(&state, config::SttKind::Local),
             local_stt::DEFAULT_MODEL
         );
     }
@@ -5644,28 +5728,11 @@ mod tests {
     #[tokio::test]
     async fn saving_a_local_model_from_the_catalog_keeps_it() {
         let (state, _dir) = test_state(false);
-        api_set_stt_config(
-            State(state.clone()),
-            Json(SttConfigPutJson {
-                kind: transcribe::LOCAL_KIND.to_string(),
-                host: String::new(),
-                port: String::new(),
-                model: "small.en".to_string(),
-                api_key: None,
-            }),
-        )
-        .await
-        .expect("saving must not error");
+        api_set_stt_config(State(state.clone()), Json(local_model_change("small.en")))
+            .await
+            .expect("saving must not error");
 
-        assert_eq!(
-            state
-                .db
-                .stt_provider(transcribe::LOCAL_KIND)
-                .expect("read local")
-                .expect("local row")
-                .model,
-            "small.en"
-        );
+        assert_eq!(stored_stt_model(&state, config::SttKind::Local), "small.en");
     }
 
     // The in-process engine runs the checkpoints in model.lock.json and
@@ -5675,21 +5742,19 @@ mod tests {
     #[tokio::test]
     async fn the_local_model_list_never_offers_a_checkpoint_the_engine_cannot_run() {
         let (state, _dir) = test_state(false);
-        state
-            .db
-            .set_stt_provider(db::SttProviderRow {
-                kind: transcribe::LOCAL_KIND.to_string(),
-                host: "http://127.0.0.1".to_string(),
-                port: "5200".to_string(),
-                model: "Systran/faster-whisper-small".to_string(),
-                api_key: None,
-            })
-            .expect("a row left over from the container-backed provider");
+        write_config(
+            &state,
+            json!({"stt": {"providers": {"local": {
+                "host": "http://127.0.0.1",
+                "port": "5200",
+                "model": "Systran/faster-whisper-small"
+            }}}}),
+        );
 
         let Json(val) = api_stt_models(
             State(state),
             Query(SttModelsQuery {
-                kind: Some(transcribe::LOCAL_KIND.to_string()),
+                kind: Some(config::SttKind::Local),
                 host: Some("http://127.0.0.1".to_string()),
                 port: Some("5200".to_string()),
             }),
@@ -5715,7 +5780,7 @@ mod tests {
     async fn stt_models_returns_openai_fallback_for_openai_kind() {
         let (state, _dir) = test_state(false);
         let q = SttModelsQuery {
-            kind: Some("openai".to_string()),
+            kind: Some(config::SttKind::Openai),
             host: Some("https://api.openai.com".to_string()),
             port: Some("443".to_string()),
         };

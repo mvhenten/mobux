@@ -26,8 +26,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "local-stt")]
 mod engine;
-#[cfg(feature = "local-stt")]
-mod wav;
 
 /// Whether this binary was built with the in-process engine.
 pub const ENABLED: bool = cfg!(feature = "local-stt");

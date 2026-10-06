@@ -13,7 +13,12 @@ export const FALLBACK_MODELS = {
     "Systran/faster-whisper-small.en",
     "Systran/faster-whisper-medium.en",
   ],
+  mistral: ["voxtral-mini-latest", "voxtral-mini-2507"],
+  // moshi-server picks the checkpoint from its own config; this is a label.
+  kyutai: ["stt-1b-en_fr", "stt-2.6b-en"],
 };
+
+export const SCHEME = /^(https?|wss?):\/\//i;
 
 // Defaults a kind falls back to when it has no stored provider row.
 export function kindDefaults(kind) {
@@ -26,11 +31,12 @@ export function kindDefaults(kind) {
 }
 
 // Normalise a host string to always carry a scheme (default http://). Accepts a
-// bare hostname like "lab" → "http://lab".
+// bare hostname like "lab" → "http://lab". ws:// and wss:// are kept for the
+// Kyutai websocket.
 export function normalizeHost(h) {
   h = (h || "").trim().replace(/\/$/, "");
   if (!h) return h;
-  if (!/^https?:\/\//i.test(h)) return "http://" + h;
+  if (!SCHEME.test(h)) return "http://" + h;
   return h;
 }
 
@@ -40,7 +46,7 @@ export function normalizeHost(h) {
 export function parseUrlIntoFields(raw) {
   if (!raw) return null;
   let normalised = raw.trim();
-  if (!/^https?:\/\//i.test(normalised)) normalised = "http://" + normalised;
+  if (!SCHEME.test(normalised)) normalised = "http://" + normalised;
   let u;
   try {
     u = new URL(normalised);
@@ -48,7 +54,8 @@ export function parseUrlIntoFields(raw) {
     return null;
   }
   const host = u.protocol + "//" + u.hostname;
-  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  const secure = u.protocol === "https:" || u.protocol === "wss:";
+  const port = u.port || (secure ? "443" : "80");
   return { host, port };
 }
 

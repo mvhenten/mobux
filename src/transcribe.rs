@@ -1,26 +1,25 @@
 //! STT provider selection.
 //!
-//! Two providers, one seam. The "local" kind runs whisper inside this process
-//! (`crate::local_stt`); every other kind forwards the clip to an
-//! OpenAI-compatible `/v1/audio/transcriptions` endpoint the user configured.
-//! The active provider is read from db config on each request, so a config
-//! change needs no restart.
+//! Three providers, one seam. The "local" kind runs whisper inside this
+//! process (`crate::local_stt`); the "kyutai" kind streams the clip to a
+//! moshi-server websocket (`crate::kyutai_stt`); every other kind, Mistral
+//! Voxtral included, forwards the clip to an OpenAI-compatible
+//! `/v1/audio/transcriptions` endpoint the user configured.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::multipart;
 
-/// Endpoint configuration for a remote provider (mirrors db::SttProviderRow).
+use crate::config::SttKind;
+
+/// Endpoint configuration for a remote provider.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderConfig {
     pub url: String,
     pub model: String,
     pub api_key: Option<String>,
 }
-
-/// The provider kind that runs in-process instead of over HTTP.
-pub const LOCAL_KIND: &str = "local";
 
 /// Where a transcription runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,24 +28,27 @@ pub enum Provider {
     InProcess { model: String },
     /// An OpenAI-compatible endpoint the user configured.
     Remote(ProviderConfig),
+    /// A moshi-server websocket serving Kyutai STT.
+    Kyutai(ProviderConfig),
 }
 
-/// Pick the provider for a configured kind.
-///
-/// Only the local kind runs in-process; every other kind — including one this
-/// build has never heard of — is a user-configured endpoint, so an unknown
-/// kind keeps forwarding rather than silently switching to local inference.
-pub fn select_provider(kind: &str, url: &str, model: &str, api_key: Option<&str>) -> Provider {
-    if kind == LOCAL_KIND {
+/// Pick the provider for a configured kind. Only the local kind runs
+/// in-process; every other kind is a user-configured endpoint.
+pub fn select_provider(kind: SttKind, url: &str, model: &str, api_key: Option<&str>) -> Provider {
+    if kind == SttKind::Local {
         return Provider::InProcess {
             model: crate::local_stt::resolve_model(model).to_string(),
         };
     }
-    Provider::Remote(ProviderConfig {
+    let config = ProviderConfig {
         url: url.to_string(),
         model: model.to_string(),
         api_key: api_key.filter(|k| !k.is_empty()).map(str::to_string),
-    })
+    };
+    if kind == SttKind::Kyutai {
+        return Provider::Kyutai(config);
+    }
+    Provider::Remote(config)
 }
 
 #[derive(Debug)]
@@ -73,7 +75,7 @@ impl std::fmt::Display for TranscribeError {
 // the client's own /transcribe timeout (see TRANSCRIBE_TIMEOUT_MS in
 // input-actions.js) so a hung backend surfaces as a clean error response
 // instead of the client having to abort the connection itself.
-const FORWARD_TIMEOUT: Duration = Duration::from_secs(20);
+pub const FORWARD_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Forward `audio_bytes` to the configured provider and return the transcript.
 ///
@@ -146,7 +148,7 @@ pub async fn transcribe_with_provider(
 
 // Probe timeout — short so a hung backend fails the pre-record check fast
 // instead of leaving the "reachable" poll itself looking dead.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// 10 ms of 16 kHz mono silence, WAV-encoded — just enough audio for a real
 /// provider to round-trip through its actual transcription pipeline.
@@ -222,7 +224,7 @@ mod tests {
     #[test]
     fn the_local_kind_runs_in_process() {
         assert_eq!(
-            select_provider("local", "http://127.0.0.1:5200", "tiny.en", None),
+            select_provider(SttKind::Local, "http://127.0.0.1:5200", "tiny.en", None),
             Provider::InProcess {
                 model: "tiny.en".to_string()
             }
@@ -234,7 +236,7 @@ mod tests {
     #[test]
     fn a_stale_local_model_resolves_to_one_the_engine_can_run() {
         let Provider::InProcess { model } = select_provider(
-            "local",
+            SttKind::Local,
             "http://127.0.0.1:5200/v1/audio/transcriptions",
             "Systran/faster-whisper-small",
             None,
@@ -247,7 +249,7 @@ mod tests {
     #[test]
     fn a_configured_endpoint_is_forwarded_to_unchanged() {
         let provider = select_provider(
-            "openai",
+            SttKind::Openai,
             "https://api.openai.com:443/v1/audio/transcriptions",
             "whisper-1",
             Some("sk-test"),
@@ -265,7 +267,7 @@ mod tests {
     #[test]
     fn a_self_hosted_endpoint_keeps_its_own_model_id() {
         let provider = select_provider(
-            "network",
+            SttKind::Network,
             "http://lab:8081/v1/audio/transcriptions",
             "Systran/faster-whisper-medium.en",
             Some(""),
@@ -280,19 +282,80 @@ mod tests {
         );
     }
 
-    // A kind this build does not know is still a configured endpoint, never a
-    // silent switch to in-process inference.
     #[test]
-    fn an_unknown_kind_stays_a_remote_endpoint() {
+    fn the_kyutai_kind_streams_to_moshi_server() {
         assert!(matches!(
             select_provider(
-                "groq",
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                "whisper-large-v3",
+                SttKind::Kyutai,
+                "ws://gpu:8080/api/asr-streaming",
+                "stt-1b-en_fr",
                 None
             ),
-            Provider::Remote(_)
+            Provider::Kyutai(_)
         ));
+    }
+
+    // Mistral's hosted transcription speaks the OpenAI shape: the forwarder
+    // must hit the route, carry the key as a Bearer token and name the model.
+    #[tokio::test]
+    async fn mistral_gets_the_openai_shaped_request_with_a_bearer_key() {
+        use axum::{extract::Multipart, http::HeaderMap, routing::post, Json as AxumJson, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<(String, String, usize)>>> = Arc::new(Mutex::new(None));
+        let app = Router::new().route(
+            "/v1/audio/transcriptions",
+            post({
+                let seen = seen.clone();
+                move |headers: HeaderMap, mut form: Multipart| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut model = String::new();
+                    let mut file_len = 0;
+                    while let Some(field) = form.next_field().await.unwrap() {
+                        match field.name() {
+                            Some("model") => model = field.text().await.unwrap(),
+                            Some("file") => file_len = field.bytes().await.unwrap().len(),
+                            _ => {}
+                        }
+                    }
+                    *seen.lock().unwrap() = Some((auth, model, file_len));
+                    AxumJson(serde_json::json!({ "text": " bonjour " }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        use crate::speech_settings::SpeechProvider;
+        let defaults = crate::config::SttProvider::default_for(SttKind::Mistral);
+        let provider = crate::config::SttProvider {
+            host: format!("http://{addr}"),
+            port: String::new(),
+            api_key: "mistral-key".to_string(),
+            ..defaults
+        };
+        let url = crate::speech_settings::stt_url(SttKind::Mistral, &provider);
+        let Provider::Remote(cfg) = select_provider(
+            SttKind::Mistral,
+            &url,
+            &provider.model,
+            Some(&provider.api_key),
+        ) else {
+            panic!("mistral is a remote endpoint");
+        };
+        let text = transcribe_with_provider(&cfg, vec![1u8; 64], "speech.wav")
+            .await
+            .unwrap();
+        assert_eq!(text, "bonjour");
+        let (auth, model, file_len) = seen.lock().unwrap().clone().expect("the mock was hit");
+        assert_eq!(auth, "Bearer mistral-key");
+        assert_eq!(model, "voxtral-mini-latest");
+        assert_eq!(file_len, 64);
     }
 
     #[tokio::test]

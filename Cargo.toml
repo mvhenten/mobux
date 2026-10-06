@@ -75,6 +75,10 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 instant-acme = "0.8"
 time = "0.3"
 web-push-native = "0.4"
+# Kyutai STT (src/kyutai_stt.rs): moshi-server speaks msgpack frames over a
+# websocket, with no HTTP batch endpoint.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rmp-serde = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 # Cloudflare Access JWTs (src/access.rs), on the aws-lc-rs backend rustls
 # already links.

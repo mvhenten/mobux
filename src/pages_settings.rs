@@ -179,10 +179,13 @@ impl PagesSettings {
             return Ok(self.status());
         }
 
-        self.file.edit(&keys).await.map_err(|err| match err {
-            EditError::Invalid(message) => SetError::Invalid(message),
-            EditError::Io(message) => SetError::Io(message),
-        })?;
+        self.file
+            .edit_with(|_| keys)
+            .await
+            .map_err(|err| match err {
+                EditError::Invalid(message) => SetError::Invalid(message),
+                EditError::Io(message) => SetError::Io(message),
+            })?;
 
         if let Some(resolved) = resolved {
             self.files.replace(resolved);
