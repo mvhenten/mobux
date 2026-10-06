@@ -240,6 +240,60 @@ Access listener, which answer 404 at `/mcp`. Anything that can open a loopback
 connection on this host can drive the sessions, so turn it on only where every
 local user is trusted.
 
+### Speech providers
+
+The `stt` block picks where dictation from the 🎤 button is transcribed; the
+`tts` block picks the voice Listen mode reads the terminal with. Both are
+file-only: no environment variable or flag sets them. Settings → Speech to text
+and Settings → Listen write them, and mobux reads the file on every request, so
+a hand edit applies without a restart.
+
+`active` names the kind in use. `providers` maps a kind to its settings; a kind
+left out, or a field left empty, takes that kind's defaults. `port` is text,
+and empty means the scheme's default. The settings API never returns
+`api_key`, and saving a kind with an empty key keeps the stored one.
+
+| `stt` kind | Defaults (`host`, `port`, `model`) | What it is |
+|---|---|---|
+| `local` | none, none, `base.en` | Whisper in the mobux process |
+| `network` | none, none, `Systran/faster-whisper-base.en` | A self-hosted OpenAI-compatible `/v1/audio/transcriptions`, see [`deploy/stt/`](deploy/stt/README.md) |
+| `openai` | `https://api.openai.com`, `443`, `whisper-1` | OpenAI |
+| `mistral` | `https://api.mistral.ai`, `443`, `voxtral-mini-latest` | Mistral Voxtral, hosted |
+| `kyutai` | `ws://localhost`, `8080`, `stt-1b-en_fr` | Kyutai STT on `moshi-server`, see [`deploy/stt/`](deploy/stt/README.md) |
+
+| `tts` kind | Defaults (`host`, `port`, `model`, `voice`) | What it is |
+|---|---|---|
+| `local` | none | The Piper voice in the mobux process |
+| `mistral` | `https://api.mistral.ai`, `443`, `voxtral-mini-tts-2603`, `en_paul_neutral` | Mistral Voxtral TTS, hosted |
+| `network` | none, none, `mistralai/Voxtral-4B-TTS-2603`, `casual_female` | A self-hosted OpenAI-compatible `/v1/audio/speech`, see [`deploy/tts/`](deploy/tts/README.md) |
+| `kyutai` | `http://localhost`, `8000`, `pocket-tts`, `alba` | Kyutai Pocket TTS, see [`deploy/tts/`](deploy/tts/README.md) |
+
+A remote voice that fails is not an error to the listener: `/api/tts/speak`
+answers with the words for the browser voice and a `reason` naming the
+provider and what it answered.
+
+```json
+{
+  "stt": {
+    "active": "mistral",
+    "providers": { "mistral": { "api_key": "…" } }
+  },
+  "tts": {
+    "active": "kyutai",
+    "providers": { "kyutai": { "host": "http://gpu-box.tailnet.ts.net", "voice": "alba" } }
+  }
+}
+```
+
+To ship an install with its providers already set, write that file into a
+directory and point `MOBUX_CONFIG_DIR` at it, or pass `--config PATH`. Keep it
+at mode 600: it holds the keys. mobux writes Settings changes back to the same
+file.
+
+An install from before this block kept its speech-to-text settings in the
+database. On the first start with a `config.json` that has no `stt` block,
+mobux copies them into the file once; the database rows are not read again.
+
 ### The schema
 
 `mobux configure --schema` prints the JSON schema for `config.json`. The same

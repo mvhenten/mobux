@@ -44,6 +44,35 @@ impl ConfigFile {
         config::parse(&self.path, &next).map_err(|e| EditError::Invalid(e.to_string()))?;
         write_atomic(&self.path, &next).map_err(|e| EditError::Io(e.to_string()))
     }
+
+    /// Like [`ConfigFile::edit`], with the keys worked out from the file as it
+    /// is under the lock, so a change that rewrites a whole map never drops an
+    /// entry another save wrote a moment earlier.
+    pub async fn edit_with<F>(&self, change: F) -> Result<(), EditError>
+    where
+        F: FnOnce(&config::Config) -> Vec<(&'static str, &'static str, serde_json::Value)>,
+    {
+        let _held = self.lock.lock().await;
+        let previous = read_optional(&self.path).map_err(EditError::Io)?;
+        let current = config::parse(&self.path, previous.as_deref().unwrap_or("{}"))
+            .map_err(|e| EditError::Invalid(e.to_string()))?;
+        let keys = change(&current);
+        let next = with_keys(previous.as_deref(), &keys).map_err(EditError::Invalid)?;
+        config::parse(&self.path, &next).map_err(|e| EditError::Invalid(e.to_string()))?;
+        write_atomic(&self.path, &next).map_err(|e| EditError::Io(e.to_string()))
+    }
+
+    /// The file as it is now, merged onto the defaults and checked. Read on
+    /// every call, so a hand edit applies without a restart.
+    pub fn read(&self) -> Result<config::Config, config::LoadError> {
+        config::load_from(&self.path)
+    }
+
+    /// The file's own statement, without the defaults. `None` when there is no
+    /// file.
+    pub fn read_partial(&self) -> Result<Option<config::PartialConfig>, config::LoadError> {
+        config::load_partial_from(&self.path)
+    }
 }
 
 /// Set each `block.key` and leave every other key where it was; serde_json

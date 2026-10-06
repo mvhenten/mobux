@@ -6,6 +6,7 @@ import {
   kindDefaults,
   parseUrlIntoFields,
   fetchModels,
+  SCHEME,
 } from "../../lib/stt.js";
 import {
   ActionRow,
@@ -56,8 +57,15 @@ function stateMessage(s, fallback) {
 // Which fields a kind exposes — this is the component-model replacement for the
 // old visibility toggling. We render only what applies (no [hidden]).
 const isLocal = computed(() => kind.value === "local");
-const isNetwork = computed(() => kind.value === "network");
-const isOpenai = computed(() => kind.value === "openai");
+// A self-hosted kind is reached at a host and port the user names; a hosted
+// one has a fixed endpoint and needs only its key. Kyutai is both: a
+// moshi-server on the tailnet, with an optional key of its own.
+const hasEndpoint = computed(
+  () => kind.value === "network" || kind.value === "kyutai",
+);
+const hasApiKey = computed(() =>
+  ["openai", "mistral", "kyutai"].includes(kind.value),
+);
 const isCustomModel = computed(() => model.value === CUSTOM);
 
 function flash(sig, msg, ok) {
@@ -149,11 +157,15 @@ const KINDS = [
   { value: "local", label: "On this machine" },
   { value: "network", label: "Network (self-hosted)" },
   { value: "openai", label: "OpenAI" },
+  { value: "mistral", label: "Mistral Voxtral" },
+  { value: "kyutai", label: "Kyutai (moshi-server)" },
 ];
 const KIND_SHORT = {
   local: "This machine",
   network: "Network",
   openai: "OpenAI",
+  mistral: "Mistral",
+  kyutai: "Kyutai",
 };
 const summaryKind = signal(null);
 
@@ -229,7 +241,7 @@ export function SttCard() {
     const parsed = parseUrlIntoFields(raw);
     if (parsed) {
       // Re-split only when there was a port or a real path component.
-      let normalised = /^https?:\/\//i.test(raw) ? raw : "http://" + raw;
+      let normalised = SCHEME.test(raw) ? raw : "http://" + raw;
       try {
         const u = new URL(normalised);
         if (u.port || (u.pathname && u.pathname !== "/")) {
@@ -351,7 +363,7 @@ export function SttCard() {
           onChange={onKindChange}
         />
 
-        {isNetwork.value && (
+        {hasEndpoint.value && (
           <FieldRow rowId="sttHostRow" label="Host">
             <input
               type="text"
@@ -364,7 +376,7 @@ export function SttCard() {
             />
           </FieldRow>
         )}
-        {isNetwork.value && (
+        {hasEndpoint.value && (
           <FieldRow rowId="sttPortRow" label="Port">
             <input
               type="number"
@@ -403,13 +415,19 @@ export function SttCard() {
           </FieldRow>
         )}
 
-        {isOpenai.value && (
+        {hasApiKey.value && (
           <FieldRow rowId="sttApiKeyRow" label="API key">
             <input
               type="password"
               id="sttApiKey"
               class="settings-input"
-              placeholder={hasKey.value ? "•••• stored" : "sk-…"}
+              placeholder={
+                hasKey.value
+                  ? "•••• stored"
+                  : kind.value === "kyutai"
+                    ? "public_token"
+                    : "sk-…"
+              }
               autocomplete="off"
               value={apiKey.value}
               onInput={(e) => (apiKey.value = e.target.value)}

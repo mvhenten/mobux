@@ -1,10 +1,12 @@
-//! Minimal RIFF/WAVE decode to the mono f32 at 16 kHz that whisper wants.
+//! Minimal RIFF/WAVE decode to mono f32: 16 kHz for whisper, 24 kHz for
+//! Kyutai STT.
 //!
 //! The browser already encodes exactly that (see `encodeWav` in
 //! `web/static/input-actions.js`), so the common path is a straight
 //! conversion. Stereo, other sample rates and 8/24/32-bit inputs are still
 //! handled so a clip posted to `/transcribe` by hand is not a puzzle.
 
+#[cfg_attr(not(feature = "local-stt"), allow(dead_code))]
 pub const TARGET_RATE: u32 = 16_000;
 
 struct Format {
@@ -14,11 +16,16 @@ struct Format {
     bits_per_sample: u16,
 }
 
+#[cfg_attr(not(feature = "local-stt"), allow(dead_code))]
 pub fn decode_to_mono_16k(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    decode_to_mono(bytes, TARGET_RATE)
+}
+
+pub fn decode_to_mono(bytes: &[u8], rate: u32) -> Result<Vec<f32>, String> {
     let (format, data) = split_chunks(bytes)?;
     let interleaved = samples(&format, data)?;
     let mono = downmix(interleaved, format.channels);
-    Ok(resample(mono, format.sample_rate, TARGET_RATE))
+    Ok(resample(mono, format.sample_rate, rate))
 }
 
 fn split_chunks(bytes: &[u8]) -> Result<(Format, &[u8]), String> {
@@ -100,7 +107,7 @@ fn downmix(interleaved: Vec<f32>, channels: u16) -> Vec<f32> {
         .collect()
 }
 
-fn resample(samples: Vec<f32>, from: u32, to: u32) -> Vec<f32> {
+pub fn resample(samples: Vec<f32>, from: u32, to: u32) -> Vec<f32> {
     if from == to || samples.len() < 2 {
         return samples;
     }

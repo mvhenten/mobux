@@ -362,14 +362,17 @@ test-stt-ux:
 		MOBUX_STT_USER=smoke MOBUX_STT_PASS=00000 \
 		npx playwright test test/stt-ux.spec.cjs
 
-# STT per-kind persistence: run stt-per-kind.spec.cjs against the smoke instance.
+# Speech provider settings: stt-per-kind.spec.cjs against the smoke instance,
+# plus speech-config.spec.cjs and tts-settings.spec.cjs, which start their own
+# mobux on a preseeded config.json (test/speech-instance.cjs) and need only the
+# binary smoke-start builds.
 .PHONY: test-stt-per-kind
 test-stt-per-kind:
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_STT_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \
 		MOBUX_STT_USER=smoke MOBUX_STT_PASS=00000 \
-		npx playwright test test/stt-per-kind.spec.cjs
+		npx playwright test test/stt-per-kind.spec.cjs test/speech-config.spec.cjs test/tts-settings.spec.cjs
 
 # SPA coverage: the Preact/Wouter UI served at /app on the smoke instance
 # (built into web/static/spa by `make build`, which smoke-start depends on).

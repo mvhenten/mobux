@@ -168,13 +168,15 @@ test("GET response has activeKind and per-kind providers map", async ({
 
   expect(body).toHaveProperty("activeKind");
   expect(typeof body.activeKind).toBe("string");
-  expect(["local", "network", "openai"]).toContain(body.activeKind);
+  expect(["local", "network", "openai", "mistral", "kyutai"]).toContain(
+    body.activeKind,
+  );
 
   expect(body).toHaveProperty("providers");
   const providers = body.providers;
 
-  // All three kinds must be represented.
-  for (const kind of ["local", "network", "openai"]) {
+  // Every kind must be represented.
+  for (const kind of ["local", "network", "openai", "mistral", "kyutai"]) {
     expect(providers).toHaveProperty(kind);
     const p = providers[kind];
     expect(p).toHaveProperty("has_key");
@@ -214,4 +216,35 @@ test("switching to local kind shows an in-process provider", async ({
   expect(localProv.port || "").toBe("");
   expect(["tiny.en", "base.en", "small.en"]).toContain(localProv.model);
   expect(typeof body.localEngine).toBe("boolean");
+});
+
+// Mistral Voxtral takes only a key: the hosted endpoint is fixed, and the key
+// is stored without ever coming back.
+test("a mistral key is saved and never returned", async ({ page }) => {
+  await openSettings(page);
+  await selectKind(page, "mistral");
+  await fillFields(page, { apiKey: "mistral-secret-key" });
+  await triggerSave(page);
+
+  const authHeader =
+    USER && PASS
+      ? {
+          Authorization:
+            "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64"),
+        }
+      : {};
+  const read = () =>
+    page.request.get(`${BASE}/api/settings/stt`, {
+      headers: authHeader,
+      ignoreHTTPSErrors: true,
+    });
+  await expect
+    .poll(async () => (await (await read()).json()).providers.mistral.has_key)
+    .toBe(true);
+  const text = await (await read()).text();
+  expect(text).not.toContain("mistral-secret-key");
+  const body = JSON.parse(text);
+  expect(body.activeKind).toBe("mistral");
+  expect(body.providers.mistral.host).toBe("https://api.mistral.ai");
+  expect(body.providers.mistral.model).toBe("voxtral-mini-latest");
 });

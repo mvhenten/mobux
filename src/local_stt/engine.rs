@@ -18,9 +18,9 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tokenizers::Tokenizer;
 
-use super::wav;
 use super::Phase;
 use crate::release_asset::{self, Manifest, Progress};
+use crate::wav;
 
 /// Mel filterbank for the 80-bin whisper checkpoints, as shipped by candle's
 /// own example. The engine refuses a checkpoint that wants a different bank

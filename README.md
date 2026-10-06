@@ -22,7 +22,7 @@ mobux closes that gap. It puts your tmux sessions on the phone in a form built f
 - **Built for reading on a phone.** A dedicated reader view renders scrollback with smooth, synthetic scrolling tuned for mobile WebViews, so long output is actually browsable. Pinch to zoom, swipe to switch windows.
 - **Gestures, not chords.** Swipe a session to rename or kill it. Swipe the terminal to move between tmux windows. Long-press for tmux commands. The things you'd reach for a key combo for become a gesture.
 - **Notified when it matters.** A long job finishing rings the terminal bell; mobux turns that into a Web Push notification on your phone — even with the screen locked — deep-linked back to the exact session. It hooks tmux's own bell event, so a notification means a real bell fired, not a guess scraped off the screen.
-- **Voice capture.** Record a voice note from the input bar and mobux transcribes it. Two providers: whisper running inside the mobux process (pure Rust, no container runtime), or any endpoint that speaks the OpenAI audio API — self-hosted whisper.cpp on your tailnet, or OpenAI's own. A ready-to-run, tailnet-only whisper.cpp recipe ships in [`deploy/stt/`](deploy/stt/README.md).
+- **Voice capture.** Record a voice note from the input bar and mobux transcribes it. Providers: whisper running inside the mobux process (pure Rust, no container runtime), any endpoint that speaks the OpenAI audio API — self-hosted whisper.cpp or Voxtral on your tailnet, or OpenAI's own — Mistral Voxtral, or Kyutai STT on `moshi-server`. Tailnet-only recipes ship in [`deploy/stt/`](deploy/stt/README.md). Providers and their keys live in `config.json`, so an install can ship with them set ([speech providers](DEPLOY.md#speech-providers)).
 
   Three English checkpoints, picked in settings: **base.en** (the default) rides in the prebuilt release asset, so `install.sh` lands a host that dictates offline; **tiny.en** and **small.en** are their own release assets, downloaded on demand and checked against hashes compiled into the binary. A source build has to opt in, and pulls the same published assets on first use:
 
@@ -34,7 +34,7 @@ mobux closes that gap. It puts your tmux sessions on the phone in a form built f
   The default build has no engine and only talks to a configured endpoint. For an airgapped host, point `MOBUX_STT_MODEL_DIR` at a directory holding `config.json`, `tokenizer.json` and `model.safetensors`. Nothing contacts a model host at runtime.
 
   On arm64 the engine needs ARMv8.2 half-precision (FEAT_FP16) — a Raspberry Pi 4 and other ARMv8.0 cores do not have it, and mobux says so and refuses the local provider rather than crashing. Weights run at full precision, so a checkpoint costs about twice its download in memory: ~290 MB for base.en, ~150 MB for tiny.en, ~970 MB for small.en.
-- **Reads output aloud.** An optional listen mode speaks terminal output in a neural voice that runs on the host itself — no cloud, no account — falling back to the device's own voice where the host has none. What it reads is rewritten first: escape codes and box drawing are dropped, a long path reads as "main dot rs in src", a commit hash as "a hash", and a code block is announced ("bash, twelve lines") rather than recited, unless you ask for the whole thing.
+- **Reads output aloud.** An optional listen mode speaks terminal output in a neural voice that runs on the host itself — no cloud, no account — or through Mistral Voxtral, a self-hosted Voxtral, or Kyutai Pocket TTS on your tailnet ([`deploy/tts/`](deploy/tts/README.md)) — falling back to the device's own voice when none answers. What it reads is rewritten first: escape codes and box drawing are dropped, a long path reads as "main dot rs in src", a commit hash as "a hash", and a code block is announced ("bash, twelve lines") rather than recited, unless you ask for the whole thing.
 - **Themed for night use.** Muted, low-contrast color themes (Gruvbox Soft, Tomorrow Night Soft, Nord, Solarized, and more) chosen for a phone screen in a dark room, not a desktop in daylight.
 - **Shell integration, one tap.** Install OSC 133 prompt markers for bash, zsh, or fish from the settings page, so mobux can tell prompts from output and mark command boundaries cleanly under tmux.
 - **A real app, not just a tab.** Installable as a PWA, or build a signed Android app (Trusted Web Activity, package id `io.github.mvhenten.mobux`) that mobux serves from `/install` — full-screen, a launcher icon, and OS-level push.
@@ -139,7 +139,10 @@ An agent on the host reads **[docs/for-agents.md](docs/for-agents.md)** for the 
 | `/api/sessions/:name/command` | POST | Run a tmux command |
 | `/api/sessions/:name/history` | GET | Capture scrollback |
 | `/api/upload` | POST | Upload a file (multipart) |
-| `/transcribe` | POST | Speech-to-text (OpenAI-compatible audio endpoint) |
+| `/transcribe` | POST | Speech-to-text through the active provider |
+| `/api/settings/stt` | GET / PUT | Speech-to-text provider per kind; the key is never returned |
+| `/api/settings/tts` | GET / PUT | Listen voice provider per kind; the key is never returned |
+| `/api/tts/speak` | POST | Normalize a block and speak it through the active voice, or return the words for the browser voice |
 | `/api/push/vapid-public-key` | GET | VAPID public key for push subscription |
 | `/api/push/subscribe` | POST / DELETE | Register or unregister a push subscription |
 | `/api/push/devices` | GET | List subscribed devices |

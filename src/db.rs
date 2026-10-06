@@ -630,8 +630,41 @@ impl Db {
         Ok(())
     }
 
+    /// The active STT kind saved before config.json held it, if one was.
+    pub fn stt_saved_active_kind(&self) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        conn.query_row("SELECT kind FROM stt_active_kind WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()
+        .context("reading stt_active_kind")
+    }
+
+    /// Every STT provider row saved before config.json held them.
+    pub fn stt_saved_providers(&self) -> Result<Vec<SttProviderRow>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT kind, host, port, model, api_key FROM stt_providers ORDER BY kind")
+            .context("preparing stt_providers read")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SttProviderRow {
+                    kind: r.get(0)?,
+                    host: r.get(1)?,
+                    port: r.get(2)?,
+                    model: r.get(3)?,
+                    api_key: r.get(4)?,
+                })
+            })
+            .context("reading stt_providers")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading stt_providers")?;
+        Ok(rows)
+    }
+
     /// Return the active STT kind ("local", "network", or "openai").
     /// Defaults to "local" if never set.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stt_active_kind(&self) -> Result<String> {
         let conn = self.lock_conn()?;
         let kind: Option<String> = conn
@@ -644,6 +677,7 @@ impl Db {
     }
 
     /// Set the active STT kind.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_stt_active_kind(&self, kind: &str) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute(
@@ -656,6 +690,7 @@ impl Db {
     }
 
     /// Return a single provider's settings, or None if never saved.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stt_provider(&self, kind: &str) -> Result<Option<SttProviderRow>> {
         let conn = self.lock_conn()?;
         let row: Option<(String, String, String, String, Option<String>)> = conn
@@ -678,6 +713,7 @@ impl Db {
     }
 
     /// Return all three provider rows (inserting defaults for any that don't exist yet).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stt_all_providers(&self) -> Result<[SttProviderRow; 3]> {
         let kinds = ["local", "network", "openai"];
         let mut out = [
@@ -709,6 +745,7 @@ impl Db {
     }
 
     /// Upsert per-kind provider settings. Empty api_key keeps the existing stored key.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_stt_provider(&self, row: SttProviderRow) -> Result<()> {
         // Preserve existing api_key when none supplied.
         let api_key = if row.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
@@ -761,6 +798,7 @@ pub struct SttProviderRow {
     pub api_key: Option<String>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl SttProviderRow {
     pub fn default_for(kind: &str) -> Self {
         match kind {

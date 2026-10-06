@@ -204,6 +204,53 @@
       },
       "type": "object"
     },
+    "SttConfig": {
+      "additionalProperties": false,
+      "description": "Speech-to-text: where dictation from the microphone button is transcribed.\nFile-only: no environment variable or flag sets it, and Settings → Speech\nto text writes it.",
+      "properties": {
+        "active": {
+          "default": "local",
+          "description": "The provider kind in use: `local`, `network`, `openai`, `mistral`\nor `kyutai`.",
+          "type": "string"
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SttProvider"
+          },
+          "default": {},
+          "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SttProvider": {
+      "additionalProperties": false,
+      "description": "One speech-to-text provider.",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "description": "API key sent to the provider. Never returned by the settings API.",
+          "type": "string"
+        },
+        "host": {
+          "default": "",
+          "description": "Scheme and host, e.g. `https://api.mistral.ai` or `ws://gpu-box`.",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "description": "Model id sent to the provider.",
+          "type": "string"
+        },
+        "port": {
+          "default": "",
+          "description": "Port, as text; empty means the scheme's default.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "TlsConfig": {
       "additionalProperties": false,
       "description": "HTTPS: the built-in CA, a supplied key pair, or ACME.",
@@ -255,6 +302,58 @@
         "key_file": {
           "default": "",
           "description": "Path to the private key PEM matching `cert_file`. Env: `MOBUX_KEY_FILE`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TtsConfig": {
+      "additionalProperties": false,
+      "description": "Text-to-speech: the voice Listen mode reads the terminal with. File-only,\nwritten by Settings → Listen.",
+      "properties": {
+        "active": {
+          "default": "local",
+          "description": "The provider kind in use: `local`, `mistral`, `network` or `kyutai`.",
+          "type": "string"
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TtsProvider"
+          },
+          "default": {},
+          "description": "Settings per provider kind. A kind left out, or a field left empty,\ntakes that kind's defaults.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "TtsProvider": {
+      "additionalProperties": false,
+      "description": "One text-to-speech provider.",
+      "properties": {
+        "api_key": {
+          "default": "",
+          "description": "API key sent to the provider. Never returned by the settings API.",
+          "type": "string"
+        },
+        "host": {
+          "default": "",
+          "description": "Scheme and host, e.g. `https://api.mistral.ai`.",
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "description": "Model id sent to the provider.",
+          "type": "string"
+        },
+        "port": {
+          "default": "",
+          "description": "Port, as text; empty means the scheme's default.",
+          "type": "string"
+        },
+        "voice": {
+          "default": "",
+          "description": "Voice id or preset name sent to the provider.",
           "type": "string"
         }
       },
@@ -349,6 +448,13 @@
         "shell": ""
       }
     },
+    "stt": {
+      "$ref": "#/$defs/SttConfig",
+      "default": {
+        "active": "local",
+        "providers": {}
+      }
+    },
     "tls": {
       "$ref": "#/$defs/TlsConfig",
       "default": {
@@ -360,6 +466,13 @@
         "enabled": false,
         "hosts": [],
         "key_file": ""
+      }
+    },
+    "tts": {
+      "$ref": "#/$defs/TtsConfig",
+      "default": {
+        "active": "local",
+        "providers": {}
       }
     },
     "update": {
