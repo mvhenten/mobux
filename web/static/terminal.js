@@ -299,7 +299,8 @@ export function createTerminal({
   });
   on(cmdOverlayBg, "click", hideCmdList);
   on(document, "keydown", (e) => {
-    if (e.key !== "Escape" || !cmdPickList.classList.contains("visible")) return;
+    if (e.key !== "Escape" || !cmdPickList.classList.contains("visible"))
+      return;
     e.preventDefault();
     hideCmdList();
   });
@@ -413,6 +414,9 @@ export function createTerminal({
       // instead of being stuck with no keyboard affordance.
       ensureInputBar().show();
     },
+
+    holdsTap: links.holds,
+    onSingleTap: links.open,
 
     onHSwipe: (dir) => core.switchWindow(dir),
 

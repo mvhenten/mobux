@@ -321,7 +321,6 @@ export function createSterkRenderer(host, options = {}) {
       };
     },
 
-    // R17 — the Ace paints wired up in drawBuffer.
     onDraw(cb) {
       drawSubs.push(cb);
       return {

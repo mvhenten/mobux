@@ -1,7 +1,8 @@
 // Select mode in the live terminal view, under both renderers: a long-press
 // on the touch overlay shows the rows on screen as real text on the
 // renderer's cell grid, with the word under the finger selected through the
-// browser's own selection and URLs as real anchors.
+// browser's own selection; and the URLs on screen as anchors a tap opens and a
+// long-press leaves to the browser.
 //
 // Headless Chromium fires no contextmenu for an emulated touch long-press,
 // so the specs dispatch the contextmenu Chrome Android fires for one.
@@ -268,38 +269,6 @@ test("the layer's rows sit on the renderer's glyphs on the alternate screen abov
   }
 });
 
-test("a URL is a real anchor and a tap on it leaves through the intent path", async ({
-  page,
-}) => {
-  await bootTerminal(page);
-  await recordExternalOpens(page);
-  echoLine("see https://example.com/touch-path. now");
-  const at = await findOnScreen(
-    page,
-    "see https://example.com/touch-path. now",
-    "see",
-  );
-
-  await longPress(page, await cellPoint(page, at.col, at.row));
-  expect((await selectState(page)).text).toBe("see");
-
-  const anchors = page.locator(".select-layer a");
-  await expect(anchors).toHaveCount(2);
-  for (const anchor of await anchors.all()) {
-    await expect(anchor).toHaveAttribute(
-      "href",
-      "https://example.com/touch-path",
-    );
-    await expect(anchor).toHaveText("https://example.com/touch-path");
-  }
-
-  await anchors.last().tap();
-
-  await expect.poll(() => page.evaluate(() => window.__opened)).toHaveLength(1);
-  const opened = await page.evaluate(() => window.__opened);
-  expect(opened[0]).toContain("intent://example.com/touch-path#Intent");
-});
-
 // The regression: a single tap on a URL opened nothing.
 test("a single tap on a URL opens it outside the shell", async ({ page }) => {
   await bootTerminal(page);
@@ -362,39 +331,79 @@ test("a long-press on a URL is left to the browser's link menu", async ({
   await expect(page.locator(".select-layer")).toBeHidden();
 });
 
-test("after a scroll each link anchor still sits on its URL", async ({
+test("a double-tap on a URL shows the input bar and opens nothing", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  await recordExternalOpens(page);
+  echoLine("twice https://example.com/double-path now");
+  const at = await findOnScreen(
+    page,
+    "twice https://example.com/double-path now",
+    "example",
+  );
+  const point = await cellPoint(page, at.col, at.row);
+  await quiet(page);
+
+  const cdp = await page.context().newCDPSession(page);
+  const touchAt = (type) =>
+    cdp.send("Input.dispatchTouchEvent", {
+      type,
+      touchPoints: type === "touchEnd" ? [] : [{ x: point.x, y: point.y }],
+    });
+  for (let i = 0; i < 2; i++) {
+    await touchAt("touchStart");
+    await page.waitForTimeout(40);
+    await touchAt("touchEnd");
+    await page.waitForTimeout(80);
+  }
+
+  await expect(page.locator("#inputBar")).toBeVisible();
+  await page.waitForTimeout(800);
+  expect(await page.evaluate(() => window.__opened)).toEqual([]);
+});
+
+test("after a scroll each link anchor sits on the URL the renderer draws", async ({
   page,
 }) => {
   await bootTerminal(page);
   tmux(
-    `send-keys -t ${SESSION} "for i in \\$(seq 1 60); do echo https://example.com/row-\\$i; done" Enter`,
+    `send-keys -t ${SESSION} "for i in \\$(seq 10 69); do echo https://example.com/row-\\$i; done" Enter`,
   );
-  await findOnScreen(page, "https://example.com/row-60", "https");
+  await findOnScreen(page, "https://example.com/row-69", "https");
   await page.evaluate(() => window.__mobuxView.test.scrollLines(-20));
   await quiet(page);
 
   await expect
     .poll(
-      () =>
-        page.evaluate(() => {
-          const t = window.__mobuxView.test;
-          const top = t.viewportY();
-          const origin = t.cellOrigin();
-          const cell = t.cellMetrics();
-          const wrong = [];
-          for (let r = 0; r < t.rows(); r++) {
-            const text = (t.lineText(top + r) || "").trim();
-            if (!text.startsWith("https://")) continue;
-            const x = origin.x + cell.width / 2;
-            const y = origin.y + (r + 0.5) * cell.height;
-            const a = document.elementFromPoint(x, y)?.closest(".link-layer a");
-            if (a?.getAttribute("href") !== text) wrong.push(text);
-          }
-          return wrong;
-        }),
+      async () => {
+        const anchors = await page.evaluate(() =>
+          [...document.querySelectorAll(".link-layer a")].map((a) => {
+            const b = a.getBoundingClientRect();
+            return {
+              href: a.getAttribute("href"),
+              left: b.left,
+              top: b.top,
+              width: b.width,
+            };
+          }),
+        );
+        const off = [];
+        for (const anchor of anchors) {
+          const drawn = await glyphBox(page, "#terminal", anchor.href);
+          if (
+            !drawn ||
+            Math.abs(drawn.left - anchor.left) > 1 ||
+            Math.abs(drawn.top - anchor.top) > 1 ||
+            Math.abs(drawn.width - anchor.width) > 1
+          )
+            off.push(anchor.href);
+        }
+        return { count: anchors.length >= 10, off };
+      },
       { timeout: 8000 },
     )
-    .toEqual([]);
+    .toEqual({ count: true, off: [] });
 });
 
 test("a tap that collapses the selection hides the layer and gives the overlay back", async ({

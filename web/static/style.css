@@ -1478,11 +1478,6 @@ h1, h2, h3 { margin: 0; }
   right: 0;
   white-space: pre;
 }
-.select-row a {
-  color: transparent;
-  text-decoration: underline;
-  text-decoration-color: var(--terminal-fg, var(--text));
-}
 .select-layer ::selection {
   color: transparent;
   background: var(--select-highlight);
