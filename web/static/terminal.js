@@ -4,6 +4,7 @@ import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createNativeSelection } from "./native-select.js";
+import { createLinkLayer } from "./link-layer.js";
 import { createInputBar } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { openSettings } from "./settings-nav.js";
@@ -298,7 +299,8 @@ export function createTerminal({
   });
   on(cmdOverlayBg, "click", hideCmdList);
   on(document, "keydown", (e) => {
-    if (e.key !== "Escape" || !cmdPickList.classList.contains("visible")) return;
+    if (e.key !== "Escape" || !cmdPickList.classList.contains("visible"))
+      return;
     e.preventDefault();
     hideCmdList();
   });
@@ -384,6 +386,9 @@ export function createTerminal({
   });
   cleanups.push(() => selection.dispose());
 
+  const links = createLinkLayer({ core, overlay });
+  cleanups.push(() => links.dispose());
+
   const gestures = createGestureRecognizer(overlay, {
     onScroll: scrollByPixels,
     onScrollStart: startScroll,
@@ -410,6 +415,9 @@ export function createTerminal({
       ensureInputBar().show();
     },
 
+    holdsTap: links.holds,
+    onSingleTap: links.open,
+
     onHSwipe: (dir) => core.switchWindow(dir),
 
     onSwipeUp: showCmdList,
@@ -417,9 +425,11 @@ export function createTerminal({
 
   // Chrome fires contextmenu for a touch long-press; select mode takes it
   // from there and the rest of that touch belongs to the browser.
-  // A mouse right-click keeps the browser's own menu.
+  // A mouse right-click and a long-press on a link keep the browser's own
+  // menu.
   on(overlay, "contextmenu", (e) => {
     if (e.pointerType && e.pointerType !== "touch") return;
+    if (e.target.closest(".link-layer a")) return;
     if (termEl.classList.contains("hidden")) return;
     if (selection.enter(e.clientX, e.clientY)) gestures.release();
   });

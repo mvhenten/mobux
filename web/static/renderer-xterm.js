@@ -188,6 +188,11 @@ export function createXtermRenderer(host, options = {}) {
       };
     },
 
+    // R17 — xterm paints rows on a scroll, a resize and new output alike.
+    onDraw(cb) {
+      return term.onRender(() => cb());
+    },
+
     // R15 — input surface ownership.
     focus() {
       try {

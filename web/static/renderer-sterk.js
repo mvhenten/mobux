@@ -58,6 +58,7 @@ export function createSterkRenderer(host, options = {}) {
   let source = null;
   const cleanups = [];
   const linkSubs = [];
+  const drawSubs = [];
   const emitLink = (uri) => {
     for (const cb of linkSubs.slice()) cb(uri);
   };
@@ -125,6 +126,14 @@ export function createSterkRenderer(host, options = {}) {
       throw err;
     }
     cleanups.push(view.registerLinkProvider({ provideLinks }));
+    // Ace paints every change, scroll and font size on its own frame; the
+    // view's render event fires only for new content.
+    const aceRenderer = view.getEditor().renderer;
+    const emitDraw = () => {
+      for (const cb of drawSubs.slice()) cb();
+    };
+    aceRenderer.on("afterRender", emitDraw);
+    cleanups.push({ dispose: () => aceRenderer.off("afterRender", emitDraw) });
     // The view renders on an animation frame, which a hidden tab never
     // runs; there the change counts as drawn once the view has it.
     const unrendered = new Set();
@@ -211,6 +220,7 @@ export function createSterkRenderer(host, options = {}) {
     // R1 — teardown: sterk releases its DOM + internal listeners.
     dispose() {
       linkSubs.length = 0;
+      drawSubs.length = 0;
       for (const sub of cleanups.splice(0)) sub.dispose();
       view?.dispose();
       if (window.__sterk === debugHandle) delete window.__sterk;
@@ -307,6 +317,16 @@ export function createSterkRenderer(host, options = {}) {
         dispose() {
           const i = linkSubs.indexOf(cb);
           if (i >= 0) linkSubs.splice(i, 1);
+        },
+      };
+    },
+
+    onDraw(cb) {
+      drawSubs.push(cb);
+      return {
+        dispose() {
+          const i = drawSubs.indexOf(cb);
+          if (i >= 0) drawSubs.splice(i, 1);
         },
       };
     },

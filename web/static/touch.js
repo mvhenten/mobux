@@ -33,6 +33,7 @@ const SWIPE_UP_PX = 60;
 const SWIPE_UP_MS = 400;
 
 // callbacks: { onScroll(dy), onScrollStart(x,y), onFling(), onTap(x,y), onDoubleTap(x,y),
+//              holdsTap(target), onSingleTap(target),
 //              onHSwipe(direction), onPinch(scale, startFontSize),
 //              onTwoPullMove(pull, vh), onTwoPullEnd(pull, vh),
 //              onLongPress(), onSwipeUp(), onReconnect() }
@@ -46,6 +47,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
   let lastY;
   let lastTapTime = 0;
   let longPressTimer = null;
+  let singleTapTimer = null;
   let startedAtBottomEdge = false;
 
   // Two-finger state
@@ -55,6 +57,22 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
 
   function clearLongPress() {
     if (longPressTimer !== null) { clearTimeout(longPressTimer); longPressTimer = null; }
+  }
+
+  // A tap on a target the caller holds gets no compatibility click and waits
+  // out the double-tap window before it counts as a single tap.
+  function clearSingleTap() {
+    if (singleTapTimer !== null) { clearTimeout(singleTapTimer); singleTapTimer = null; }
+  }
+
+  function holdTap(e) {
+    if (!callbacks.holdsTap?.(e.target)) return;
+    e.preventDefault();
+    const target = e.target;
+    singleTapTimer = setTimeout(() => {
+      singleTapTimer = null;
+      callbacks.onSingleTap?.(target);
+    }, DTAP_MS);
   }
 
   function transition(newState) {
@@ -233,11 +251,14 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
         // so the click cannot land on whatever the callback just revealed
         // under the finger.
         e.preventDefault();
+        clearSingleTap();
         callbacks.onDoubleTap(startX, startY);
         lastTapTime = 0;
       } else {
         callbacks.onTap?.(startX, startY);
         lastTapTime = now;
+        clearSingleTap();
+        holdTap(e);
       }
     } else if (state === 'SCROLL') {
       physics.fling();
@@ -283,6 +304,7 @@ export function createGestureRecognizer(overlay, callbacks, options = {}) {
       overlay.removeEventListener('touchcancel', onTouchCancel);
       physics.stopMomentum();
       clearLongPress();
+      clearSingleTap();
     }
   };
 }

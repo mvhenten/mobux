@@ -1,8 +1,8 @@
 // The engine buffer read as the display's rows (issue #315 keeps the buffer
 // the source of truth): history lines cut at the pane width, the normal
 // screen's scrollback, then the screen. The select layer (native-select.js)
-// reads cells and links from here, never from a renderer, so xterm and sterk
-// select the same text.
+// and the link layer (link-layer.js) read cells and URLs from here, never
+// from a renderer, so xterm and sterk select and link the same text.
 
 import { isBlankCell } from "./terminal-buffer.js";
 import { historyLine, lineCells } from "./terminal-lines.js";
@@ -182,24 +182,30 @@ export function urlAt(rows, row, col) {
   return null;
 }
 
-// Per row of `rows`, per column: the http(s) URL drawn in that cell, or
-// null. A URL wrapped across rows marks its cells on every row it covers.
-export function linkCells(rows) {
-  const out = rows.map((row) => row.cells.map(() => null));
+// The http(s) URLs drawn in `rows`, one { row, start, end, href } per row a
+// URL covers (end inclusive): a URL wrapped across rows is a run on each.
+// The second column of a wide character belongs to the run it ends.
+export function linkRuns(rows) {
+  const runs = [];
   rows.forEach((row, r) => {
     if (r > 0 && row.wrapped) return;
     const line = logicalLineAt(rows, r);
     URL_RE.lastIndex = 0;
     let m;
     while ((m = URL_RE.exec(line.text)) !== null) {
-      const url = m[0].replace(TRAILING_PUNCT_RE, "");
-      for (let i = m.index; i < m.index + url.length; i++) {
+      const href = m[0].replace(TRAILING_PUNCT_RE, "");
+      let run = null;
+      for (let i = m.index; i < m.index + href.length; i++) {
         const { row: at, col } = line.cells[i];
-        out[at][col] = url;
+        if (!run || run.row !== at) {
+          run = { row: at, start: col, end: col, href };
+          runs.push(run);
+        }
+        run.end = rows[at].cells[col + 1] === "" ? col + 1 : col;
       }
     }
   });
-  return out;
+  return runs;
 }
 
 // The run of non-whitespace cells through (row, col) across the logical
@@ -241,4 +247,44 @@ export function textBetween(rows, start, end) {
   }
   lines.push(current);
   return lines.map((l) => l.replace(/\s+$/, "")).join("\n");
+}
+
+const blankRow = (cols) => ({ cells: Array(cols).fill(" "), wrapped: false });
+
+const rowKey = (row) => (row ? `${row.wrapped}:${row.cells.join("")}` : "");
+
+// Everything the rows on screen stand for besides their text: once any of it
+// changes, rows read earlier no longer lie on the text drawn under them.
+export function layoutKey(core) {
+  const pane = core.panes[core.activeIndex];
+  return [
+    core.textLayout(),
+    core.isAlternateScreenActive(),
+    core.rows,
+    pane?.id,
+    pane?.alternateOn,
+  ].join(":");
+}
+
+// The rows on screen and the cell grid the renderer draws them on.
+export function textGrid(core) {
+  const { top, rows: count } = core.textViewport();
+  const shown = core.textRows(top, count);
+  return {
+    cell: core.cellSize(),
+    origin: core.cellOrigin(),
+    top,
+    rows: shown.map((r) => r ?? blankRow(core.cols)),
+    keys: shown.map(rowKey),
+  };
+}
+
+// True once the rows a grid was read from are no longer the rows on screen:
+// a new line, a status line tick, a redraw, a scroll.
+export function rowsMoved(core, grid) {
+  const { top, rows: count } = core.textViewport();
+  if (top !== grid.top || count !== grid.keys.length) return true;
+  return core
+    .textRows(top, count)
+    .some((row, i) => rowKey(row) !== grid.keys[i]);
 }

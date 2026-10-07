@@ -35,6 +35,8 @@
 //   R13 onLink(cb): Disposable               URL activations; UI opens them
 //   R15 focus(); setNativeInputEnabled(bool)
 //   R16 reset()                              drop all content (full redraw)
+//   R17 onDraw(cb): Disposable               the view painted: new rows, a
+//                                             scroll, a new font size
 //
 // Alternate-screen state (R9), OSC handlers (R10), the bell (R14) and
 // buffer changes come from the buffer, not the renderer, and so do the
@@ -657,6 +659,9 @@ export class TerminalEngine extends EventTarget {
   }
   onLink(cb) {
     return this.renderer.onLink(cb);
+  }
+  onDraw(cb) {
+    return this.renderer.onDraw(cb);
   }
 
   // The buffer's display rows (terminal-text.js), in their own row space:
