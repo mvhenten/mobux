@@ -81,6 +81,45 @@ const blankRow = (cols) => ({ cells: Array(cols).fill(" "), wrapped: false });
 
 const rowKey = (row) => (row ? `${row.wrapped}:${row.cells.join("")}` : "");
 
+// Everything a layer's rows stand for besides their text: once any of it
+// changes, the rows no longer lie on the text drawn under them.
+export function layoutKey(core) {
+  const pane = core.panes[core.activeIndex];
+  return [
+    core.textLayout(),
+    core.isAlternateScreenActive(),
+    core.rows,
+    pane?.id,
+    pane?.alternateOn,
+  ].join(":");
+}
+
+// The rows on screen, the cell grid they are drawn on, and per cell the URL
+// it is part of.
+export function textGrid(core) {
+  const { top, rows: count } = core.textViewport();
+  const shown = core.textRows(top, count);
+  const rows = shown.map((r) => r ?? blankRow(core.cols));
+  return {
+    cell: core.cellSize(),
+    origin: core.cellOrigin(),
+    top,
+    rows,
+    links: linkCells(rows),
+    keys: shown.map(rowKey),
+  };
+}
+
+// True once the rows a grid was read from are no longer the rows on screen:
+// a new line, a status line tick, a redraw, a scroll.
+export function rowsMoved(core, grid) {
+  const { top, rows: count } = core.textViewport();
+  if (top !== grid.top || count !== grid.keys.length) return true;
+  return core
+    .textRows(top, count)
+    .some((row, i) => rowKey(row) !== grid.keys[i]);
+}
+
 export function createNativeSelection({
   core,
   root,
@@ -93,26 +132,10 @@ export function createNativeSelection({
 
   let active = null;
 
-  // Everything the layer's rows stand for besides their text: once any of it
-  // changes, the rows no longer lie on the text drawn under them.
-  const layoutKey = () => {
-    const pane = core.panes[core.activeIndex];
-    return [
-      core.textLayout(),
-      core.isAlternateScreenActive(),
-      core.rows,
-      pane?.id,
-      pane?.alternateOn,
-    ].join(":");
-  };
-
   function render() {
-    const cell = core.cellSize();
-    const origin = core.cellOrigin();
+    const grid = textGrid(core);
+    const { cell, origin, rows, links } = grid;
     const box = root.getBoundingClientRect();
-    const { top, rows: count } = core.textViewport();
-    const rows = core.textRows(top, count).map((r) => r ?? blankRow(core.cols));
-    const links = linkCells(rows);
 
     layer.style.left = `${origin.x - box.left}px`;
     layer.style.top = `${origin.y - box.top}px`;
@@ -129,7 +152,7 @@ export function createNativeSelection({
     probe.remove();
     layer.style.letterSpacing = `${cell.width - advance}px`;
 
-    const maps = rows.map((row, i) => {
+    grid.maps = rows.map((row, i) => {
       const continued = !!rows[i + 1]?.wrapped;
       const built = buildRow(row, links[i], cell.width, continued);
       built.node.style.top = `${i * cell.height}px`;
@@ -137,7 +160,7 @@ export function createNativeSelection({
       layer.append(built.node);
       return built.map;
     });
-    return { cell, origin, rows, maps, top, keys: rows.map(rowKey) };
+    return grid;
   }
 
   function selectWord(grid, x, y) {
@@ -183,7 +206,7 @@ export function createNativeSelection({
       layer.replaceChildren();
       return false;
     }
-    active = { layout: layoutKey(), top: grid.top, keys: grid.keys };
+    active = { layout: layoutKey(core), grid };
     overlay.style.pointerEvents = "none";
     return true;
   }
@@ -203,18 +226,10 @@ export function createNativeSelection({
   document.addEventListener("selectionchange", onSelectionChange);
   const onResize = () => leave();
   window.addEventListener("resize", onResize);
-  // The text drawn under the layer moved or changed: a new line, a status
-  // line tick, a redraw.
-  const rowsMoved = () => {
-    const { top, rows: count } = core.textViewport();
-    if (top !== active.top || count !== active.keys.length) return true;
-    return core
-      .textRows(top, count)
-      .some((row, i) => rowKey(row) !== active.keys[i]);
-  };
   const onLayout = () => {
     if (!active) return;
-    if (active.layout !== layoutKey() || rowsMoved()) leave();
+    if (active.layout !== layoutKey(core) || rowsMoved(core, active.grid))
+      leave();
   };
   const bufferSub = core.onBufferChanged(onLayout);
   core.addEventListener("panes", onLayout);

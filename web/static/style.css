@@ -1488,6 +1488,23 @@ h1, h2, h3 { margin: 0; }
   background: var(--select-highlight);
 }
 .select-wide { display: inline-block; }
+
+/* No box of its own: only the anchors are hit, and they take the overlay's
+   pointer-events. */
+.link-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+}
+.link-layer a {
+  position: absolute;
+  display: block;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
 .select-probe { white-space: pre; }
 
 @media (max-width: 620px) {

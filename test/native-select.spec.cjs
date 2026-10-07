@@ -300,6 +300,103 @@ test("a URL is a real anchor and a tap on it leaves through the intent path", as
   expect(opened[0]).toContain("intent://example.com/touch-path#Intent");
 });
 
+// The regression: a single tap on a URL opened nothing.
+test("a single tap on a URL opens it outside the shell", async ({ page }) => {
+  await bootTerminal(page);
+  await recordExternalOpens(page);
+  echoLine("open https://example.com/tap-path now");
+  const at = await findOnScreen(
+    page,
+    "open https://example.com/tap-path now",
+    "example",
+  );
+  const point = await cellPoint(page, at.col, at.row);
+
+  await quiet(page);
+  await page.touchscreen.tap(point.x, point.y);
+
+  await expect.poll(() => page.evaluate(() => window.__opened)).toHaveLength(1);
+  const opened = await page.evaluate(() => window.__opened);
+  expect(opened[0]).toContain("intent://example.com/tap-path#Intent");
+  expect(opened[0]).toContain(
+    `S.browser_fallback_url=${encodeURIComponent("https://example.com/tap-path")}`,
+  );
+  expect((await selectState(page)).active).toBe(false);
+});
+
+test("a long-press on a URL is left to the browser's link menu", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  echoLine("hold https://example.com/hold-path now");
+  const at = await findOnScreen(
+    page,
+    "hold https://example.com/hold-path now",
+    "example",
+  );
+  const point = await cellPoint(page, at.col, at.row);
+  await quiet(page);
+
+  const menu = await page.evaluate(({ x, y }) => {
+    const target = document.elementFromPoint(x, y);
+    const notPrevented = target.dispatchEvent(
+      new PointerEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        pointerType: "touch",
+      }),
+    );
+    return {
+      href: target.closest(".link-layer a")?.getAttribute("href") ?? null,
+      notPrevented,
+    };
+  }, point);
+
+  expect(menu).toEqual({
+    href: "https://example.com/hold-path",
+    notPrevented: true,
+  });
+  expect((await selectState(page)).active).toBe(false);
+  await expect(page.locator(".select-layer")).toBeHidden();
+});
+
+test("after a scroll each link anchor still sits on its URL", async ({
+  page,
+}) => {
+  await bootTerminal(page);
+  tmux(
+    `send-keys -t ${SESSION} "for i in \\$(seq 1 60); do echo https://example.com/row-\\$i; done" Enter`,
+  );
+  await findOnScreen(page, "https://example.com/row-60", "https");
+  await page.evaluate(() => window.__mobuxView.test.scrollLines(-20));
+  await quiet(page);
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const t = window.__mobuxView.test;
+          const top = t.viewportY();
+          const origin = t.cellOrigin();
+          const cell = t.cellMetrics();
+          const wrong = [];
+          for (let r = 0; r < t.rows(); r++) {
+            const text = (t.lineText(top + r) || "").trim();
+            if (!text.startsWith("https://")) continue;
+            const x = origin.x + cell.width / 2;
+            const y = origin.y + (r + 0.5) * cell.height;
+            const a = document.elementFromPoint(x, y)?.closest(".link-layer a");
+            if (a?.getAttribute("href") !== text) wrong.push(text);
+          }
+          return wrong;
+        }),
+      { timeout: 8000 },
+    )
+    .toEqual([]);
+});
+
 test("a tap that collapses the selection hides the layer and gives the overlay back", async ({
   page,
 }) => {
