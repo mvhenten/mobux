@@ -371,8 +371,15 @@ test("after a scroll each link anchor sits on the URL the renderer draws", async
     `send-keys -t ${SESSION} "for i in \\$(seq 10 69); do echo https://example.com/row-\\$i; done" Enter`,
   );
   await findOnScreen(page, "https://example.com/row-69", "https");
-  await page.evaluate(() => window.__mobuxView.test.scrollLines(-20));
   await quiet(page);
+  await expect
+    .poll(() => page.evaluate(() => window.__mobuxView.test.viewportY()))
+    .toBeGreaterThan(20);
+  const bottom = await page.evaluate(() => window.__mobuxView.test.viewportY());
+  await page.evaluate(() => window.__mobuxView.test.scrollLines(-20));
+  await expect
+    .poll(() => page.evaluate(() => window.__mobuxView.test.viewportY()))
+    .toBeLessThan(bottom);
 
   await expect
     .poll(
@@ -383,7 +390,7 @@ test("after a scroll each link anchor sits on the URL the renderer draws", async
             return {
               href: a.getAttribute("href"),
               left: b.left,
-              top: b.top,
+              middle: b.top + b.height / 2,
               width: b.width,
             };
           }),
@@ -394,7 +401,7 @@ test("after a scroll each link anchor sits on the URL the renderer draws", async
           if (
             !drawn ||
             Math.abs(drawn.left - anchor.left) > 1 ||
-            Math.abs(drawn.top - anchor.top) > 1 ||
+            Math.abs(drawn.top + drawn.height / 2 - anchor.middle) > 1 ||
             Math.abs(drawn.width - anchor.width) > 1
           )
             off.push(anchor.href);
