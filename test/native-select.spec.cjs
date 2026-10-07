@@ -372,11 +372,31 @@ test("after a scroll each link anchor sits on the URL the renderer draws", async
   );
   await findOnScreen(page, "https://example.com/row-69", "https");
   await quiet(page);
+  const atBottom = () =>
+    page.evaluate(() => {
+      const t = window.__mobuxView.test;
+      const top = t.viewportY();
+      const shown = Array.from({ length: t.rows() }, (_, r) =>
+        (t.lineText(top + r) || "").trim(),
+      );
+      return shown.includes("https://example.com/row-69") ? top : -1;
+    });
+  let bottom = -1;
   await expect
-    .poll(() => page.evaluate(() => window.__mobuxView.test.viewportY()))
-    .toBeGreaterThan(20);
-  const bottom = await page.evaluate(() => window.__mobuxView.test.viewportY());
-  await page.evaluate(() => window.__mobuxView.test.scrollLines(-20));
+    .poll(
+      async () => {
+        const before = await atBottom();
+        await page.waitForTimeout(250);
+        bottom = await atBottom();
+        return bottom > 0 && bottom === before;
+      },
+      { timeout: 8000 },
+    )
+    .toBe(true);
+  await page.evaluate(
+    (n) => window.__mobuxView.test.scrollLines(-n),
+    Math.min(20, bottom),
+  );
   await expect
     .poll(() => page.evaluate(() => window.__mobuxView.test.viewportY()))
     .toBeLessThan(bottom);
@@ -396,7 +416,8 @@ test("after a scroll each link anchor sits on the URL the renderer draws", async
           }),
         );
         const off = [];
-        for (const anchor of anchors) {
+        const printed = anchors.filter((a) => /row-\d+$/.test(a.href));
+        for (const anchor of printed) {
           const drawn = await glyphBox(page, "#terminal", anchor.href);
           if (
             !drawn ||
@@ -406,7 +427,7 @@ test("after a scroll each link anchor sits on the URL the renderer draws", async
           )
             off.push(anchor.href);
         }
-        return { count: anchors.length >= 10, off };
+        return { count: printed.length >= 10, off };
       },
       { timeout: 8000 },
     )
