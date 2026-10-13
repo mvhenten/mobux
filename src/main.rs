@@ -5991,14 +5991,14 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn await_phase(job: &Arc<tokio::sync::Mutex<BackgroundJobState>>, want: &InstallPhase) {
+    async fn await_log(path: &std::path::Path, expected: &str) {
         for _ in 0..500 {
-            if job.lock().await.phase == *want {
+            if stub_log(path) == expected {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        panic!("job never reached {want:?}");
+        panic!("stub log never read {expected:?}");
     }
 
     #[cfg(unix)]
@@ -6029,7 +6029,8 @@ mod tests {
             stub_command(&build, &log),
         ));
 
-        await_phase(&job, &InstallPhase::InstallingTools).await;
+        await_log(&log, "setup\n").await;
+        assert_eq!(job.lock().await.phase, InstallPhase::InstallingTools);
         assert_eq!(stub_log(&log), "setup\n", "the build must wait for setup");
         assert!(InstallPhase::InstallingTools.is_active());
         assert_eq!(
