@@ -1,10 +1,19 @@
-import { useRef, useLayoutEffect } from "preact/hooks";
+import { useRef, useLayoutEffect, useState } from "preact/hooks";
 import { collectDiagnostics } from "../lib/diagnostics.js";
 import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
 import { readLoadedBundleHash } from "../lib/bundleHash.js";
 import { createViewController } from "../lib/viewController.js";
-import { u } from "../lib/base.js";
+import {
+  ensureStylesheet,
+  loadScript,
+  staticUrl,
+} from "../lib/staticAssets.js";
+import {
+  RENDERER_LABELS,
+  otherRenderer,
+  rendererBundles,
+} from "../lib/rendererProbe.js";
 import { probeSession } from "../lib/accessSession.js";
 
 // ── Terminal island ──────────────────────────────────────────────────
@@ -23,13 +32,8 @@ import { probeSession } from "../lib/accessSession.js";
 //      change is a clean dispose + create — no document reload (#188), and
 //      the new engine attaches to exactly the (node, session) in the URL
 //      (the #185 regression class).
-//
-// `CACHE_BUST` mirrors the old Rust page's `?v=` query-param convention on
-// <script>/<link> tags, but it's a fixed string — it does no cache-busting
-// of its own. What actually guarantees a stale cache never hands back an
-// old bundle is `serve_static` in src/main.rs serving every /static/* asset
-// `no-store, must-revalidate`; the query param is vestigial and harmless.
-const CACHE_BUST = "spa";
+//   3. Fall back to the other renderer, with a notice, when the configured
+//      one fails to load or start, so the phone always gets a terminal.
 
 // Ribbon bug-report button (#191): grab the current diagnostics bundle and
 // open a prefilled GitHub issue in a new tab. Reuses the same bundle/URL
@@ -65,42 +69,32 @@ async function openBugReport() {
   window.location.href = url;
 }
 
-// Append a classic <script> and resolve when it loads. Deduped per document:
-// the vendor bundles pin window globals (window.Terminal / window.Sterk) and
-// chime.js self-boots, so each URL loads exactly once no matter how many
-// times the island mounts.
-const loadedScripts = new Map();
-function loadScript(src) {
-  if (!loadedScripts.has(src)) {
-    loadedScripts.set(
-      src,
-      new Promise((resolve, reject) => {
-        const el = document.createElement("script");
-        el.src = src;
-        el.async = false; // preserve execution order
-        el.onload = () => resolve();
-        el.onerror = () => {
-          loadedScripts.delete(src); // a later mount may retry
-          reject(new Error(`failed to load ${src}`));
-        };
-        document.body.appendChild(el);
-      }),
-    );
-  }
-  return loadedScripts.get(src);
+function loadRenderer(name) {
+  if (name === "xterm") ensureStylesheet(staticUrl("vendor/xterm.css"));
+  return Promise.all(
+    rendererBundles(name).map((b) => loadScript(staticUrl(b))),
+  );
 }
 
-function ensureStylesheet(href) {
-  if (document.querySelector(`link[rel="stylesheet"][href="${href}"]`)) return;
-  const link = document.createElement("link");
-  link.rel = "stylesheet";
-  link.href = href;
-  document.head.appendChild(link);
+function FallbackNotice({ failed, fallback, reason, onDismiss }) {
+  return (
+    <div id="rendererFallbackNotice" class="renderer-fallback" role="alert">
+      <p>
+        The {RENDERER_LABELS[failed]} renderer failed to load ({reason}), so
+        this terminal fell back to {RENDERER_LABELS[fallback]}. Pick a renderer
+        in Settings → Terminal renderer.
+      </p>
+      <button type="button" aria-label="Dismiss" onClick={onDismiss}>
+        ✕
+      </button>
+    </div>
+  );
 }
 
 export function TerminalIsland({ node, session }) {
   const rootRef = useRef(null);
   const resizeObsRef = useRef(null);
+  const [fallbackNotice, setFallbackNotice] = useState(null);
 
   useLayoutEffect(() => {
     // The engine attaches to exactly this (node, session) — both come from
@@ -115,49 +109,41 @@ export function TerminalIsland({ node, session }) {
     // boot by main.jsx), then load the vendor bundles + css (once per
     // document) before constructing the engine. The headless xterm bundle
     // always loads: it parses the engine's text buffer under either renderer.
-    const renderer = getPref("renderer") === "sterk" ? "sterk" : "xterm";
+    const configured = getPref("renderer") === "sterk" ? "sterk" : "xterm";
 
-    const v = `?v=${CACHE_BUST}`;
-    const bundles = [
-      "xterm-headless.bundle.js",
-      renderer === "sterk" ? "sterk.bundle.js" : "xterm.bundle.js",
-    ];
-
-    if (renderer === "xterm") {
-      ensureStylesheet(u(`/static/vendor/xterm.css${v}`));
-    }
+    const showBootFailure = (e) => {
+      // Surface boot failure in the loading splash rather than a blank page.
+      const q = rootRef.current?.querySelector("#quote");
+      if (q) q.textContent = `Terminal failed to load: ${e.message}`;
+      return null;
+    };
 
     (async () => {
       let createTerminal;
       let createReader;
       let createReadMode;
       try {
-        await Promise.all(
-          bundles.map((b) => loadScript(u(`/static/vendor/${b}${v}`))),
-        );
         // The engine and reader modules are pure factory exports (no side
         // effects), so the browser's module-map caching is exactly right:
         // first mount fetches them, every later mount reuses them.
         ({ createTerminal } = await import(
-          /* @vite-ignore */ u(`/static/terminal.js${v}`)
+          /* @vite-ignore */ staticUrl("terminal.js")
         ));
         ({ createReader } = await import(
-          /* @vite-ignore */ u(`/static/reader.js${v}`)
+          /* @vite-ignore */ staticUrl("reader.js")
         ));
         ({ createReadMode } = await import(
-          /* @vite-ignore */ u(`/static/read-mode.js${v}`)
+          /* @vite-ignore */ staticUrl("read-mode.js")
         ));
         // chime.js sets up the in-page bell that plays when the SW delivers a
         // push notification. It self-boots via IIFE (attaches to SW messages),
         // so loading it once is enough; it also guards itself via the global
         // it exposes.
         if (!window.__mobuxChime) {
-          await loadScript(u(`/static/chime.js${v}`));
+          await loadScript(staticUrl("chime.js"));
         }
       } catch (e) {
-        // Surface boot failure in the loading splash rather than a blank page.
-        const q = rootRef.current?.querySelector("#quote");
-        if (q) q.textContent = `Terminal failed to load: ${e.message}`;
+        showBootFailure(e);
         return;
       }
       if (cancelled || !rootRef.current) return;
@@ -180,17 +166,40 @@ export function TerminalIsland({ node, session }) {
         isRead: () => viewCtl?.current === "read",
       };
 
-      engine = createTerminal({
-        node: node || "",
-        session,
-        host: rootRef.current,
-        renderer,
-        // Diagnostic only: rides to the WS URL as &build=<hash> so a stale tab
-        // identifies itself in the server's attach log (never affects routing).
-        build: readLoadedBundleHash() || "",
-        viewToggle,
-        readToggle,
-      });
+      const start = (renderer) =>
+        loadRenderer(renderer).then(() => {
+          if (cancelled || !rootRef.current) return null;
+          return createTerminal({
+            node: node || "",
+            session,
+            host: rootRef.current,
+            renderer,
+            // Diagnostic only: rides to the WS URL as &build=<hash> so a stale
+            // tab identifies itself in the server's attach log (never affects
+            // routing).
+            build: readLoadedBundleHash() || "",
+            viewToggle,
+            readToggle,
+          });
+        });
+
+      engine = await start(configured)
+        .catch((e) => {
+          const fallback = otherRenderer(configured);
+          console.error(`[terminal] ${configured} renderer failed:`, e);
+          setFallbackNotice({
+            failed: configured,
+            fallback,
+            reason: e.message,
+          });
+          return start(fallback);
+        })
+        .catch(showBootFailure);
+      if (cancelled) {
+        engine?.dispose();
+        engine = null;
+      }
+      if (!engine) return;
 
       // A socket that closes may be a lapsed Cloudflare Access session, which
       // a WebSocket cannot tell apart from a network blip. One probe per close
@@ -310,6 +319,12 @@ export function TerminalIsland({ node, session }) {
       </div>
       <div id="touchOverlay" />
       <div id="paneIndicator" />
+      {fallbackNotice && (
+        <FallbackNotice
+          {...fallbackNotice}
+          onDismiss={() => setFallbackNotice(null)}
+        />
+      )}
       <div id="cmdOverlayBg" />
       <div
         id="cmdPickList"

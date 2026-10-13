@@ -284,7 +284,7 @@ test("changing one preference does not reset the others (GET-merge-PUT)", async 
     await page.locator("#renderer-picker select").selectOption("sterk");
     await expect(
       page.locator("#renderer-picker .settings-status"),
-    ).toBeVisible();
+    ).toContainText("Saved", { timeout: 10000 });
 
     const after = await page.evaluate(async () =>
       (await fetch("/api/settings/preferences")).json(),
@@ -300,6 +300,65 @@ test("changing one preference does not reset the others (GET-merge-PUT)", async 
   } finally {
     await putPrefs(page, PREF_DEFAULTS);
   }
+});
+
+const RENDERER_BUNDLES = {
+  xterm: /\/static\/vendor\/xterm\.bundle\.js/,
+  sterk: /\/static\/vendor\/sterk\.bundle\.js/,
+};
+
+function rendererSwitch(testInfo) {
+  const from = testInfo.project.use.renderer || "xterm";
+  return { from, to: from === "sterk" ? "xterm" : "sterk" };
+}
+
+async function storedRenderer(page) {
+  return page
+    .evaluate(async () => (await fetch("/api/settings/preferences")).json())
+    .then((p) => p.renderer);
+}
+
+test("a renderer switch saves once the target renderer passes its probe", async ({
+  page,
+}, testInfo) => {
+  const { from, to } = rendererSwitch(testInfo);
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await expect(page.locator("#renderer-picker select")).toHaveValue(from);
+  try {
+    await page.locator("#renderer-picker select").selectOption(to);
+    await expect(
+      page.locator("#renderer-picker .settings-status"),
+    ).toContainText("Saved", { timeout: 10000 });
+    await expect(page.locator("#renderer-probe-error")).toHaveCount(0);
+    expect(await storedRenderer(page)).toBe(to);
+    await expect(page.locator("[data-renderer-probe]")).toHaveCount(0);
+  } finally {
+    await putPrefs(page, { ...PREF_DEFAULTS, renderer: from });
+  }
+});
+
+test("a renderer switch is refused when the target bundle is missing", async ({
+  page,
+}, testInfo) => {
+  const { from, to } = rendererSwitch(testInfo);
+  await page.route(RENDERER_BUNDLES[to], (route) =>
+    route.fulfill({ status: 404, body: "not found" }),
+  );
+  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
+  await page.locator("#renderer-picker select").selectOption(to);
+
+  const error = page.locator("#renderer-probe-error");
+  await expect(error).toContainText(
+    `/static/vendor/${to}.bundle.js returned HTTP 404`,
+    { timeout: 10000 },
+  );
+  await expect(error).toContainText("reinstall mobux");
+  await expect(
+    error.locator("a", { hasText: "Report an issue" }),
+  ).toHaveAttribute("href", /github\.com\/mvhenten\/mobux\/issues\/new/);
+  await expect(page.locator("#renderer-picker select")).toHaveValue(from);
+  await expect(page.locator("#renderer-picker select")).toBeEnabled();
+  expect(await storedRenderer(page)).toBe(from);
 });
 
 test("PUT rejects an invalid renderer/default_view with 400", async ({
