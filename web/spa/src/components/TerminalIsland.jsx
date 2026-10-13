@@ -4,15 +4,11 @@ import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
 import { readLoadedBundleHash } from "../lib/bundleHash.js";
 import { createViewController } from "../lib/viewController.js";
-import {
-  ensureStylesheet,
-  loadScript,
-  staticUrl,
-} from "../lib/staticAssets.js";
+import { loadScript, staticUrl } from "../lib/staticAssets.js";
 import {
   RENDERER_LABELS,
+  loadRenderer,
   otherRenderer,
-  rendererBundles,
 } from "../lib/rendererProbe.js";
 import { probeSession } from "../lib/accessSession.js";
 
@@ -69,21 +65,21 @@ async function openBugReport() {
   window.location.href = url;
 }
 
-function loadRenderer(name) {
-  if (name === "xterm") ensureStylesheet(staticUrl("vendor/xterm.css"));
-  return Promise.all(
-    rendererBundles(name).map((b) => loadScript(staticUrl(b))),
-  );
+function noticeText({ kind, failed }) {
+  const [first] = failed;
+  if (kind === "fallback") {
+    return `The ${RENDERER_LABELS[first.name]} renderer failed to load (${first.reason}), so this terminal fell back to ${RENDERER_LABELS[otherRenderer(first.name)]}. Pick a renderer in Settings → Terminal renderer.`;
+  }
+  const reasons = failed
+    .map((f) => `${RENDERER_LABELS[f.name]}: ${f.reason}`)
+    .join("; ");
+  return `Both renderers failed to load (${reasons}). Update or reinstall mobux, then reload this page.`;
 }
 
-function FallbackNotice({ failed, fallback, reason, onDismiss }) {
+function RendererNotice({ notice, onDismiss }) {
   return (
     <div id="rendererFallbackNotice" class="renderer-fallback" role="alert">
-      <p>
-        The {RENDERER_LABELS[failed]} renderer failed to load ({reason}), so
-        this terminal fell back to {RENDERER_LABELS[fallback]}. Pick a renderer
-        in Settings → Terminal renderer.
-      </p>
+      <p>{noticeText(notice)}</p>
       <button type="button" aria-label="Dismiss" onClick={onDismiss}>
         ✕
       </button>
@@ -94,7 +90,7 @@ function FallbackNotice({ failed, fallback, reason, onDismiss }) {
 export function TerminalIsland({ node, session }) {
   const rootRef = useRef(null);
   const resizeObsRef = useRef(null);
-  const [fallbackNotice, setFallbackNotice] = useState(null);
+  const [rendererNotice, setRendererNotice] = useState(null);
 
   useLayoutEffect(() => {
     // The engine attaches to exactly this (node, session) — both come from
@@ -166,10 +162,18 @@ export function TerminalIsland({ node, session }) {
         isRead: () => viewCtl?.current === "read",
       };
 
-      const start = (renderer) =>
-        loadRenderer(renderer).then(() => {
-          if (cancelled || !rootRef.current) return null;
-          return createTerminal({
+      const start = async (renderer) => {
+        const loaded = await loadRenderer(renderer);
+        if (!loaded.ok) {
+          return {
+            ok: false,
+            name: renderer,
+            reason: `/static/${loaded.asset} did not load`,
+          };
+        }
+        if (cancelled || !rootRef.current) return { ok: true, engine: null };
+        try {
+          const created = createTerminal({
             node: node || "",
             session,
             host: rootRef.current,
@@ -181,20 +185,28 @@ export function TerminalIsland({ node, session }) {
             viewToggle,
             readToggle,
           });
-        });
+          return { ok: true, engine: created };
+        } catch (e) {
+          return { ok: false, name: renderer, reason: e.message };
+        }
+      };
 
-      engine = await start(configured)
-        .catch((e) => {
-          const fallback = otherRenderer(configured);
-          console.error(`[terminal] ${configured} renderer failed:`, e);
-          setFallbackNotice({
-            failed: configured,
-            fallback,
-            reason: e.message,
-          });
-          return start(fallback);
-        })
-        .catch(showBootFailure);
+      let started = await start(configured);
+      if (!started.ok) {
+        const failed = started;
+        console.error(`[terminal] ${configured} renderer failed:`, failed);
+        started = await start(otherRenderer(configured));
+        setRendererNotice(
+          started.ok
+            ? { kind: "fallback", failed: [failed] }
+            : { kind: "failed", failed: [failed, started] },
+        );
+      }
+      if (!started.ok) {
+        showBootFailure(new Error("no terminal renderer could start"));
+        return;
+      }
+      engine = started.engine;
       if (cancelled) {
         engine?.dispose();
         engine = null;
@@ -319,10 +331,10 @@ export function TerminalIsland({ node, session }) {
       </div>
       <div id="touchOverlay" />
       <div id="paneIndicator" />
-      {fallbackNotice && (
-        <FallbackNotice
-          {...fallbackNotice}
-          onDismiss={() => setFallbackNotice(null)}
+      {rendererNotice && (
+        <RendererNotice
+          notice={rendererNotice}
+          onDismiss={() => setRendererNotice(null)}
         />
       )}
       <div id="cmdOverlayBg" />

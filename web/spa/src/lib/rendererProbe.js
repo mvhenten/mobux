@@ -1,50 +1,53 @@
-import { loadScript, staticUrl } from "./staticAssets.js";
+import { ensureStylesheet, loadScript, staticUrl } from "./staticAssets.js";
 
 export const RENDERER_LABELS = { xterm: "xterm.js", sterk: "sterk" };
 export const PROBE_TIMEOUT_MS = 5000;
 
-const HEADLESS_BUNDLE = "vendor/xterm-headless.bundle.js";
 const BUNDLES = {
-  xterm: "vendor/xterm.bundle.js",
-  sterk: "vendor/sterk.bundle.js",
+  xterm: ["vendor/xterm-headless.bundle.js", "vendor/xterm.bundle.js"],
+  sterk: ["vendor/xterm-headless.bundle.js", "vendor/sterk.bundle.js"],
 };
-
-export function rendererBundles(name) {
-  return [HEADLESS_BUNDLE, BUNDLES[name]];
-}
 
 export function otherRenderer(name) {
   return name === "sterk" ? "xterm" : "sterk";
 }
 
+// Loads the renderer's vendor bundles (and its stylesheet) once per document.
+// Resolves `{ ok: false, asset }` naming the first bundle that did not load.
+export async function loadRenderer(name) {
+  if (name === "xterm") ensureStylesheet(staticUrl("vendor/xterm.css"));
+  const results = await Promise.allSettled(
+    BUNDLES[name].map((asset) => loadScript(staticUrl(asset))),
+  );
+  const failed = results.findIndex((r) => r.status === "rejected");
+  return failed === -1
+    ? { ok: true }
+    : { ok: false, asset: BUNDLES[name][failed] };
+}
+
 function fetchStatus(asset) {
   return fetch(staticUrl(asset), { cache: "no-store" }).then(
-    (res) => ({ asset, status: res.status }),
-    () => ({ asset, status: 0 }),
+    (res) => res.status,
+    () => 0,
   );
 }
 
-async function checkAssets(name) {
-  const results = await Promise.all(
-    [`renderer-${name}.js`, ...rendererBundles(name)].map(fetchStatus),
-  );
-  const missing = results.find((r) => r.status !== 200);
-  return missing ? { ok: false, step: "fetch", ...missing } : { ok: true };
+function timeLeft(deadlineAt) {
+  return Math.max(0, deadlineAt - performance.now());
 }
 
-function loadBundles(name) {
-  return rendererBundles(name).reduce(
-    (prev, asset) =>
-      prev.then((result) =>
-        result.ok
-          ? loadScript(staticUrl(asset)).then(
-              () => ({ ok: true }),
-              () => ({ ok: false, step: "load", asset }),
-            )
-          : result,
-      ),
-    Promise.resolve({ ok: true }),
-  );
+function beforeDeadline(promise, deadlineAt) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(
+      () => resolve({ ok: false, step: "timeout" }),
+      timeLeft(deadlineAt),
+    );
+  });
+  return Promise.race([promise, expired]).then((result) => {
+    clearTimeout(timer);
+    return result;
+  });
 }
 
 function probeHost() {
@@ -63,94 +66,79 @@ function probeHost() {
   return host;
 }
 
-async function drawLine(name) {
+async function loadStep(name, deadlineAt) {
+  const loaded = await beforeDeadline(loadRenderer(name), deadlineAt);
+  if (loaded.ok || loaded.step === "timeout") return loaded;
+  const status = await fetchStatus(loaded.asset);
+  return { ok: false, step: "load", asset: loaded.asset, status };
+}
+
+function importStep(deadlineAt) {
   const asset = "renderer-probe.js";
-  const imported = await import(/* @vite-ignore */ staticUrl(asset)).then(
-    (mod) => ({ ok: true, mod }),
-    (err) => ({ ok: false, step: "import", asset, message: err.message }),
+  return beforeDeadline(
+    import(/* @vite-ignore */ staticUrl(asset)).then(
+      (mod) => ({ ok: true, mod }),
+      (err) => ({ ok: false, step: "import", asset, message: err.message }),
+    ),
+    deadlineAt,
   );
+}
+
+// End-to-end check that `name` can run in this browser: its bundles load,
+// its module imports, and an offscreen instance starts and accepts a line.
+export async function probeRenderer(name) {
+  const deadlineAt = performance.now() + PROBE_TIMEOUT_MS;
+  const loaded = await loadStep(name, deadlineAt);
+  if (!loaded.ok) return loaded;
+  const imported = await importStep(deadlineAt);
   if (!imported.ok) return imported;
   const host = probeHost();
-  const result = await imported.mod.probeRenderer(name, host).then(
-    (r) => r,
-    (err) => ({ ok: false, step: "draw", message: err.message }),
+  const result = await imported.mod.probeRenderer(
+    name,
+    host,
+    timeLeft(deadlineAt),
   );
   host.remove();
   return result;
 }
 
-async function runSteps(name, progress) {
-  progress.step = "fetch";
-  const assets = await checkAssets(name);
-  if (!assets.ok) return assets;
-  progress.step = "load";
-  const loaded = await loadBundles(name);
-  if (!loaded.ok) return loaded;
-  progress.step = "start";
-  return drawLine(name);
-}
-
-// End-to-end check that `name` can run in this browser: its files are
-// served, its bundles execute, and an offscreen instance draws a line.
-export function probeRenderer(name) {
-  const progress = { step: "fetch" };
-  let timer;
-  const timedOut = new Promise((resolve) => {
-    timer = setTimeout(
-      () => resolve({ ok: false, step: "timeout", during: progress.step }),
-      PROBE_TIMEOUT_MS,
-    );
-  });
-  return Promise.race([runSteps(name, progress), timedOut]).then((result) => {
-    clearTimeout(timer);
-    return result;
-  });
-}
-
 const REINSTALL =
   "This mobux install is missing or serving a broken file; update or reinstall mobux, then try again.";
 
-const STEP_NAMES = {
-  fetch: "downloading its files",
-  load: "loading its bundle",
-  start: "starting it",
-};
+function loadFix(status) {
+  if (status === 401 || status === 403) {
+    return "Your session may have ended; reload the page to sign in again.";
+  }
+  if (status === 0) return "Check the connection to the host and try again.";
+  return REINSTALL;
+}
 
 export function describeProbeFailure(name, failure) {
   const label = RENDERER_LABELS[name];
-  const path = failure.asset ? `/static/${failure.asset}` : "";
-  if (failure.step === "fetch") {
+  if (failure.step === "load") {
     const status = failure.status
       ? `HTTP ${failure.status}`
       : "no response (network error)";
-    const fix =
-      failure.status === 401 || failure.status === 403
-        ? "Your session may have ended; reload the page to sign in again."
-        : failure.status
-          ? REINSTALL
-          : "Check the connection to the host and try again.";
-    return { what: `${label} check failed: ${path} returned ${status}.`, fix };
-  }
-  if (failure.step === "load") {
     return {
-      what: `${label} check failed: ${path} did not load.`,
-      fix: REINSTALL,
+      what: `${label} check failed: /static/${failure.asset} returned ${status}.`,
+      fix: loadFix(failure.status),
     };
   }
   if (failure.step === "import") {
     return {
-      what: `${label} check failed: ${path} did not import (${failure.message}).`,
+      what: `${label} check failed: /static/${failure.asset} did not import (${failure.message}).`,
       fix: REINSTALL,
     };
   }
   if (failure.step === "timeout") {
     return {
-      what: `${label} check timed out after ${PROBE_TIMEOUT_MS / 1000} s while ${STEP_NAMES[failure.during]}.`,
+      what: `${label} check timed out after ${PROBE_TIMEOUT_MS / 1000} s.`,
       fix: "Check the connection to the host and try again.",
     };
   }
+  const stage = failure.step === "start" ? "starting" : "accepting a test line";
   return {
-    what: `${label} failed while ${failure.step === "start" ? "starting" : "drawing a test line"}: ${failure.message}.`,
+    what: `${label} failed while ${stage}: ${failure.message}.`,
     fix: "Keep the current renderer and report an issue.",
   };
 }

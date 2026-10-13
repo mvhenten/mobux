@@ -1,15 +1,6 @@
 import { u } from "./base.js";
 
-// `CACHE_BUST` mirrors the old Rust page's `?v=` query-param convention on
-// <script>/<link> tags, but it's a fixed string — it does no cache-busting
-// of its own. What actually guarantees a stale cache never hands back an
-// old bundle is `serve_static` in src/main.rs serving every /static/* asset
-// `no-store, must-revalidate`; the query param is vestigial and harmless.
-const CACHE_BUST = "spa";
-
-export function staticUrl(path) {
-  return u(`/static/${path}?v=${CACHE_BUST}`);
-}
+export const staticUrl = (path) => u(`/static/${path}`);
 
 // Append a classic <script> and resolve when it loads. Deduped per document:
 // the vendor bundles pin window globals (window.Terminal / window.Sterk) and

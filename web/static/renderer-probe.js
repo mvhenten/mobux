@@ -1,11 +1,11 @@
-// Draws one line through a renderer on a throwaway buffer, the way the
-// engine wires it, so a renderer can be proven before a terminal depends on
-// it. The renderer's vendor bundle (and the headless one) must be loaded.
+// Starts a renderer under a throwaway engine and writes one line through it,
+// so a renderer can be proven before a terminal depends on it. The engine is
+// never connected. The renderer's vendor bundle (and the headless one) must
+// be loaded.
 
+import { TerminalEngine } from "./terminal-engine.js";
 import { createXtermRenderer } from "./renderer-xterm.js";
 import { createSterkRenderer } from "./renderer-sterk.js";
-import { createTerminalBuffer } from "./terminal-buffer.js";
-import { createRedrawWriter } from "./terminal-redraw.js";
 
 export const PROBE_LINE = "mobux renderer probe";
 
@@ -17,7 +17,7 @@ const OPTIONS = {
   scrollback: 100,
 };
 
-function drawnLine(renderer) {
+function acceptedLine(renderer) {
   const { length } = renderer.viewport();
   for (let y = 0; y < length; y++) {
     if (renderer.rowText(y)?.includes(PROBE_LINE)) return true;
@@ -25,50 +25,58 @@ function drawnLine(renderer) {
   return false;
 }
 
-function start(name, host) {
-  const parts = {};
+function startEngine(name, host) {
+  let renderer = null;
   try {
-    parts.renderer = FACTORIES[name](host, OPTIONS);
-    parts.buffer = createTerminalBuffer({
-      cols: parts.renderer.cols,
-      rows: parts.renderer.rows,
+    renderer = FACTORIES[name](host, OPTIONS);
+    const engine = new TerminalEngine({
+      session: "",
+      host,
+      renderer,
       scrollback: OPTIONS.scrollback,
     });
-    parts.view = parts.renderer.drawBuffer
-      ? parts.renderer.drawBuffer(parts.buffer)
-      : createRedrawWriter(parts.buffer, parts.renderer);
-    return { ok: true, parts };
+    return { ok: true, engine };
   } catch (err) {
-    return { ok: false, parts, message: err.message };
+    renderer?.dispose();
+    return { ok: false, step: "start", message: err.message };
   }
 }
 
-function teardown({ view, buffer, renderer }) {
-  view?.dispose();
-  buffer?.dispose();
-  renderer?.dispose();
+function deadline(ms) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, step: "timeout" }), ms);
+  });
+  return { expired, cancel: () => clearTimeout(timer) };
 }
 
-export async function probeRenderer(name, host) {
-  const started = start(name, host);
-  if (!started.ok) {
-    teardown(started.parts);
-    return { ok: false, step: "start", message: started.message };
-  }
-  const { parts } = started;
-  const drawn = await parts.buffer
+function acceptLine(engine) {
+  return engine.buffer
     .writeScreen(`${PROBE_LINE}\r\n`)
-    .then(() => parts.view.flush())
-    .then(() => parts.view.settle())
+    .then(() => engine.view.flush())
+    .then(() => engine.view.settle())
     .then(
-      () => ({ ok: drawnLine(parts.renderer) }),
-      (err) => ({ ok: false, message: err.message }),
+      () =>
+        acceptedLine(engine.renderer)
+          ? { ok: true }
+          : {
+              ok: false,
+              step: "accept",
+              message: "the test line never reached the renderer",
+            },
+      (err) => ({ ok: false, step: "accept", message: err.message }),
     );
-  teardown(parts);
-  if (drawn.ok) return { ok: true };
-  return {
-    ok: false,
-    step: "draw",
-    message: drawn.message || "the test line did not appear on screen",
-  };
+}
+
+export async function probeRenderer(name, host, timeoutMs) {
+  const started = startEngine(name, host);
+  if (!started.ok) return started;
+  const limit = deadline(timeoutMs);
+  const result = await Promise.race([
+    acceptLine(started.engine),
+    limit.expired,
+  ]);
+  limit.cancel();
+  started.engine.dispose();
+  return result;
 }

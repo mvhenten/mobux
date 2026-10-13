@@ -285,6 +285,7 @@ test("changing one preference does not reset the others (GET-merge-PUT)", async 
     await expect(
       page.locator("#renderer-picker .settings-status"),
     ).toContainText("Saved", { timeout: 10000 });
+    await expect(page.locator("[data-renderer-probe]")).toHaveCount(0);
 
     const after = await page.evaluate(async () =>
       (await fetch("/api/settings/preferences")).json(),
@@ -317,25 +318,6 @@ async function storedRenderer(page) {
     .evaluate(async () => (await fetch("/api/settings/preferences")).json())
     .then((p) => p.renderer);
 }
-
-test("a renderer switch saves once the target renderer passes its probe", async ({
-  page,
-}, testInfo) => {
-  const { from, to } = rendererSwitch(testInfo);
-  await page.goto(`${APP}#/settings`, { waitUntil: "networkidle" });
-  await expect(page.locator("#renderer-picker select")).toHaveValue(from);
-  try {
-    await page.locator("#renderer-picker select").selectOption(to);
-    await expect(
-      page.locator("#renderer-picker .settings-status"),
-    ).toContainText("Saved", { timeout: 10000 });
-    await expect(page.locator("#renderer-probe-error")).toHaveCount(0);
-    expect(await storedRenderer(page)).toBe(to);
-    await expect(page.locator("[data-renderer-probe]")).toHaveCount(0);
-  } finally {
-    await putPrefs(page, { ...PREF_DEFAULTS, renderer: from });
-  }
-});
 
 test("a renderer switch is refused when the target bundle is missing", async ({
   page,
