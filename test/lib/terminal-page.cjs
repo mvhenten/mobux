@@ -3,9 +3,50 @@
 
 const { execSync } = require("child_process");
 
+function assertSessionAlive(tmux, session) {
+  let panes;
+  try {
+    panes = tmux(
+      `list-panes -s -t ${session} -F '#{pane_id} #{pane_dead} #{pane_dead_status} #{pane_dead_signal} #{pane_pid}'`,
+    )
+      .toString()
+      .trim()
+      .split("\n");
+  } catch (error) {
+    let sessions;
+    try {
+      sessions = tmux("list-sessions").toString().trim();
+    } catch (listError) {
+      sessions = `list-sessions failed: ${listError.stderr || listError.message}`;
+    }
+    throw new Error(
+      `tmux session '${session}' is gone: ${error.stderr || error.message}\nlist-sessions:\n${sessions}`,
+    );
+  }
+  const deadPanes = panes
+    .map((line) => line.split(" "))
+    .filter(([, dead]) => dead === "1");
+  if (deadPanes.length === 0) return;
+  const report = deadPanes.map(([paneId, , status, signal, pid]) => {
+    let lastLines;
+    try {
+      lastLines = tmux(`capture-pane -p -t ${paneId} -S -30`)
+        .toString()
+        .trimEnd();
+    } catch (captureError) {
+      lastLines = `capture-pane failed: ${captureError.stderr || captureError.message}`;
+    }
+    return `pane ${paneId} pid ${pid} exit status ${status || "unreported"} signal ${signal || "unreported"}\nlast 30 lines:\n${lastLines}`;
+  });
+  throw new Error(
+    `tmux session '${session}' has a dead pane\n${report.join("\n")}`,
+  );
+}
+
 // One window, one pane, no half-typed command line, a known prompt and a
 // cleared screen.
 function resetSession(tmux, session) {
+  assertSessionAlive(tmux, session);
   const firstWindow = tmux(`list-windows -t ${session} -F '#{window_id}'`)
     .toString()
     .trim()
