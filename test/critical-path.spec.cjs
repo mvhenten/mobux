@@ -54,6 +54,7 @@ test.beforeAll(() => {
   } catch (_) {}
   // bash --norc --noprofile gives us a clean, predictable prompt.
   tmux(`new-session -d -s ${SESSION} ${SHELL_ENV} "bash --norc --noprofile"`);
+  tmux(`set-option -t ${SESSION} remain-on-exit on`);
 });
 
 test.beforeEach(() => {
