@@ -58,6 +58,7 @@ export async function probeRenderer(name, host) {
   const { parts } = started;
   const drawn = await parts.buffer
     .writeScreen(`${PROBE_LINE}\r\n`)
+    .then(() => parts.view.flush())
     .then(() => parts.view.settle())
     .then(
       () => ({ ok: drawnLine(parts.renderer) }),
