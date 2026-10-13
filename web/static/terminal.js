@@ -203,18 +203,28 @@ export function createTerminal({
   // The engine is renderer-agnostic; it drives whichever adapter the host
   // selected (the vendor bundle is already loaded). All renderer-specific
   // code lives inside the two adapter factories.
-  const rendererImpl =
-    renderer === "sterk"
-      ? createSterkRenderer(termEl, RENDERER_OPTIONS)
-      : createXtermRenderer(termEl, RENDERER_OPTIONS);
-  const core = new TerminalEngine({
-    session,
-    node,
-    host: termEl,
-    renderer: rendererImpl,
-    build,
-    scrollback: RENDERER_OPTIONS.scrollback,
-  });
+  // A renderer that fails to start leaves #terminal empty, so the host can
+  // fall back to the other renderer in the same scaffold.
+  let rendererImpl = null;
+  let core;
+  try {
+    rendererImpl =
+      renderer === "sterk"
+        ? createSterkRenderer(termEl, RENDERER_OPTIONS)
+        : createXtermRenderer(termEl, RENDERER_OPTIONS);
+    core = new TerminalEngine({
+      session,
+      node,
+      host: termEl,
+      renderer: rendererImpl,
+      build,
+      scrollback: RENDERER_OPTIONS.scrollback,
+    });
+  } catch (err) {
+    rendererImpl?.dispose();
+    termEl.replaceChildren();
+    throw err;
+  }
 
   // Apply the stored theme to all three layers. The renderer applied its boot
   // palette at construction; this call pushes the --ansi-* vars onto #reader

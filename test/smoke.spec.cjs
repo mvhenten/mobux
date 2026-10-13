@@ -139,6 +139,38 @@ test("terminal renders and connects", async ({ page }) => {
   });
 });
 
+test("terminal falls back to the other renderer when its bundle is missing", async ({
+  page,
+}, testInfo) => {
+  const failed = testInfo.project.use.renderer || "xterm";
+  const fallback = failed === "sterk" ? "xterm" : "sterk";
+  const labels = { xterm: "xterm.js", sterk: "sterk" };
+  await page.route(new RegExp(`/static/vendor/${failed}\\.bundle\\.js`), (r) =>
+    r.fulfill({ status: 404, body: "not found" }),
+  );
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+
+  const notice = page.locator("#rendererFallbackNotice");
+  await expect(notice).toBeVisible({ timeout: 10000 });
+  await expect(notice).toContainText(
+    `The ${labels[failed]} renderer failed to load`,
+  );
+  await expect(notice).toContainText(`${failed}.bundle.js`);
+  await expect(notice).toContainText(`fell back to ${labels[fallback]}`);
+
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 15000 },
+  );
+  await expect(page.locator(`.${fallback}-viewport`)).toBeVisible({
+    timeout: 5000,
+  });
+  await expect(page.locator(`.${failed}-viewport`)).toHaveCount(0);
+
+  await notice.getByRole("button", { name: "Dismiss" }).click();
+  await expect(notice).toHaveCount(0);
+});
+
 test("scroll works via touch gesture", async ({ page }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
 
