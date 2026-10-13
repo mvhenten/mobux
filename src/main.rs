@@ -5991,17 +5991,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn await_phase(job: &Arc<tokio::sync::Mutex<BackgroundJobState>>, want: &InstallPhase) {
-        for _ in 0..500 {
-            if job.lock().await.phase == *want {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("job never reached {want:?}");
-    }
-
-    #[cfg(unix)]
     async fn await_log(path: &std::path::Path, expected: &str) {
         for _ in 0..500 {
             if stub_log(path) == expected {
