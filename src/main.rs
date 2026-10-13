@@ -6002,6 +6002,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn await_log(path: &std::path::Path, expected: &str) {
+        for _ in 0..500 {
+            if stub_log(path) == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("stub log never read {expected:?}");
+    }
+
+    #[cfg(unix)]
     fn stub_log(path: &std::path::Path) -> String {
         std::fs::read_to_string(path).unwrap_or_default()
     }
@@ -6029,7 +6040,8 @@ mod tests {
             stub_command(&build, &log),
         ));
 
-        await_phase(&job, &InstallPhase::InstallingTools).await;
+        await_log(&log, "setup\n").await;
+        assert_eq!(job.lock().await.phase, InstallPhase::InstallingTools);
         assert_eq!(stub_log(&log), "setup\n", "the build must wait for setup");
         assert!(InstallPhase::InstallingTools.is_active());
         assert_eq!(
