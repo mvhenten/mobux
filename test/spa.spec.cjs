@@ -2426,6 +2426,7 @@ test("settings: every ported card renders and consumes its endpoint", async ({
   await expect(page.locator("#stt-provider")).toBeVisible();
   await page.goto(`${APP}#/settings/listen`, { waitUntil: "networkidle" });
   await expect(page.locator("#listen-settings")).toBeVisible();
+  await expect(page.locator("#ttsKind")).toBeEnabled();
   await page.goto(`${APP}#/settings/about`, { waitUntil: "networkidle" });
   await expect(page.locator("#build-info h2")).toHaveText("Build");
 
