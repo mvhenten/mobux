@@ -252,8 +252,20 @@ test-smoke:
 test-node:
 	node --test --test-timeout=30000 test/terminal-text.test.mjs
 
+# The published crate must carry everything the binary embeds: the built
+# settings app and both terminal renderers. Needs `make web` (or npm ci) first.
+PACKAGE_REQUIRED = web/static/spa/index.html web/static/vendor/sterk.bundle.js web/static/vendor/xterm.bundle.js
+
+.PHONY: check-package
+check-package:
+	@list=$$($(CARGO) package --list --allow-dirty) || exit 1; \
+	for f in $(PACKAGE_REQUIRED); do \
+		echo "$$list" | grep -qx "$$f" || { echo "check-package: $$f is missing from the crate"; exit 1; }; \
+	done; \
+	echo "check-package: crate ships the settings app and both renderers"
+
 .PHONY: test-critical-path
-test-critical-path: test-node
+test-critical-path: test-node check-package
 	@$(MAKE) smoke-start
 	@trap '$(MAKE) smoke-stop' EXIT; \
 		MOBUX_URL=http://127.0.0.1:$(MOBUX_SMOKE_PORT) \

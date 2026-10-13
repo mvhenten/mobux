@@ -12,7 +12,24 @@ homepage = "https://github.com/mvhenten/mobux"
 readme = "README.md"
 keywords = ["tmux", "terminal", "mobile", "web", "tui"]
 categories = ["command-line-utilities", "web-programming"]
-exclude = ["target/"]
+# An explicit list, because `include` bypasses .gitignore: web/static/spa/ is
+# built (npm ci → web/build.js), never committed, and must ship in the crate.
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/build.rs",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/THIRD_PARTY-LICENSES.md",
+    "/src/**",
+    "/web/static/**",
+    "!*.map",
+    "/docs/mobux.schema.json",
+    "/bin/setup-twa",
+    "/bin/twa-build",
+    "/twa/**",
+]
 
 [features]
 default = []
