@@ -185,6 +185,16 @@ body.term-body #app {
   font-size: 0.95rem;
   font-family: inherit;
 }
+.fatal-error-page--notice {
+  background: #1d1f21;
+  z-index: 1000;
+}
+.fatal-error-page--notice .fatal-error-summary {
+  font-family: inherit;
+}
+.fatal-error-page--notice .fatal-error-reload-btn {
+  color: #1d1f21;
+}
 .fatal-error-report-btn[aria-disabled="true"] {
   opacity: 0.5;
   pointer-events: none;
