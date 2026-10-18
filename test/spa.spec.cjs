@@ -923,6 +923,57 @@ test("node-qualified route threads ?node= and &build= onto the PTY ws", async ({
   expect(wsUrl).toMatch(/[?&]build=[\w-]+/);
 });
 
+// ── bookmarked session that no longer exists ────────────────────────────────
+//
+// Attaching to a session tmux cannot find left its one-line complaint on an
+// otherwise empty terminal, with the tmux sheet still live: a dead screen.
+const GONE = `spa-gone-${process.pid}`;
+
+test("a bookmarked session that is gone shows a full page back to the dashboard", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/s/${GONE}`, { waitUntil: "networkidle" });
+
+  const gone = page.locator("#sessionGone");
+  await expect(gone).toBeVisible({ timeout: 10000 });
+  await expect(gone).toContainText("This session no longer exists on");
+  await expect(page.locator("#sessionGoneHome")).toHaveText(
+    "Back to dashboard",
+  );
+  await expect(page.locator("#sessionGoneCreate")).toHaveText("New session");
+  await expect(page.locator("#inputBar")).toHaveCount(0);
+  await expect(page.locator("#cmdPickList")).toHaveCount(0);
+
+  await page.locator("#sessionGoneHome").click();
+  await expect(page).toHaveURL(/#\/$/);
+  await expect(page.locator("#sessionList .session-item").first()).toBeVisible({
+    timeout: 8000,
+  });
+});
+
+test("New session on the gone-session page recreates it and attaches", async ({
+  page,
+}) => {
+  try {
+    await page.goto(`${APP}#/s/${GONE}`, { waitUntil: "networkidle" });
+    await page.locator("#sessionGoneCreate").click();
+
+    await expect(page.locator("#sessionGone")).toHaveCount(0);
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById("terminal");
+        return t && t.childElementCount > 0;
+      },
+      { timeout: 15000 },
+    );
+    expect(String(tmux("list-sessions -F '#{session_name}'"))).toContain(GONE);
+  } finally {
+    try {
+      tmux(`kill-session -t ${GONE}`);
+    } catch (_) {}
+  }
+});
+
 // ── node-drop on re-entry (issue #210) ──────────────────────────────────────
 //
 // A session's node rides only in the hash URL (`#/s/<node>/<name>`), so a
