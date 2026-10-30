@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
+import { getPref, setPref } from "../lib/prefs.js";
 
-const STORAGE_KEY = "mobux:drawer-favourites";
+const PREF_KEY = "drawer_favourites";
 
 function isFavourite(value) {
   return (
@@ -12,20 +13,8 @@ function isFavourite(value) {
 }
 
 function loadFavourites() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed.filter(isFavourite) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveFavourites(list) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    // Storage blocked (private window): the list still works for this visit.
-  }
+  const stored = getPref(PREF_KEY);
+  return Array.isArray(stored) ? stored.filter(isFavourite) : [];
 }
 
 function byUses(a, b) {
@@ -38,7 +27,7 @@ export function DrawerFavourites({ engineRef }) {
 
   const update = (next) => {
     const sorted = [...next].sort(byUses);
-    saveFavourites(sorted);
+    setPref(PREF_KEY, sorted);
     setFavourites(sorted);
   };
 

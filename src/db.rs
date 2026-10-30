@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use p256::ecdsa::SigningKey;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Raw VAPID keypair as stored in the database.
 ///
@@ -111,6 +111,14 @@ pub struct UiPreferences {
     /// Stored verbatim; a since-removed node is reconciled to local by the
     /// client.
     pub selected_node: String,
+    /// Shell commands pinned in the terminal drawer, with how often each ran.
+    pub drawer_favourites: Vec<DrawerFavourite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawerFavourite {
+    pub text: String,
+    pub uses: u32,
 }
 
 impl Default for UiPreferences {
@@ -124,6 +132,7 @@ impl Default for UiPreferences {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         }
     }
 }
@@ -185,7 +194,8 @@ impl Db {
                 listen_voice TEXT NOT NULL,
                 listen_rate REAL NOT NULL,
                 listen_pitch REAL NOT NULL,
-                selected_node TEXT NOT NULL DEFAULT ''
+                selected_node TEXT NOT NULL DEFAULT '',
+                drawer_favourites TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE IF NOT EXISTS stt_config (
@@ -229,6 +239,9 @@ impl Db {
         // localStorage into this global row. Older DBs predate the column.
         let _ = conn.execute_batch(
             "ALTER TABLE ui_preferences ADD COLUMN selected_node TEXT NOT NULL DEFAULT '';",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE ui_preferences ADD COLUMN drawer_favourites TEXT NOT NULL DEFAULT '[]';",
         );
 
         // Migration: drop tables from the removed peer-relay feature
@@ -491,7 +504,8 @@ impl Db {
         let row: Option<UiPreferences> = conn
             .query_row(
                 "SELECT renderer, theme, default_view, osc133_hint_dismissed,
-                        listen_voice, listen_rate, listen_pitch, selected_node
+                        listen_voice, listen_rate, listen_pitch, selected_node,
+                        drawer_favourites
                  FROM ui_preferences WHERE id = 1",
                 [],
                 |row| {
@@ -504,6 +518,8 @@ impl Db {
                         listen_rate: row.get(5)?,
                         listen_pitch: row.get(6)?,
                         selected_node: row.get(7)?,
+                        drawer_favourites: serde_json::from_str(&row.get::<_, String>(8)?)
+                            .unwrap_or_default(),
                     })
                 },
             )
@@ -531,8 +547,9 @@ impl Db {
         conn.execute(
             "INSERT INTO ui_preferences
                  (id, renderer, theme, default_view, osc133_hint_dismissed,
-                  listen_voice, listen_rate, listen_pitch, selected_node)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  listen_voice, listen_rate, listen_pitch, selected_node,
+                  drawer_favourites)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                  renderer = excluded.renderer,
                  theme = excluded.theme,
@@ -541,7 +558,8 @@ impl Db {
                  listen_voice = excluded.listen_voice,
                  listen_rate = excluded.listen_rate,
                  listen_pitch = excluded.listen_pitch,
-                 selected_node = excluded.selected_node",
+                 selected_node = excluded.selected_node,
+                 drawer_favourites = excluded.drawer_favourites",
             params![
                 prefs.renderer,
                 prefs.theme,
@@ -551,6 +569,8 @@ impl Db {
                 prefs.listen_rate,
                 prefs.listen_pitch,
                 prefs.selected_node,
+                serde_json::to_string(&prefs.drawer_favourites)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
             ],
         )?;
         Ok(())
@@ -819,6 +839,7 @@ mod tests {
         assert_eq!(defaults.listen_rate, 1.0);
         assert_eq!(defaults.listen_pitch, 1.0);
         assert_eq!(defaults.selected_node, "");
+        assert!(defaults.drawer_favourites.is_empty());
 
         db.set_ui_preferences(UiPreferences {
             renderer: "sterk".to_string(),
@@ -829,6 +850,10 @@ mod tests {
             listen_rate: 1.4,
             listen_pitch: 0.8,
             selected_node: "gpu-box".to_string(),
+            drawer_favourites: vec![DrawerFavourite {
+                text: "make test".to_string(),
+                uses: 3,
+            }],
         })
         .expect("write");
 
@@ -841,6 +866,13 @@ mod tests {
         assert_eq!(got.listen_rate, 1.4);
         assert_eq!(got.listen_pitch, 0.8);
         assert_eq!(got.selected_node, "gpu-box");
+        assert_eq!(
+            got.drawer_favourites,
+            vec![DrawerFavourite {
+                text: "make test".to_string(),
+                uses: 3,
+            }]
+        );
     }
 
     #[test]

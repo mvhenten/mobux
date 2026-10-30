@@ -1994,6 +1994,8 @@ struct UiPrefsJson {
     listen_pitch: f64,
     #[serde(default)]
     selected_node: String,
+    #[serde(default)]
+    drawer_favourites: Vec<db::DrawerFavourite>,
 }
 
 impl From<db::UiPreferences> for UiPrefsJson {
@@ -2024,6 +2026,7 @@ impl From<db::UiPreferences> for UiPrefsJson {
             listen_rate: p.listen_rate.clamp(0.5, 2.0),
             listen_pitch: p.listen_pitch.clamp(0.5, 2.0),
             selected_node: p.selected_node,
+            drawer_favourites: p.drawer_favourites,
         }
     }
 }
@@ -2056,6 +2059,7 @@ impl UiPrefsJson {
             listen_rate: self.listen_rate.clamp(0.5, 2.0),
             listen_pitch: self.listen_pitch.clamp(0.5, 2.0),
             selected_node: self.selected_node,
+            drawer_favourites: self.drawer_favourites,
         })
     }
 }
@@ -4270,6 +4274,7 @@ mod tests {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         };
         let err = bad.validate().expect_err("bogus renderer must be rejected");
         assert!(
@@ -4289,6 +4294,7 @@ mod tests {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         };
         let err = bad
             .validate()
@@ -4310,6 +4316,7 @@ mod tests {
             listen_rate: 99.0,  // out of range: clamped, not rejected
             listen_pitch: -5.0, // out of range: clamped, not rejected
             selected_node: "gpu-box".to_string(),
+            drawer_favourites: Vec::new(),
         }
         .validate()
         .expect("valid enums must be accepted");
@@ -4331,6 +4338,7 @@ mod tests {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         }
         .validate()
         .expect("read must be accepted as a default_view");
@@ -4355,6 +4363,7 @@ mod tests {
             listen_rate: 500.0,
             listen_pitch: -500.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         };
         let json: UiPrefsJson = corrupt.into();
         assert_eq!(json.renderer, "xterm");

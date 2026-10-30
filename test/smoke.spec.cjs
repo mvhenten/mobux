@@ -1013,6 +1013,16 @@ test("a favourite added in the command menu sends its text plus Enter", async ({
 
   await expect.poll(() => sent.join("")).toBe("echo fav-363\r");
   await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await page.request.get(`${BASE}/api/settings/preferences`)
+          ).json()
+        ).drawer_favourites,
+    )
+    .toEqual([{ text: "echo fav-363", uses: 1 }]);
 });
 
 test("no command menu label carries an emoji or icon glyph", async ({
