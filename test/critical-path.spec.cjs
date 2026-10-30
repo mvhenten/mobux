@@ -1639,13 +1639,19 @@ test("one copy: a tmux command via /command keeps a single copy of history", asy
     })
     .toEqual(expectedCounts(1, 500));
 
-  await page.evaluate(() => {
-    const btn = document.createElement("button");
-    btn.dataset.cmd = "next-pane";
-    document.getElementById("cmdPickList").append(btn);
-    btn.click();
-    btn.remove();
-  });
+  const { vh, x } = await page.evaluate(() => ({
+    vh: window.innerHeight,
+    x: Math.round(window.innerWidth / 2),
+  }));
+  await touch(page, "touchstart", x, vh - 20);
+  await touch(page, "touchmove", x, vh - 60);
+  await touch(page, "touchmove", x, vh - 100);
+  await touch(page, "touchend", x, vh - 100);
+  await expect(page.locator("#cmdPickList")).toHaveClass(/visible/);
+  const windows = page.locator("#cmdWindowsSection");
+  await windows.locator("summary").tap();
+  await windows.locator('[data-cmd="next-window"]').tap();
+  await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
   await page.waitForTimeout(1500);
   expect(numberCounts(await terminalLines(page))).toEqual(
     expectedCounts(1, 500),
