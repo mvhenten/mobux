@@ -122,6 +122,52 @@ test("the served shell carries the entry script the base helper reads", async ({
   expect(new URL(src).pathname).toMatch(/^\/static\/spa\//);
 });
 
+// Android Chrome opens a navigation outside the installed app's scope in a
+// browser-chromed window (#366), so the shell must link a manifest whose
+// scope covers /app.
+test("/app links a standalone manifest whose scope covers /app", async ({
+  page,
+}) => {
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  const href = await page.evaluate(
+    () => document.querySelector('link[rel="manifest"]')?.href || null,
+  );
+  expect(href).toBeTruthy();
+
+  const res = await page.request.get(href);
+  expect(res.status()).toBe(200);
+  const manifest = await res.json();
+  expect(manifest.display).toBe("standalone");
+
+  const scope = new URL(manifest.scope, href);
+  const app = new URL(APP);
+  expect(scope.origin).toBe(app.origin);
+  expect(app.pathname.startsWith(scope.pathname)).toBeTruthy();
+  expect(new URL(manifest.start_url, href).pathname).toBe(app.pathname);
+});
+
+test("opening a session from Home stays in the same document", async ({
+  page,
+}) => {
+  const popups = [];
+  page.context().on("page", (p) => popups.push(p));
+  page.on("popup", (p) => popups.push(p));
+
+  await page.goto(`${APP}#/`, { waitUntil: "networkidle" });
+  await page.evaluate(() => {
+    window.__mobuxMarker = "kept";
+  });
+
+  const row = page
+    .locator("#sessionList .session-item")
+    .filter({ has: page.locator(".session-name", { hasText: SEED }) });
+  await row.first().click();
+  await expect(page).toHaveURL(new RegExp(`/s/.*${SEED}`), { timeout: 8000 });
+
+  expect(await page.evaluate(() => window.__mobuxMarker)).toBe("kept");
+  expect(popups).toHaveLength(0);
+});
+
 // ── server-synced UI preferences (#211) ───────────────────────────────
 
 const PREF_DEFAULTS = {
