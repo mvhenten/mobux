@@ -938,14 +938,30 @@ test("the command menu scrolls by touch when its sections overflow the screen", 
   );
   expect(overflow).toBeGreaterThan(0);
 
+  await expect
+    .poll(async () => {
+      const b = await sheet.boundingBox();
+      return Math.round(b.y + b.height);
+    })
+    .toBe(420);
   const box = await sheet.boundingBox();
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Input.synthesizeScrollGesture", {
-    x: Math.round(box.x + box.width / 2),
-    y: Math.round(box.y + box.height - 40),
-    yDistance: -200,
-    gestureSourceType: "touch",
-    speed: 800,
+  const x = Math.round(box.x + box.width / 2);
+  const startY = Math.round(box.y + box.height - 40);
+  const point = (y) => [{ x, y, id: 1 }];
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: point(startY),
+  });
+  for (let step = 1; step <= 10; step++) {
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: point(startY - step * 20),
+    });
+  }
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: [],
   });
 
   await expect
@@ -961,9 +977,12 @@ test("a Keys button in the command menu sends the same bytes as the ribbon", asy
 }) => {
   const sent = captureInputFrames(page);
   await page.goto(`${BASE}/app#/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
-    timeout: 5000,
-  });
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 8000 },
+  );
+  await page.waitForTimeout(500);
+  sent.splice(0);
 
   for (const [key, label] of [
     ["\\x1b[A", "Up"],
