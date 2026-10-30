@@ -367,6 +367,9 @@ export function createAttachAction({ send, node, button, errorContainer } = {}) 
 //              the mobile text input). The injection itself always happens.
 const TARGET_RATE = 16000;
 const MAX_SECONDS = 60;
+// TUIs such as Claude Code read a fast multi-character burst as a paste and
+// swallow a trailing Enter, so Enter goes out as its own keypress after a gap.
+const SUBMIT_ENTER_DELAY_MS = 50;
 
 export function createDictateAction({ send, node, button, onText } = {}) {
   const mic = {
@@ -892,7 +895,7 @@ export function createDictateAction({ send, node, button, onText } = {}) {
   function submitText(text) {
     telemetry.log('mic.submit');
     send(text.trim());
-    send('\r');
+    setTimeout(() => send('\r'), SUBMIT_ENTER_DELAY_MS);
     onText?.();
     mic.busy = false;
     micLabel('🎤');

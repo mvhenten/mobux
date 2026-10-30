@@ -1731,6 +1731,16 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
       });
     });
 
+    await page.addInitScript(() => {
+      window.__wsFrames = [];
+      const realSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string") {
+          window.__wsFrames.push({ data, at: performance.now() });
+        }
+        return realSend.call(this, data);
+      };
+    });
     await openRecording(page);
     await page.locator("#mobux-mic-overlay .mo-btn-primary").click();
 
@@ -1744,6 +1754,25 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     // The transcript was sent straight through (typed + Enter), not held
     // back for a confirm tap.
     await waitForTerminalMarker(page, "mobux fast submit marker");
+
+    // TUIs read a fast burst as a paste and swallow a trailing Enter, so the
+    // transcript and Enter must be separate frames with a gap between them.
+    await page.waitForFunction(() =>
+      window.__wsFrames.some((f) => f.data === "\r"),
+    );
+    const frames = await page.evaluate(() => window.__wsFrames);
+    const textIdx = frames.findIndex(
+      (f) => f.data === "mobux fast submit marker",
+    );
+    expect(textIdx, "transcript sent as its own frame").toBeGreaterThanOrEqual(
+      0,
+    );
+    const enter = frames.slice(textIdx + 1).find((f) => f.data === "\r");
+    expect(
+      enter,
+      "Enter sent as its own frame after the transcript",
+    ).toBeTruthy();
+    expect(enter.at - frames[textIdx].at).toBeGreaterThanOrEqual(30);
   });
 
   test("a transcription failure after Stop keeps the recording — Retry resends it instead of re-recording", async ({
