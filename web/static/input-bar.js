@@ -11,6 +11,14 @@ import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
 import { openSettings } from './settings-nav.js';
 
+// ── Parse escape sequences from data-key attributes ───────────────
+export function parseKey(raw) {
+  return raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+            .replace(/\\t/g, '\t')
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\r');
+}
+
 export function createInputBar(engine, send, node = '') {
   const bar = document.getElementById('inputBar');
   const ribbon = document.getElementById('inputRibbon');
@@ -25,14 +33,6 @@ export function createInputBar(engine, send, node = '') {
   // so it can't steal focus / pop the soft keyboard (R15). The engine routes
   // this to the live adapter — the input bar never touches renderer internals.
   engine.setNativeInputEnabled(false);
-
-  // ── Parse escape sequences from data-key attributes ───────────────
-  function parseKey(raw) {
-    return raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-              .replace(/\\t/g, '\t')
-              .replace(/\\n/g, '\n')
-              .replace(/\\r/g, '\r');
-  }
 
   // ── Show/hide bar ─────────────────────────────────────────────────
   // The bar is now a flex item (see style.css), so `.hidden` toggles

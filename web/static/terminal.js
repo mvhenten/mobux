@@ -5,7 +5,7 @@ import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createNativeSelection } from "./native-select.js";
 import { createLinkLayer } from "./link-layer.js";
-import { createInputBar } from "./input-bar.js";
+import { createInputBar, parseKey } from "./input-bar.js";
 import { createTopBar } from "./top-bar.js";
 import { openSettings } from "./settings-nav.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
@@ -301,6 +301,8 @@ export function createTerminal({
       hideCmdList();
       return;
     }
+    const keyItem = e.target.closest("[data-key]");
+    if (keyItem) core.send(parseKey(keyItem.dataset.key));
   });
   on(cmdCloseBtn, "click", hideCmdList);
   on(cmdSettingsBtn, "click", () => {
@@ -1020,6 +1022,7 @@ export function createTerminal({
     document: core.document,
     dispose,
     openCommandMenu,
+    closeCommandMenu: hideCmdList,
     refreshViewToggle,
     // Reveal the on-screen input bar (the reader's double-tap-to-type path
     // routes here so the keyboard has somewhere to land).

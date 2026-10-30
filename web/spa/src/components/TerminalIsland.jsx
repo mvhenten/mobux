@@ -12,6 +12,28 @@ import {
   otherRenderer,
 } from "../lib/rendererProbe.js";
 import { probeSession } from "../lib/accessSession.js";
+import { DrawerFavourites } from "./DrawerFavourites.jsx";
+
+const DRAWER_KEYS = [
+  ["\\x7f", "Backspace"],
+  ["\\r", "Enter"],
+  ["\\x1b[D", "Left"],
+  ["\\x1b[C", "Right"],
+  ["\\x1b[A", "Up"],
+  ["\\x1b[B", "Down"],
+  ["\\x03", "Ctrl-C"],
+  ["\\x04", "Ctrl-D"],
+  ["\\x1b", "Esc"],
+  ["\\t", "Tab"],
+  ["\\x1a", "Ctrl-Z"],
+  ["\\x1b[3~", "Del"],
+  ["\\x1b[H", "Home"],
+  ["\\x1b[F", "End"],
+  ["\\x15", "Ctrl-U"],
+  ["\\x0c", "Ctrl-L"],
+  ["/clear\\r", "/clear"],
+  ["/quit\\r", "/quit"],
+];
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -92,6 +114,7 @@ export function TerminalIsland({ node, session }) {
   const [, navigate] = useLocation();
   const rootRef = useRef(null);
   const resizeObsRef = useRef(null);
+  const engineRef = useRef(null);
   const [rendererNotice, setRendererNotice] = useState(null);
 
   useLayoutEffect(() => {
@@ -214,6 +237,7 @@ export function TerminalIsland({ node, session }) {
         engine = null;
       }
       if (!engine) return;
+      engineRef.current = engine;
 
       // A socket that closes may be a lapsed Cloudflare Access session, which
       // a WebSocket cannot tell apart from a network blip. One probe per close
@@ -305,6 +329,7 @@ export function TerminalIsland({ node, session }) {
 
     return () => {
       cancelled = true;
+      engineRef.current = null;
       resizeObsRef.current?.disconnect();
       resizeObsRef.current = null;
       if (window.__mobuxView) delete window.__mobuxView;
@@ -349,13 +374,8 @@ export function TerminalIsland({ node, session }) {
         <div class="cmd-handle" aria-hidden="true" />
         <div class="cmd-header">
           <h3 id="cmdSheetTitle">tmux</h3>
-          <button
-            type="button"
-            class="cmd-close"
-            id="cmdCloseBtn"
-            aria-label="Close"
-          >
-            ✕
+          <button type="button" class="cmd-close" id="cmdCloseBtn">
+            Close
           </button>
         </div>
         <section class="cmd-group">
@@ -365,12 +385,20 @@ export function TerminalIsland({ node, session }) {
             id="cmdDashboardBtn"
             onClick={() => navigate("/")}
           >
-            <span class="cmd-glyph" aria-hidden="true">
-              {"\u2302\uFE0E"}
-            </span>
             Dashboard
           </button>
         </section>
+        <DrawerFavourites engineRef={engineRef} />
+        <details class="cmd-group cmd-section" id="cmdKeysSection">
+          <summary class="cmd-section-title">Keys</summary>
+          <div class="cmd-keys">
+            {DRAWER_KEYS.map(([key, label]) => (
+              <button type="button" class="cmd-key" data-key={key} key={key}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </details>
         <details class="cmd-group cmd-section" id="cmdWindowsSection">
           <summary class="cmd-section-title">tmux windows</summary>
           <button class="cmd-item" data-cmd="new-window">
@@ -388,9 +416,6 @@ export function TerminalIsland({ node, session }) {
         </details>
         <section class="cmd-group">
           <button type="button" class="cmd-item" id="cmdSettingsBtn">
-            <span class="cmd-glyph" aria-hidden="true">
-              {"\u2699\uFE0E"}
-            </span>
             Settings
           </button>
         </section>

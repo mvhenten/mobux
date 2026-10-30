@@ -1639,9 +1639,13 @@ test("one copy: a tmux command via /command keeps a single copy of history", asy
     })
     .toEqual(expectedCounts(1, 500));
 
-  await page.evaluate(() =>
-    document.querySelector('#cmdPickList [data-cmd="next-pane"]').click(),
-  );
+  await page.evaluate(() => {
+    const btn = document.createElement("button");
+    btn.dataset.cmd = "next-pane";
+    document.getElementById("cmdPickList").append(btn);
+    btn.click();
+    btn.remove();
+  });
   await page.waitForTimeout(1500);
   expect(numberCounts(await terminalLines(page))).toEqual(
     expectedCounts(1, 500),

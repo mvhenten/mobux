@@ -906,6 +906,135 @@ test("the command menu's Dashboard row lands on the session list", async ({
   await expect(page.locator("#sessionList")).toBeVisible();
 });
 
+function captureInputFrames(page) {
+  const sent = [];
+  page.on("websocket", (ws) => {
+    ws.on("framesent", (frame) => {
+      const payload = String(frame.payload);
+      if (!payload.startsWith("{")) sent.push(payload);
+    });
+  });
+  return sent;
+}
+
+test("the command menu scrolls by touch when its sections overflow the screen", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 412, height: 420 });
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await openSheetBySwipe(page);
+  await page.evaluate(() =>
+    document
+      .querySelectorAll("#cmdPickList details")
+      .forEach((d) => (d.open = true)),
+  );
+
+  const sheet = page.locator("#cmdPickList");
+  const overflow = await sheet.evaluate(
+    (el) => el.scrollHeight - el.clientHeight,
+  );
+  expect(overflow).toBeGreaterThan(0);
+
+  const box = await sheet.boundingBox();
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.synthesizeScrollGesture", {
+    x: Math.round(box.x + box.width / 2),
+    y: Math.round(box.y + box.height - 40),
+    yDistance: -200,
+    gestureSourceType: "touch",
+    speed: 800,
+  });
+
+  await expect
+    .poll(() => sheet.evaluate((el) => el.scrollTop))
+    .toBeGreaterThan(0);
+  expect(await page.evaluate(() => document.scrollingElement.scrollTop)).toBe(
+    0,
+  );
+});
+
+test("a Keys button in the command menu sends the same bytes as the ribbon", async ({
+  page,
+}) => {
+  const sent = captureInputFrames(page);
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+
+  for (const [key, label] of [
+    ["\\x1b[A", "Up"],
+    ["\\t", "Tab"],
+    ["\\x03", "Ctrl-C"],
+  ]) {
+    await page.evaluate((k) => {
+      const btn = [
+        ...document.querySelectorAll("#inputRibbon [data-key]"),
+      ].find((b) => b.dataset.key === k);
+      btn.click();
+    }, key);
+    await expect.poll(() => sent.length).toBe(1);
+    const fromRibbon = sent.splice(0);
+
+    await openSheetBySwipe(page);
+    const section = page.locator("#cmdKeysSection");
+    if (!(await section.evaluate((d) => d.open)))
+      await section.locator("summary").tap();
+    await section.getByRole("button", { name: label, exact: true }).tap();
+    await expect.poll(() => sent.length).toBe(1);
+    expect(sent.splice(0)).toEqual(fromRibbon);
+
+    await page.locator("#cmdCloseBtn").tap();
+  }
+});
+
+test("a favourite added in the command menu sends its text plus Enter", async ({
+  page,
+}) => {
+  const sent = captureInputFrames(page);
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await openSheetBySwipe(page);
+
+  const section = page.locator("#cmdFavouritesSection");
+  await section.locator("summary").tap();
+  await section.locator(".cmd-fav-input").fill("echo fav-363");
+  await section.locator(".cmd-fav-submit").tap();
+
+  const row = section.locator(".cmd-fav-run", { hasText: "echo fav-363" });
+  await expect(row).toHaveCount(1);
+  sent.splice(0);
+  await row.tap();
+
+  await expect.poll(() => sent.join("")).toBe("echo fav-363\r");
+  await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
+});
+
+test("no command menu label carries an emoji or icon glyph", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+
+  const labels = await page.evaluate(() =>
+    [
+      ...document.querySelectorAll(
+        "#cmdPickList button, #cmdPickList summary, #cmdPickList h3",
+      ),
+    ].map((el) => el.textContent.trim()),
+  );
+  expect(labels.length).toBeGreaterThan(0);
+  const glyph = /[\p{Extended_Pictographic}←-⯿️]/u;
+  expect(labels.filter((l) => glyph.test(l))).toEqual([]);
+});
+
 async function openSheetBySwipe(page) {
   await page.evaluate(() => {
     document.getElementById("touchOverlay").style.pointerEvents = "auto";
