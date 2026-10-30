@@ -861,7 +861,7 @@ test("mid-screen upward drag does not trigger the command menu", async ({
   await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
 });
 
-test("command menu offers no pane-split entries", async ({ page }) => {
+test("command menu offers no pane entries", async ({ page }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
     timeout: 5000,
@@ -869,8 +869,41 @@ test("command menu offers no pane-split entries", async ({ page }) => {
 
   const sheet = page.locator("#cmdPickList");
   await expect(sheet.locator('[data-cmd="new-window"]')).toHaveCount(1);
-  await expect(sheet.locator('[data-cmd="split-h"]')).toHaveCount(0);
-  await expect(sheet.locator('[data-cmd="split-v"]')).toHaveCount(0);
+  await expect(sheet.locator('[data-cmd*="split"]')).toHaveCount(0);
+  await expect(sheet.locator('[data-cmd*="pane"]')).toHaveCount(0);
+});
+
+test("the command menu's tmux windows section opens on tap", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await openSheetBySwipe(page);
+
+  const section = page.locator("#cmdWindowsSection");
+  const newWindow = section.locator('[data-cmd="new-window"]');
+  await expect(section).not.toHaveAttribute("open", "");
+  await expect(newWindow).toBeHidden();
+
+  await section.locator("summary").tap();
+  await expect(section).toHaveAttribute("open", "");
+  await expect(newWindow).toBeVisible();
+});
+
+test("the command menu's Dashboard row lands on the session list", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await openSheetBySwipe(page);
+
+  await page.locator("#cmdDashboardBtn").tap();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe("#/");
+  await expect(page.locator("#sessionList")).toBeVisible();
 });
 
 async function openSheetBySwipe(page) {

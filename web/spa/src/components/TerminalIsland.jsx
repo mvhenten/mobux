@@ -1,4 +1,5 @@
 import { useRef, useLayoutEffect, useState } from "preact/hooks";
+import { useLocation } from "wouter-preact";
 import { collectDiagnostics } from "../lib/diagnostics.js";
 import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
@@ -88,6 +89,7 @@ function RendererNotice({ notice, onDismiss }) {
 }
 
 export function TerminalIsland({ node, session }) {
+  const [, navigate] = useLocation();
   const rootRef = useRef(null);
   const resizeObsRef = useRef(null);
   const [rendererNotice, setRendererNotice] = useState(null);
@@ -356,10 +358,21 @@ export function TerminalIsland({ node, session }) {
             ✕
           </button>
         </div>
-        <section class="cmd-group" aria-labelledby="cmdGroupWindows">
-          <h4 class="cmd-group-title" id="cmdGroupWindows">
-            Windows
-          </h4>
+        <section class="cmd-group">
+          <button
+            type="button"
+            class="cmd-item"
+            id="cmdDashboardBtn"
+            onClick={() => navigate("/")}
+          >
+            <span class="cmd-glyph" aria-hidden="true">
+              {"\u2302\uFE0E"}
+            </span>
+            Dashboard
+          </button>
+        </section>
+        <details class="cmd-group cmd-section" id="cmdWindowsSection">
+          <summary class="cmd-section-title">tmux windows</summary>
           <button class="cmd-item" data-cmd="new-window">
             New window
           </button>
@@ -372,24 +385,7 @@ export function TerminalIsland({ node, session }) {
           <button class="cmd-item" data-cmd="kill-window">
             Close window
           </button>
-        </section>
-        <section class="cmd-group" aria-labelledby="cmdGroupPanes">
-          <h4 class="cmd-group-title" id="cmdGroupPanes">
-            Panes
-          </h4>
-          <button class="cmd-item" data-cmd="next-pane">
-            Next pane
-          </button>
-          <button class="cmd-item" data-cmd="prev-pane">
-            Previous pane
-          </button>
-          <button class="cmd-item" data-cmd="zoom-pane">
-            Zoom pane
-          </button>
-          <button class="cmd-item" data-cmd="kill-pane">
-            Close pane
-          </button>
-        </section>
+        </details>
         <section class="cmd-group">
           <button type="button" class="cmd-item" id="cmdSettingsBtn">
             <span class="cmd-glyph" aria-hidden="true">
