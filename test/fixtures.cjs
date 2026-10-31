@@ -35,6 +35,7 @@ const PREF_DEFAULTS = {
   listen_rate: 1.0,
   listen_pitch: 1.0,
   selected_node: "",
+  drawer_favourites: [],
 };
 
 exports.test = base.test.extend({

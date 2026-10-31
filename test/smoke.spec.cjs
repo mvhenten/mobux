@@ -861,16 +861,149 @@ test("mid-screen upward drag does not trigger the command menu", async ({
   await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
 });
 
-test("command menu offers no pane-split entries", async ({ page }) => {
+test("the command menu's Dashboard row lands on the session list", async ({
+  page,
+}) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
   await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
     timeout: 5000,
   });
+  await openSheetBySwipe(page);
+
+  await page.locator("#cmdDashboardBtn").tap();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe("#/");
+  await expect(page.locator("#sessionList")).toBeVisible();
+});
+
+function captureInputFrames(page) {
+  const sent = [];
+  page.on("websocket", (ws) => {
+    ws.on("framesent", (frame) => {
+      const payload = String(frame.payload);
+      if (!payload.startsWith("{")) sent.push(payload);
+    });
+  });
+  return sent;
+}
+
+test("the command menu scrolls by touch when its sections overflow the screen", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 412, height: 420 });
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
+    timeout: 5000,
+  });
+  await openSheetBySwipe(page);
+  await page.evaluate(() =>
+    document
+      .querySelectorAll("#cmdPickList details")
+      .forEach((d) => (d.open = true)),
+  );
 
   const sheet = page.locator("#cmdPickList");
-  await expect(sheet.locator('[data-cmd="new-window"]')).toHaveCount(1);
-  await expect(sheet.locator('[data-cmd="split-h"]')).toHaveCount(0);
-  await expect(sheet.locator('[data-cmd="split-v"]')).toHaveCount(0);
+  const overflow = await sheet.evaluate(
+    (el) => el.scrollHeight - el.clientHeight,
+  );
+  expect(overflow).toBeGreaterThan(0);
+
+  await expect
+    .poll(async () => {
+      const b = await sheet.boundingBox();
+      return Math.round(b.y + b.height);
+    })
+    .toBe(420);
+  const box = await sheet.boundingBox();
+  const cdp = await page.context().newCDPSession(page);
+  const x = Math.round(box.x + box.width / 2);
+  const startY = Math.round(box.y + box.height - 40);
+  const point = (y) => [{ x, y, id: 1 }];
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: point(startY),
+  });
+  for (let step = 1; step <= 10; step++) {
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: point(startY - step * 20),
+    });
+  }
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: [],
+  });
+
+  await expect
+    .poll(() => sheet.evaluate((el) => el.scrollTop))
+    .toBeGreaterThan(0);
+  expect(await page.evaluate(() => document.scrollingElement.scrollTop)).toBe(
+    0,
+  );
+});
+
+test("a Keys button in the command menu sends the same bytes as the ribbon", async ({
+  page,
+}) => {
+  const sent = captureInputFrames(page);
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 8000 },
+  );
+  await page.waitForTimeout(500);
+  sent.splice(0);
+
+  await page.evaluate(() =>
+    [...document.querySelectorAll("#inputRibbon [data-key]")]
+      .find((b) => b.dataset.key === "\\x1b[A")
+      .click(),
+  );
+  await expect.poll(() => sent.length).toBe(1);
+  const fromRibbon = sent.splice(0);
+
+  await openSheetBySwipe(page);
+  const section = page.locator("#cmdKeysSection");
+  await section.locator("summary").tap();
+  await section.getByRole("button", { name: "Up", exact: true }).tap();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent).toEqual(fromRibbon);
+});
+
+test("a favourite added in the command menu sends its text plus Enter", async ({
+  page,
+}) => {
+  const sent = captureInputFrames(page);
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 8000 },
+  );
+  await page.waitForTimeout(500);
+  await openSheetBySwipe(page);
+
+  const section = page.locator("#cmdFavouritesSection");
+  await section.locator("summary").tap();
+  await section.locator(".cmd-fav-input").fill("echo fav-363");
+  await section.locator(".cmd-fav-submit").tap();
+
+  const row = section.locator(".cmd-fav-run", { hasText: "echo fav-363" });
+  await expect(row).toHaveCount(1);
+  sent.splice(0);
+  await row.tap();
+
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent).toEqual(["echo fav-363", "\r"]);
+  await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await page.request.get(`${BASE}/api/settings/preferences`)
+          ).json()
+        ).drawer_favourites,
+    )
+    .toEqual([{ text: "echo fav-363", uses: 1 }]);
 });
 
 async function openSheetBySwipe(page) {

@@ -1983,6 +1983,8 @@ async fn api_set_pages_settings(
     })
 }
 
+const DRAWER_FAVOURITE_MAX_CHARS: usize = 1000;
+
 #[derive(serde::Serialize, Deserialize)]
 struct UiPrefsJson {
     renderer: String,
@@ -1994,6 +1996,8 @@ struct UiPrefsJson {
     listen_pitch: f64,
     #[serde(default)]
     selected_node: String,
+    #[serde(default)]
+    drawer_favourites: Vec<db::DrawerFavourite>,
 }
 
 impl From<db::UiPreferences> for UiPrefsJson {
@@ -2024,6 +2028,7 @@ impl From<db::UiPreferences> for UiPrefsJson {
             listen_rate: p.listen_rate.clamp(0.5, 2.0),
             listen_pitch: p.listen_pitch.clamp(0.5, 2.0),
             selected_node: p.selected_node,
+            drawer_favourites: p.drawer_favourites,
         }
     }
 }
@@ -2047,6 +2052,23 @@ impl UiPrefsJson {
                 self.default_view
             ));
         }
+        let mut seen = std::collections::HashSet::new();
+        for favourite in &self.drawer_favourites {
+            if favourite.text.trim().is_empty() {
+                return Err("invalid drawer_favourites: a favourite has empty text".to_string());
+            }
+            if favourite.text.chars().count() > DRAWER_FAVOURITE_MAX_CHARS {
+                return Err(format!(
+                    "invalid drawer_favourites: a favourite is longer than {DRAWER_FAVOURITE_MAX_CHARS} characters"
+                ));
+            }
+            if !seen.insert(favourite.text.as_str()) {
+                return Err(format!(
+                    "invalid drawer_favourites: {:?} is listed twice",
+                    favourite.text
+                ));
+            }
+        }
         Ok(db::UiPreferences {
             renderer: self.renderer,
             theme: self.theme,
@@ -2056,6 +2078,7 @@ impl UiPrefsJson {
             listen_rate: self.listen_rate.clamp(0.5, 2.0),
             listen_pitch: self.listen_pitch.clamp(0.5, 2.0),
             selected_node: self.selected_node,
+            drawer_favourites: self.drawer_favourites,
         })
     }
 }
@@ -4270,6 +4293,7 @@ mod tests {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         };
         let err = bad.validate().expect_err("bogus renderer must be rejected");
         assert!(
@@ -4289,6 +4313,7 @@ mod tests {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         };
         let err = bad
             .validate()
@@ -4310,6 +4335,7 @@ mod tests {
             listen_rate: 99.0,  // out of range: clamped, not rejected
             listen_pitch: -5.0, // out of range: clamped, not rejected
             selected_node: "gpu-box".to_string(),
+            drawer_favourites: Vec::new(),
         }
         .validate()
         .expect("valid enums must be accepted");
@@ -4318,6 +4344,34 @@ mod tests {
         assert_eq!(ok.listen_rate, 2.0);
         assert_eq!(ok.listen_pitch, 0.5);
         assert_eq!(ok.selected_node, "gpu-box");
+    }
+
+    #[test]
+    fn set_ui_preferences_rejects_empty_duplicate_and_over_long_favourites() {
+        let with_favourites = |texts: &[&str]| UiPrefsJson {
+            renderer: "xterm".to_string(),
+            theme: "nord".to_string(),
+            default_view: "xterm".to_string(),
+            osc133_hint_dismissed: false,
+            listen_voice: String::new(),
+            listen_rate: 1.0,
+            listen_pitch: 1.0,
+            selected_node: String::new(),
+            drawer_favourites: texts
+                .iter()
+                .map(|text| db::DrawerFavourite {
+                    text: text.to_string(),
+                    uses: 0,
+                })
+                .collect(),
+        };
+        let too_long = "x".repeat(DRAWER_FAVOURITE_MAX_CHARS + 1);
+        let at_cap = "x".repeat(DRAWER_FAVOURITE_MAX_CHARS);
+
+        assert!(with_favourites(&["  "]).validate().is_err());
+        assert!(with_favourites(&["ls", "ls"]).validate().is_err());
+        assert!(with_favourites(&[&too_long]).validate().is_err());
+        assert!(with_favourites(&["ls", &at_cap]).validate().is_ok());
     }
 
     #[test]
@@ -4331,6 +4385,7 @@ mod tests {
             listen_rate: 1.0,
             listen_pitch: 1.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         }
         .validate()
         .expect("read must be accepted as a default_view");
@@ -4355,6 +4410,7 @@ mod tests {
             listen_rate: 500.0,
             listen_pitch: -500.0,
             selected_node: String::new(),
+            drawer_favourites: Vec::new(),
         };
         let json: UiPrefsJson = corrupt.into();
         assert_eq!(json.renderer, "xterm");

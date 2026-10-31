@@ -1,4 +1,5 @@
 import { useRef, useLayoutEffect, useState } from "preact/hooks";
+import { useLocation } from "wouter-preact";
 import { collectDiagnostics } from "../lib/diagnostics.js";
 import { buildIssueUrl } from "../lib/githubIssue.js";
 import { getPref } from "../lib/prefs.js";
@@ -11,6 +12,28 @@ import {
   otherRenderer,
 } from "../lib/rendererProbe.js";
 import { probeSession } from "../lib/accessSession.js";
+import { DrawerFavourites } from "./DrawerFavourites.jsx";
+
+const KEYS = [
+  ["\\x7f", "⌫", "Backspace"],
+  ["\\r", "⏎", "Enter"],
+  ["\\x1b[D", "←", "Left"],
+  ["\\x1b[C", "→", "Right"],
+  ["\\x1b[A", "↑", "Up"],
+  ["\\x1b[B", "↓", "Down"],
+  ["\\x03", "^C", "Ctrl-C"],
+  ["\\x04", "^D", "Ctrl-D"],
+  ["\\x1b", "Esc", "Esc"],
+  ["\\t", "Tab", "Tab"],
+  ["\\x1a", "^Z", "Ctrl-Z"],
+  ["\\x1b[3~", "Del", "Del"],
+  ["\\x1b[H", "Home", "Home"],
+  ["\\x1b[F", "End", "End"],
+  ["\\x15", "^U", "Ctrl-U"],
+  ["\\x0c", "^L", "Ctrl-L"],
+  ["/clear\\r", "/clear", "/clear"],
+  ["/quit\\r", "/quit", "/quit"],
+];
 
 // ── Terminal island ──────────────────────────────────────────────────
 //
@@ -88,8 +111,10 @@ function RendererNotice({ notice, onDismiss }) {
 }
 
 export function TerminalIsland({ node, session }) {
+  const [, navigate] = useLocation();
   const rootRef = useRef(null);
   const resizeObsRef = useRef(null);
+  const engineRef = useRef(null);
   const [rendererNotice, setRendererNotice] = useState(null);
 
   useLayoutEffect(() => {
@@ -212,6 +237,7 @@ export function TerminalIsland({ node, session }) {
         engine = null;
       }
       if (!engine) return;
+      engineRef.current = engine;
 
       // A socket that closes may be a lapsed Cloudflare Access session, which
       // a WebSocket cannot tell apart from a network blip. One probe per close
@@ -303,6 +329,7 @@ export function TerminalIsland({ node, session }) {
 
     return () => {
       cancelled = true;
+      engineRef.current = null;
       resizeObsRef.current?.disconnect();
       resizeObsRef.current = null;
       if (window.__mobuxView) delete window.__mobuxView;
@@ -347,19 +374,33 @@ export function TerminalIsland({ node, session }) {
         <div class="cmd-handle" aria-hidden="true" />
         <div class="cmd-header">
           <h3 id="cmdSheetTitle">tmux</h3>
-          <button
-            type="button"
-            class="cmd-close"
-            id="cmdCloseBtn"
-            aria-label="Close"
-          >
-            ✕
+          <button type="button" class="cmd-close" id="cmdCloseBtn">
+            Close
           </button>
         </div>
-        <section class="cmd-group" aria-labelledby="cmdGroupWindows">
-          <h4 class="cmd-group-title" id="cmdGroupWindows">
-            Windows
-          </h4>
+        <section class="cmd-group">
+          <button
+            type="button"
+            class="cmd-item"
+            id="cmdDashboardBtn"
+            onClick={() => navigate("/")}
+          >
+            Dashboard
+          </button>
+        </section>
+        <DrawerFavourites engineRef={engineRef} />
+        <details class="cmd-group cmd-section" id="cmdKeysSection">
+          <summary class="cmd-section-title">Keys</summary>
+          <div class="cmd-keys">
+            {KEYS.map(([key, , label]) => (
+              <button type="button" class="cmd-key" data-key={key} key={key}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </details>
+        <details class="cmd-group cmd-section" id="cmdWindowsSection">
+          <summary class="cmd-section-title">tmux windows</summary>
           <button class="cmd-item" data-cmd="new-window">
             New window
           </button>
@@ -372,29 +413,9 @@ export function TerminalIsland({ node, session }) {
           <button class="cmd-item" data-cmd="kill-window">
             Close window
           </button>
-        </section>
-        <section class="cmd-group" aria-labelledby="cmdGroupPanes">
-          <h4 class="cmd-group-title" id="cmdGroupPanes">
-            Panes
-          </h4>
-          <button class="cmd-item" data-cmd="next-pane">
-            Next pane
-          </button>
-          <button class="cmd-item" data-cmd="prev-pane">
-            Previous pane
-          </button>
-          <button class="cmd-item" data-cmd="zoom-pane">
-            Zoom pane
-          </button>
-          <button class="cmd-item" data-cmd="kill-pane">
-            Close pane
-          </button>
-        </section>
+        </details>
         <section class="cmd-group">
           <button type="button" class="cmd-item" id="cmdSettingsBtn">
-            <span class="cmd-glyph" aria-hidden="true">
-              {"\u2699\uFE0E"}
-            </span>
             Settings
           </button>
         </section>
@@ -436,24 +457,11 @@ export function TerminalIsland({ node, session }) {
           >
             🐛
           </button>
-          <button data-key="\x7f">⌫</button>
-          <button data-key="\r">⏎</button>
-          <button data-key="\x1b[D">←</button>
-          <button data-key="\x1b[C">→</button>
-          <button data-key="\x1b[A">↑</button>
-          <button data-key="\x1b[B">↓</button>
-          <button data-key="\x03">^C</button>
-          <button data-key="\x04">^D</button>
-          <button data-key="\x1b">Esc</button>
-          <button data-key="\t">Tab</button>
-          <button data-key="\x1a">^Z</button>
-          <button data-key="\x1b[3~">Del</button>
-          <button data-key="\x1b[H">Home</button>
-          <button data-key="\x1b[F">End</button>
-          <button data-key="\x15">^U</button>
-          <button data-key="\x0c">^L</button>
-          <button data-key="/clear\r">/clear</button>
-          <button data-key="/quit\r">/quit</button>
+          {KEYS.map(([key, glyph]) => (
+            <button data-key={key} key={key}>
+              {glyph}
+            </button>
+          ))}
         </div>
         <div id="inputToast" class="mobux-attach-error" />
         <div class="input-row">
