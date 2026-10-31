@@ -6,6 +6,7 @@ import { createGestureRecognizer } from "./touch.js";
 import { createNativeSelection } from "./native-select.js";
 import { createLinkLayer } from "./link-layer.js";
 import { createInputBar, parseKey } from "./input-bar.js";
+import { submitLine } from "./submit.js";
 import { createTopBar } from "./top-bar.js";
 import { openSettings } from "./settings-nav.js";
 import { applyTheme, getStoredThemeId } from "./themes.js";
@@ -1023,6 +1024,7 @@ export function createTerminal({
     dispose,
     openCommandMenu,
     closeCommandMenu: hideCmdList,
+    submit: (text) => submitLine((d) => core.send(d), text),
     refreshViewToggle,
     // Reveal the on-screen input bar (the reader's double-tap-to-type path
     // routes here so the keyboard has somewhere to land).

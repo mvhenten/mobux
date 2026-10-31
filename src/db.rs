@@ -519,7 +519,13 @@ impl Db {
                         listen_pitch: row.get(6)?,
                         selected_node: row.get(7)?,
                         drawer_favourites: serde_json::from_str(&row.get::<_, String>(8)?)
-                            .unwrap_or_default(),
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    8,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?,
                     })
                 },
             )

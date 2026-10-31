@@ -2,27 +2,14 @@ import { useState } from "preact/hooks";
 import { getPref, setPref } from "../lib/prefs.js";
 
 const PREF_KEY = "drawer_favourites";
-
-function isFavourite(value) {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof value.text === "string" &&
-    typeof value.uses === "number"
-  );
-}
-
-function loadFavourites() {
-  const stored = getPref(PREF_KEY);
-  return Array.isArray(stored) ? stored.filter(isFavourite) : [];
-}
+const FAVOURITE_MAX_LEN = 1000;
 
 function byUses(a, b) {
   return b.uses - a.uses;
 }
 
 export function DrawerFavourites({ engineRef }) {
-  const [favourites, setFavourites] = useState(loadFavourites);
+  const [favourites, setFavourites] = useState(() => getPref(PREF_KEY));
   const [draft, setDraft] = useState("");
 
   const update = (next) => {
@@ -43,8 +30,7 @@ export function DrawerFavourites({ engineRef }) {
   const run = (text) => {
     const engine = engineRef.current;
     if (!engine) return;
-    engine.core.send(text);
-    engine.core.send("\r");
+    engine.submit(text);
     engine.closeCommandMenu();
     update(
       favourites.map((f) => (f.text === text ? { ...f, uses: f.uses + 1 } : f)),
@@ -88,6 +74,7 @@ export function DrawerFavourites({ engineRef }) {
           autocorrect="off"
           spellcheck={false}
           enterkeyhint="done"
+          maxLength={FAVOURITE_MAX_LEN}
           value={draft}
           onInput={(e) => setDraft(e.currentTarget.value)}
         />

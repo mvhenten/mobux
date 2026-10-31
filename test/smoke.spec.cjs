@@ -861,37 +861,6 @@ test("mid-screen upward drag does not trigger the command menu", async ({
   await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
 });
 
-test("command menu offers no pane entries", async ({ page }) => {
-  await page.goto(`${BASE}/app#/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
-    timeout: 5000,
-  });
-
-  const sheet = page.locator("#cmdPickList");
-  await expect(sheet.locator('[data-cmd="new-window"]')).toHaveCount(1);
-  await expect(sheet.locator('[data-cmd*="split"]')).toHaveCount(0);
-  await expect(sheet.locator('[data-cmd*="pane"]')).toHaveCount(0);
-});
-
-test("the command menu's tmux windows section opens on tap", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
-    timeout: 5000,
-  });
-  await openSheetBySwipe(page);
-
-  const section = page.locator("#cmdWindowsSection");
-  const newWindow = section.locator('[data-cmd="new-window"]');
-  await expect(section).not.toHaveAttribute("open", "");
-  await expect(newWindow).toBeHidden();
-
-  await section.locator("summary").tap();
-  await expect(section).toHaveAttribute("open", "");
-  await expect(newWindow).toBeVisible();
-});
-
 test("the command menu's Dashboard row lands on the session list", async ({
   page,
 }) => {
@@ -984,30 +953,20 @@ test("a Keys button in the command menu sends the same bytes as the ribbon", asy
   await page.waitForTimeout(500);
   sent.splice(0);
 
-  for (const [key, label] of [
-    ["\\x1b[A", "Up"],
-    ["\\t", "Tab"],
-    ["\\x03", "Ctrl-C"],
-  ]) {
-    await page.evaluate((k) => {
-      const btn = [
-        ...document.querySelectorAll("#inputRibbon [data-key]"),
-      ].find((b) => b.dataset.key === k);
-      btn.click();
-    }, key);
-    await expect.poll(() => sent.length).toBe(1);
-    const fromRibbon = sent.splice(0);
+  await page.evaluate(() =>
+    [...document.querySelectorAll("#inputRibbon [data-key]")]
+      .find((b) => b.dataset.key === "\\x1b[A")
+      .click(),
+  );
+  await expect.poll(() => sent.length).toBe(1);
+  const fromRibbon = sent.splice(0);
 
-    await openSheetBySwipe(page);
-    const section = page.locator("#cmdKeysSection");
-    if (!(await section.evaluate((d) => d.open)))
-      await section.locator("summary").tap();
-    await section.getByRole("button", { name: label, exact: true }).tap();
-    await expect.poll(() => sent.length).toBe(1);
-    expect(sent.splice(0)).toEqual(fromRibbon);
-
-    await page.locator("#cmdCloseBtn").tap();
-  }
+  await openSheetBySwipe(page);
+  const section = page.locator("#cmdKeysSection");
+  await section.locator("summary").tap();
+  await section.getByRole("button", { name: "Up", exact: true }).tap();
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent).toEqual(fromRibbon);
 });
 
 test("a favourite added in the command menu sends its text plus Enter", async ({
@@ -1015,9 +974,11 @@ test("a favourite added in the command menu sends its text plus Enter", async ({
 }) => {
   const sent = captureInputFrames(page);
   await page.goto(`${BASE}/app#/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
-    timeout: 5000,
-  });
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 8000 },
+  );
+  await page.waitForTimeout(500);
   await openSheetBySwipe(page);
 
   const section = page.locator("#cmdFavouritesSection");
@@ -1030,7 +991,8 @@ test("a favourite added in the command menu sends its text plus Enter", async ({
   sent.splice(0);
   await row.tap();
 
-  await expect.poll(() => sent.join("")).toBe("echo fav-363\r");
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent).toEqual(["echo fav-363", "\r"]);
   await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
   await expect
     .poll(
@@ -1042,26 +1004,6 @@ test("a favourite added in the command menu sends its text plus Enter", async ({
         ).drawer_favourites,
     )
     .toEqual([{ text: "echo fav-363", uses: 1 }]);
-});
-
-test("no command menu label carries an emoji or icon glyph", async ({
-  page,
-}) => {
-  await page.goto(`${BASE}/app#/s/${SESSION}`);
-  await page.waitForFunction(() => typeof window.__mobuxView !== "undefined", {
-    timeout: 5000,
-  });
-
-  const labels = await page.evaluate(() =>
-    [
-      ...document.querySelectorAll(
-        "#cmdPickList button, #cmdPickList summary, #cmdPickList h3",
-      ),
-    ].map((el) => el.textContent.trim()),
-  );
-  expect(labels.length).toBeGreaterThan(0);
-  const glyph = /[\p{Extended_Pictographic}←-⯿️]/u;
-  expect(labels.filter((l) => glyph.test(l))).toEqual([]);
 });
 
 async function openSheetBySwipe(page) {

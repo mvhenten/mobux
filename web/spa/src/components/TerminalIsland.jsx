@@ -14,25 +14,25 @@ import {
 import { probeSession } from "../lib/accessSession.js";
 import { DrawerFavourites } from "./DrawerFavourites.jsx";
 
-const DRAWER_KEYS = [
-  ["\\x7f", "Backspace"],
-  ["\\r", "Enter"],
-  ["\\x1b[D", "Left"],
-  ["\\x1b[C", "Right"],
-  ["\\x1b[A", "Up"],
-  ["\\x1b[B", "Down"],
-  ["\\x03", "Ctrl-C"],
-  ["\\x04", "Ctrl-D"],
-  ["\\x1b", "Esc"],
-  ["\\t", "Tab"],
-  ["\\x1a", "Ctrl-Z"],
-  ["\\x1b[3~", "Del"],
-  ["\\x1b[H", "Home"],
-  ["\\x1b[F", "End"],
-  ["\\x15", "Ctrl-U"],
-  ["\\x0c", "Ctrl-L"],
-  ["/clear\\r", "/clear"],
-  ["/quit\\r", "/quit"],
+const KEYS = [
+  ["\\x7f", "⌫", "Backspace"],
+  ["\\r", "⏎", "Enter"],
+  ["\\x1b[D", "←", "Left"],
+  ["\\x1b[C", "→", "Right"],
+  ["\\x1b[A", "↑", "Up"],
+  ["\\x1b[B", "↓", "Down"],
+  ["\\x03", "^C", "Ctrl-C"],
+  ["\\x04", "^D", "Ctrl-D"],
+  ["\\x1b", "Esc", "Esc"],
+  ["\\t", "Tab", "Tab"],
+  ["\\x1a", "^Z", "Ctrl-Z"],
+  ["\\x1b[3~", "Del", "Del"],
+  ["\\x1b[H", "Home", "Home"],
+  ["\\x1b[F", "End", "End"],
+  ["\\x15", "^U", "Ctrl-U"],
+  ["\\x0c", "^L", "Ctrl-L"],
+  ["/clear\\r", "/clear", "/clear"],
+  ["/quit\\r", "/quit", "/quit"],
 ];
 
 // ── Terminal island ──────────────────────────────────────────────────
@@ -392,7 +392,7 @@ export function TerminalIsland({ node, session }) {
         <details class="cmd-group cmd-section" id="cmdKeysSection">
           <summary class="cmd-section-title">Keys</summary>
           <div class="cmd-keys">
-            {DRAWER_KEYS.map(([key, label]) => (
+            {KEYS.map(([key, , label]) => (
               <button type="button" class="cmd-key" data-key={key} key={key}>
                 {label}
               </button>
@@ -457,24 +457,11 @@ export function TerminalIsland({ node, session }) {
           >
             🐛
           </button>
-          <button data-key="\x7f">⌫</button>
-          <button data-key="\r">⏎</button>
-          <button data-key="\x1b[D">←</button>
-          <button data-key="\x1b[C">→</button>
-          <button data-key="\x1b[A">↑</button>
-          <button data-key="\x1b[B">↓</button>
-          <button data-key="\x03">^C</button>
-          <button data-key="\x04">^D</button>
-          <button data-key="\x1b">Esc</button>
-          <button data-key="\t">Tab</button>
-          <button data-key="\x1a">^Z</button>
-          <button data-key="\x1b[3~">Del</button>
-          <button data-key="\x1b[H">Home</button>
-          <button data-key="\x1b[F">End</button>
-          <button data-key="\x15">^U</button>
-          <button data-key="\x0c">^L</button>
-          <button data-key="/clear\r">/clear</button>
-          <button data-key="/quit\r">/quit</button>
+          {KEYS.map(([key, glyph]) => (
+            <button data-key={key} key={key}>
+              {glyph}
+            </button>
+          ))}
         </div>
         <div id="inputToast" class="mobux-attach-error" />
         <div class="input-row">
