@@ -1360,63 +1360,6 @@ test("ribbon reveals on tap-to-focus engagement and hides again on keyboard dism
   await expect.poll(() => ribbonVisible(page), { timeout: 1000 }).toBe(false);
 });
 
-// ── control-key ribbon: horizontally scrollable by touch ────────────────────
-//
-// Regression guard for the "ribbon won't scroll sideways" bug. The control-key
-// ribbon (^C, arrows, Tab, Esc, …) is wider than the viewport and must scroll
-// horizontally by touch without wrapping. Assert it overflows (scrollWidth >
-// clientWidth), is not wrapped (single row of buttons), is overflow-x:auto, and
-// that programmatic scrollLeft actually moves it.
-test("control-key ribbon is horizontally scrollable (not wrapped/clipped)", async ({
-  page,
-}) => {
-  await page.goto(`${APP}#/s/${encodeURIComponent(SEED)}`, {
-    waitUntil: "networkidle",
-  });
-  await expect(page.locator("#inputRibbon")).toHaveCount(1);
-
-  // The mobile input bar only reveals on tap-to-focus engagement (#201),
-  // not on mount, so force it visible directly for these geometry checks —
-  // they're about ribbon scroll behavior, not the reveal lifecycle.
-  await page.evaluate(() => {
-    const bar = document.getElementById("inputBar");
-    if (bar) bar.classList.remove("hidden");
-  });
-  await page.waitForTimeout(100);
-
-  const ribbon = page.locator("#inputRibbon");
-  const m = await ribbon.evaluate((el) => {
-    const cs = getComputedStyle(el);
-    // Single row of buttons → all buttons share the same offsetTop (not wrapped).
-    const btns = [...el.querySelectorAll("button")];
-    const tops = new Set(btns.map((b) => b.offsetTop));
-    return {
-      scrollWidth: el.scrollWidth,
-      clientWidth: el.clientWidth,
-      overflowX: cs.overflowX,
-      flexWrap: cs.flexWrap,
-      rowCount: tops.size,
-      buttonCount: btns.length,
-    };
-  });
-
-  // Overflows horizontally and the browser treats it as scrollable.
-  expect(m.buttonCount).toBeGreaterThan(5);
-  expect(m.scrollWidth).toBeGreaterThan(m.clientWidth);
-  expect(["auto", "scroll"]).toContain(m.overflowX);
-  expect(m.flexWrap).toBe("nowrap");
-  // Not wrapped — every button sits on the same row.
-  expect(m.rowCount).toBe(1);
-
-  // Programmatic scrollLeft actually moves it (it's a real scroll container).
-  const moved = await ribbon.evaluate((el) => {
-    el.scrollLeft = 0;
-    el.scrollLeft = 80;
-    return el.scrollLeft;
-  });
-  expect(moved).toBeGreaterThan(0);
-});
-
 // ── regression: mic button is wired and opens the overlay ──────────────────
 //
 // After the SPA migration, input-bar.js imported input-actions.js via the

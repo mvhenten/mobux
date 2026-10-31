@@ -720,11 +720,11 @@ test("long-press menu toggles reader view", async ({ page }) => {
     timeout: 5000,
   });
 
-  // Initial state: terminal visible, ribbon toggle shows reader icon
+  // Initial state: terminal visible, bar toggle shows reader icon
   await expect(page.locator("#terminal")).toBeVisible();
   await expect(page.locator("#viewToggleBtn")).toHaveText("📖");
 
-  // Reveal the input bar so the ribbon view-toggle is in the viewport.
+  // Reveal the input bar so the view-toggle is in the viewport.
   await page.evaluate(() =>
     document.getElementById("inputBar").classList.remove("hidden"),
   );
@@ -941,7 +941,7 @@ test("the command menu scrolls by touch when its sections overflow the screen", 
   );
 });
 
-test("a Keys button in the command menu sends the same bytes as the ribbon", async ({
+test("a Keys button in the command menu sends its escape sequence", async ({
   page,
 }) => {
   const sent = captureInputFrames(page);
@@ -951,22 +951,13 @@ test("a Keys button in the command menu sends the same bytes as the ribbon", asy
     { timeout: 8000 },
   );
   await page.waitForTimeout(500);
-  sent.splice(0);
-
-  await page.evaluate(() =>
-    [...document.querySelectorAll("#inputRibbon [data-key]")]
-      .find((b) => b.dataset.key === "\\x1b[A")
-      .click(),
-  );
-  await expect.poll(() => sent.length).toBe(1);
-  const fromRibbon = sent.splice(0);
-
   await openSheetBySwipe(page);
   const section = page.locator("#cmdKeysSection");
   await section.locator("summary").tap();
+  sent.splice(0);
   await section.getByRole("button", { name: "Up", exact: true }).tap();
   await expect.poll(() => sent.length).toBe(1);
-  expect(sent).toEqual(fromRibbon);
+  expect(sent).toEqual(["\x1b[A"]);
 });
 
 test("a favourite added in the command menu sends its text plus Enter", async ({
@@ -1105,7 +1096,7 @@ test("reader view disables terminal touch overlay", async ({ page }) => {
   expect(overlayPEAfter).toBe("auto");
 });
 
-test("reader view toggle button in input ribbon flips back to xterm", async ({
+test("reader view toggle button in input bar flips back to xterm", async ({
   page,
 }) => {
   await page.goto(`${BASE}/app#/s/${SESSION}`);
@@ -2065,7 +2056,7 @@ async function bootIsland(page) {
   await page.waitForTimeout(150);
 }
 
-async function revealRibbon(page) {
+async function revealInputBar(page) {
   await page.evaluate(() =>
     document.getElementById("inputBar").classList.remove("hidden"),
   );
@@ -2163,11 +2154,11 @@ test("read mode: swapping to read shows #readmode and hides both other views", a
   await expect(page.locator("#readmode")).toBeHidden();
 });
 
-test("read mode: the ribbon button reflects the view and is clickable from read mode", async ({
+test("read mode: the input bar button reflects the view and is clickable from read mode", async ({
   page,
 }) => {
   await bootIsland(page);
-  await revealRibbon(page);
+  await revealInputBar(page);
 
   const btn = page.locator("#readModeBtn");
   await expect(btn).toBeVisible();
@@ -2179,7 +2170,7 @@ test("read mode: the ribbon button reflects the view and is clickable from read 
   await expect(btn).toBeVisible();
   await expect(btn).toHaveText("▣");
 
-  // Reachable from inside read mode: the ribbon is still on screen and the
+  // Reachable from inside read mode: the input bar is still on screen and the
   // second tap comes back out.
   await btn.scrollIntoViewIfNeeded();
   await btn.click({ force: true });
@@ -2192,7 +2183,7 @@ test("read mode: the reader toggle goes to the reader, not the terminal", async 
   page,
 }) => {
   await bootIsland(page);
-  await revealRibbon(page);
+  await revealInputBar(page);
 
   await page.evaluate(() => window.__mobuxView.swap("read"));
   await expect(page.locator("#readmode")).toBeVisible();

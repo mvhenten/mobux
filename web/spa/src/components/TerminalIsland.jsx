@@ -15,24 +15,24 @@ import { probeSession } from "../lib/accessSession.js";
 import { DrawerFavourites } from "./DrawerFavourites.jsx";
 
 const KEYS = [
-  ["\\x7f", "⌫", "Backspace"],
-  ["\\r", "⏎", "Enter"],
-  ["\\x1b[D", "←", "Left"],
-  ["\\x1b[C", "→", "Right"],
-  ["\\x1b[A", "↑", "Up"],
-  ["\\x1b[B", "↓", "Down"],
-  ["\\x03", "^C", "Ctrl-C"],
-  ["\\x04", "^D", "Ctrl-D"],
-  ["\\x1b", "Esc", "Esc"],
-  ["\\t", "Tab", "Tab"],
-  ["\\x1a", "^Z", "Ctrl-Z"],
-  ["\\x1b[3~", "Del", "Del"],
-  ["\\x1b[H", "Home", "Home"],
-  ["\\x1b[F", "End", "End"],
-  ["\\x15", "^U", "Ctrl-U"],
-  ["\\x0c", "^L", "Ctrl-L"],
-  ["/clear\\r", "/clear", "/clear"],
-  ["/quit\\r", "/quit", "/quit"],
+  ["\\x7f", "Backspace"],
+  ["\\r", "Enter"],
+  ["\\x1b[D", "Left"],
+  ["\\x1b[C", "Right"],
+  ["\\x1b[A", "Up"],
+  ["\\x1b[B", "Down"],
+  ["\\x03", "Ctrl-C"],
+  ["\\x04", "Ctrl-D"],
+  ["\\x1b", "Esc"],
+  ["\\t", "Tab"],
+  ["\\x1a", "Ctrl-Z"],
+  ["\\x1b[3~", "Del"],
+  ["\\x1b[H", "Home"],
+  ["\\x1b[F", "End"],
+  ["\\x15", "Ctrl-U"],
+  ["\\x0c", "Ctrl-L"],
+  ["/clear\\r", "/clear"],
+  ["/quit\\r", "/quit"],
 ];
 
 // ── Terminal island ──────────────────────────────────────────────────
@@ -45,7 +45,7 @@ const KEYS = [
 //
 // The island's job:
 //   1. Render the DOM scaffold the engine binds to (#terminal, #reader,
-//      #loadquote, the #inputBar ribbon, the #cmdPickList overlay, …).
+//      #loadquote, the #inputBar, the #cmdPickList overlay, …).
 //   2. Load the vendor bundles (once per document), then create
 //      the engine in an effect and dispose it on unmount. A route-param
 //      change is a clean dispose + create — no document reload (#188), and
@@ -403,7 +403,7 @@ export function TerminalIsland({ node, session }) {
         <details class="cmd-group cmd-section" id="cmdKeysSection">
           <summary class="cmd-section-title">Keys</summary>
           <div class="cmd-keys">
-            {KEYS.map(([key, , label]) => (
+            {KEYS.map(([key, label]) => (
               <button type="button" class="cmd-key" data-key={key} key={key}>
                 {label}
               </button>
@@ -433,7 +433,7 @@ export function TerminalIsland({ node, session }) {
       </div>
 
       <div id="inputBar" class="input-bar hidden">
-        <div id="inputRibbon" class="input-ribbon">
+        <div id="inputActions" class="input-actions">
           <button id="viewToggleBtn" title="Toggle reader/terminal view">
             📖
           </button>
@@ -449,9 +449,6 @@ export function TerminalIsland({ node, session }) {
           <button id="settingsBtn" title="Settings">
             ⚙
           </button>
-          {/* Single-action hard reload (#189) — no data-key, so it's ignored
-              by the engine's ribbon delegation (input-bar.js only intercepts
-              `button[data-key]`); the click is handled directly by Preact. */}
           <button
             id="reloadBtn"
             type="button"
@@ -468,11 +465,6 @@ export function TerminalIsland({ node, session }) {
           >
             🐛
           </button>
-          {KEYS.map(([key, glyph]) => (
-            <button data-key={key} key={key}>
-              {glyph}
-            </button>
-          ))}
         </div>
         <div id="inputToast" class="mobux-attach-error" />
         <div class="input-row">

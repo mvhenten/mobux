@@ -36,27 +36,6 @@ body.term-body #app {
   overflow: hidden;
 }
 
-/* ── Control-key ribbon ──────────────────────────────────────────────
-   The ribbon (^C, arrows, Tab, Esc, …) is a horizontal strip that must
-   scroll sideways by touch and never wrap. The base rules already come
-   from web/static/style.css `.input-ribbon`; these reassert them in the
-   SPA context so a stray parent `touch-action`/flex rule can't clip or
-   wrap the strip (the "ribbon won't scroll by touch" regression). Mirrors
-   the old `.input-ribbon`: overflow-x:auto + touch momentum + nowrap, with
-   touch-action:pan-x so the browser hands horizontal pans to the strip. */
-.term-body-spa .input-ribbon {
-  display: flex;
-  flex-wrap: nowrap;
-  white-space: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-  touch-action: pan-x;
-}
-.term-body-spa .input-ribbon button {
-  flex: 0 0 auto;
-}
-
 /* Wordmark = home link. `.app-header h1` already has `flex: 1` (style.css),
    which shoves the lone gear to the far edge — just add the pointer cursor. */
 .app-header .app-wordmark {

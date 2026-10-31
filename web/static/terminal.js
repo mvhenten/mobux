@@ -5,7 +5,7 @@ import { createSterkRenderer } from "./renderer-sterk.js";
 import { createGestureRecognizer } from "./touch.js";
 import { createNativeSelection } from "./native-select.js";
 import { createLinkLayer } from "./link-layer.js";
-import { createInputBar, parseKey } from "./input-bar.js";
+import { createInputBar } from "./input-bar.js";
 import { submitLine } from "./submit.js";
 import { createTopBar } from "./top-bar.js";
 import { openSettings } from "./settings-nav.js";
@@ -16,6 +16,14 @@ import {
   isExternalUrl,
   installExternalLinkHandler,
 } from "./external-link.js";
+
+function parseKey(raw) {
+  return raw
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\t/g, "\t")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r");
+}
 
 // ── Loading screen quotes ───────────────────────────────────────────
 const quotes = [

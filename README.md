@@ -14,11 +14,11 @@ Your real work lives on a server: builds, training runs, deploys, the long-lived
 
 A phone is a terrible terminal. Tiny keys, no control keys, no scrollback you can trust, browsers that fight you over the keyboard, and SSH apps that treat the screen like a 1980s VT100. So the work waits until you are back at a real machine.
 
-mobux closes that gap. It puts your tmux sessions on the phone in a form built for a phone — touch gestures instead of key combos, a control-key ribbon where a keyboard would be, a reader view for scrollback, and a push notification when the long job finishes. The session keeps running on the server the whole time. The phone is just a good window into it.
+mobux closes that gap. It puts your tmux sessions on the phone in a form built for a phone — touch gestures instead of key combos, a reader view for scrollback, and a push notification when the long job finishes. The session keeps running on the server the whole time. The phone is just a good window into it.
 
 ## What it does
 
-- **Full terminal, touch-first.** Attach to any tmux session and drive it by touch. A bottom input bar carries the keys a phone keyboard lacks — `^C`, arrows, `Tab`, `Esc`, and more — on a scrollable ribbon. Two send modes: Enter executes; a separate inject button drops text into the line for readline editing without running it.
+- **Full terminal, touch-first.** Attach to any tmux session and drive it by touch. The command menu carries the keys a phone keyboard lacks — `^C`, arrows, `Tab`, `Esc`, and more. Two send modes: Enter executes; a separate inject button drops text into the line for readline editing without running it.
 - **Built for reading on a phone.** A dedicated reader view renders scrollback with smooth, synthetic scrolling tuned for mobile WebViews, so long output is actually browsable. Pinch to zoom, swipe to switch windows.
 - **Gestures, not chords.** Swipe a session to rename or kill it. Swipe the terminal to move between tmux windows. Long-press for tmux commands. The things you'd reach for a key combo for become a gesture.
 - **Notified when it matters.** A long job finishing rings the terminal bell; mobux turns that into a Web Push notification on your phone — even with the screen locked — deep-linked back to the exact session. It hooks tmux's own bell event, so a notification means a real bell fired, not a guess scraped off the screen.

@@ -1,9 +1,8 @@
 // ── Mobile Input Bar ─────────────────────────────────────────────────
 //
-// Bottom bar with control-key ribbon + text input.
+// Bottom bar with action buttons + text input.
 // Replaces direct xterm.js textarea interaction on mobile.
 //
-// - Ribbon buttons send control chars / escape sequences directly to PTY
 // - Text input: native keyboard with autocomplete/voice. Enter sends + clears.
 // - Bar appears on tap, hides when keyboard dismisses.
 
@@ -11,17 +10,9 @@ import { createAttachAction, createDictateAction } from './input-actions.js';
 import telemetry from './telemetry.js';
 import { openSettings } from './settings-nav.js';
 
-// ── Parse escape sequences from data-key attributes ───────────────
-export function parseKey(raw) {
-  return raw.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-            .replace(/\\t/g, '\t')
-            .replace(/\\n/g, '\n')
-            .replace(/\\r/g, '\r');
-}
-
 export function createInputBar(engine, send, node = '') {
   const bar = document.getElementById('inputBar');
-  const ribbon = document.getElementById('inputRibbon');
+  const actions = document.getElementById('inputActions');
   const input = document.getElementById('inputText');
   const sendBtn = document.getElementById('inputSend');
   // Complete no-op shape: callers invoke .show()/.hide(), so a partial stub
@@ -66,23 +57,9 @@ export function createInputBar(engine, send, node = '') {
     window.dispatchEvent(new Event('resize'));
   }
 
-  // ── Ribbon: send control chars directly to PTY ────────────────────
-  ribbon.addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-key]');
-    if (!btn) return;
-    e.preventDefault();
-    const seq = parseKey(btn.dataset.key);
-    send(seq);
-    // Keep focus on input so keyboard stays up
-    input.focus();
-  });
-
-  // Prevent ribbon buttons from stealing focus, but allow scroll
-  ribbon.addEventListener('mousedown', (e) => {
+  actions.addEventListener('mousedown', (e) => {
     if (e.target.closest('button')) e.preventDefault();
   });
-  // Don't preventDefault touchstart — it kills ribbon scrolling.
-  // Instead, prevent focus steal via mousedown only.
 
   // ── Text input: two send modes ────────────────────────────────────
   // Keyboard Enter: send text + \r (execute in shell)
