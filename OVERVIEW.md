@@ -4,7 +4,7 @@
 
 ## What it is
 
-A touch-native web UI for tmux. You attach to a real session on your server and drive it by touch: a control-key ribbon where a keyboard would be, swipe gestures for the things you'd normally reach for a key combo, a reader view for scrollback, voice capture for input, and a push notification on your phone the moment a long job finishes. The session never leaves the server — the phone is just a good window into it.
+A touch-native web UI for tmux. You attach to a real session on your server and drive it by touch: swipe gestures for the things you'd normally reach for a key combo, a reader view for scrollback, voice capture for input, and a push notification on your phone the moment a long job finishes. The session never leaves the server — the phone is just a good window into it.
 
 <p align="center">
   <img src="docs/screenshots/home.png" width="200" alt="Session list" />
@@ -28,7 +28,7 @@ Technical operators — developers, SREs, ML and infra engineers — who keep lo
 ## What works today
 
 - Full tmux access from a mobile browser: attach, create, rename, kill sessions; switch windows.
-- Touch input bar with a control-key ribbon and two send modes (execute vs. inject).
+- Touch input bar with two send modes (execute vs. inject).
 - Phone-tuned reader view for scrollback, with gesture scrolling, pinch-zoom, and swipe navigation.
 - Web Push notifications driven by tmux's native bell event, deep-linked back to the source session, on locked phones.
 - Voice capture from the input bar, transcribed by an OpenAI-compatible speech-to-text backend you run yourself (self-hosted whisper.cpp recipe included) or OpenAI's own endpoint.

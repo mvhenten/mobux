@@ -474,15 +474,15 @@ test("the pane switching to its alternate screen leaves select mode", async ({
 });
 
 // The regression: the input bar appears under the finger on the second tap,
-// and the compatibility click that followed landed on a ribbon button.
+// and the compatibility click that followed landed on a button in the bar.
 test("a double-tap where the input bar appears reaches the bar and no button in it", async ({
   page,
 }) => {
   await bootTerminal(page);
-  const ribbon = await page.evaluate(async () => {
+  const actions = await page.evaluate(async () => {
     const bar = document.getElementById("inputBar");
     bar.classList.remove("hidden");
-    const r = document.getElementById("inputRibbon").getBoundingClientRect();
+    const r = document.getElementById("inputActions").getBoundingClientRect();
     bar.classList.add("hidden");
     window.dispatchEvent(new Event("resize"));
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -503,7 +503,7 @@ test("a double-tap where the input bar appears reaches the bar and no button in 
   const touchAt = (type) =>
     cdp.send("Input.dispatchTouchEvent", {
       type,
-      touchPoints: type === "touchEnd" ? [] : [{ x: ribbon.x, y: ribbon.y }],
+      touchPoints: type === "touchEnd" ? [] : [{ x: actions.x, y: actions.y }],
     });
 
   for (let i = 0; i < 2; i++) {
