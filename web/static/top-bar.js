@@ -202,6 +202,7 @@ export function createTopBar({
   window.dispatchEvent(new Event('resize'));
 
   return {
+    dictate,
     // Full teardown for a same-document engine remount: an active
     // dictation's mic stream + full-viewport overlay live outside `bar`
     // (mic-overlay.js mounts its own root on document.body), so `bar.remove()`

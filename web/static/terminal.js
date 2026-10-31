@@ -102,7 +102,8 @@ const RENDERER_OPTIONS = {
 // ── Terminal engine factory ─────────────────────────────────────────
 //
 // createTerminal({ node, session, host, renderer }) →
-//   { core, document, dispose(), openCommandMenu(), refreshViewToggle(),
+//   { core, document, dispose(), openCommandMenu(), startDictation(),
+//     refreshViewToggle(),
 //     showInputBar(), twoPullMove(), twoPullEnd(), test }
 //
 //   session    tmux session name to attach to.
@@ -642,6 +643,23 @@ export function createTerminal({
   // reader.
   const openCommandMenu = showCmdList;
 
+  function startDictation() {
+    (topBar || ensureInputBar()).dictate.trigger();
+  }
+
+  on(
+    window,
+    "keydown",
+    (e) => {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (e.code !== "Space") return;
+      e.preventDefault();
+      e.stopPropagation();
+      startDictation();
+    },
+    true,
+  );
+
   // Engine test surface. Renderer-agnostic probes the conformance suite drives
   // against BOTH adapters, plus the inject helpers the reader/view tests use.
   // The owner (SPA) assembles `window.__mobuxView` from this and the reader
@@ -1024,6 +1042,7 @@ export function createTerminal({
     dispose,
     openCommandMenu,
     closeCommandMenu: hideCmdList,
+    startDictation,
     submit: (text) => submitLine((d) => core.send(d), text),
     refreshViewToggle,
     // Reveal the on-screen input bar (the reader's double-tap-to-type path

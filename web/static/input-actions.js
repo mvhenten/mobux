@@ -900,7 +900,7 @@ export function createDictateAction({ send, node, button, onText } = {}) {
 
   return {
     trigger() {
-      if (mic.busy) return;
+      if (mic.busy || micOverlay.isOpen()) return;
       telemetry.log('mic.click', { action: 'start' });
       startRecording();
     },

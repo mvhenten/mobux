@@ -912,5 +912,12 @@ export function createMicOverlay(handlers) {
       : 'The speech model did not become ready in time. Try again.';
   }
 
-  return { showRecording, showTranscribing, showReview, showFault, dismiss };
+  return {
+    showRecording,
+    showTranscribing,
+    showReview,
+    showFault,
+    dismiss,
+    isOpen: () => root !== null,
+  };
 }

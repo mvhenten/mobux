@@ -382,6 +382,17 @@ export function TerminalIsland({ node, session }) {
           <button
             type="button"
             class="cmd-item"
+            id="cmdVoiceBtn"
+            onClick={() => {
+              engineRef.current?.closeCommandMenu();
+              engineRef.current?.startDictation();
+            }}
+          >
+            Start voice mode
+          </button>
+          <button
+            type="button"
+            class="cmd-item"
             id="cmdDashboardBtn"
             onClick={() => navigate("/")}
           >

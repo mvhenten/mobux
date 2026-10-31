@@ -26,7 +26,7 @@ export function createInputBar(engine, send, node = '') {
   const sendBtn = document.getElementById('inputSend');
   // Complete no-op shape: callers invoke .show()/.hide(), so a partial stub
   // would throw. Mirror the real public API below.
-  if (!bar || !input) return { show() {}, hide() {}, destroy() {} };
+  if (!bar || !input) return { show() {}, hide() {}, destroy() {}, dictate: { trigger() {} } };
 
   // ── Disable the renderer's native input on mobile ─────────────────
   // We own input now. Tell the renderer to release its native input surface
@@ -218,6 +218,7 @@ export function createInputBar(engine, send, node = '') {
 
   // ── Public API ────────────────────────────────────────────────────
   return {
+    dictate,
     _computeKeyboardOffset: computeKeyboardOffset,
     // show() — show the bar AND focus the text input (the double-tap /
     // engagement path — see terminal.js's `onDoubleTap` handlers, #201).
