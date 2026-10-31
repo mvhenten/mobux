@@ -900,7 +900,7 @@ export function createDictateAction({ send, node, button, onText } = {}) {
 
   return {
     trigger() {
-      if (mic.busy || document.getElementById('mobux-mic-overlay')) return;
+      if (mic.busy || micOverlay.isOpen()) return;
       telemetry.log('mic.click', { action: 'start' });
       startRecording();
     },

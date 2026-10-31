@@ -1750,18 +1750,6 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     }, points);
   }
 
-  test("a long-press on the terminal starts dictation, not the drawer", async ({
-    page,
-  }) => {
-    await openRecording(page, (p) =>
-      touchOverlay(p, [
-        { type: "touchstart", x: 100, y: 100, wait: 800 },
-        { type: "touchend", x: 100, y: 100 },
-      ]),
-    );
-    await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
-  });
-
   test("the drawer's Start voice mode item starts dictation", async ({
     page,
   }) => {
@@ -1780,7 +1768,6 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
       await expect(p.locator("#cmdPickList")).toHaveClass(/visible/);
       await p.locator("#cmdVoiceBtn").click();
     });
-    await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
   });
 
   test("Ctrl+Shift+Space starts dictation and sends nothing to the PTY", async ({

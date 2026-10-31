@@ -434,7 +434,6 @@ export function createTerminal({
 
     onHSwipe: (dir) => core.switchWindow(dir),
 
-    onLongPress: startDictation,
     onSwipeUp: showCmdList,
   });
 
@@ -645,7 +644,7 @@ export function createTerminal({
   const openCommandMenu = showCmdList;
 
   function startDictation() {
-    (topBar || ensureInputBar()).dictate?.trigger();
+    (topBar || ensureInputBar()).dictate.trigger();
   }
 
   on(
