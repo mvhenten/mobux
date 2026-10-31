@@ -218,6 +218,7 @@ export function createInputBar(engine, send, node = '') {
 
   // ── Public API ────────────────────────────────────────────────────
   return {
+    dictate: { trigger: () => dictate.trigger() },
     _computeKeyboardOffset: computeKeyboardOffset,
     // show() — show the bar AND focus the text input (the double-tap /
     // engagement path — see terminal.js's `onDoubleTap` handlers, #201).

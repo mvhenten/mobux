@@ -18,7 +18,8 @@
 //               onOscDetected, oscDetected, onPanes, alternateOn }.
 //     handlers  cross-cutting callbacks the reader's gestures call up to the
 //               owner (the terminal + the SPA view controller):
-//                 onCommandMenu()          long-press / swipe-up → tmux menu
+//                 onCommandMenu()          swipe-up → tmux menu
+//                 onDictate()              long-press → voice dictation
 //                 onSwitchWindow(dir)      horizontal swipe → prev/next window
 //                 onReconnect()            touch-to-reconnect
 //                 onExit()                 double-tap → back to terminal + kbd
@@ -150,7 +151,7 @@ export function createReader({ host, document: doc, handlers = {} } = {}) {
       host,
       {
         onReconnect: () => handlers.onReconnect?.(),
-        onLongPress: () => handlers.onCommandMenu?.(),
+        onLongPress: () => handlers.onDictate?.(),
         onSwipeUp: () => handlers.onCommandMenu?.(),
         onHSwipe: (dir) => handlers.onSwitchWindow?.(dir),
         onTap: () => {},

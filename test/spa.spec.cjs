@@ -1668,7 +1668,10 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
     });
   }
 
-  async function openRecording(page) {
+  async function openRecording(
+    page,
+    start = (p) => p.locator("#micBtn").click(),
+  ) {
     // Backend probe (added alongside these fixes) must see a reachable
     // provider or it raises a pre-record FAULT instead of opening the mic —
     // that's its own behavior, tested separately; here we want RECORDING.
@@ -1711,11 +1714,98 @@ test.describe("mic dictation: fast submit + retry preserves audio", () => {
       const bar = document.getElementById("inputBar");
       if (bar) bar.classList.remove("hidden");
     });
-    await page.locator("#micBtn").click();
+    await start(page);
     await expect(page.locator("#mobux-mic-overlay.recording")).toBeVisible({
       timeout: 5000,
     });
   }
+
+  function touchOverlay(page, points) {
+    return page.evaluate(async (points) => {
+      const overlay = document.getElementById("touchOverlay");
+      for (const { type, x, y, wait } of points) {
+        const touches =
+          type === "touchend"
+            ? []
+            : [
+                new Touch({
+                  identifier: 0,
+                  target: overlay,
+                  clientX: x,
+                  clientY: y,
+                  pageX: x,
+                  pageY: y,
+                }),
+              ];
+        overlay.dispatchEvent(
+          new TouchEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            touches,
+            changedTouches: touches,
+          }),
+        );
+        if (wait) await new Promise((r) => setTimeout(r, wait));
+      }
+    }, points);
+  }
+
+  test("a long-press on the terminal starts dictation, not the drawer", async ({
+    page,
+  }) => {
+    await openRecording(page, (p) =>
+      touchOverlay(p, [
+        { type: "touchstart", x: 100, y: 100, wait: 800 },
+        { type: "touchend", x: 100, y: 100 },
+      ]),
+    );
+    await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
+  });
+
+  test("the drawer's Start voice mode item starts dictation", async ({
+    page,
+  }) => {
+    await openRecording(page, async (p) => {
+      const { w, h } = await p.evaluate(() => ({
+        w: window.innerWidth,
+        h: window.innerHeight,
+      }));
+      const x = w / 2;
+      await touchOverlay(p, [
+        { type: "touchstart", x, y: h - 20 },
+        { type: "touchmove", x, y: h - 60 },
+        { type: "touchmove", x, y: h - 100 },
+        { type: "touchend", x, y: h - 100 },
+      ]);
+      await expect(p.locator("#cmdPickList")).toHaveClass(/visible/);
+      await p.locator("#cmdVoiceBtn").click();
+    });
+    await expect(page.locator("#cmdPickList")).not.toHaveClass(/visible/);
+  });
+
+  test("Ctrl+Shift+Space starts dictation and sends nothing to the PTY", async ({
+    page,
+  }) => {
+    const sent = [];
+    page.on("websocket", (ws) => {
+      ws.on("framesent", (frame) => {
+        const payload = String(frame.payload);
+        if (!payload.startsWith("{")) sent.push(payload);
+      });
+    });
+    await openRecording(page, async (p) => {
+      await p.waitForTimeout(500);
+      sent.splice(0);
+      await p.evaluate(() =>
+        document.querySelector("#terminal textarea")?.focus(),
+      );
+      await p.keyboard.press("Control+Shift+Space");
+    });
+    await page.keyboard.press("Control+Shift+Space");
+    await page.waitForTimeout(300);
+    expect(sent).toEqual([]);
+    expect(await page.evaluate(() => window.__gumCalls)).toBe(1);
+  });
 
   // Renderer-agnostic text search, same technique as critical-path.spec.cjs's
   // keyboard-up marker check: walk #terminal's text nodes for a substring.

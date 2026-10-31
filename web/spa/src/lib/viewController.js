@@ -67,6 +67,7 @@ export function createViewController({
     document: terminal.document,
     handlers: {
       onCommandMenu: () => terminal.openCommandMenu(),
+      onDictate: () => terminal.startDictation(),
       onSwitchWindow: (dir) => core.switchWindow(dir),
       onReconnect: () => core.reconnect(),
       // The reader has no cursor — a double-tap to type drops back to the
