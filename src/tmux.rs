@@ -908,6 +908,18 @@ fn command_args(session: &str, command: &str) -> Result<Vec<String>> {
         "prev-pane" => vec!["select-pane".into(), "-t".into(), format!("={session}:-")],
         "kill-pane" => vec!["kill-pane".into(), "-t".into(), win_target],
         "zoom-pane" => vec!["resize-pane".into(), "-Z".into(), "-t".into(), win_target],
+        // tmux 3.4's default WheelUpPane binding, which 3.6 dropped for the
+        // alternate screen: a wheel over an app that ignores the mouse
+        // scrolls copy-mode.
+        "wheel-copy-mode" => vec![
+            "if-shell".into(),
+            "-F".into(),
+            "-t".into(),
+            win_target.clone(),
+            "#{||:#{pane_in_mode},#{mouse_any_flag}}".into(),
+            "".into(),
+            format!("copy-mode -e -t {win_target}"),
+        ],
         _ => return Err(anyhow!("unknown command: {}", command)),
     })
 }
