@@ -23,7 +23,12 @@ const path = require("path");
 
 const CACHE_DIR = path.join(__dirname, "..", "..", ".tmp", "test-zsh");
 const EXTRACTED_DIR = path.join(CACHE_DIR, "extracted");
-const BIN_PATH = path.join(EXTRACTED_DIR, "bin", "zsh");
+// Ubuntu 26.04 ships zsh in /usr/bin, older releases in /bin.
+const BIN_PATHS = [
+  path.join(EXTRACTED_DIR, "usr", "bin", "zsh"),
+  path.join(EXTRACTED_DIR, "bin", "zsh"),
+];
+const extractedBin = () => BIN_PATHS.find((p) => fs.existsSync(p));
 
 function which(bin) {
   try {
@@ -54,7 +59,8 @@ function resolveZshBin() {
   const onPath = which("zsh");
   if (onPath) return (resolved = onPath);
 
-  if (fs.existsSync(BIN_PATH)) return (resolved = BIN_PATH);
+  const cached = extractedBin();
+  if (cached) return (resolved = cached);
 
   fs.mkdirSync(CACHE_DIR, { recursive: true });
   try {
@@ -83,13 +89,14 @@ function resolveZshBin() {
     execFileSync("dpkg-deb", ["-x", deb, EXTRACTED_DIR]);
   }
 
-  if (!fs.existsSync(BIN_PATH)) {
+  const bin = extractedBin();
+  if (!bin) {
     throw new Error(
-      `zsh test fixture: expected binary at ${BIN_PATH} after extracting ${debs.join(", ")}`,
+      `zsh test fixture: expected binary at ${BIN_PATHS.join(" or ")} after extracting ${debs.join(", ")}`,
     );
   }
-  fs.chmodSync(BIN_PATH, 0o755);
-  return (resolved = BIN_PATH);
+  fs.chmodSync(bin, 0o755);
+  return (resolved = bin);
 }
 
 module.exports = { resolveZshBin };

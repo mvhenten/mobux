@@ -336,6 +336,7 @@ export function createTerminal({
   let wheelCell = { col: 0, row: 0 };
   let wheelPx = 0;
   let wheelPinned = false;
+  let wheelCopyModeAsked = false;
   let wheelWasOn = false;
 
   function startScroll(x, y) {
@@ -353,6 +354,7 @@ export function createTerminal({
     };
     wheelPx = 0;
     wheelPinned = false;
+    wheelCopyModeAsked = false;
   }
 
   on(core, "panes", () => {
@@ -366,6 +368,10 @@ export function createTerminal({
     wheelPx += dy;
     while (Math.abs(wheelPx) >= notch) {
       const up = wheelPx < 0;
+      if (up && !wheelCopyModeAsked) {
+        wheelCopyModeAsked = true;
+        core.wheelCopyMode();
+      }
       core.sendWheel(up, wheelCell.col, wheelCell.row);
       wheelPx += up ? notch : -notch;
     }
