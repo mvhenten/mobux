@@ -139,6 +139,24 @@ test("terminal renders and connects", async ({ page }) => {
   });
 });
 
+test("terminal starts when the browser withholds service workers", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    Object.defineProperty(Navigator.prototype, "serviceWorker", {
+      get: () => null,
+      configurable: true,
+    }),
+  );
+  await page.goto(`${BASE}/app#/s/${SESSION}`);
+
+  await page.waitForFunction(
+    () => window.__mobuxView?.test?.wsReady?.() === true,
+    { timeout: 5000 },
+  );
+  await expect(page.locator("#rendererFallbackNotice")).toHaveCount(0);
+});
+
 test("terminal falls back to the other renderer when its bundle is missing", async ({
   page,
 }, testInfo) => {

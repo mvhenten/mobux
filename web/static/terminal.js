@@ -831,7 +831,7 @@ export function createTerminal({
     }
   }
 
-  if ("serviceWorker" in navigator) {
+  if (navigator.serviceWorker) {
     on(navigator.serviceWorker, "message", (ev) => {
       if (ev.data?.type === "mobux-navigate") {
         selectWindow(windowFromUrl(ev.data.url));

@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  if (!('serviceWorker' in navigator) || !('Audio' in window)) return;
+  if (!navigator.serviceWorker || !('Audio' in window)) return;
 
   const base = new URL('../', document.currentScript.src);
   const audio = new Audio(new URL('static/chime.ogg', base).href);
