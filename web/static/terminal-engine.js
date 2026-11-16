@@ -754,6 +754,24 @@ export class TerminalEngine extends EventTarget {
   }
 
   async runTmuxCmd(command) {
+    await this._postTmuxCmd(command);
+    if (WINDOW_SWITCH_CMDS.has(command)) {
+      this.forgetPaneScreen(WINDOW_SETTLE_MS);
+      this.clear();
+      this.scrollToBottom();
+    }
+    setTimeout(() => {
+      this.refreshPanes();
+      this.reloadHistory();
+    }, WINDOW_SETTLE_MS);
+  }
+
+  // A wheel notch up over an app that ignores the mouse scrolls copy-mode.
+  wheelCopyMode() {
+    return this._postTmuxCmd("wheel-copy-mode");
+  }
+
+  async _postTmuxCmd(command) {
     try {
       await accessFetch(
         u(
@@ -766,15 +784,6 @@ export class TerminalEngine extends EventTarget {
         },
       );
     } catch (_) {}
-    if (WINDOW_SWITCH_CMDS.has(command)) {
-      this.forgetPaneScreen(WINDOW_SETTLE_MS);
-      this.clear();
-      this.scrollToBottom();
-    }
-    setTimeout(() => {
-      this.refreshPanes();
-      this.reloadHistory();
-    }, WINDOW_SETTLE_MS);
   }
 
   // ── History ───────────────────────────────────────────────────────
