@@ -21,7 +21,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04 (glibc 2.43); the self-updater
+    # targets hosts on glibc 2.39, and the apt cross toolchain follows the runner.
+    runs-on: ubuntu-24.04
     # Only on a green CI run that was triggered by a push to main.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
