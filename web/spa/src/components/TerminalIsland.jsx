@@ -88,6 +88,17 @@ async function openBugReport() {
   window.location.href = url;
 }
 
+// The message plus the throwing frame (`input-bar.js:60:11`), so a phone
+// screenshot of the notice names the line.
+function describeError(e) {
+  const frame = String(e?.stack || "")
+    .split("\n")
+    .map((line) => line.match(/([^/\s(]+\.[cm]?jsx?(?:\?[^:\s)]*)?:\d+:\d+)/))
+    .find(Boolean);
+  const message = e?.message || String(e);
+  return frame ? `${message} at ${frame[1].replace(/\?[^:]*/, "")}` : message;
+}
+
 function noticeText({ kind, failed }) {
   const [first] = failed;
   if (kind === "fallback") {
@@ -212,7 +223,8 @@ export function TerminalIsland({ node, session }) {
           });
           return { ok: true, engine: created };
         } catch (e) {
-          return { ok: false, name: renderer, reason: e.message };
+          console.error(`[terminal] ${renderer} createTerminal threw:`, e);
+          return { ok: false, name: renderer, reason: describeError(e) };
         }
       };
 

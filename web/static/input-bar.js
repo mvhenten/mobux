@@ -57,7 +57,9 @@ export function createInputBar(engine, send, node = '') {
     window.dispatchEvent(new Event('resize'));
   }
 
-  actions.addEventListener('mousedown', (e) => {
+  // A tab still running an older app shell (pre-#372 #inputRibbon scaffold)
+  // loads this module fresh from the server, so the ids may be missing.
+  actions?.addEventListener('mousedown', (e) => {
     if (e.target.closest('button')) e.preventDefault();
   });
 
@@ -85,7 +87,7 @@ export function createInputBar(engine, send, node = '') {
     }
   });
 
-  sendBtn.addEventListener('click', (e) => {
+  sendBtn?.addEventListener('click', (e) => {
     e.preventDefault();
     sendWithoutEnter();
     input.focus();
